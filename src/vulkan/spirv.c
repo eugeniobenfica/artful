@@ -30,12 +30,12 @@ static uint32_t packString(const char* text, uint32_t* out) {
 static SpvId typeOf(Spv* s, uint32_t op, const uint32_t* operands, uint32_t n) {
     for (size_t i = 0; i < s->types.len;) {
         const uint32_t head = s->types.items[i], length = head >> 16;
-        if ((head & 0xFFFF) == op && length == n + 2 && !memcmp(&s->types.items[i + 2], operands, (size_t)n * 4)) return s->types.items[i + 1];
+        if ((head & 0xFFFF) == op && length == n + 2 && (!n || !memcmp(&s->types.items[i + 2], operands, (size_t)n * 4))) return s->types.items[i + 1];
         i += length;
     }
     uint32_t words[16];
     words[0] = spvNewId(s);
-    memcpy(words + 1, operands, (size_t)n * 4);
+    if (n) memcpy(words + 1, operands, (size_t)n * 4);
     spvEmit(&s->types, op, words, n + 1);
     return words[0];
 }
@@ -113,7 +113,7 @@ SpvId spvTypeStruct(Spv* s, const SpvId* members, uint32_t count) {
     /* (never shared: two of the same may be decorated apart) */
     uint32_t words[9];
     words[0] = spvNewId(s);
-    memcpy(words + 1, members, (size_t)count * 4);
+    if (count) memcpy(words + 1, members, (size_t)count * 4);
     spvEmit(&s->types, OP_TypeStruct, words, count + 1);
     return words[0];
 }
@@ -218,7 +218,7 @@ SpvId spvGlsl2(Spv* s, uint32_t inst, SpvId type, SpvId a, SpvId b) {
 
 SpvId spvCompose(Spv* s, SpvId type, const SpvId* parts, uint32_t count) {
     uint32_t words[8] = {type, spvNewId(s)};
-    memcpy(words + 2, parts, (size_t)count * 4);
+    if (count) memcpy(words + 2, parts, (size_t)count * 4);
     spvEmit(&s->code, OP_CompositeConstruct, words, count + 2);
     return words[1];
 }
@@ -237,7 +237,7 @@ SpvId spvShuffle3(Spv* s, SpvId v) {
 
 SpvId spvAccess(Spv* s, SpvId pointerType, SpvId base, const SpvId* indices, uint32_t count) {
     uint32_t words[8] = {pointerType, spvNewId(s), base};
-    memcpy(words + 3, indices, (size_t)count * 4);
+    if (count) memcpy(words + 3, indices, (size_t)count * 4);
     spvEmit(&s->code, OP_AccessChain, words, count + 3);
     return words[1];
 }

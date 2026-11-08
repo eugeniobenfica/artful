@@ -170,7 +170,7 @@ typedef struct Metal {
 
 /* ---- memory ---- */
 
-static void wait(Metal* v) {
+static void waitLast(Metal* v) {
     if (!v->last) return;
     DO(v->last, "waitUntilCompleted");
     const double from = GET(double, v->last, "GPUStartTime"), to = GET(double, v->last, "GPUEndTime");
@@ -842,7 +842,7 @@ static void denoise(Metal* v, id e) {
 }
 
 static bool frameDraw(Metal* v, ArtfScene* scene) {
-    wait(v);
+    waitLast(v);
     if (v->targetsStale && !targetsMake(v)) return false;
     if (!v->frameTexture) return true; /* a window with no size */
     if (scene->hole.on && !v->warnedHole) {
@@ -1031,7 +1031,7 @@ static bool metalDraw(ArtfRenderer* r, ArtfScene* scene) {
 static bool metalReadPixels(ArtfRenderer* r, uint32_t* dst) {
     Metal* v = (Metal*)r;
     if (!v->frameNumber || !v->frameTexture) return false;
-    wait(v);
+    waitLast(v);
     void* pool = poolPush();
     const NSUInteger row = (NSUInteger)v->width * 4, bytes = row * (NSUInteger)v->height;
     Buffer readback;
@@ -1057,7 +1057,7 @@ static bool metalReadPixels(ArtfRenderer* r, uint32_t* dst) {
 
 static void metalResize(ArtfRenderer* r, int width, int height) {
     Metal* v = (Metal*)r;
-    wait(v);
+    waitLast(v);
     v->width = width;
     v->height = height;
     v->targetsStale = true;
@@ -1078,7 +1078,7 @@ static void pipelineFree(Pipeline* p) { release(p->state); }
 
 static void metalFree(ArtfRenderer* r) {
     Metal* v = (Metal*)r;
-    wait(v);
+    waitLast(v);
     targetsFree(v);
     Buffer* buffers[] = {&v->empty, &v->frame, &v->instances, &v->visible, &v->indirect, &v->template_, &v->materials, &v->meshTable, &v->vertices, &v->indices, &v->colors, &v->shadowData,
                          &v->shadowList, &v->shadowCommands, &v->traceData, &v->traceNodes, &v->traceTriangles, &v->traceVertices, &v->traceTop, &v->traceInstances};
