@@ -58,6 +58,7 @@ typedef __m128i V4I;
 #define v4iSelect(m, a, b) _mm_blendv_epi8(a, b, m)
 #define v4iToF _mm_cvtepi32_ps
 #define v4iAsF _mm_castsi128_ps
+#define v4fAsI _mm_castps_si128
 #define v4iSigns(a) _mm_movemask_ps(_mm_castsi128_ps(a))
 #else
 #include <arm_neon.h>
@@ -99,6 +100,7 @@ V8_INLINE V4F v4fMax(V4F a, V4F b) { return vbslq_f32(vcgtq_f32(a, b), a, b); }
 #define v4iSelect(m, a, b) vbslq_s32(vreinterpretq_u32_s32(vshrq_n_s32(m, 31)), b, a)
 #define v4iToF vcvtq_f32_s32
 #define v4iAsF vreinterpretq_f32_s32
+#define v4fAsI vreinterpretq_s32_f32
 V8_INLINE int v4iSigns(V4I a) {
     static const int32_t bits[4] = {1, 2, 4, 8};
     return vaddvq_s32(vandq_s32(vshrq_n_s32(a, 31), vld1q_s32(bits)));
@@ -149,6 +151,7 @@ V8I_OP(v8iGt, v4iGt)
 V8_INLINE V8I v8iSelect(V8I m, V8I x, V8I y) { V8I r = {v4iSelect(m.a, x.a, y.a), v4iSelect(m.b, x.b, y.b)}; return r; }
 V8_INLINE V8F v8iToF(V8I x) { V8F r = {v4iToF(x.a), v4iToF(x.b)}; return r; }
 V8_INLINE V8F v8iAsF(V8I x) { V8F r = {v4iAsF(x.a), v4iAsF(x.b)}; return r; }
+V8_INLINE V8I v8fAsI(V8F x) { V8I r = {v4fAsI(x.a), v4fAsI(x.b)}; return r; }
 V8_INLINE V8I v8iGather(const uint32_t* base, V8I index) {
     _Alignas(16) int32_t k[8];
     _Alignas(16) uint32_t out[8];
@@ -203,6 +206,7 @@ V8_INLINE V8I v8iGt(V8I a, V8I b) { return _mm256_cmpgt_epi32(a, b); }
 V8_INLINE V8I v8iSelect(V8I mask, V8I a, V8I b) { return _mm256_blendv_epi8(a, b, mask); }
 V8_INLINE V8F v8iToF(V8I a) { return _mm256_cvtepi32_ps(a); }
 V8_INLINE V8F v8iAsF(V8I a) { return _mm256_castsi256_ps(a); }
+V8_INLINE V8I v8fAsI(V8F a) { return _mm256_castps_si256(a); }
 V8_INLINE V8I v8iGather(const uint32_t* base, V8I index) { return _mm256_i32gather_epi32((const int*)base, index, 4); }
 /* a bit for each lane whose top bit is set */
 V8_INLINE int v8iSigns(V8I a) { return _mm256_movemask_ps(_mm256_castsi256_ps(a)); }
@@ -253,6 +257,7 @@ V8I_OP(v8iGt, a.v[i] > b.v[i] ? -1 : 0)
 V8_INLINE V8I v8iSelect(V8I m, V8I a, V8I b) { V8I r; V8_EACH r.v[i] = m.v[i] < 0 ? b.v[i] : a.v[i]; return r; }
 V8_INLINE V8F v8iToF(V8I a) { V8F r; V8_EACH r.v[i] = (float)a.v[i]; return r; }
 V8_INLINE V8F v8iAsF(V8I a) { V8F r; __builtin_memcpy(r.v, a.v, 32); return r; }
+V8_INLINE V8I v8fAsI(V8F a) { V8I r; __builtin_memcpy(r.v, a.v, 32); return r; }
 V8_INLINE V8I v8iGather(const uint32_t* base, V8I index) { V8I r; V8_EACH r.v[i] = (int32_t)base[index.v[i]]; return r; }
 V8_INLINE int v8iSigns(V8I a) { int r = 0; V8_EACH r |= (a.v[i] < 0) << i; return r; }
 

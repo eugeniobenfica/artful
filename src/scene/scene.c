@@ -917,6 +917,31 @@ void artfSceneRemoveLight(ArtfScene* s, ArtfLight l) {
 
 void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera) { s->camera = *camera; }
 void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color) { s->background = color; }
+
+static float halton(uint32_t i, uint32_t base) {
+    float f = 1.f, r = 0.f;
+    for (; i; i /= base) {
+        f /= (float)base;
+        r += f * (float)(i % base);
+    }
+    return r;
+}
+
+void artfFrameJitter(ArtfFrameData* frame, uint32_t n, int width, int height) {
+    const float jx = halton(n % 16 + 1, 2) - .5f, jy = halton(n % 16 + 1, 3) - .5f;
+    frame->post[2][2] = jx;
+    frame->post[2][3] = jy;
+    const float ox = jx * 2.f / (float)width, oy = jy * 2.f / (float)height;
+    for (int c = 0; c < 4; ++c) {
+        frame->viewProj[c * 4] += ox * frame->viewProj[c * 4 + 3];
+        frame->viewProj[c * 4 + 1] += oy * frame->viewProj[c * 4 + 3];
+    }
+}
+
+void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc) {
+    if (desc) s->post = *desc;
+    else memset(&s->post, 0, sizeof s->post);
+}
 void artfSceneSetShadows(ArtfScene* s, const ArtfShadowDesc* desc) {
     memset(&s->shadows, 0, sizeof s->shadows);
     if (!desc || desc->resolution <= 0) return;
@@ -1140,6 +1165,12 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     const ArtfVec3 right = artfVec3Normalize(artfVec3Cross(forward, c->up));
     const ArtfVec3 up = artfVec3Cross(right, forward);
     const float wide = 1.f / artfMaxf(proj.m[0], 1e-6f), tall = 1.f / artfMaxf(proj.m[5], 1e-6f);
+    const ArtfPostDesc* p = &s->post;
+    const float post[3][4] = {{p->bloom, p->bloomThreshold > 0 ? p->bloomThreshold : 1.f, p->occlusion, p->occlusionRadius > 0 ? p->occlusionRadius : .5f},
+                              {p->reflections, p->volumetric, artfClampf(p->scattering, -.95f, .95f), p->temporal ? 1.f : 0.f},
+                              {p->focus, p->aperture, 0, 0}};
+    memcpy(out->post, post, sizeof post);
+    memcpy(out->previous, vp.m, sizeof vp.m);
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;
     for (int k = 0; k < 3; ++k) {

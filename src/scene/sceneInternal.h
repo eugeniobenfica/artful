@@ -208,7 +208,14 @@ typedef struct ArtfFrameData {
     /* Toward a pixel at (x, y) of clip space: eye[2] + x eye[0] + y eye[1]. (sky[3]: the environment's light, 0 when
      * there is none; ground[3]: 1 when it is shown.) */
     float eye[3][4];
+    /* What comes after the frame (ArtfPostDesc): bloom, its threshold, occlusion, its radius; reflections, volumetric,
+     * scattering, temporal (1 or 0); focus, aperture, and this frame's jitter, in pixels. */
+    float post[3][4];
+    float previous[16]; /* the frame before's viewProj, with no jitter: where a point was */
 } ArtfFrameData;
+
+/* Moves the frame within a pixel, by the n-th of Halton's points, for temporal antialiasing: viewProj and post[2]. */
+void artfFrameJitter(ArtfFrameData* frame, uint32_t n, int width, int height);
 
 /* One square of the shadow atlas: a place seen from a light. Clip space: x and y from -1 to 1, depth from 0 to
  * 1. y grows with the map's rows. */
@@ -392,6 +399,7 @@ struct ArtfScene {
     float lodError;
     ArtfHole hole;
     ArtfTrace trace;
+    ArtfPostDesc post;
     float* environment;         /* ARTF_ENV_FLOATS, or NULL: sky and ground */
     float environmentLight;     /* what it is multiplied by */
     bool environmentShown;      /* behind the scene */

@@ -59,6 +59,10 @@ typedef struct ArtfRendererOptions {
     /* Four samples a pixel, at the places Vulkan's standard gives them, on both backends: edges are
      * smooth, in color and in alpha. Each pixel of a surface is still shaded once. */
     bool antialias;
+    /* The frame in floats, then what a lens and a film do to it: artfSceneSetPost (bloom, ambient occlusion,
+     * reflections, fog that light goes through, temporal antialiasing, depth of field), exposure and tone mapping.
+     * It costs memory and time even with no effect on; off, frames are made as they always were. */
+    bool hdr;
     /* Vulkan: plain textures are compressed as they go up, to BC or ETC2, whichever the device takes: a quarter
      * of the memory or less, for a little of their quality. Normal maps stay as they are. */
     bool compressTextures;

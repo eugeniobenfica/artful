@@ -114,7 +114,39 @@ typedef struct ArtfSoftFrame {
     float* hdr[3];
     int hdrStride;      /* a multiple of 8 */
     float* bloom[3];
+    /* a frame in floats (ArtfRendererOptions.hdr): what the tiles leave for post.c */
+    bool post;
+    bool postFog;        /* fog is post.c's, not the tiles' */
+    float* postLight[4]; /* premultiplied light, and alpha */
+    float* postDepth;    /* 1 / w; 0 where nothing is */
+    uint32_t* postSurface;
 } ArtfSoftFrame;
+
+/* ---- post.c ---- */
+
+#define ARTF_POST_BLOOM_LEVELS 6
+
+typedef struct ArtfPool ArtfPool;
+typedef struct ArtfSoftPost {
+    ArtfPool* pool;
+    ArtfSoftFrame* f;
+    uint32_t* pixels;
+    int width, height;
+    float* scratch[3];
+    float* history[3];
+    bool historyValid;
+    float* occlusion;
+    float* fog[4];       /* light the air adds, and what it leaves, at a quarter */
+    int fogWidth, fogHeight;
+    float* bloom[3];
+    int bloomW[ARTF_POST_BLOOM_LEVELS], bloomH[ARTF_POST_BLOOM_LEVELS];
+    size_t bloomAt[ARTF_POST_BLOOM_LEVELS];
+    int bloomLevel;
+} ArtfSoftPost;
+
+void artfSoftPostSize(ArtfSoftPost* p, int width, int height);
+void artfSoftPostFree(ArtfSoftPost* p);
+void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels);
 
 typedef struct ArtfKernels {
     const char* name;

@@ -9,6 +9,9 @@
  *                 pixel, gathered over frames (1 to start with); [--bounces n]; [--denoise]
  *                 [--environment file.hdr]: light from all around, from a picture of it; [--environment-light x];
  *                 [--show-environment]: it is the background too; [--scene-exposure x]
+ *                 [--hdr]: the frame in floats, and then: [--glow x] [--glow-threshold t] [--occlusion x]
+ *                 [--occlusion-radius r] [--reflections x] [--volumetric x] [--scattering g] [--temporal]
+ *                 [--focus distance --aperture pixels] [--fog density r g b]
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
  *
@@ -288,6 +291,9 @@ int main(int argc, char** argv) {
     const char* environment = NULL;
     float environmentLight = 1.f, sceneExposure = 0;
     bool showEnvironment = false;
+    ArtfPostDesc post;
+    memset(&post, 0, sizeof post);
+    float fog[4] = {0, 0, 0, 0};
     ArtfTraceDesc trace = {ARTF_TRACE_NONE, 1, 0, 0, false};
     int traceSamples = 1;
     ArtfRendererOptions o;
@@ -313,6 +319,18 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--environment") && i + 1 < argc) environment = argv[++i];
         else if (!strcmp(a, "--environment-light") && i + 1 < argc) environmentLight = (float)atof(argv[++i]);
         else if (!strcmp(a, "--show-environment")) showEnvironment = true;
+        else if (!strcmp(a, "--hdr")) o.hdr = true;
+        else if (!strcmp(a, "--glow") && i + 1 < argc) post.bloom = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--glow-threshold") && i + 1 < argc) post.bloomThreshold = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--occlusion") && i + 1 < argc) post.occlusion = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--occlusion-radius") && i + 1 < argc) post.occlusionRadius = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--reflections") && i + 1 < argc) post.reflections = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--volumetric") && i + 1 < argc) post.volumetric = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--scattering") && i + 1 < argc) post.scattering = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--temporal")) post.temporal = true;
+        else if (!strcmp(a, "--focus") && i + 1 < argc) post.focus = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--aperture") && i + 1 < argc) post.aperture = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--fog") && i + 4 < argc) { for (int k = 0; k < 4; ++k) fog[k] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--scene-exposure") && i + 1 < argc) sceneExposure = (float)atof(argv[++i]);
         else if (!strcmp(a, "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(a, "--trace") && i + 1 < argc) trace.mode = !strcmp(argv[++i], "paths") ? ARTF_TRACE_PATHS : ARTF_TRACE_RAYS;
@@ -358,6 +376,8 @@ int main(int argc, char** argv) {
     else sceneSpheres(s);
     if (pngAlpha) artfSceneSetBackgroundAlpha(s, 0);
     if (sceneExposure > 0) artfSceneSetExposure(s, sceneExposure);
+    artfSceneSetPost(s, &post);
+    if (fog[0] > 0) artfSceneSetFog(s, artfVec3(fog[1], fog[2], fog[3]), fog[0]);
     if (environment) {
         FILE* file = fopen(environment, "rb");
         if (!file) { fprintf(stderr, "cannot read %s\n", environment); return 1; }

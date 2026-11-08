@@ -342,6 +342,26 @@ void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color);
  * scene covers, to put it over something else. A black hole fills the frame all the same. */
 void artfSceneSetBackgroundAlpha(ArtfScene* s, float alpha);
 
+/* ---- after the frame: what a renderer made with ArtfRendererOptions.hdr does to it ----
+ * Each is off at 0. Lengths are the world's; what a scene asks of a renderer without hdr is not done. */
+typedef struct ArtfPostDesc {
+    float bloom;            /* light past the threshold spreads around it: .05 is a camera's lens */
+    float bloomThreshold;   /* what is bright enough to spread, after exposure; 0: 1 */
+    float occlusion;        /* ambient occlusion: how much light from all around corners and creases lose, 0 to 1 */
+    float occlusionRadius;  /* how far it looks; 0: .5 */
+    float reflections;      /* screen-space reflections: how much of what the frame shows smooth surfaces mirror, 0 to 1 */
+    float volumetric;       /* fog that light goes through, lit by the sun through its shadows: how much, 0 to 1. It takes
+                             * artfSceneSetFog's color and density, and replaces that fog */
+    float scattering;       /* where that fog sends light: 0 all ways, toward .9 mostly onward (Henyey-Greenstein's g) */
+    bool temporal;          /* temporal antialiasing: the eye moves within a pixel from frame to frame, and frames are
+                             * mixed, as far as each pixel's history can be followed */
+    float focus;            /* depth of field: the distance in focus */
+    float aperture;         /* how much what is out of focus spreads, in pixels, for something twice as far: 0 none */
+} ArtfPostDesc;
+
+/* NULL: none. */
+void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc);
+
 /* ---- tracing ----
  * Light followed along rays, in place of drawing triangles: on both backends, and on any GPU, as this
  * needs no ray tracing hardware. Each frame adds samples to what the frames before gathered, for as long

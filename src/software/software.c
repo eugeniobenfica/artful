@@ -39,6 +39,10 @@ typedef struct Software {
     ArtfDenoiser denoiser;
     bool denoising;
     size_t hdrPixels, bloomPixels;
+    ArtfSoftPost post;
+    uint32_t postFrames;  /* for the jitter */
+    float previous[16];   /* the frame before's viewProj */
+    bool hasPrevious;
 } Software;
 
 #ifdef ARTFUL_HAVE_AVX2
@@ -118,6 +122,19 @@ static void allocateTargets(Software* s, int width, int height) {
     artfFree(f->hizTiles);
     f->hizCells = artfCalloc((size_t)f->cellsX * f->cellsY, 4);
     f->hizTiles = artfCalloc(tiles, 4);
+    if (f->post) {
+        const size_t pixels = (size_t)width * height;
+        for (int c = 0; c < 4; ++c) {
+            artfFree(f->postLight[c]);
+            f->postLight[c] = artfCalloc(pixels, 4);
+        }
+        artfFree(f->postDepth);
+        artfFree(f->postSurface);
+        f->postDepth = artfCalloc(pixels, 4);
+        f->postSurface = artfCalloc(pixels, 4);
+        artfSoftPostSize(&s->post, width, height);
+        s->hasPrevious = false;
+    }
     /* as far out as the integers of the rasterizer go */
     f->guardX = 2.f * 15000.f / (float)width;
     f->guardY = 2.f * 15000.f / (float)height;
@@ -556,6 +573,18 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     artfSceneDecodeTextures(scene);
     artfScenePosesApply(scene);
     artfSceneFrame(scene, f->width, f->height, &f->data);
+    if (f->post) {
+        /* the frame before, and with temporal antialiasing, a place within the pixel */
+        float now[16];
+        memcpy(now, f->data.viewProj, sizeof now);
+        if (s->hasPrevious) memcpy(f->data.previous, s->previous, sizeof s->previous);
+        memcpy(s->previous, now, sizeof now);
+        s->hasPrevious = true;
+        if (scene->post.temporal) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
+        f->postFog = scene->post.volumetric > 0 && f->data.look[1] > 0;
+    } else {
+        memset(f->data.post, 0, sizeof f->data.post);
+    }
     artfSceneResidencyStep(scene, &f->data, f->height);
     f->nearW = scene->camera.near_;
     const bool occlusion = scene->features[ARTF_FEATURE_OCCLUSION];
@@ -624,6 +653,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
 
     memset(s->tilesSkipped, 0, sizeof s->tilesSkipped);
     artfPoolRun(s->pool, tileJob, s, (uint32_t)(f->tilesX * f->tilesY));
+    if (f->post) artfSoftPostRun(&s->post, f, s->pixels);
     const double t3 = artfNowMs();
 
     s->cullMs = t1 - t0;
@@ -701,6 +731,10 @@ static void softFree(ArtfRenderer* r) {
         artfAlignedFree(f->hdr[c]);
         artfAlignedFree(f->bloom[c]);
     }
+    for (int c = 0; c < 4; ++c) artfFree(f->postLight[c]);
+    artfFree(f->postDepth);
+    artfFree(f->postSurface);
+    artfSoftPostFree(&s->post);
     artfAlignedFree(s->pixels);
     artfFree(s);
 }
@@ -720,12 +754,16 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
     f->chunks = artfCalloc(ARTF_CHUNKS, sizeof *f->chunks);
     f->workers = artfCalloc((size_t)workers, sizeof *f->workers);
     f->samples = o->antialias ? 4 : 1;
+    f->post = o->hdr;
+    s->post.pool = s->pool;
     const size_t planes = (size_t)ARTF_TILE_PIXELS * 4 * f->samples;
+    /* (with a frame in floats, each color has its alpha and surface after it: see storeLit) */
+    const size_t colors = f->post ? (size_t)ARTF_TILE_PIXELS * 4 * 12 : planes;
     for (int i = 0; i < workers; ++i) {
         f->workers[i].depth = artfAlignedMalloc(planes, 64);
         f->workers[i].ids = artfAlignedMalloc(planes, 64);
-        f->workers[i].color = artfAlignedMalloc(planes, 64);
-        f->workers[i].layer = artfAlignedMalloc(planes, 64);
+        f->workers[i].color = artfAlignedMalloc(colors, 64);
+        f->workers[i].layer = artfAlignedMalloc(colors, 64);
     }
     allocateTargets(s, artfMaxi(o->width, 1), artfMaxi(o->height, 1));
     return &s->base;

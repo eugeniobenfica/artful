@@ -420,6 +420,63 @@ V8_INLINE void addLight(Lanes3 n, Lanes3 view, Lanes3 toLight, V8F strength, con
     }
 }
 
+/* ---- a frame in floats (f->post): light as RGB9E5, three nine-bit mantissas over one exponent ---- */
+
+V8_INLINE V8I pack9e5(Lanes3 c) {
+    const V8F zero = v8fSet(0.f), most = v8fSet(65408.f), half = v8fSet(.5f);
+    const V8F r = v8fMin(v8fMax(c.x, zero), most), g = v8fMin(v8fMax(c.y, zero), most), b = v8fMin(v8fMax(c.z, zero), most);
+    const V8F m = v8fMax(r, v8fMax(g, b));
+    /* the shared exponent: floor(log2(m)) + 16, at least 0 */
+    V8I e = v8iSub(v8iAnd(v8iShr(v8fAsI(m), 23), v8iSet(255)), v8iSet(111));
+    e = v8iSelect(v8iGt(v8iSet(0), e), e, v8iSet(0));
+    V8F inverse = v8iAsF(v8iShl(v8iSub(v8iSet(151), e), 23)); /* 2^(24 - e) */
+    const V8I over = v8iGt(v8fToI(v8fFloor(v8fAdd(v8fMul(m, inverse), half))), v8iSet(511));
+    e = v8iSelect(over, e, v8iAdd(e, v8iSet(1)));
+    inverse = v8fSelect(over, inverse, v8fMul(inverse, half));
+    const V8I top = v8iSet(511);
+#define MANTISSA(x) v8iSelect(v8iGt(v8fToI(v8fFloor(v8fAdd(v8fMul(x, inverse), half))), top), v8fToI(v8fFloor(v8fAdd(v8fMul(x, inverse), half))), top)
+    return v8iOr(v8iOr(MANTISSA(r), v8iShl(MANTISSA(g), 9)), v8iOr(v8iShl(MANTISSA(b), 18), v8iShl(e, 27)));
+#undef MANTISSA
+}
+
+V8_INLINE Lanes3 unpack9e5(V8I v) {
+    const V8F scale = v8iAsF(v8iShl(v8iAdd(v8iShr(v, 27), v8iSet(103)), 23)); /* 2^(e - 24) */
+    const V8I nine = v8iSet(511);
+    const Lanes3 c = {v8fMul(v8iToF(v8iAnd(v, nine)), scale), v8fMul(v8iToF(v8iAnd(v8iShr(v, 9), nine)), scale), v8fMul(v8iToF(v8iAnd(v8iShr(v, 18), nine)), scale)};
+    return c;
+}
+
+/* A surface for what comes after: its normal, folded onto an octahedron (9 + 9 bits), roughness (5), metal (4), and
+ * the share of its light that came from all around (5), which ambient occlusion takes from. */
+V8_INLINE V8I packSurface(Lanes3 n, V8F rough, V8F metal, V8F ambient) {
+    const V8F zero = v8fSet(0.f), one = v8fSet(1.f), half = v8fSet(.5f);
+    const V8F sum = v8fMax(v8fAdd(v8fAdd(v8fAbs(n.x), v8fAbs(n.y)), v8fAbs(n.z)), v8fSet(1e-20f));
+    V8F a = v8fDiv(n.x, sum), b = v8fDiv(n.y, sum);
+    const V8I below = v8fLt(n.z, zero);
+    const V8F sa = v8fSelect(v8fLt(a, zero), one, v8fSet(-1.f)), sb = v8fSelect(v8fLt(b, zero), one, v8fSet(-1.f));
+    const V8F fa = v8fMul(v8fSub(one, v8fAbs(b)), sa), fb = v8fMul(v8fSub(one, v8fAbs(a)), sb);
+    a = v8fSelect(below, a, fa);
+    b = v8fSelect(below, b, fb);
+#define QUANT(x, top) v8fToI(v8fAdd(v8fMul(v8fMin(v8fMax(x, zero), one), v8fSet(top)), half))
+    const V8I qa = QUANT(v8fAdd(v8fMul(a, half), half), 511.f), qb = QUANT(v8fAdd(v8fMul(b, half), half), 511.f);
+    return v8iOr(v8iOr(qa, v8iShl(qb, 9)), v8iOr(v8iOr(v8iShl(QUANT(rough, 31.f), 18), v8iShl(QUANT(metal, 15.f), 23)), v8iShl(QUANT(ambient, 31.f), 27)));
+#undef QUANT
+}
+
+/* What lighting gives eight pixels: their color, as the frame keeps it, and with a frame in floats their alpha and
+ * surface too. */
+typedef struct LitOut { V8I color; V8F alpha; V8I surface; } LitOut;
+#define ARTF_POST_ALPHA (ARTF_TILE_PIXELS * 4)   /* from a color, in its buffer: its alpha, as a float */
+#define ARTF_POST_SURFACE (ARTF_TILE_PIXELS * 8) /* and its surface */
+
+V8_INLINE void storeLit(const ArtfSoftFrame* f, uint32_t* at, LitOut o) {
+    v8iStore(at, o.color);
+    if (f->post) {
+        v8fStore((float*)(at + ARTF_POST_ALPHA), o.alpha);
+        v8iStore(at + ARTF_POST_SURFACE, o.surface);
+    }
+}
+
 /* Narkowicz's fit to ACES: what is very bright rolls off to white. As lensToneMap, and the GPU's. */
 V8_INLINE V8F toneMap(V8F x) {
     const V8F top = v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.51f)), v8fSet(.03f)));
@@ -506,7 +563,7 @@ static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
 
 /* The color of eight pixels. A light out of reach adds exactly nothing, so which lights are looked
  * at changes the time this takes, never the pixels. */
-static V8I lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
+static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
                       bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
     const bool shiny = material->specular > 0 || material->metallic > 0 || material->graph;
@@ -648,6 +705,7 @@ static V8I lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const 
         albedo.y = v8fMul(albedo.y, keep);
         albedo.z = v8fMul(albedo.z, keep);
     }
+    const Lanes3 aroundDiffuse = diffuse, aroundHighlight = highlight; /* (for ambient occlusion) */
     if (frame->sunColor[0] > 0 || frame->sunColor[1] > 0 || frame->sunColor[2] > 0) {
         Lanes3 toSun = {v8fSet(frame->toSun[0]), v8fSet(frame->toSun[1]), v8fSet(frame->toSun[2])};
         addLight(n, view, toSun, f->shadows ? shadowLanes(f, -1, world, n) : v8fSet(1.f), frame->sunColor, shiny, &reflecting, &diffuse, &highlight);
@@ -670,7 +728,7 @@ static V8I lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const 
     Lanes3 lit = {v8fAdd(v8fAdd(v8fMul(albedo.x, diffuse.x), highlight.x), own.x),
                   v8fAdd(v8fAdd(v8fMul(albedo.y, diffuse.y), highlight.y), own.y),
                   v8fAdd(v8fAdd(v8fMul(albedo.z, diffuse.z), highlight.z), own.z)};
-    if (frame->look[1] > 0) {
+    if (frame->look[1] > 0 && !f->postFog) {
         Lanes3 fromEye = {v8fSub(world.x, v8fSet(frame->cameraPos[0])), v8fSub(world.y, v8fSet(frame->cameraPos[1])), v8fSub(world.z, v8fSet(frame->cameraPos[2]))};
         /* (with no exp, whose bits differ from one C library to the next) */
         const V8F air = v8fMul(v8fSqrt(dot3(fromEye, fromEye)), v8fSet(frame->look[1]));
@@ -680,13 +738,27 @@ static V8I lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const 
         lit.y = v8fAdd(fg, v8fMul(v8fSub(lit.y, fg), keep));
         lit.z = v8fAdd(fb, v8fMul(v8fSub(lit.z, fb), keep));
     }
+    LitOut out;
+    if (f->post) {
+        /* light as it is: exposure, tone mapping and fog come after */
+        const V8F a = layered ? v8fMin(v8fMax(alpha, zero), one) : one;
+        const Lanes3 kept = {v8fMul(lit.x, a), v8fMul(lit.y, a), v8fMul(lit.z, a)};
+        out.color = pack9e5(kept);
+        out.alpha = a;
+        const V8F all = v8fAdd(v8fAdd(v8fMul(lit.x, v8fSet(.3f)), v8fMul(lit.y, v8fSet(.59f))), v8fMul(lit.z, v8fSet(.11f)));
+        const V8F around = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fMul(albedo.x, aroundDiffuse.x), aroundHighlight.x), v8fSet(.3f)), v8fMul(v8fAdd(v8fMul(albedo.y, aroundDiffuse.y), aroundHighlight.y), v8fSet(.59f))),
+                                  v8fMul(v8fAdd(v8fMul(albedo.z, aroundDiffuse.z), aroundHighlight.z), v8fSet(.11f)));
+        out.surface = packSurface(n, rough, metal, v8fDiv(around, v8fMax(all, v8fSet(1e-6f))));
+        return out;
+    }
     if (frame->look[0] > 0) {
         const V8F exposure = v8fSet(frame->look[0]);
         lit.x = toneMap(v8fMul(lit.x, exposure));
         lit.y = toneMap(v8fMul(lit.y, exposure));
         lit.z = toneMap(v8fMul(lit.z, exposure));
     }
-    return layered ? packLayer(lit, alpha) : packColor(lit);
+    out.color = layered ? packLayer(lit, alpha) : packColor(lit);
+    return out;
 }
 
 static void batchFlush(LitBatch* b, const ArtfSoftFrame* f, uint32_t* color) {
@@ -709,14 +781,24 @@ static void batchFlush(LitBatch* b, const ArtfSoftFrame* f, uint32_t* color) {
         tint.z = v8fLoad(b->b);
         alpha = v8fMul(alpha, v8fLoad(b->a));
     }
-    _Alignas(32) uint32_t colors[8];
+    _Alignas(32) uint32_t colors[8], surfaces[8];
+    _Alignas(32) float alphas[8];
     Lanes3 tangent = {one, one, one}, bitangent = {one, one, one};
     if (b->bumpy) {
         tangent.x = v8fLoad(b->tx); tangent.y = v8fLoad(b->ty); tangent.z = v8fLoad(b->tz);
         bitangent.x = v8fLoad(b->bx); bitangent.y = v8fLoad(b->by); bitangent.z = v8fLoad(b->bz);
     }
-    v8iStore(colors, lightLanes(f, frame, b->material, b->textures, b->texture, b->lights, b->level, n, world, v8fLoad(b->u), v8fLoad(b->v), b->colored, b->layered, tint, alpha, &tangent, &bitangent));
+    const LitOut lit = lightLanes(f, frame, b->material, b->textures, b->texture, b->lights, b->level, n, world, v8fLoad(b->u), v8fLoad(b->v), b->colored, b->layered, tint, alpha, &tangent, &bitangent);
+    v8iStore(colors, lit.color);
     for (int i = 0; i < b->count; ++i) color[b->at[i]] = colors[i];
+    if (f->post) {
+        v8fStore(alphas, lit.alpha);
+        v8iStore(surfaces, lit.surface);
+        for (int i = 0; i < b->count; ++i) {
+            ((float*)(color + ARTF_POST_ALPHA))[b->at[i]] = alphas[i];
+            color[ARTF_POST_SURFACE + b->at[i]] = surfaces[i];
+        }
+    }
     b->count = 0;
     b->lights = 0;
 }
@@ -939,7 +1021,7 @@ static void shadeTriangle(ArtfSoftFrame* f, LitBatch* batch, const ArtfRasterTri
                     alpha = v8fMul(alpha, LERP(col, 3));
                 }
                 Lanes3 tangent = {v8fSet(s.tangent[0]), v8fSet(s.tangent[1]), v8fSet(s.tangent[2])}, bitangent = {v8fSet(s.bitangent[0]), v8fSet(s.bitangent[1]), v8fSet(s.bitangent[2])};
-                v8iStore(color + y * ARTF_TILE + x, lightLanes(f, frame, s.material, f->scene->textures.items, s.texture, s.lights, mipAt(&s, (float)x + 3.5f, fy), n, world, LERP(uv, 0), LERP(uv, 1), s.colored, s.layered, tint, alpha, &tangent, &bitangent));
+                storeLit(f, color + y * ARTF_TILE + x, lightLanes(f, frame, s.material, f->scene->textures.items, s.texture, s.lights, mipAt(&s, (float)x + 3.5f, fy), n, world, LERP(uv, 0), LERP(uv, 1), s.colored, s.layered, tint, alpha, &tangent, &bitangent));
 #undef LERP
                 continue;
             }
@@ -1035,6 +1117,35 @@ V8_INLINE V8I overlayBlend(V8I src, V8I dst) {
     return v8iAdd(src, v8iOr(v8iOr(a, r), v8iOr(g, b)));
 }
 
+/* ---- a tile of a frame in floats ---- */
+
+/* What the tile's colors were made of before: a black hole's, already tone mapped, back to light. */
+static void postFromBytes(uint32_t* c, int count) {
+    const V8F inverse = v8fSet(1.f / 255.f);
+    const V8I byte = v8iSet(255);
+    for (int i = 0; i < count; i += 8) {
+        const V8I p = v8iLoad(c + i);
+        const V8F a = v8fMul(v8iToF(v8iShr(p, 24)), inverse);
+        const V8F r = v8fMul(v8iToF(v8iAnd(v8iShr(p, 16), byte)), inverse), g = v8fMul(v8iToF(v8iAnd(v8iShr(p, 8), byte)), inverse), b = v8fMul(v8iToF(v8iAnd(p, byte)), inverse);
+        /* (premultiplied in the frame's colors: light is their square, over alpha, times alpha) */
+        const V8F over = v8fDiv(v8fSet(1.f), v8fMax(a, v8fSet(1e-6f)));
+        const Lanes3 light = {v8fMul(v8fMul(r, r), over), v8fMul(v8fMul(g, g), over), v8fMul(v8fMul(b, b), over)};
+        v8iStore(c + i, pack9e5(light));
+        v8fStore((float*)(c + ARTF_POST_ALPHA + i), a);
+        v8iStore(c + ARTF_POST_SURFACE + i, v8iSet(0));
+    }
+}
+
+/* top over under, both premultiplied, in light. */
+V8_INLINE void postBlend(uint32_t* under, const uint32_t* top, V8F topAlpha) {
+    const Lanes3 a = unpack9e5(v8iLoad(top)), b = unpack9e5(v8iLoad(under));
+    const V8F rest = v8fSub(v8fSet(1.f), topAlpha);
+    const Lanes3 out = {v8fAdd(a.x, v8fMul(b.x, rest)), v8fAdd(a.y, v8fMul(b.y, rest)), v8fAdd(a.z, v8fMul(b.z, rest))};
+    v8iStore(under, pack9e5(out));
+    float* alpha = (float*)(under + ARTF_POST_ALPHA);
+    v8fStore(alpha, v8fAdd(topAlpha, v8fMul(v8fLoad(alpha), rest)));
+}
+
 /* Each layer of a tile, the farthest first. It takes its depth among what is there, so that only its
  * nearest surface shows, and goes over the colors of each sample. */
 static void drawLayers(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, int th) {
@@ -1056,7 +1167,15 @@ static void drawLayers(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, 
                 if (v8iSigns(empty) == 0xFF) continue;
                 const V8I under = v8iLoad(w->color + plane + i);
                 /* (what shows the same as in the first sample was shaded there) */
-                const V8I src = k ? v8iSelect(v8iEq(id, v8iLoad(w->ids + i)), v8iLoad(w->layer + plane + i), v8iLoad(w->layer + i)) : v8iLoad(w->layer + i);
+                const V8I fromFirst = k ? v8iEq(id, v8iLoad(w->ids + i)) : v8iSet(-1);
+                if (f->post) {
+                    _Alignas(32) uint32_t top[8];
+                    const V8F topAlpha = v8fSelect(empty, v8fSelect(fromFirst, v8fLoad((const float*)(w->layer + ARTF_POST_ALPHA + plane + i)), v8fLoad((const float*)(w->layer + ARTF_POST_ALPHA + i))), v8fSet(0.f));
+                    v8iStore(top, v8iSelect(empty, v8iSelect(fromFirst, v8iLoad(w->layer + plane + i), v8iLoad(w->layer + i)), v8iSet(0)));
+                    postBlend(w->color + plane + i, top, topAlpha);
+                    continue;
+                }
+                const V8I src = k ? v8iSelect(fromFirst, v8iLoad(w->layer + plane + i), v8iLoad(w->layer + i)) : v8iLoad(w->layer + i);
                 v8iStore(w->color + plane + i, v8iSelect(empty, overlayBlend(src, under), under));
             }
         }
@@ -1131,7 +1250,26 @@ static void drawLayersSorted(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, in
 
 /* The mean of a pixel's four samples, into the first plane: they are premultiplied, so this holds for
  * alpha too, and an edge over nothing comes out as part of a pixel. */
-static void resolveSamples(ArtfWorker* w) {
+static void resolveSamples(const ArtfSoftFrame* f, ArtfWorker* w) {
+    if (f->post) {
+        uint32_t* c = w->color;
+        const V8F quarter = v8fSet(.25f);
+        for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) {
+            Lanes3 sum = unpack9e5(v8iLoad(c + i));
+            V8F alpha = v8fLoad((const float*)(c + ARTF_POST_ALPHA + i));
+            for (int k = 1; k < 4; ++k) {
+                const Lanes3 s = unpack9e5(v8iLoad(c + k * ARTF_TILE_PIXELS + i));
+                sum.x = v8fAdd(sum.x, s.x);
+                sum.y = v8fAdd(sum.y, s.y);
+                sum.z = v8fAdd(sum.z, s.z);
+                alpha = v8fAdd(alpha, v8fLoad((const float*)(c + ARTF_POST_ALPHA + k * ARTF_TILE_PIXELS + i)));
+            }
+            const Lanes3 mean = {v8fMul(sum.x, quarter), v8fMul(sum.y, quarter), v8fMul(sum.z, quarter)};
+            v8iStore(c + i, pack9e5(mean));
+            v8fStore((float*)(c + ARTF_POST_ALPHA + i), v8fMul(alpha, quarter));
+        }
+        return;
+    }
     const V8I mask = v8iSet(0x00FF00FF), rounding = v8iSet(0x00020002);
     uint32_t* c = w->color;
     for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) {
@@ -1233,6 +1371,15 @@ static void environmentFill(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int o
             float c[3];
             artfEnvSample(env, 0, d->eye[2][0] + px * d->eye[0][0] + py * d->eye[1][0], d->eye[2][1] + px * d->eye[0][1] + py * d->eye[1][1],
                           d->eye[2][2] + px * d->eye[0][2] + py * d->eye[1][2], c);
+            if (f->post) {
+                /* light as it is, for what comes after */
+                _Alignas(32) uint32_t packed[8];
+                const Lanes3 light3 = {v8fSet(c[0] * light * alpha), v8fSet(c[1] * light * alpha), v8fSet(c[2] * light * alpha)};
+                v8iStore(packed, pack9e5(light3));
+                w->color[y * ARTF_TILE + x] = packed[0];
+                ((float*)(w->color + ARTF_POST_ALPHA))[y * ARTF_TILE + x] = alpha;
+                continue;
+            }
             uint32_t bits = (uint32_t)(alpha * 255.f + .5f) << 24;
             for (int k = 0; k < 3; ++k) {
                 float v = c[k] * light;
@@ -1258,6 +1405,15 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     const uint8_t klass = f->tileClass[index];
 
     /* under an opaque overlay nothing of the scene shows, so none of it is drawn */
+    if (klass == ARTF_TILE_OPAQUE && f->post) {
+        for (int y = 0; y < th; ++y) {
+            const size_t row = (size_t)(oy + y) * f->width + ox;
+            for (int c = 0; c < 4; ++c) memset(f->postLight[c] + row, 0, (size_t)tw * 4);
+            memset(f->postDepth + row, 0, (size_t)tw * 4);
+            memset(f->postSurface + row, 0, (size_t)tw * 4);
+        }
+        return 1;
+    }
     if (klass == ARTF_TILE_OPAQUE) {
         for (int y = 0; y < th; ++y)
             memcpy(f->pixels + (size_t)(oy + y) * f->width + ox, f->overlay + (size_t)(oy + y) * f->overlayStride + ox, (size_t)tw * 4);
@@ -1268,12 +1424,32 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
 
     const V8I zeroI = v8iSet(0);
     const V8I background = v8iSet((int32_t)f->background);
-    if (f->hole) lensFill(f, w, ox, oy, tw, th);
-    else {
+    if (f->hole) {
+        lensFill(f, w, ox, oy, tw, th);
+        if (f->post) postFromBytes(w->color, ARTF_TILE_PIXELS);
+    } else if (f->post) {
+        /* the background as light: what shows, squared */
+        const float* bg = f->data.background;
+        const float a = bg[3], over = a > 0 ? 1.f / a : 0.f;
+        const Lanes3 light = {v8fSet(bg[0] * bg[0] * over), v8fSet(bg[1] * bg[1] * over), v8fSet(bg[2] * bg[2] * over)};
+        const V8I packed = pack9e5(light);
+        for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) {
+            v8iStore(w->color + i, packed);
+            v8fStore((float*)(w->color + ARTF_POST_ALPHA + i), v8fSet(a));
+            v8iStore(w->color + ARTF_POST_SURFACE + i, v8iSet(0));
+        }
+        if (f->data.sky[3] > 0 && f->data.ground[3] > 0 && f->scene->environment) environmentFill(f, w, ox, oy, tw, th);
+    } else {
         for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) v8iStore(w->color + i, background);
         if (f->data.sky[3] > 0 && f->data.ground[3] > 0 && f->scene->environment) environmentFill(f, w, ox, oy, tw, th);
     }
-    for (int k = 1; k < f->samples; ++k) memcpy(w->color + k * ARTF_TILE_PIXELS, w->color, ARTF_TILE_PIXELS * 4);
+    for (int k = 1; k < f->samples; ++k) {
+        memcpy(w->color + k * ARTF_TILE_PIXELS, w->color, ARTF_TILE_PIXELS * 4);
+        if (f->post) {
+            memcpy(w->color + ARTF_POST_ALPHA + k * ARTF_TILE_PIXELS, w->color + ARTF_POST_ALPHA, ARTF_TILE_PIXELS * 4);
+            memcpy(w->color + ARTF_POST_SURFACE + k * ARTF_TILE_PIXELS, w->color + ARTF_POST_SURFACE, ARTF_TILE_PIXELS * 4);
+        }
+    }
 
     if (w->tris.len) {
         /* the triangles that still show after all the others */
@@ -1284,12 +1460,19 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         /* what shows the same as in the first sample takes its color from there */
         for (int k = 1; k < f->samples; ++k) {
             const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
-            for (int i = 0; i < ARTF_TILE_PIXELS; i += 8)
-                v8iStore(w->color + plane + i, v8iSelect(v8iEq(v8iLoad(w->ids + plane + i), v8iLoad(w->ids + i)), v8iLoad(w->color + plane + i), v8iLoad(w->color + i)));
+            for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) {
+                const V8I same = v8iEq(v8iLoad(w->ids + plane + i), v8iLoad(w->ids + i));
+                v8iStore(w->color + plane + i, v8iSelect(same, v8iLoad(w->color + plane + i), v8iLoad(w->color + i)));
+                if (f->post) {
+                    float* alpha = (float*)(w->color + ARTF_POST_ALPHA);
+                    v8fStore(alpha + plane + i, v8fSelect(same, v8fLoad(alpha + plane + i), v8fLoad(alpha + i)));
+                    v8iStore(w->color + ARTF_POST_SURFACE + plane + i, v8iSelect(same, v8iLoad(w->color + ARTF_POST_SURFACE + plane + i), v8iLoad(w->color + ARTF_POST_SURFACE + i)));
+                }
+            }
         }
     }
     if (w->layers.len) {
-        if (f->scene->features[ARTF_FEATURE_LAYERS_SORTED]) drawLayersSorted(f, w, ox, oy, tw, th);
+        if (f->scene->features[ARTF_FEATURE_LAYERS_SORTED] && !f->post) drawLayersSorted(f, w, ox, oy, tw, th);
         else drawLayers(f, w, ox, oy, tw, th);
     }
     if (f->tracing) {
@@ -1300,6 +1483,23 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
                 const float* sum = f->traceSum + ((size_t)(oy + y) * f->width + ox + x) * 4;
                 if (sum[3] <= 0) continue;
                 const float alpha = sum[3] * each, scale = 1.f / sum[3], exposure = f->data.look[0];
+                if (f->post) {
+                    /* light over what is there, as a layer: tone mapping comes after */
+                    uint32_t* at = w->color + y * ARTF_TILE + x;
+                    float* under = (float*)(at + ARTF_POST_ALPHA);
+                    _Alignas(32) uint32_t one[8];
+                    v8iStore(one, v8iLoad(at - (x & 7))); /* (the block this pixel is in) */
+                    const Lanes3 was = unpack9e5(v8iLoad(one));
+                    _Alignas(32) float r[8], g[8], b[8];
+                    v8fStore(r, was.x); v8fStore(g, was.y); v8fStore(b, was.z);
+                    const int lane = x & 7;
+                    const Lanes3 now = {v8fSet(sum[0] * scale * alpha + r[lane] * (1.f - alpha)), v8fSet(sum[1] * scale * alpha + g[lane] * (1.f - alpha)), v8fSet(sum[2] * scale * alpha + b[lane] * (1.f - alpha))};
+                    _Alignas(32) uint32_t packed[8];
+                    v8iStore(packed, pack9e5(now));
+                    *at = packed[0];
+                    *under = alpha + *under * (1.f - alpha);
+                    continue;
+                }
                 float light[3];
                 for (int c = 0; c < 3; ++c) {
                     const float v = sum[c] * scale * (exposure > 0 ? exposure : 1.f);
@@ -1318,8 +1518,27 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
                 w->color[y * ARTF_TILE + x] = top + (t0 | t1 << 8 | t2 << 16 | t3 << 24);
             }
     }
-    if (f->samples > 1 && (w->tris.len || w->layers.len)) resolveSamples(w);
+    if (f->samples > 1 && (w->tris.len || w->layers.len || f->post)) resolveSamples(f, w);
 
+    if (f->post) {
+        /* out to the frame's planes, in light: the overlay goes on after what follows */
+        for (int y = 0; y < th; ++y) {
+            const size_t row = (size_t)(oy + y) * f->width + ox;
+            const uint32_t* color = w->color + y * ARTF_TILE;
+            for (int x = 0; x < tw; x += 8) {
+                const Lanes3 c = unpack9e5(v8iLoad(color + x));
+                _Alignas(32) float out[4][8], depth[8];
+                v8fStore(out[0], c.x); v8fStore(out[1], c.y); v8fStore(out[2], c.z);
+                v8fStore(out[3], v8fLoad((const float*)(color + ARTF_POST_ALPHA + x)));
+                v8fStore(depth, v8fLoad(w->depth + y * ARTF_TILE + x));
+                const int n = artfMini(8, tw - x);
+                for (int k = 0; k < 4; ++k) memcpy(f->postLight[k] + row + x, out[k], (size_t)n * 4);
+                memcpy(f->postDepth + row + x, depth, (size_t)n * 4);
+                memcpy(f->postSurface + row + x, color + ARTF_POST_SURFACE + x, (size_t)n * 4);
+            }
+        }
+        return 0;
+    }
     /* the overlay, and out to the frame: the one time this tile's pixels touch main memory */
     const int overlayRows = klass == ARTF_TILE_EMPTY ? 0 : artfMini(th, f->overlayHeight - oy);
     const int overlayColumns = klass == ARTF_TILE_EMPTY ? 0 : artfMini(tw, f->overlayWidth - ox);
