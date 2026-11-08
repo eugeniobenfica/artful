@@ -4,6 +4,11 @@ name: CI
 # Vulkan calls against the validation layers (on a software Vulkan, Mesa's lavapipe).
 on: [push, pull_request]
 
+# (a newer push makes the run before it worthless)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     runs-on: ubuntu-latest
