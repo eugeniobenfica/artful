@@ -1,0 +1,5 @@
+# Text is LF, in the repository and when checked out, on every system: scripts run as they are, and
+# the compilers take it everywhere.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="gradient1" x1="0.068" y1="0.385" x2="0.971" y2="0.385">
+      <stop offset="0" stop-color="#A6A6B0"/>
+      <stop offset="0.6" stop-color="#C0C0C8"/>
+      <stop offset="1" stop-color="#ADADB7"/>
+    </linearGradient>
+    <linearGradient id="gradient2" x1="0.153" y1="0.03" x2="0.936" y2="0.935">
+      <stop offset="0" stop-color="#B6B6C0"/>
+      <stop offset="0.5" stop-color="#D4D4DA"/>
+      <stop offset="1" stop-color="#F4F4F6"/>
+    </linearGradient>
+    <linearGradient id="gradient3" x1="0.801" y1="0.143" x2="0.146" y2="1.007">
+      <stop offset="0" stop-color="#BEBEC8"/>
+      <stop offset="0.6" stop-color="#A8A8B3"/>
+      <stop offset="1" stop-color="#54545F"/>
+    </linearGradient>
+    <linearGradient id="gradient4" x1="0.098" y1="-0.011" x2="0.826" y2="0.915">
+      <stop offset="0" stop-color="#5A5A66"/>
+      <stop offset="0.6" stop-color="#9A9AA6"/>
+      <stop offset="1" stop-color="#B4B4BE"/>
+    </linearGradient>
+    <linearGradient id="gradient5" x1="0.142" y1="0.919" x2="0.57" y2="0.202">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.5" stop-color="#F6F6F8"/>
+      <stop offset="1" stop-color="#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="gradient6" x1="0.127" y1="0.374" x2="0.967" y2="0.374">
+      <stop offset="0" stop-color="#464652" stop-opacity="0"/>
+      <stop offset="0.42" stop-color="#464652" stop-opacity="0.361"/>
+      <stop offset="0.74" stop-color="#3A3A46" stop-opacity="0.753"/>
+      <stop offset="1" stop-color="#2A2A34" stop-opacity="0.957"/>
+    </linearGradient>
+  </defs>
+  <path id="Whole" d="M219.034 83.585 L289.879 83.585 L452 350.063 L418.047 408.415 L94.394 408.415 L60 350.063 Z M200.073 315.522 L257.249 221.013 L314.278 315.522 Z" fill="#C8C8CE" fill-rule="evenodd"/>
+  <path id="Base" d="M60 350.063 L382.297 350.063 L418.047 408.415 L94.394 408.415 Z" fill="url(#gradient1)"/>
+  <path id="Outer-face" d="M219.034 83.585 L289.879 83.585 L452 350.063 L418.047 408.415 Z" fill="url(#gradient2)"/>
+  <path id="Inner-left" d="M252.743 138.605 L280.095 183.25 L200.073 315.522 L145.396 315.522 Z" fill="url(#gradient3)"/>
+  <path id="Inner-right" d="M280.095 183.25 L382.297 350.063 L334.562 350.063 L257.249 221.013 Z" fill="url(#gradient4)"/>
+  <path id="Bright-face" d="M60 350.063 L219.034 83.585 L252.743 138.605 L145.396 315.522 L314.278 315.522 L334.562 350.063 Z" fill="url(#gradient5)"/>
+  <path id="Shade" d="M145.396 315.522 L314.278 315.522 L334.562 350.063 L145.396 350.063 Z" fill="url(#gradient6)"/>
+</svg>

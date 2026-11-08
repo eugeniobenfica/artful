@@ -1,0 +1,90 @@
+name: CI
+
+# What no single machine can check: each system and compiler, the shaders against spirv-val, and the
+# Vulkan calls against the validation layers (on a software Vulkan, Mesa's lavapipe).
+on: [push, pull_request]
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: What the checks need (none of it is linked)
+        run: sudo apt-get update && sudo apt-get install -y ninja-build mesa-vulkan-drivers libvulkan1 vulkan-validationlayers spirv-tools
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          cmake --build build
+      - name: Tests, in every mode
+        env:
+          VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+          VK_LAYER_VALIDATE_SYNC: 1
+          VK_LAYER_SYNCVAL_SHADER_ACCESSES_HEURISTIC: 1
+        run: |
+          build/artful-tests
+          ARTFUL_SINGLE_DRAW=1 build/artful-tests
+          ARTFUL_FEATURES=+occlusion build/artful-tests
+          ARTFUL_FEATURES=-lod,-cones build/artful-tests
+      - name: The shaders are valid SPIR-V
+        run: |
+          mkdir shaders && build/artful-shaders shaders
+          for f in shaders/*.spv; do spirv-val --target-env vulkan1.2 "$f"; done
+      - name: Memory
+        run: |
+          cmake -S . -B build-asan -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=float-cast-overflow"
+          cmake --build build-asan --target artful-tests
+          build-asan/artful-tests
+          ARTFUL_FEATURES=+occlusion build-asan/artful-tests
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ninja spirv-cross
+      - run: |
+          cmake -S . -B build -G Ninja
+          cmake --build build
+          build/artful-tests
+      - name: Metal's shaders, through Apple's compiler
+        run: |
+          mkdir spv metal
+          build/artful-shaders spv
+          python3 tools/mkmetal.py spv spirv-cross metal
+          git diff --exit-code src/metal/shaders.inc
+          for f in metal/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /dev/null; done
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: MSVC
+        run: |
+          cmake -S . -B build
+          cmake --build build --config Release
+          build/Release/artful-tests.exe
+
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The version says the same everywhere
+        run: |
+          version=$(sed -n 's/^project(artful VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          header=$(sed -n 's/^#define ARTF_VERSION_[A-Z]* \([0-9]*\).*/\1/p' include/artful/core.h | paste -sd.)
+          test "$version" = "$header"
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Every ABI
+        run: |
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            cmake -S . -B build-$abi -G Ninja -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=$abi -DANDROID_PLATFORM=android-26
+            cmake --build build-$abi
+          done

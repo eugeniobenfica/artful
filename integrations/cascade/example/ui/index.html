@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+<title>Artful under cascade</title>
+<style>
+html, body { margin: 0; height: 100%; background: transparent; font-family: "Segoe UI", system-ui, sans-serif; color: #e8ecf4; }
+.panel {
+  position: absolute; left: 24px; top: 24px; width: 280px; padding: 20px 22px;
+  background: rgba(16, 19, 28, .72); border: 1px solid rgba(255, 255, 255, .12); border-radius: 14px;
+}
+h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; }
+p { margin: 0 0 14px; color: #a9b3c6; font-size: 13px; line-height: 1.45; }
+.row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 13px; border-top: 1px solid rgba(255, 255, 255, .08); }
+.row b { font-weight: 600; }
+.value { color: #ffd27a; text-align: right; }
+button {
+  margin-top: 14px; width: 100%; padding: 9px 0; border: 0; border-radius: 8px; font-size: 14px; font-weight: 600;
+  color: #10131c; background: #ffd27a;
+}
+button:hover { background: #ffe0a3; }
+.bar {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 130px; background: #141824;
+  display: flex; align-items: center; justify-content: center; color: #6d7890; font-size: 12px; text-align: center;
+}
+@media (max-width: 640px) {
+  .panel { left: 12px; right: 12px; top: 12px; width: auto; }
+  .bar { top: auto; left: 0; right: 0; bottom: 0; width: auto; height: 56px; }
+}
+</style>
+</head>
+<body>
+<div class="panel">
+  <h1>Artful</h1>
+  <p>A 3D scene under an HTML page. The page is cascade's, the scene is Artful's, and neither library knows the other.</p>
+  <div class="row"><b>Frame rate</b><span class="value" id="fps">...</span></div>
+  <div class="row"><b>Drawn by</b><span class="value" id="backend">...</span></div>
+  <button id="pause">Pause</button>
+</div>
+<div class="bar">An opaque panel:<br>Artful does not draw under it on the CPU</div>
+</body>
+</html>

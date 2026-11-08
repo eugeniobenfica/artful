@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Artful under cascade as an Android app: cascade's activity loads libartful-cascade.so and starts
+     the program's main in it. As cascade's gallery, with a name of its own. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.artful.example"
+    android:versionCode="1"
+    android:versionName="0.2">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+
+    <application
+        android:label="Artful"
+        android:hasCode="true"
+        android:allowBackup="false"
+        android:extractNativeLibs="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        <activity
+            android:name="org.cascade.CascadeActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|touchscreen|density|uiMode|fontScale|fontWeightAdjustment|locale|layoutDirection|colorMode|grammaticalGender|mcc|mnc"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data android:name="android.app.lib_name" android:value="artful-cascade" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <provider
+            android:name="org.cascade.CascadeFiles"
+            android:authorities="org.artful.example.cascade.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>
