@@ -44,16 +44,22 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: brew install ninja spirv-cross
+      - run: brew install ninja
       - run: |
           cmake -S . -B build -G Ninja
           cmake --build build
           build/artful-tests
+      # (the SPIRV-Cross of the Vulkan SDK that wrote shaders.inc: another version names its variables otherwise)
+      - name: SPIRV-Cross, as in Vulkan SDK 1.4.363
+        run: |
+          git clone --depth 1 --branch vulkan-sdk-1.4.363.0 https://github.com/KhronosGroup/SPIRV-Cross ../spirv-cross
+          cmake -S ../spirv-cross -B ../spirv-cross/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_SHARED=OFF -DSPIRV_CROSS_CLI=ON
+          cmake --build ../spirv-cross/build --target spirv-cross
       - name: Metal's shaders, through Apple's compiler
         run: |
           mkdir spv metal
           build/artful-shaders spv
-          python3 tools/mkmetal.py spv spirv-cross metal
+          python3 tools/mkmetal.py spv ../spirv-cross/build/spirv-cross metal
           git diff --exit-code src/metal/shaders.inc
           for f in metal/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /dev/null; done
 
