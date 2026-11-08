@@ -300,6 +300,35 @@ each byte broken in turn.
 
 `imageDecode.c` is cascade's decoder for PNG and JPEG, copied, as linking it is what Artful must not do.
 
+Lights (`KHR_lights_punctual`) and cameras stay with the model, so that they follow their nodes when a clip
+plays or the model moves. A light of the file fades by the square of distance and Artful's end at a radius: the
+range given, or where the square law would have come down to a twentieth, as bright as the square law at a
+quarter of it. `KHR_texture_transform` goes into the vertices, as a material has one set of coordinates.
+
+Loading a model reads the file on the calling thread, and then decodes its images and makes its meshes, with
+their meshlets and lighter versions, on all cores, each on its own: what comes out is what one thread would have
+made.
+
+## Light from all around
+
+`environment.c` makes a picture of all around (equirectangular, as `.hdr` files are) into maps of an
+octahedron around +y, folded below. A direction falls on one by additions and a division: no angle to work out,
+so the CPU and the GPU find the same texels, and the shaders need no `atan` or `acos`. Each map has a border of
+one texel copied from across the fold, so bilinear sampling needs no care at the edges.
+
+There are six, in one array of floats that the GPU reads as a storage buffer (binding 49):
+
+| | Side | |
+| --- | ---: | --- |
+| 0 | 512 | The picture itself: mirrors and the background. |
+| 1 to 4 | 64, 32, 16, 16 | What surfaces of roughness .25, .5, .75 and 1 reflect: each texel the sum of what GGX's lobe around it gathers from a smaller map, the eye taken to look along the normal. |
+| 5 | 16 | What a surface facing each way takes from all around, over pi. |
+
+A surface reads the last for its diffuse light, and the two maps around its roughness in the mirror direction,
+weighed as the sky and ground were. Traced rays read the first where they leave the scene. Making the maps reads
+every texel of a smaller map for each texel of a larger one, on all cores, with no sine or power from the C
+library: about 40 ms for a picture of 512 x 256, and the same bytes on every processor.
+
 ## The GPU: the CPU stays out of the way
 
 All meshes share one vertex buffer and one index buffer, every texture is in one descriptor array,

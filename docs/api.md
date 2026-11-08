@@ -37,6 +37,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | --- | --- |
 | `artfSceneLoadGltf`, `artfSceneLoadGltfMemory` | All a glTF file holds. |
 | `artfSceneLoadModel`, `artfModelSetTransform`, `artfAnimationSet` | The same as a model you can move, with its clips. |
+| `artfModelCameraCount`, `artfModelCamera` | A file's cameras, for `artfSceneSetCamera`. |
 | `artfSceneAddSkinnedMesh`, `artfInstanceSetJoints` | Your own bones. |
 | `artfSceneAddMesh` | Your own triangles. |
 | `artfSceneAddCube`, `AddSphere`, `AddTorus`, `AddPlane` | Shapes. |
@@ -57,7 +58,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | --- | --- |
 | `artfSceneSetCamera` | Where the eye is. |
 | `artfSceneSetSun`, `artfSceneSetSunSize` | Light from far away; soft shadows, when traced. |
-| `artfSceneSetAmbient` | Light from all around. |
+| `artfSceneSetAmbient` | Light from all around: a sky and a ground. |
+| `artfSceneSetEnvironment`, `artfSceneSetEnvironmentLight`, `artfImageDecodeHdr` | Light from all around, from a picture of it, and that picture behind the scene. |
 | `artfSceneAddLight`, `artfLightSet`, `artfLightSetSpot`, `artfSceneRemoveLight` | Point lights and spots, 16 at a time. |
 | `artfSceneSetExposure` | Film: bright light rolls off to white. |
 | `artfSceneSetFog` | Air. |

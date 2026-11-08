@@ -3,6 +3,10 @@
 # tools/shaders.c saves them, put through SPIRV-Cross, which comes with the Vulkan SDK. This is a tool for whoever
 # changes a shader: the library takes only what it writes.
 #
+# The same bytes come out only from the same inputs: artful-shaders built by clang (C leaves the order of a call's
+# arguments to the compiler, and GCC writes the shaders' instructions in another order), and the SPIRV-Cross of
+# Vulkan SDK 1.4.363, as CI has them.
+#
 #   build/artful-shaders dir
 #   python tools/mkmetal.py dir path/to/spirv-cross [dir for .metal files, for Apple's compiler to check]
 import os, re, struct, subprocess, sys
