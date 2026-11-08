@@ -16,6 +16,7 @@
 
 <p>
 <a href="#quick-start">Quick start</a> &nbsp;·&nbsp;
+<a href="#download">Download</a> &nbsp;·&nbsp;
 <a href="#building">Building</a> &nbsp;·&nbsp;
 <a href="#documentation">Documentation</a> &nbsp;·&nbsp;
 <a href="CHANGELOG.md">Changelog</a>
@@ -323,6 +324,17 @@ to the last pixel of a run of frames.
 
 `libartful.a` is about 1.4 MB; `artful-render`, linked statically, about 1.3 MB.
 </details>
+
+## Download
+
+| Platform | SDK |
+| :--- | :--- |
+| **Windows** x64, MinGW-w64 | [artful-0.3.0-windows-x64-mingw.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.3.0/artful-0.3.0-windows-x64-mingw.zip), with `artful-render` and `artful-blackhole` |
+| **Windows** x64, MSVC | [artful-0.3.0-windows-x64-msvc.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.3.0/artful-0.3.0-windows-x64-msvc.zip) |
+| **Android** arm64, armv7, x86_64 | [artful-0.3.0-android.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.3.0/artful-0.3.0-android.zip) |
+
+Each SDK holds the static library, its headers and a CMake package for `find_package(artful)`; checksums are in
+`SHA256SUMS.txt`. On Linux and macOS, build it from the sources: it takes a few seconds.
 
 ## Building
 
