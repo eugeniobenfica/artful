@@ -50,6 +50,7 @@ uint32_t* artfShaderPostGather(size_t* size);
 uint32_t* artfShaderPostOcclusion(size_t* size);
 uint32_t* artfShaderPostOcclusionBlur(size_t* size);
 uint32_t* artfShaderPostReflection(size_t* size);
+uint32_t* artfShaderPostReflectionApply(size_t* size);
 uint32_t* artfShaderPostFog(size_t* size);
 uint32_t* artfShaderPostFogApply(size_t* size);
 uint32_t* artfShaderPostTemporal(size_t* size);

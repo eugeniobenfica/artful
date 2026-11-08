@@ -174,12 +174,17 @@ static void occlusionBlurRow(ArtfSoftPost* p, int y) {
 
 /* ---- reflections ---- */
 
-static void reflectionRow(ArtfSoftPost* p, int y) {
+/* At half the frame's resolution, a pixel for each two by two: what it mirrors (into bloom's first level, before
+ * bloom needs it) and how much (into occlusion's plane, after occlusion is done). reflectionApplyRow takes it up. */
+static void reflectionRow(ArtfSoftPost* p, int hy) {
     const ArtfFrameData* f = &p->f->data;
     const float strength = f->post[1][0];
-    for (int x = 0; x < p->width; ++x) {
-        const size_t i = (size_t)y * p->width + x;
-        for (int c = 0; c < 3; ++c) p->scratch[c][i] = p->f->postLight[c][i];
+    const int hw = p->bloomW[0];
+    for (int hx = 0; hx < hw; ++hx) {
+        const int x = artfMini(hx * 2, p->width - 1), y = artfMini(hy * 2, p->height - 1);
+        const size_t i = (size_t)y * p->width + x, half = (size_t)hy * hw + hx;
+        for (int c = 0; c < 3; ++c) p->bloom[c][half] = 0;
+        p->occlusion[half] = 0;
         const uint32_t s = p->f->postSurface[i];
         const float d = distanceAt(p, x, y), rough = roughOf(s);
         if (d <= 0 || !s || rough > .6f) continue;
@@ -196,15 +201,21 @@ static void reflectionRow(ArtfSoftPost* p, int y) {
         const float away = r[0] * f->eye[2][0] + r[1] * f->eye[2][1] + r[2] * f->eye[2][2];
         if (away < -.2f) continue;
         const float stride = d * .04f + .02f, thickness = d * .03f + .05f;
-        float hx = 0, hy = 0, found = 0;
+        /* the ray from here to as far as 24 steps reach, across the frame: a line, along which 1 / w goes evenly */
+        float sx0, sy0, w0, sx1, sy1, w1, reach = stride * 70.f, end[3];
+        if (!project(f->viewProj, at, p->width, p->height, &sx0, &sy0, &w0)) continue;
+        const float wDrop = -(r[0] * f->eye[2][0] + r[1] * f->eye[2][1] + r[2] * f->eye[2][2]);
+        if (wDrop > 0) reach = artfMinf(reach, w0 * .9f / wDrop); /* (not past the eye) */
+        for (int k = 0; k < 3; ++k) end[k] = at[k] + r[k] * reach;
+        if (!project(f->viewProj, end, p->width, p->height, &sx1, &sy1, &w1)) continue;
+        float hx2 = 0, hy2 = 0, found = 0;
         bool before = true; /* the last step was in front of what the frame shows */
+        const float jitter = (float)(hash((uint32_t)(y * p->width + x)) & 255) / 256.f;
         for (int step = 1; step <= 24 && !found; ++step) {
-            /* (steps grow with distance, jittered by the pixel so that their banding turns to noise) */
-            const float jitter = (float)(hash((uint32_t)(y * p->width + x)) & 255) / 256.f;
-            const float t = stride * ((float)step + jitter) * (1.f + (float)step * .08f);
-            float q[3], sx, sy, w;
-            for (int k = 0; k < 3; ++k) q[k] = at[k] + r[k] * t;
-            if (!project(f->viewProj, q, p->width, p->height, &sx, &sy, &w)) break;
+            /* (closer together near the start) */
+            const float share = ((float)step + jitter) / 25.f, t = share * share;
+            const float sx = sx0 + (sx1 - sx0) * t, sy = sy0 + (sy1 - sy0) * t;
+            const float w = 1.f / (1.f / w0 + (1.f / w1 - 1.f / w0) * t);
             const int qx = (int)(sx + .5f), qy = (int)(sy + .5f);
             if (qx < 0 || qy < 0 || qx >= p->width || qy >= p->height) break;
             const float there = distanceAt(p, qx, qy);
@@ -212,15 +223,15 @@ static void reflectionRow(ArtfSoftPost* p, int y) {
             const bool behind = there > 0 && w > there;
             const float moved = fabsf(sx - (float)x) + fabsf(sy - (float)y);
             if (behind && before && w - there < thickness && moved > 2.f) {
-                hx = sx;
-                hy = sy;
+                hx2 = sx;
+                hy2 = sy;
                 found = 1.f;
             }
             before = !behind;
         }
         if (!found) continue;
         /* fading where the ray left near the frame's edges, and as it grows rough */
-        const float edge = artfMinf(artfMinf(hx, (float)p->width - 1 - hx), artfMinf(hy, (float)p->height - 1 - hy));
+        const float edge = artfMinf(artfMinf(hx2, (float)p->width - 1 - hx2), artfMinf(hy2, (float)p->height - 1 - hy2));
         const float fade = artfClampf(edge / ((float)p->width * .08f), 0, 1);
         const float smooth = 1.f - rough / .6f, metal = metalOf(s);
         const float c5 = 1.f + vn, fresnel = c5 * c5 * c5 * c5 * c5;
@@ -231,10 +242,18 @@ static void reflectionRow(ArtfSoftPost* p, int y) {
             const float sum = p->f->postLight[0][i] + p->f->postLight[1][i] + p->f->postLight[2][i];
             for (int c = 0; c < 3; ++c) tint[c] = 1.f + metal * (sum > 1e-6f ? p->f->postLight[c][i] * 3.f / sum - 1.f : 0.f);
         }
-        for (int c = 0; c < 3; ++c) {
-            const float seen = tap(p->f->postLight[c], p->width, p->height, hx, hy);
-            p->scratch[c][i] = p->f->postLight[c][i] * (1.f - mirror) + seen * tint[c] * mirror;
-        }
+        for (int c = 0; c < 3; ++c) p->bloom[c][half] = tap(p->f->postLight[c], p->width, p->height, hx2, hy2) * tint[c] * mirror;
+        p->occlusion[half] = mirror;
+    }
+}
+
+static void reflectionApplyRow(ArtfSoftPost* p, int y) {
+    const int hw = p->bloomW[0], hh = p->bloomH[0];
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        const float fx = ((float)x + .5f) * .5f - .5f, fy = ((float)y + .5f) * .5f - .5f;
+        const float mirror = tap(p->occlusion, hw, hh, fx, fy);
+        for (int c = 0; c < 3; ++c) p->f->postLight[c][i] = p->f->postLight[c][i] * (1.f - mirror) + tap(p->bloom[c], hw, hh, fx, fy);
     }
 }
 
@@ -494,8 +513,8 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
         rows(p, p->height, occlusionBlurRow);
     }
     if (d->post[1][0] > 0) {
-        rows(p, p->height, reflectionRow);
-        copyScratch(p);
+        rows(p, p->bloomH[0], reflectionRow);
+        rows(p, p->height, reflectionApplyRow);
     }
     if (d->post[1][1] > 0 && d->look[1] > 0) {
         rows(p, p->fogHeight, fogRow);

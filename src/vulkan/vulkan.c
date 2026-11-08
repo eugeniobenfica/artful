@@ -272,7 +272,7 @@ typedef struct Vulkan {
     VkRenderPass presentPass;
     VkFramebuffer presentFramebuffers[MAX_SWAPCHAIN_IMAGES];
     VkPipeline presentPipeline;
-    VkPipeline postPipelines[10];   /* gather, occlusion, its blur, reflections, fog, its use, temporal, focus, bloom down, up */
+    VkPipeline postPipelines[11];   /* gather, occlusion, its blur, reflections, fog, its use, temporal, focus, bloom down, up */
     GpuBuffer postLight, postDepth, postSurface, postScratch, postHistory, postOcclusion, postFog, postBloom;
     uint32_t postBloomSizes[6][3];  /* of each level: where it starts, its width, its height */
     float previous[16];             /* the frame before's viewProj */
@@ -1023,9 +1023,10 @@ static bool pipelinesMake(Vulkan* v) {
     v->environmentPipeline = made[6];
     if (ok && v->floats) {
         /* what comes after: postShaders.inc */
-        uint32_t* (*const makers[10])(size_t*) = {artfShaderPostGather, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFog,
-                                                  artfShaderPostFogApply, artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp};
-        for (int i = 0; i < 10 && ok; ++i) {
+        uint32_t* (*const makers[11])(size_t*) = {artfShaderPostGather, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFog,
+                                                  artfShaderPostFogApply, artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp,
+                                                  artfShaderPostReflectionApply};
+        for (int i = 0; i < 11 && ok; ++i) {
             uint32_t* postCode = makers[i](&size);
             VkShaderModule module = shaderModule(v, postCode, size);
             const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
@@ -2282,7 +2283,7 @@ static void postCopy(Vulkan* v, VkCommandBuffer c, GpuBuffer* from, GpuBuffer* t
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
 }
 
-enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FOG, POST_FOG_APPLY, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP };
+enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FOG, POST_FOG_APPLY, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY };
 
 static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* frame, uint32_t image, const Viewport* viewport, const Rect2D* area) {
     const uint32_t pixels = (uint32_t)v->width * (uint32_t)v->height;
@@ -2293,8 +2294,8 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
         postStep(v, c, POST_OCCLUSION_BLUR, 0, pixels);
     }
     if (frame->post[1][0] > 0) {
-        postStep(v, c, POST_REFLECTION, 0, pixels);
-        postCopy(v, c, &v->postScratch, &v->postLight);
+        postStep(v, c, POST_REFLECTION, 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
+        postStep(v, c, POST_REFLECTION_APPLY, 0, pixels);
     }
     if (frame->post[1][1] > 0 && frame->look[1] > 0) {
         postStep(v, c, POST_FOG, 0, (uint32_t)((v->width + 3) / 4) * (uint32_t)((v->height + 3) / 4));
@@ -2804,7 +2805,7 @@ static void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->holeMap);
         bufferFree(v, &v->environment);
         if (v->environmentPipeline) v->vkDestroyPipeline(v->device, v->environmentPipeline, NULL);
-        for (int i = 0; i < 10; ++i)
+        for (int i = 0; i < 11; ++i)
             if (v->postPipelines[i]) v->vkDestroyPipeline(v->device, v->postPipelines[i], NULL);
         if (v->presentPipeline) v->vkDestroyPipeline(v->device, v->presentPipeline, NULL);
         if (v->presentPass) v->vkDestroyRenderPass(v->device, v->presentPass, NULL);

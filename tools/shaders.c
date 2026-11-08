@@ -83,6 +83,7 @@ int main(int argc, char** argv) {
     SAVE("postOcclusion", artfShaderPostOcclusion(&size));
     SAVE("postOcclusionBlur", artfShaderPostOcclusionBlur(&size));
     SAVE("postReflection", artfShaderPostReflection(&size));
+    SAVE("postReflectionApply", artfShaderPostReflectionApply(&size));
     SAVE("postFog", artfShaderPostFog(&size));
     SAVE("postFogApply", artfShaderPostFogApply(&size));
     SAVE("postTemporal", artfShaderPostTemporal(&size));

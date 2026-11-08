@@ -253,8 +253,12 @@ POST_FINISH()
 POST_MAIN(artfShaderPostReflection)
     SpvId main = spvBeginMain(s);
     postSizes(s, p);
-    SpvId i, x, y, merge;
-    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    /* (at half the resolution, as reflectionRow: into bloom's buffer, before bloom needs it) */
+    SpvId hw = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(1)), UINT(2)), hh = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(1)), UINT(2));
+    SpvId half, halfX, halfY, merge;
+    postBegin(s, p, &half, &halfX, &halfY, &merge, hw, hh);
+    SpvId x = spvGlsl2(s, 38 /* UMin */, s->uintType, MUL_U(halfX, UINT(2)), SUB_U(p->width, UINT(1))), y = spvGlsl2(s, 38, s->uintType, MUL_U(halfY, UINT(2)), SUB_U(p->height, UINT(1)));
+    SpvId i = ADD_U(MUL_U(y, p->width), x);
     SpvId xf = TO_F(x), yf = TO_F(y);
     SpvId mine = postVec4(s, p, p->light, i);
     SpvId word = postUint(s, p, p->surface, i), d = postDistance(s, p, xf, yf);
@@ -264,17 +268,30 @@ POST_MAIN(artfShaderPostReflection)
     SpvId vn = DOT3(v, n);
     SpvId r = SUB_V3(v, SCALE_V3(n, MUL_F(FLOAT(2.f), vn)));
     SpvId away = DOT3(r, spvShuffle3(s, frameVec(s, &p->r, F_EYE + 2)));
+    /* (the march only where something smooth enough faces away from the eye: everything else is copied) */
+    spvStore(s, postPtr(s, p, p->bloom, s->vec4, half), vec4Of(s, same3(s, 0.f), FLOAT(0.f)));
+    SpvId eligible = P_AND(P_AND(P_MORE(d, FLOAT(0.f)), spvOp2(s, SPV_OP_INotEqual, s->boolType, word, UINT(0))), P_AND(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, rough, FLOAT(.6f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, away, FLOAT(-.2f))));
+    eligible = P_AND(eligible, P_MORE(X(frameVec(s, &p->r, F_POST + 1)), FLOAT(0.f)));
+    SpvId marching;
+    spvIfBegin(s, eligible, &marching);
     SpvId stride = ADD_F(MUL_F(d, FLOAT(.04f)), FLOAT(.02f)), thickness = ADD_F(MUL_F(d, FLOAT(.03f)), FLOAT(.05f));
+    /* as reflectionRow: the ray across the frame as a line, along which 1 / w goes evenly */
+    SpvId sx0, sy0, w0, ok0, sx1, sy1, w1, ok1;
+    postProject(s, p, F_VIEWPROJ, at, &sx0, &sy0, &w0, &ok0);
+    SpvId wDrop = spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(r, spvShuffle3(s, frameVec(s, &p->r, F_EYE + 2))));
+    SpvId reach = MUL_F(stride, FLOAT(70.f));
+    reach = PICK_F(P_MORE(wDrop, FLOAT(0.f)), MIN_F(reach, DIV_F(MUL_F(w0, FLOAT(.9f)), MAX_F(wDrop, FLOAT(1e-20f)))), reach);
+    postProject(s, p, F_VIEWPROJ, ADD_V3(at, SCALE_V3(r, reach)), &sx1, &sy1, &w1, &ok1);
+    SpvId inv0 = DIV_F(FLOAT(1.f), w0), invStep = SUB_F(DIV_F(FLOAT(1.f), MAX_F(w1, FLOAT(1e-5f))), inv0);
     SpvId jitter = DIV_F(TO_F(spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, postHash(s, i), UINT(255))), FLOAT(256.f));
-    SpvId found = spvConstBool(s, false), before = spvConstBool(s, true), stopped = spvConstBool(s, false), hx = FLOAT(0.f), hy = FLOAT(0.f);
+    SpvId found = spvConstBool(s, false), before = spvConstBool(s, true), stopped = P_NOT(ok1), hx = FLOAT(0.f), hy = FLOAT(0.f);
     for (int step = 1; step <= 24; ++step) {
-        SpvId tt = MUL_F(MUL_F(stride, ADD_F(FLOAT((float)step), jitter)), FLOAT(1.f + (float)step * .08f));
-        SpvId q = ADD_V3(at, SCALE_V3(r, tt));
-        SpvId sx, sy, w, ok;
-        postProject(s, p, F_VIEWPROJ, q, &sx, &sy, &w, &ok);
+        SpvId share = DIV_F(ADD_F(FLOAT((float)step), jitter), FLOAT(25.f)), t = MUL_F(share, share);
+        SpvId sx = ADD_F(sx0, MUL_F(SUB_F(sx1, sx0), t)), sy = ADD_F(sy0, MUL_F(SUB_F(sy1, sy0), t));
+        SpvId w = DIV_F(FLOAT(1.f), ADD_F(inv0, MUL_F(invStep, t)));
         SpvId qx = FLOOR_F(ADD_F(sx, FLOAT(.5f))), qy = FLOOR_F(ADD_F(sy, FLOAT(.5f)));
         SpvId inside = P_AND(P_AND(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qx, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qy, FLOAT(0.f))), P_AND(P_LESS(qx, p->widthF), P_LESS(qy, p->heightF)));
-        stopped = P_OR(stopped, P_NOT(P_AND(ok, inside)));
+        stopped = P_OR(stopped, P_NOT(inside));
         SpvId there = postDistance(s, p, qx, qy);
         SpvId behind = P_AND(P_MORE(there, FLOAT(0.f)), P_MORE(w, there));
         SpvId moved = ADD_F(ABS_F(SUB_F(sx, xf)), ABS_F(SUB_F(sy, yf)));
@@ -293,10 +310,22 @@ POST_MAIN(artfShaderPostReflection)
     SpvId sum = ADD_F(ADD_F(X(mine), Y(mine)), Z(mine));
     SpvId tint = ADD_V3(same3(s, 1.f), SCALE_V3(SUB_V3(SCALE_V3(spvShuffle3(s, mine), DIV_F(FLOAT(3.f), MAX_F(sum, FLOAT(1e-6f)))), same3(s, 1.f)), PICK_F(P_MORE(sum, FLOAT(1e-6f)), metal, FLOAT(0.f))));
     SpvId seen = spvShuffle3(s, postTap(s, p, p->light, UINT(0), p->width, p->height, hx, hy));
-    SpvId mixed = ADD_V3(SCALE_V3(spvShuffle3(s, mine), SUB_F(FLOAT(1.f), mirror)), SCALE_V3(MUL_V3(seen, tint), mirror));
+    SpvId reflected = SCALE_V3(MUL_V3(seen, tint), mirror);
     SpvId use = P_AND(P_AND(found, P_MORE(d, FLOAT(0.f))), P_AND(spvOp2(s, SPV_OP_INotEqual, s->boolType, word, UINT(0)), spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, rough, FLOAT(.6f))));
     use = P_AND(use, spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, away, FLOAT(-.2f)));
-    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, pick3(s, use, mixed, spvShuffle3(s, mine)), W(mine)));
+    spvStore(s, postPtr(s, p, p->bloom, s->vec4, half), vec4Of(s, pick3(s, use, reflected, same3(s, 0.f)), PICK_F(use, mirror, FLOAT(0.f))));
+    spvIfEnd(s, marching);
+POST_FINISH()
+
+POST_MAIN(artfShaderPostReflectionApply)
+    SpvId main = spvBeginMain(s);
+    postSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    SpvId hw = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(1)), UINT(2)), hh = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(1)), UINT(2));
+    SpvId got = postTap(s, p, p->bloom, UINT(0), hw, hh, SUB_F(MUL_F(ADD_F(TO_F(x), FLOAT(.5f)), FLOAT(.5f)), FLOAT(.5f)), SUB_F(MUL_F(ADD_F(TO_F(y), FLOAT(.5f)), FLOAT(.5f)), FLOAT(.5f)));
+    SpvId here = postPtr(s, p, p->light, s->vec4, i), light = spvLoad(s, s->vec4, here);
+    spvStore(s, here, vec4Of(s, ADD_V3(SCALE_V3(spvShuffle3(s, light), SUB_F(FLOAT(1.f), W(got))), spvShuffle3(s, got)), W(light)));
 POST_FINISH()
 
 /* ---- fog that light goes through: as fogRow, at a quarter, then fogApplyRow ---- */
