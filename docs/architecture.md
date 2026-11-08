@@ -309,6 +309,57 @@ Loading a model reads the file on the calling thread, and then decodes its image
 their meshlets and lighter versions, on all cores, each on its own: what comes out is what one thread would have
 made.
 
+## A frame in floats
+
+With `ArtfRendererOptions.hdr` the scene draws light as it is, not as a screen shows it, and what a lens and a film do
+comes after, on the whole frame, in `post.c` on the CPU and `postShaders.inc` on the GPU: the same passes, in the same
+order, with the same arithmetic, on planes laid out alike.
+
+The CPU's tiles keep each sample's light as RGB9E5 (three nine-bit mantissas and an exponent: the same 32 bits as a
+pixel of bytes, so no tile grows), with the sample's alpha and surface after it in the same buffer, and leave three
+planes for the frame: light (premultiplied), depth (1 / w, of what is solid: layers write theirs after it is taken)
+and a surface word: the normal folded onto an octahedron (9 + 9 bits), roughness (5), metal (4) and the share of the
+pixel's light that came from all around (5). The GPU's passes draw into RGBA16F and an R32_UINT beside it, and a compute
+shader gathers both, with depth taken between the solid pass and the layers', into buffers.
+
+| Pass | Where | How |
+| --- | --- | --- |
+| Ambient occlusion | every pixel | Eight points in a hemisphere around the normal, turned by a 4 x 4 pattern and tested against depth; blurred over 4 x 4 by depth; taken only from the share of light that came from all around. |
+| Reflections | half the pixels | The mirror ray projected once and walked as a line across the frame, 1 / w even along it, in 24 steps closer near the start; a hit is a step from in front to behind, near enough; what it shows, by Fresnel, smoothness and the frame's edges. Then taken up to every pixel. |
+| Fog that light goes through | a quarter | 16 steps from the eye to the nearest surface of the four by four, each lit by the sun through its shadow maps with Henyey-Greenstein's phase, and by the fog's color; what the air takes, by the same rational curve as the fog drawn with the frame. |
+| Temporal antialiasing | every pixel | The eye moves within a pixel by Halton's (2, 3) points; each pixel goes back to where it was by its depth and the frame before's view, and what it finds there is kept within what this frame shows around it, nine to one. |
+| Depth of field | every pixel | 24 points of a disc as wide as the circle of confusion; what is sharper and behind does not spread over what is in front. |
+| Bloom | a pyramid | What is past the threshold, after exposure, down six halves with a tent and back up. |
+
+Exposure and tone mapping come last, then the overlay, which on the GPU is drawn in a pass of its own over the frame.
+A frame in floats on the GPU has one sample a pixel (temporal antialiasing is its smoothing), and layers in it go by
+their centers, not by each pixel's depth.
+
+## Lights past sixteen
+
+The frame holds 16 lights, as it always did: the first that are on, which may cast shadows. Those past them, up to 1024,
+go into lists: for each 64 x 64 square of the frame, those whose sphere reaches the square's slice of the view (four
+planes through the eye). `artfSceneLightTiles` makes them on the CPU for both backends, so both light the same pixels
+with the same lights; the CPU's tiles are those squares, and the GPU's pixel shader finds its square from its place.
+They cast no shadow, and tracing leaves them out.
+
+## Light that bounced
+
+`artfSceneSetIndirect` puts a grid of probes over a box. Each frame each probe sends a few rays the same random ways
+(from the frame's number: the same on every processor) through the trees tracing uses; each comes back with the sky,
+or a surface's own light, what the sun and lights give it (with shadow rays) and what the probes gave it the frame
+before. What comes back makes a first-order spherical harmonic, which a surface reads as the mean and two thirds of
+its lean along the normal (Ramamoorthi and Hanrahan), mixed with what the probe had. So light bounces once more each
+frame. The probes are made on the CPU's workers for both backends, and the GPU reads them from a buffer: both draw the
+same. A surface takes light from all around from the eight probes nearest a point a quarter of a cell out along its
+normal, in place of sky and ground or a picture. Nothing stops a probe seeing through a wall thinner than a cell.
+
+## Particles and terrain
+
+Neither is a backend's: an emitter's particles are instances of one quad, which `artfEmitterStep` moves, turns to the
+camera and fades (through eight materials between the first color and the last, and opacity), and terrain is a mesh.
+Particles are layers: drawn after what is solid, the farthest first.
+
 ## Light from all around
 
 `environment.c` makes a picture of all around (equirectangular, as `.hdr` files are) into maps of an

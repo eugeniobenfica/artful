@@ -869,7 +869,9 @@ uint32_t artfSceneLayers(const ArtfScene* s, const ArtfFrameData* frame, ArtfLay
         if (!inView) continue;
         const float dx = wx - frame->cameraPos[0], dy = wy - frame->cameraPos[1], dz = wz - frame->cameraPos[2];
         const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        const ArtfLayer layer = {(uint32_t)i, artfMeshLevel(s, inst->mesh, frame->lodScale, inst->maxScale, artfMaxf(distance - r, frame->nearW)), distance};
+        /* (by depth along the view, as depth is tested: what faces the eye then comes in the order it shows in) */
+        const float along = dx * frame->eye[2][0] + dy * frame->eye[2][1] + dz * frame->eye[2][2];
+        const ArtfLayer layer = {(uint32_t)i, artfMeshLevel(s, inst->mesh, frame->lodScale, inst->maxScale, artfMaxf(distance - r, frame->nearW)), along};
         out[n++] = layer;
     }
     qsort(out, n, sizeof *out, fartherFirst);

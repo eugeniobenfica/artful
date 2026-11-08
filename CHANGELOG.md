@@ -2,6 +2,26 @@
 
 ## 0.3.0
 
+- **A frame in floats, and what a lens and film do after it**: `ArtfRendererOptions.hdr` and `artfSceneSetPost`, on
+  both backends with the same arithmetic. The scene draws light (RGB9E5 in the CPU's tiles, RGBA16F on the GPU), each
+  pixel's surface beside it (its normal, roughness, metal, and the share of its light that came from all around), and
+  keeps the depth of what is solid; then, in order: **ambient occlusion** from eight points in the world, taken from
+  that share alone; **screen-space reflections**, along a line across the frame at half its resolution; **fog that
+  light goes through**, marched through the sun's shadow maps at a quarter of the pixels, with Henyey-Greenstein's
+  phase; **temporal antialiasing**, the eye moved by Halton's points (`artfFrameJitter`) and each pixel followed to
+  where it was; **depth of field** from a circle of confusion; **bloom** down and up a pyramid of halves; then
+  exposure, tone mapping and the overlay. Without `hdr` a frame is made as before, to the byte.
+- **Up to 1024 lights**: the first 16 that are on are drawn as before and may cast shadows; those past them are
+  listed by the 64 x 64 squares of the frame they reach (`artfSceneLightTiles`), and the CPU's tiles and the GPU's
+  pixel shader read the same lists. 256 lights at 1920 x 1080: 12 ms on a Vega 8.
+- **Light that bounced, every frame**: `artfSceneSetIndirect`. A grid of probes follows a few rays each frame through
+  the trees tracing uses, on the CPU's workers for both backends, and keeps a first-order spherical harmonic of what
+  reaches it, mixed with what it had: light bounces once more each frame, and surfaces take it from the eight probes
+  near them.
+- **Particles**: `artfSceneAddEmitter`, `artfEmitterStep`. Instances of one quad, turned to the eye, fading in size,
+  color and opacity as they age, as soft round puffs unless given a texture.
+- **Terrain**: `artfSceneAddTerrain`, a mesh from heights, with lighter versions as any mesh's.
+- `artful-render`: `--hdr` and an option for each effect, `--indirect`, `--scene lights` and `--scene outdoors`.
 - **Light from all around, from a picture**: `artfSceneSetEnvironment`, `artfSceneSetEnvironmentLight`, and
   `artfImageDecodeHdr` for Radiance files. The picture becomes maps of an octahedron, one sharp and four as rough
   surfaces reflect it (GGX), and one of what a surface takes from all around. Surfaces, reflections, rays and paths

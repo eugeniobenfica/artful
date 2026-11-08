@@ -48,7 +48,10 @@ same scene is drawn on the CPU.
 | **Software** | Works as a phone's GPU does: triangles are binned into tiles, and each tile is resolved in the cache, so every pixel is shaded once and the depth buffer never reaches main memory. All cores, with AVX2, SSE4.1 or NEON chosen at run time. |
 | **Meshes** | 16 bytes a vertex, ordered for the vertex cache and cut into meshlets when they are added. Levels of detail made on the way in. |
 | **Files** | glTF (`.gltf`, `.glb`) with nodes, PBR materials, normal maps, skins, clips, lights and cameras; PNG, JPEG, KTX2 and Radiance `.hdr`, read by its own decoders, on all cores. |
-| **Lighting** | Physically based materials, a sun, spots and point lights, shadow maps, exposure and fog; light from all around from a picture of it, reflected as rough as each surface is, and shown behind the scene. |
+| **Lighting** | Physically based materials, a sun, up to 1024 spots and point lights (16 with shadow maps), exposure and fog; light from all around from a picture of it, reflected as rough as each surface is, and shown behind the scene. |
+| **Light that bounced** | A grid of probes traced every frame, on any GPU or the CPU: light bounces once more each frame. |
+| **After the frame** | With the frame in floats: bloom, ambient occlusion, screen-space reflections, fog that light goes through (lit through the sun's shadows), temporal antialiasing and depth of field. |
+| **Particles and terrain** | Emitters of soft particles that fade as they age; terrain from heights, with levels of detail. |
 | **Layers** | Colors on vertices, opacity, holes and two sided surfaces, frames with alpha and four samples a pixel: a model can go over something else, with smooth edges, on both backends. |
 | **Rays and paths** | Real shadows and reflections, or all light however often it bounced, in place of triangles: on the CPU, or on any GPU by a compute shader, with no ray tracing hardware. A denoiser for what moves. |
 | **Animation** | Skeletons, morph targets and glTF's clips: `artfAnimationSet`, with blending left to the program. |
@@ -118,6 +121,59 @@ build/artful-render --model ship.glb --trace paths --trace-samples 256 --out shi
 A `.gltf` or a `.glb`, with its nodes, physically based materials, normal maps, PNG or JPEG textures,
 lights and cameras (`artfModelCamera`). Its reader is this library's own, and so are the decoders; images and
 meshes are made on all cores. `artfSetLog` says what a file holds that was left out.
+</details>
+
+<details>
+<summary><b>After the frame</b>: bloom, occlusion, reflections, fog, temporal antialiasing, depth of field</summary>
+<br>
+
+```c
+ArtfRendererOptions options = {.width = 1920, .height = 1080, .hdr = true};   /* the frame in floats */
+ArtfPostDesc post = {.bloom = .05f, .occlusion = .8f, .reflections = 1, .temporal = true,
+                     .volumetric = .5f, .scattering = .7f, .focus = 6, .aperture = 8};
+artfSceneSetPost(scene, &post);
+artfSceneSetExposure(scene, 1);
+```
+
+```bash
+build/artful-render --scene outdoors --hdr --shadows 2048 --scene-exposure 1 --glow .04 --occlusion .8 \
+  --temporal --indirect --fog .006 .62 .7 .82 --out outdoors.png
+```
+
+The same passes on both backends, with the same arithmetic. Without `hdr` nothing of it is there, and a frame is
+made as it always was.
+
+<div align="center">
+<img src="docs/assets/screens/outdoors.jpg" width="820" alt="Green hills from a terrain of heights, a campfire of glowing particles with a plume of smoke, and a stone half sunk in the grass">
+<p><sub>Terrain, particles, a light, bloom, ambient occlusion, temporal antialiasing and light that bounced, on a Vega 8 (<code>--scene outdoors</code>).</sub></p>
+</div>
+</details>
+
+<details>
+<summary><b>Light that bounced</b>, and many lights</summary>
+<br>
+
+```c
+ArtfIndirectDesc probes = {.probes = {8, 4, 8}, .rays = 64};   /* over the scene's bounds */
+artfSceneSetIndirect(scene, &probes);
+for (int i = 0; i < 500; ++i) artfSceneAddLight(scene, places[i], colors[i], 2.f);
+```
+
+Probes follow a few rays each frame and keep what reaches them; surfaces take light from all around from the probes
+near them. Lights past the first 16 are listed by the 64 x 64 squares of the frame they reach.
+</details>
+
+<details>
+<summary><b>Particles and terrain</b></summary>
+<br>
+
+```c
+ArtfEmitterDesc fire = {.velocity = {0, 1.6f, 0}, .spread = .25f, .rate = 120, .life = .9f, .size = .45f,
+                        .sizeEnd = .1f, .color = {1, .55f, .15f}, .colorEnd = {.8f, .15f, .05f}, .opacity = .9f, .glow = 6};
+ArtfEmitter e = artfSceneAddEmitter(scene, &fire);
+artfEmitterStep(scene, e, seconds);                                        /* each frame, after the camera */
+ArtfMesh hills = artfSceneAddTerrain(scene, heights, 129, 129, .5f, 3.f, 8.f);
+```
 </details>
 
 <details>
@@ -319,6 +375,8 @@ to the last pixel of a run of frames.
 | `field --side 300`: 90,000 instances | 6.8 | 89 | 5.4 | 53 |
 | `city`, with occlusion on: 40,000 objects behind a wall | 2.5 | 37 | 0.81 | 16 |
 | `blackhole`: 2 million rays, each its own path, a step of the fluid, then bloom | 23 | 141 | 8 to 36* | 80 to 130* |
+| `lights`: 256 lights | 12 | 50 | | |
+| `spheres --hdr`, then each of: bloom, occlusion, reflections, fog that light goes through, temporal, focus | +5, +8, +12, +9, +8, +6 | +25, +70, +45, +50, +25, +95 | | |
 
 \* Measured before the disc was painted as the film's, which reads a larger map: on the Vega 8 that cost a tenth.
 

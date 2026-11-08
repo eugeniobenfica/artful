@@ -989,6 +989,8 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId isDouble = spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, flags, UINT(ARTF_MATERIAL_DOUBLE)), UINT(0));
         SpvId coverage = MUL_F(W(sample), W(tint));
         SpvId hole = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, isMask, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, coverage, Z(m2)));
+        /* (what blends leaves out what is nearly not there: its depth would hide what is behind, as the CPU's) */
+        hole = spvOp2(s, 166 /* OpLogicalOr */, s->boolType, hole, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, isBlend, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, coverage, FLOAT(1.f / 255.f))));
         SpvId hiddenBack = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp1(s, SPV_OP_LogicalNot, s->boolType, front), spvOp1(s, SPV_OP_LogicalNot, s->boolType, isDouble));
         /* between two levels: as maskHoles */
         SpvId fade = spvLoad(s, s->uintType, vFade), coord = spvLoad(s, s->vec4, fragCoord);

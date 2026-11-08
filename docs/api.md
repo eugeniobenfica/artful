@@ -41,6 +41,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneAddSkinnedMesh`, `artfInstanceSetJoints` | Your own bones. |
 | `artfSceneAddMesh` | Your own triangles. |
 | `artfSceneAddCube`, `AddSphere`, `AddTorus`, `AddPlane` | Shapes. |
+| `artfSceneAddTerrain` | A mesh from heights. |
+| `artfSceneAddEmitter`, `artfEmitterStep`, `artfEmitterSet`, `artfSceneRemoveEmitter` | Particles: fire, smoke, sparks. |
 | `artfSceneAddTexture`, `artfImageDecode` | Pixels, and PNG or JPEG to pixels. |
 | `artfSceneAddTextureKtx2` | A KTX2 file, compressed as it is. |
 | `artfPrepareMesh`, `artfPrepareTexture`, `artfSceneAddPreparedMesh`, `artfSceneAddPreparedTexture` | The slow part on your own thread. |
@@ -60,7 +62,9 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneSetSun`, `artfSceneSetSunSize` | Light from far away; soft shadows, when traced. |
 | `artfSceneSetAmbient` | Light from all around: a sky and a ground. |
 | `artfSceneSetEnvironment`, `artfSceneSetEnvironmentLight`, `artfImageDecodeHdr` | Light from all around, from a picture of it, and that picture behind the scene. |
-| `artfSceneAddLight`, `artfLightSet`, `artfLightSetSpot`, `artfSceneRemoveLight` | Point lights and spots, 16 at a time. |
+| `artfSceneAddLight`, `artfLightSet`, `artfLightSetSpot`, `artfSceneRemoveLight` | Point lights and spots, up to 1024; the first 16 may cast shadows. |
+| `artfSceneSetIndirect` | Light that bounced, from probes, every frame. |
+| `artfSceneSetPost` | With `ArtfRendererOptions.hdr`: bloom, ambient occlusion, reflections, fog that light goes through, temporal antialiasing, depth of field. |
 | `artfSceneSetExposure` | Film: bright light rolls off to white. |
 | `artfSceneSetFog` | Air. |
 | `artfSceneSetBackground`, `artfSceneSetBackgroundAlpha` | What shows where nothing is. |

@@ -224,7 +224,8 @@ static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) {
     const ArtfVec3 k[3] = {artfVec3Cross(c1, c2), artfVec3Cross(c2, c0), artfVec3Cross(c0, c1)};
     memcpy(v->normal, k, sizeof v->normal);
     const uint32_t material = scene->materials.items[inst->material].flags;
-    v->masked = material & ARTF_MATERIAL_MASK || fade;
+    /* (what blends with a texture leaves out what is nearly not there, so that its depth does not hide what is behind) */
+    v->masked = material & ARTF_MATERIAL_MASK || fade || (material & ARTF_MATERIAL_BLEND && scene->materials.items[inst->material].texture);
     v->twoSided = material & ARTF_MATERIAL_DOUBLE;
     v->useCone = inst->flags & ARTF_INSTANCE_UNIFORM && !v->twoSided && scene->features[ARTF_FEATURE_CONES];
     if (v->useCone) {

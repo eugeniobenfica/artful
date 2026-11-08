@@ -17,8 +17,19 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   blocks into pixels when first drawn, not sample by sample, for all mipmaps. A streamed texture is plain pixels.
 - A material in C picks its mipmap from neighbouring pixels along a row, on the CPU, so a surface slanted the other way
   may show more detail than it should. When tracing it reads the largest resident mipmap.
-- What shows through casts no shadow when drawing triangles. High dynamic range and bloom are the black hole's alone:
-  a scene is tone mapped as it is shaded, and light past white does not spread.
+- What shows through casts no shadow when drawing triangles.
+- A frame in floats (`hdr`): on the GPU it has one sample a pixel, and layers go by their centers there and on the CPU.
+  Reflections see only what the frame shows: what is off screen or behind something is not reflected. Ambient
+  occlusion and fog read depth, not geometry: thin things and their backs are guessed. Temporal antialiasing follows
+  pixels by depth and the view alone: what moves leaves a trail where its history does not fit. The black hole keeps
+  its own exposure and tone mapping. Fog that light goes through is reckoned to what is solid: layers in front of the
+  sky (smoke, glass) are fogged as the sky is, and fade into it. Metal leaves all of it out.
+- Lights past the first 16 cast no shadow, are listed up to 64 for each 64 x 64 square of the frame, and are left out
+  of tracing and of what the probes gather.
+- Light that bounced (probes) leaks through walls thinner than the probes are apart, and fills a box set when it is
+  turned on: a scene that grows needs it set again. It does not reach specular reflections.
+- Particles are stepped on the calling thread, one instance each, and face the camera as it was when stepped. There are
+  no decals.
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual
   approximation): at grazing angles a rough surface's reflection is less stretched than it should be. Its maps are
   512 texels a side at most, so the picture shown behind the scene is soft at a wide view's center. Metal leaves it

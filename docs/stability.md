@@ -88,7 +88,8 @@ Each of these could turn out to be a bug that users would meet. In the order to 
 | What | Why | Size |
 | --- | --- | --- |
 | Ray tracing hardware | Where a GPU has it, `VK_KHR_ray_query` would run the same paths several times as fast. It needs a second way through the shader, and a device to test it on. | Medium |
-| Bloom for every scene | High dynamic range and bloom are the black hole's alone; a scene is tone mapped as each pixel is shaded (`artfSceneSetExposure`), so light past white does not spread. Bloom needs the frame drawn in floats first, on both backends, and then tone mapped: a change to how a frame is put together, which deserves its own version. | Medium |
+| A frame in floats with four samples on the GPU | The GPU's float frame has one sample a pixel; the CPU's has four when asked. | Medium |
+| Decals | Not there. | Medium |
 | glTF's compressed files | `EXT_meshopt_compression` needs its decoder, checked against meshoptimizer's own encoder; `KHR_texture_basisu`'s Basis formats need transcoders of their own (ETC1S, UASTC) and Zstandard. | Medium |
 | Metal's gaps | Occlusion, black holes, materials in C, textures that stay compressed, bones on the GPU. They wait for a Mac: nothing of it can be run here. Materials need its shaders written as text, and compiled at run time. | Large |
 

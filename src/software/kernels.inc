@@ -969,7 +969,7 @@ static V8I maskHoles(const ShadeContext* s, int x, int y) {
     }
     if (s->colored) alpha = v8fMul(alpha, LERP(col, 3));
 #undef LERP
-    V8I holes = v8fLt(alpha, v8fSet(s->material->flags & ARTF_MATERIAL_MASK ? s->material->cutoff : 0.f));
+    V8I holes = v8fLt(alpha, v8fSet(s->material->flags & ARTF_MATERIAL_MASK ? s->material->cutoff : s->material->flags & ARTF_MATERIAL_BLEND ? 1.f / 255.f : 0.f));
     if (s->fade) {
         /* the same pattern as the GPU's: each level keeps the pixels the other leaves */
         _Alignas(32) int32_t out[8];
