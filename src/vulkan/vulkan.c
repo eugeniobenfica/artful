@@ -174,6 +174,10 @@ typedef struct Vulkan {
     int samples;        /* of a pixel: 1 or 4 */
     int width, height;
     bool targetsStale; /* a new size: made again before the next frame */
+    /* What the surface said when the swapchain was made: a frame that is only suboptimal makes it again
+     * when this changes, not each time (Android says suboptimal for as long as the compositor turns it). */
+    VkFlags surfaceTransform;
+    uint32_t surfaceWidth, surfaceHeight;
     bool lost;         /* nothing more can be drawn: it can only be freed */
     uint64_t shadowKeys[ARTF_SHADOW_VIEWS]; /* what each map holds */
     uint64_t shadowSeen;                    /* the scene's changes these know of */
@@ -418,9 +422,16 @@ static bool targetsMake(Vulkan* v) {
         SurfaceCapabilities caps;
         if (v->vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v->gpu, v->surface, &caps) != VK_OK) return false;
         /* (0xFFFFFFFF: the size is ours to say) */
+        v->surfaceTransform = caps.currentTransform;
+        v->surfaceWidth = caps.current.width;
+        v->surfaceHeight = caps.current.height;
+        /* A screen that is turned (Android) gives its size as it stands upright. The frame is drawn as the
+         * eye sees it, and the compositor turns it: identity, with the sides the other way round. */
+        const bool upright = caps.supportedTransforms & 1;
+        const bool sideways = upright && caps.currentTransform & (0x2 | 0x8 | 0x20 | 0x80); /* 90, 270, and mirrored */
         if (caps.current.width != 0xFFFFFFFFu) {
-            v->width = (int)caps.current.width;
-            v->height = (int)caps.current.height;
+            v->width = (int)(sideways ? caps.current.height : caps.current.width);
+            v->height = (int)(sideways ? caps.current.width : caps.current.height);
         }
         if (v->width <= 0 || v->height <= 0) return true; /* minimized: nothing to draw into yet */
         uint32_t modeCount = 0;
@@ -437,7 +448,7 @@ static bool targetsMake(Vulkan* v) {
         if (caps.maxImageCount && images > caps.maxImageCount) images = caps.maxImageCount;
         VkFlags alpha = caps.supportedAlpha & 1 ? 1 : caps.supportedAlpha & (~caps.supportedAlpha + 1);
         VkSwapchainKHR old = v->swapchain;
-        SwapchainCreateInfo info = {ST_SWAPCHAIN_CREATE_INFO, NULL, 0, v->surface, images, v->colorFormat, v->colorSpace, {(uint32_t)v->width, (uint32_t)v->height}, 1, IMAGE_COLOR, 0, 0, NULL, caps.currentTransform, alpha, mode, 1, old};
+        SwapchainCreateInfo info = {ST_SWAPCHAIN_CREATE_INFO, NULL, 0, v->surface, images, v->colorFormat, v->colorSpace, {(uint32_t)v->width, (uint32_t)v->height}, 1, IMAGE_COLOR, 0, 0, NULL, upright ? 1u : caps.currentTransform, alpha, mode, 1, old};
         VkSwapchainKHR made = 0;
         const VkResult result = artfVulkanRefuseSwapchain ? -1000000000 : v->vkCreateSwapchainKHR(v->device, &info, NULL, &made);
         if (old) v->vkDestroySwapchainKHR(v->device, old, NULL);
@@ -481,6 +492,13 @@ static bool targetsMake(Vulkan* v) {
     if (!hizMake(v)) return false;
     v->targetsStale = false;
     return true;
+}
+
+/* Whether the surface turned or changed size since the swapchain was made. */
+static bool surfaceChanged(Vulkan* v) {
+    SurfaceCapabilities caps;
+    if (v->vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v->gpu, v->surface, &caps) != VK_OK) return true;
+    return caps.currentTransform != v->surfaceTransform || caps.current.width != v->surfaceWidth || caps.current.height != v->surfaceHeight;
 }
 
 static bool targetsRemake(Vulkan* v) {
@@ -2374,7 +2392,8 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     if (v->swapchain) {
         const PresentInfo present = {ST_PRESENT_INFO, NULL, 1, &v->rendered[image], 1, &v->swapchain, &image, NULL};
         result = v->vkQueuePresentKHR(v->queue, &present);
-        if (result == VK_ERR_OUT_OF_DATE || result == VK_SUBOPTIMAL) v->targetsStale = true;
+        if (result == VK_SUBOPTIMAL) { if (surfaceChanged(v)) v->targetsStale = true; }
+        else if (result == VK_ERR_OUT_OF_DATE) v->targetsStale = true;
         else if (result != VK_OK) {
             artfLog("artful: presenting a frame failed: %d", (int)result);
             v->lost = true;
