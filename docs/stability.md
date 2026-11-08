@@ -1,12 +1,18 @@
-# What stands between 0.2 and a stable Artful
+# What stands between 0.3 and a stable Artful
 
-An account of version 0.2.0: what has been proven, what has not, and what 1.0 needs. "Stable" here
+An account of version 0.3.0: what has been proven, what has not, and what 1.0 needs. "Stable" here
 means what it means for cascade: a program written for 1.x compiles against every 1.x, and what the
 documents promise holds on the systems they name.
 
 ## What has been proven
 
-Run, not assumed. `artful-tests` has 177,364 checks.
+Run, not assumed. `artful-tests` has 177,400 checks.
+
+On GitHub, CI builds and tests every change: Linux with GCC and Clang, all tests under Vulkan's validation layers
+on a software Vulkan (Mesa's lavapipe), with one draw a mesh and with occlusion, then under AddressSanitizer and
+UndefinedBehaviorSanitizer; macOS, all tests on the CPU, and Metal's shaders through Apple's compiler; Windows with
+MSVC; Android for every ABI. Its first run found two faults no machine here could: a function of `metal.c` named
+as one of macOS's, and copies of nothing from a null pointer, which UBSan stops on.
 
 | | Windows, Ryzen 3 3200G, Vega 8 | Android 17, Galaxy S25 Ultra, Adreno 830 |
 | --- | --- | --- |
@@ -45,12 +51,10 @@ Each of these could turn out to be a bug that users would meet. In the order to 
 
 | Gap | Why it matters | What it takes |
 | --- | --- | --- |
-| Rotating an Android device | The swapchain's transform is taken as it comes, and has not been turned. | A test on a device. |
-| Linux with glibc | Never built. | WSL is installed, and needs Windows to restart. |
-| macOS and iOS | Never built with Apple's tools. The Metal backend has only been compiled, by clang aimed at both, with stand-in headers: no line of it has run, and its shaders have not been through Apple's compiler. | A Mac. |
+| Rotating an Android device | The swapchain used to take the screen's transform without turning the frame. It now asks for none and leaves the turning to the compositor, swapping the sides, and is made again only when the screen turns: written to the specification, not yet seen on a phone. | A test on a device. |
+| Linux on a real GPU and in a real window | Built and tested by CI, on a software Vulkan, with no window. | A Linux machine. |
+| macOS and iOS on a device | Built and tested by CI on macOS, on the CPU. The Metal backend compiles there, and its shaders pass Apple's compiler, but no line of it has run. | A Mac. |
 | armv7 and x86-64 Android | Built with no warnings, never run. | A device or an emulator. |
-
-CI needs the project on GitHub, which needs a repository: there is none yet.
 
 ### 2. Check what nothing here could check
 
@@ -63,9 +67,9 @@ CI needs the project on GitHub, which needs a repository: there is none yet.
 
 | Problem | Effect |
 | --- | --- |
-| **Making levels of detail takes time.** About 5.6 microseconds a triangle on the Ryzen, in `artfSceneAddMesh` and `artfSceneLoadModel`. | `artfPrepareMesh` and `artfPrepareModel` do it on any thread, and this is for who does not use them. |
-| **Spinning workers.** They spin between loops, which is right on a desktop and costs battery on a phone. | Not measured. It has to be, before saying it is fine. |
-| **Android's log complains on leaving.** Each time the surface goes, "disconnect: not connected": it is taken away before the swapchain is freed. | No harm seen over repeated cycles, but the order should be looked at. |
+| **Making levels of detail takes time.** About 3.6 microseconds a triangle on the Ryzen, for one mesh, in `artfSceneAddMesh`. | A model's meshes are made on all cores (`artfSceneLoadModel`: twice as fast on four), and `artfPrepareMesh` and `artfPrepareModel` do it on any thread. One large mesh is still one thread's work: simplifying is greedy, each step depending on the last. |
+| **Spinning workers.** After each loop a worker spins for at most 20,000 pauses (tens of microseconds) before it sleeps, which covers the gaps inside a frame. Between frames they sleep. | Bounded, but its cost in battery is not measured. It has to be, on a phone, before saying it is fine. |
+| **Android's log complains on leaving.** Each time the surface goes, "disconnect: not connected". Artful frees its swapchain before its surface, as it must; the cause is cascade's: its window says it let go of the surface (`syncSurface`, in `windowAndroid.c`) before it frees the presenter, so Android takes the surface back while Artful's swapchain still holds it. | No harm seen over repeated cycles. The fix is cascade's: free the presenter, then say so. |
 | **Changing level pops**, unless `lod-fade` is on. | Bounded by `artfSceneSetLodError` (one pixel by default). In a slow dolly at four pixels the fade took the largest jump between frames from .34 to .04 of 255, on both backends. |
 
 ### 4. Decide what the API promises
@@ -84,6 +88,8 @@ CI needs the project on GitHub, which needs a repository: there is none yet.
 | What | Why | Size |
 | --- | --- | --- |
 | Ray tracing hardware | Where a GPU has it, `VK_KHR_ray_query` would run the same paths several times as fast. It needs a second way through the shader, and a device to test it on. | Medium |
+| Bloom for every scene | High dynamic range and bloom are the black hole's alone; a scene is tone mapped as each pixel is shaded (`artfSceneSetExposure`), so light past white does not spread. Bloom needs the frame drawn in floats first, on both backends, and then tone mapped: a change to how a frame is put together, which deserves its own version. | Medium |
+| glTF's compressed files | `EXT_meshopt_compression` needs its decoder, checked against meshoptimizer's own encoder; `KHR_texture_basisu`'s Basis formats need transcoders of their own (ETC1S, UASTC) and Zstandard. | Medium |
 | Metal's gaps | Occlusion, black holes, materials in C, textures that stay compressed, bones on the GPU. They wait for a Mac: nothing of it can be run here. Materials need its shaders written as text, and compiled at run time. | Large |
 
 **Speed**, measured in [the study](performanceAndPlatforms.md):
@@ -117,11 +123,11 @@ trying costs those frames.
 
 ## The way to 1.0
 
-1. A repository, and CI green on Linux, macOS, Windows and Android, with validation and spirv-val.
-   Whatever they find is the first work: expect something.
+1. ~~A repository, and CI on Linux, macOS, Windows and Android, with validation and spirv-val.~~ Done: what its
+   first run found is fixed. Keep it green.
 2. Rotation on a device, and cascade's activity built by the JDK path as well as `integrations/cascade/androidApk.sh`.
 3. Battery measured.
 4. Freezing the API.
 
-Step 1 is the one that decides how much of the rest there is. The first real window on Android found a
-bug within a minute that 39,559 checks could not see: expect the same from validation.
+The first real window on Android found a bug within a minute that 39,559 checks could not see, and CI's first run
+two that 177,364 had not: what has not run has to be taken as broken until it has.

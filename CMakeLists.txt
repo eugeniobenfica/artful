@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(artful VERSION 0.2.0 DESCRIPTION "A 3D renderer in plain C11, with no dependencies" LANGUAGES C)
+project(artful VERSION 0.3.0 DESCRIPTION "A 3D renderer in plain C11, with no dependencies" LANGUAGES C)
 
 # Plain C11: no third-party libraries, and no SDK: Vulkan is loaded at run time and its shaders are
 # built by the library itself.

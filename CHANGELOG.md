@@ -1,7 +1,24 @@
 # Changelog
 
-## Not released yet
+## 0.3.0
 
+- **Light from all around, from a picture**: `artfSceneSetEnvironment`, `artfSceneSetEnvironmentLight`, and
+  `artfImageDecodeHdr` for Radiance files. The picture becomes maps of an octahedron, one sharp and four as rough
+  surfaces reflect it (GGX), and one of what a surface takes from all around. Surfaces, reflections, rays and paths
+  read them, on both backends, with the same arithmetic; the picture can be the background. `artful-render
+  --environment file.hdr`.
+- **glTF**: `KHR_lights_punctual`, lights that follow their nodes, a directional one being the sun; cameras, with
+  `artfModelCameraCount` and `artfModelCamera`; `KHR_materials_emissive_strength`; `KHR_texture_transform` and
+  `texCoord`; a texture whose only image is `KHR_texture_basisu`'s, when its KTX2 holds a plain format.
+- **Loading a model on all cores**: its images are decoded and its meshes made, with their levels, by all workers.
+  Eight meshes of 100,000 triangles: 1.4 s, not 2.9, on four cores, and the same pixels.
+- **Android**: a phone held sideways no longer shows the frame on its side. The swapchain asks the compositor to
+  turn it, and is made again only when the screen turns or changes size, not on each suboptimal frame.
+- **CI on GitHub**: Linux (GCC and Clang, under the validation layers and sanitizers), macOS (and Metal's shaders
+  through Apple's compiler), Windows (GCC and MSVC) and Android. What it found on its first run: a function named
+  `wait` in `metal.c` that macOS's headers declare too, and copies of nothing from a null pointer in `spirv.c`.
+- Metal's table of bindings held 34, and its shaders name binding 48.
+- `ArtfFrameData` grew by three rows: where the eye looks, for what is drawn behind the scene.
 - The black hole's painted map is made on all cores: a scene with one is ready in 0.6 s, not 1.4.
 - `signApk.py` is in `integrations/cascade`, beside the only script that uses it. Text files are LF, held so
   by `.gitattributes`.

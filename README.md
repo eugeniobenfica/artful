@@ -8,7 +8,7 @@
 
 <p><b>A 3D renderer. Written in C. Nothing else.</b></p>
 
-<a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.2.0-E8875F?style=flat-square&labelColor=141417" alt="Version 0.2.0"></a>
+<a href="https://github.com/eugeniobenfica/artful/releases/latest"><img src="https://img.shields.io/badge/version-0.3.0-E8875F?style=flat-square&labelColor=141417" alt="Version 0.3.0"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E8875F?style=flat-square&labelColor=141417" alt="MIT license"></a>
 <a href="docs/architecture.md"><img src="https://img.shields.io/badge/C11-no_third--party_libraries-E8875F?style=flat-square&labelColor=141417" alt="C11, no third-party libraries"></a>
 <br>
@@ -46,8 +46,8 @@ same scene is drawn on the CPU.
 | **Vulkan** | A whole scene in one indirect draw, culled by a compute shader. The CPU's part of a frame does not grow with the scene: about 0.05 ms with 90,000 instances. |
 | **Software** | Works as a phone's GPU does: triangles are binned into tiles, and each tile is resolved in the cache, so every pixel is shaded once and the depth buffer never reaches main memory. All cores, with AVX2, SSE4.1 or NEON chosen at run time. |
 | **Meshes** | 16 bytes a vertex, ordered for the vertex cache and cut into meshlets when they are added. Levels of detail made on the way in. |
-| **Files** | glTF (`.gltf`, `.glb`) with nodes, PBR materials, normal maps, skins and clips; PNG, JPEG and KTX2, read by its own decoders. |
-| **Lighting** | Physically based materials, a sun, spots and point lights, shadow maps, exposure and fog. |
+| **Files** | glTF (`.gltf`, `.glb`) with nodes, PBR materials, normal maps, skins, clips, lights and cameras; PNG, JPEG, KTX2 and Radiance `.hdr`, read by its own decoders, on all cores. |
+| **Lighting** | Physically based materials, a sun, spots and point lights, shadow maps, exposure and fog; light from all around from a picture of it, reflected as rough as each surface is, and shown behind the scene. |
 | **Layers** | Colors on vertices, opacity, holes and two sided surfaces, frames with alpha and four samples a pixel: a model can go over something else, with smooth edges, on both backends. |
 | **Rays and paths** | Real shadows and reflections, or all light however often it bounced, in place of triangles: on the CPU, or on any GPU by a compute shader, with no ray tracing hardware. A denoiser for what moves. |
 | **Animation** | Skeletons, morph targets and glTF's clips: `artfAnimationSet`, with blending left to the program. |
@@ -114,9 +114,29 @@ artfSceneLoadGltf(scene, "ship.glb", NULL);
 build/artful-render --model ship.glb --trace paths --trace-samples 256 --out ship.png
 ```
 
-A `.gltf` or a `.glb`, with its nodes, physically based materials, normal maps and PNG or JPEG
-textures. Its reader is this library's own, and so are the decoders. `artfSetLog` says what a file
-holds that was left out.
+A `.gltf` or a `.glb`, with its nodes, physically based materials, normal maps, PNG or JPEG textures,
+lights and cameras (`artfModelCamera`). Its reader is this library's own, and so are the decoders; images and
+meshes are made on all cores. `artfSetLog` says what a file holds that was left out.
+</details>
+
+<details>
+<summary><b>Light from all around</b>, from a picture</summary>
+<br>
+
+```c
+int width, height;
+float* sky = artfImageDecodeHdr(data, size, &width, &height);   /* a Radiance .hdr, equirectangular */
+artfSceneSetEnvironment(scene, sky, width, height, 1.f, true);   /* light 1, and shown behind the scene */
+artfFree(sky);
+```
+
+```bash
+build/artful-render --environment studio.hdr --show-environment --out picture.png
+```
+
+The picture becomes maps: one sharp, four as rough surfaces reflect it, one of what a surface takes from all
+around. Surfaces, reflections, rays and paths read them, on both backends, with the same arithmetic. About 40 ms
+for a picture of 512 x 256.
 </details>
 
 <details>
@@ -269,14 +289,17 @@ about a second and a half each on a Vega 8. How it works is [here](docs/architec
 | :--- | :--- | :---: |
 | **Windows** x64 | Vulkan, software (GCC, clang) | Tier 1 |
 | **Android** arm64 | Vulkan, software | Tier 1 |
+| **Linux** x64 | Vulkan, software (GCC, Clang) | Tier 2 |
+| **macOS** | software; Metal | Tier 2 |
+| **Windows** x64, MSVC | Vulkan, software | Tier 2 |
 | **Android** armv7, x86-64 | Vulkan, software | Tier 2 |
-| **Linux**, **macOS**, **iOS**, MSVC | Vulkan, software; Metal on Apple's systems | Tier 2 |
+| **iOS** | software; Metal | Tier 2 |
 
 **Tier 1**: all tests and a real window with a page over the scene, run on an AMD GPU (Windows) and an
 Adreno GPU (Android).<br>
-**Tier 2**: experimental. Android armv7 and x86-64 are built, not run; Linux, macOS, iOS and MSVC are
-written and built only by [CI](.github/workflows/ci.yml). **Metal has never been run**, so it is chosen
-only by name.
+**Tier 2**: experimental. [CI](.github/workflows/ci.yml) builds Linux, macOS, MSVC and every Android ABI and runs
+the tests on Linux (on a software Vulkan, under validation and sanitizers), macOS (on the CPU) and MSVC; none of
+them has opened a window. iOS is written, not built. **Metal has never been run**, so it is chosen only by name.
 
 Vulkan needs version 1.2, `drawIndirectFirstInstance` and non-uniform texture indexing; a device
 without them draws on the CPU, which needs only a C compiler.
@@ -348,7 +371,7 @@ integrations/     bridges to other libraries, each a target of its own and named
 ## Quality
 
 - **Pixels, proved.** The tests hold the hashes of reference pictures: a change that moves a drawn pixel shows. The same scene gives the same bytes on x86 and ARM on the CPU, with levels of detail off.
-- **Validation.** CI runs the tests on a software Vulkan (Mesa's lavapipe) under the validation layers, synchronization included, checks every shader with `spirv-val` and Metal's through Apple's compiler.
+- **Validation.** CI runs the tests on a software Vulkan (Mesa's lavapipe) under the validation layers, synchronization included, checks every shader with `spirv-val` and Metal's through Apple's compiler, on Linux, macOS, Windows and Android.
 - **Every mode.** The tests run again as a device without multi-draw, and with occlusion on, on GCC and Clang, and under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ## Principles

@@ -17,22 +17,29 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   blocks into pixels when first drawn, not sample by sample, for all mipmaps. A streamed texture is plain pixels.
 - A material in C picks its mipmap from neighbouring pixels along a row, on the CPU, so a surface slanted the other way
   may show more detail than it should. When tracing it reads the largest resident mipmap.
-- What shows through casts no shadow when drawing triangles. Light from all
-  around is a sky and a ground: there are no environment maps. What comes next, and in what order, is in
-  [the roadmap](roadmap.md).
-  High dynamic range and bloom are the black hole's alone: what the scene draws does not go through them.
+- What shows through casts no shadow when drawing triangles. High dynamic range and bloom are the black hole's alone:
+  a scene is tone mapped as it is shaded, and light past white does not spread.
+- Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual
+  approximation): at grazing angles a rough surface's reflection is less stretched than it should be. Its maps are
+  512 texels a side at most, so the picture shown behind the scene is soft at a wide view's center. Metal leaves it
+  out. Paths read the sharp map where they leave the scene: a small, very bright sun in the picture makes fireflies,
+  as it would in any path tracer that does not aim at it.
 - A black hole bends only its own disc and stars: what the scene holds is drawn in front of it, straight.
   Its gas is painted, as the film's was, and moved by a two-dimensional fluid with no magnetic field; both
   are maps, which show their texels when the eye comes close.
 - A removed mesh gives back GPU memory, but its handle's place in the scene stays used. Residency manages textures
-  only, and keeps their mipmaps in main memory. glTF files are read on the calling thread: what can go to another
-  is `artfPrepareMesh` and `artfPrepareTexture`. A scene holds up to 1024 textures on the GPU (beyond that they
+  only, and keeps their mipmaps in main memory. A glTF file's JSON is read on the calling thread, and its images and meshes made on
+  all cores; all of it can go to another thread with `artfPrepareModel`. A scene holds up to 1024 textures on the GPU (beyond that they
   draw white).
 - Making levels of detail takes time, on the calling thread: about half a second for 100,000 triangles
   on a slow desktop.
-- **Metal has never been run.** It was written without a Mac: it compiles for macOS and iOS, and no more than that
-  is known. So it is chosen only by name. It needs Metal 3; it leaves out occlusion, black holes and materials in
-  C, and sends textures up decoded. Linux, macOS and iOS have not been built with their own compilers.
+- glTF: Draco and meshopt compression and Basis Universal's formats are not read, nor orthographic cameras. A file's
+  lights end at a radius, as Artful's do, and are not the square law: as bright as it at a quarter of their reach.
+  Each material has one set of texture coordinates, moved by the transform of its first texture.
+- **Metal has never been run.** It was written without a Mac: CI builds it on macOS and puts its shaders through
+  Apple's compiler, and no more than that is known. So it is chosen only by name. It needs Metal 3; it leaves out
+  occlusion, black holes, materials in C and light from a picture, and sends textures up decoded. Linux and macOS are
+  built and tested by CI, Linux on a software Vulkan; iOS has not been built with Apple's tools.
 - On macOS and iOS the cascade bridge draws on the CPU, as the Metal layer is cascade's to hand over.
 
 [What stands between this and a stable version](stability.md), and
