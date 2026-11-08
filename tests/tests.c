@@ -2839,6 +2839,54 @@ static void testGltfSparse(void) {
     artfSceneFree(s);
 }
 
+/* KHR_lights_punctual, cameras, KHR_materials_emissive_strength and KHR_texture_transform. */
+static void testGltfExtensions(void) {
+    static const char file[] =
+        "{\"asset\":{\"version\":\"2.0\"},\"extensionsRequired\":[\"KHR_texture_transform\"],\"extensions\":{\"KHR_ligh"
+        "ts_punctual\":{\"lights\":[{\"type\":\"point\",\"intensity\":20,\"range\":10,\"color\":[1,0.5,0.25]},{\"type\""
+        ":\"directional\",\"intensity\":3},{\"type\":\"spot\",\"intensity\":5,\"spot\":{\"innerConeAngle\":0.2,\"outerC"
+        "oneAngle\":0.5}}]}},\"buffers\":[{\"byteLength\":84,\"uri\":\"data:application/octet-stream;base64,AAAAAAAAAAA"
+        "AAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAAA/AAAAAAAAAAAAAAA/\"}],\"bu"
+        "fferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,\"byteLength\":"
+        "24},{\"buffer\":0,\"byteOffset\":60,\"byteLength\":24}],\"accessors\":[{\"bufferView\":0,\"componentType\":512"
+        "6,\"type\":\"VEC3\",\"count\":3,\"max\":[1,1,0],\"min\":[0,0,0]},{\"bufferView\":1,\"componentType\":5126,\"ty"
+        "pe\":\"VEC2\",\"count\":3},{\"bufferView\":2,\"componentType\":5126,\"type\":\"VEC2\",\"count\":3}],\"material"
+        "s\":[{\"emissiveFactor\":[1,1,1],\"extensions\":{\"KHR_materials_emissive_strength\":{\"emissiveStrength\":4}}"
+        ",\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0,\"extensions\":{\"KHR_texture_transform\":{\"offs"
+        "et\":[0.5,0],\"scale\":[2,2],\"texCoord\":1}}}}}],\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0"
+        ",\"TEXCOORD_0\":1,\"TEXCOORD_1\":2},\"material\":0}]}],\"cameras\":[{\"type\":\"perspective\",\"perspective\":"
+        "{\"yfov\":0.7,\"znear\":0.05}}],\"nodes\":[{\"mesh\":0},{\"translation\":[0,2,0],\"extensions\":{\"KHR_lights_"
+        "punctual\":{\"light\":0}}},{\"extensions\":{\"KHR_lights_punctual\":{\"light\":1}}},{\"translation\":[1,1,1],\""
+        "extensions\":{\"KHR_lights_punctual\":{\"light\":2}}},{\"translation\":[0,0,5],\"camera\":0}],\"scenes\":[{\"n"
+        "odes\":[0,1,2,3,4]}],\"scene\":0}";
+    ArtfScene* s = artfSceneNew();
+    const ArtfModel m = artfSceneLoadModelMemory(s, file, sizeof file - 1, NULL, NULL);
+    CHECK(m && artfModelInstanceCount(s, m) == 1);
+    /* the second set of coordinates, moved by half and doubled: (0.5, 0) and (0, 0.5) become (1.5, 0) and (0.5, 1) */
+    float most = 0, least = 9;
+    const ArtfMeshData* mesh = &s->meshes.items[0];
+    for (uint32_t i = 0; i < mesh->vertexCount; ++i) {
+        most = artfMaxf(most, artfHalfToFloat(mesh->vertices[i].u));
+        least = artfMinf(least, artfHalfToFloat(mesh->vertices[i].u));
+    }
+    CHECK(most == 1.5f && least == .5f);
+    CHECK(s->materials.items[s->materials.len - 1].emissive[0] == 4.f);
+    /* the point light, its range kept; the sun, down -z; the spot, a cone */
+    CHECK(s->lightOn[0] && s->lights[0].position[1] == 2.f && s->lights[0].radius == 10.f);
+    CHECK(s->lights[0].color[0] > s->lights[0].color[1] && s->lights[0].color[1] > s->lights[0].color[2]);
+    CHECK(s->sunColor.x == 3.f && s->toSun.z > .99f);
+    CHECK(s->lightOn[1] && s->lights[1].spotCut > .87f && s->lights[1].spotCut < .88f);
+    ArtfCamera eye;
+    CHECK(artfModelCameraCount(s, m) == 1 && artfModelCamera(s, m, 0, &eye));
+    CHECK(eye.position.z == 5.f && eye.target.z == 4.f && eye.up.y == 1.f && eye.fovY == .7f);
+    CHECK(!artfModelCamera(s, m, 1, &eye));
+    /* lights and cameras go with the model */
+    const ArtfTransform moved = artfTransformAt(3, 0, 0, 1);
+    artfModelSetTransform(s, m, &moved);
+    CHECK(s->lights[0].position[0] == 3.f && artfModelCamera(s, m, 0, &eye) && eye.position.x == 3.f);
+    artfSceneFree(s);
+}
+
 static void testGltfTargets(void) {
     static const char file[] = "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"byteLength\":80,\"uri\":\"data:application/octet-stream;base64,AAABAAIAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAA=\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":8,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":44,\"byteLength\":36}],\"accessors\":[{\"bufferView\":0,\"componentType\":5123,\"type\":\"SCALAR\",\"count\":3},{\"bufferView\":1,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3,\"max\":[1,1,0],\"min\":[0,0,0]},{\"bufferView\":2,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3}],\"meshes\":[{\"weights\":[1],\"primitives\":[{\"attributes\":{\"POSITION\":1},\"indices\":0,\"targets\":[{\"POSITION\":2}]}]}],\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
     ArtfScene* s = artfSceneNew();
@@ -3768,6 +3816,7 @@ int main(void) {
     testSlerp();
     testGltfSparse();
     testGltfTargets();
+    testGltfExtensions();
     testLostDevice();
     testRefusedSwapchain();
     testBlocks();

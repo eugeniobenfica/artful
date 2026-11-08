@@ -2,8 +2,12 @@
  * transforms of its nodes. It is a convenience on top of scene.h: it uses nothing else of the library's, and
  * a program that does not call it does not carry it.
  *
- * What is not read: cameras, lights, Draco and meshopt compression. What that leaves out goes to artfSetLog; a file
- * that requires an extension other than KHR_mesh_quantization is not read at all. */
+ * Read as well: KHR_lights_punctual (lights follow their nodes, and a directional one is the sun), cameras,
+ * KHR_materials_emissive_strength, KHR_texture_transform and KHR_mesh_quantization. KHR_texture_basisu is read when
+ * its KTX2 file holds a plain format, not Basis's own.
+ *
+ * What is not read: orthographic cameras, Draco and meshopt compression, Basis's formats. What that leaves out goes
+ * to artfSetLog; a file that requires an extension other than those read is not read at all. */
 #ifndef ARTFUL_GLTF_H
 #define ARTFUL_GLTF_H
 
@@ -35,6 +39,9 @@ ArtfModel artfSceneAddPreparedModel(ArtfScene* s, ArtfPreparedModel* prepared, c
 
 void artfModelSetTransform(ArtfScene* s, ArtfModel m, const ArtfTransform* transform);
 uint32_t artfModelInstanceCount(const ArtfScene* s, ArtfModel m);
+/* The file's perspective cameras, where their nodes are now: for artfSceneSetCamera. false: there is none. */
+uint32_t artfModelCameraCount(const ArtfScene* s, ArtfModel m);
+bool artfModelCamera(const ArtfScene* s, ArtfModel m, uint32_t camera, ArtfCamera* out);
 uint32_t artfModelClipCount(const ArtfScene* s, ArtfModel m);
 /* Borrowed; empty when the file gave none. */
 const char* artfModelClipName(const ArtfScene* s, ArtfModel m, uint32_t clip);

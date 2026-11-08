@@ -27,6 +27,10 @@ typedef struct ModelSkin {
 
 typedef struct ModelPart { ArtfInstance instance; uint32_t node; int32_t skin; } ModelPart;
 
+/* A light of KHR_lights_punctual, where its node is: 0 for the sun. */
+typedef struct ModelLight { ArtfLight light; uint32_t node; bool sun, spot; ArtfVec3 color; float radius, inner, outer; } ModelLight;
+typedef struct ModelCamera { uint32_t node; float fovY, near_; } ModelCamera;
+
 enum { PATH_T, PATH_R, PATH_S, PATH_W };
 enum { BLEND_LINEAR, BLEND_STEP, BLEND_CUBIC };
 
@@ -50,6 +54,8 @@ typedef struct ModelData {
     ModelSkin* skins;
     uint32_t skinCount;
     ARTF_VEC(ModelPart) parts;
+    ARTF_VEC(ModelLight) lights;
+    ARTF_VEC(ModelCamera) cameras;
     ModelClip* clips;
     uint32_t clipCount;
     ArtfMat4 base;
@@ -442,7 +448,10 @@ static const uint8_t* imageBytes(Loader* l, int64_t image, uint8_t** owned, size
 static ArtfTexture textureOf(Loader* l, const Json* info) {
     if (!info) return 0;
     const Json* texture = element(l, l->textures, (uint32_t)indexOf(l, info, "index"));
-    const int64_t image = indexOf(l, texture, "source");
+    int64_t image = indexOf(l, texture, "source");
+    /* (KHR_texture_basisu, when there is no plain image beside it: a KTX2 file, read when it holds a format that
+     * can be, not Basis's own) */
+    if (image < 0) image = indexOf(l, member(l, member(l, texture, "extensions"), "KHR_texture_basisu"), "source");
     if (image < 0 || image >= l->imageCount) {
         if (texture) artfLog("artful: glTF: a texture with no image it can read");
         return 0;
@@ -481,7 +490,8 @@ static ArtfMaterial materialOf(Loader* l, const Json* m) {
     readNumbers(l, member(l, pbr, "baseColorFactor"), color, 4);
     readNumbers(l, member(l, m, "emissiveFactor"), emissive, 3);
     d.baseColor = artfVec3(color[0], color[1], color[2]);
-    d.emissive = artfVec3(emissive[0], emissive[1], emissive[2]);
+    const float strength = (float)numberOf(l, member(l, member(l, m, "extensions"), "KHR_materials_emissive_strength"), "emissiveStrength", 1);
+    d.emissive = artfVec3Scale(artfVec3(emissive[0], emissive[1], emissive[2]), strength);
     d.texture = textureOf(l, member(l, pbr, "baseColorTexture"));
     d.metallic = (float)numberOf(l, pbr, "metallicFactor", 1);
     d.roughness = (float)numberOf(l, pbr, "roughnessFactor", 1);
@@ -527,6 +537,37 @@ static uint32_t byteOf(float light) {
     return (uint32_t)(sqrtf(artfClampf(light, 0, 1)) * 255.f + .5f);
 }
 
+/* Which coordinates a primitive's textures read, and how KHR_texture_transform moves them: Artful's materials
+ * have one set, so it is put into the vertices, after the first texture of the material that has one. */
+typedef struct UvMap { int set; float offset[2], m[4]; } UvMap;
+
+static UvMap uvMapOf(Loader* l, const Json* p) {
+    UvMap map = {0, {0, 0}, {1, 0, 0, 1}};
+    const int64_t which = indexOf(l, p, "material");
+    const Json* material = which < 0 ? NULL : element(l, member(l, l->root, "materials"), (uint32_t)which);
+    const Json* pbr = member(l, material, "pbrMetallicRoughness");
+    const Json* infos[5] = {member(l, pbr, "baseColorTexture"), member(l, material, "normalTexture"), member(l, pbr, "metallicRoughnessTexture"),
+                            member(l, material, "occlusionTexture"), member(l, material, "emissiveTexture")};
+    const Json* info = NULL;
+    for (int i = 0; i < 5 && !info; ++i) info = infos[i];
+    if (!info) return map;
+    map.set = (int)numberOf(l, info, "texCoord", 0);
+    const Json* t = member(l, member(l, info, "extensions"), "KHR_texture_transform");
+    if (!t) return map;
+    map.set = (int)numberOf(l, t, "texCoord", map.set);
+    float scale[2] = {1, 1};
+    readNumbers(l, member(l, t, "offset"), map.offset, 2);
+    readNumbers(l, member(l, t, "scale"), scale, 2);
+    const float turn = (float)numberOf(l, t, "rotation", 0);
+    const float c = turn ? cosf(turn) : 1.f, sn = turn ? sinf(turn) : 0.f;
+    /* u' = offset + R S u, with R = (cos sin; -sin cos), as the extension has it */
+    map.m[0] = c * scale[0];
+    map.m[1] = sn * scale[1];
+    map.m[2] = -sn * scale[0];
+    map.m[3] = c * scale[1];
+    return map;
+}
+
 static ArtfMesh meshOf(Loader* l, const Json* p, bool skinned, uint32_t slot) {
     const int64_t mode = (int64_t)numberOf(l, p, "mode", 4);
     if (l->preparing && member(l, p, "targets")) return 0; /* (what bends is made when it is added) */
@@ -545,7 +586,10 @@ static ArtfMesh meshOf(Loader* l, const Json* p, bool skinned, uint32_t slot) {
         return 0;
     }
     const bool hasNormal = accessorOf(l, indexOf(l, attributes, "NORMAL"), &normal) && normal.components == 3 && normal.count >= position.count;
-    const bool hasUv = accessorOf(l, indexOf(l, attributes, "TEXCOORD_0"), &uv) && uv.components == 2 && uv.count >= position.count;
+    const UvMap uvMap = uvMapOf(l, p);
+    char uvName[16];
+    snprintf(uvName, sizeof uvName, "TEXCOORD_%d", artfClampi(uvMap.set, 0, 9));
+    const bool hasUv = accessorOf(l, indexOf(l, attributes, uvName), &uv) && uv.components == 2 && uv.count >= position.count;
     const bool hasColor = accessorOf(l, indexOf(l, attributes, "COLOR_0"), &color) && color.components >= 3 && color.count >= position.count;
 
     const uint32_t count = position.count;
@@ -560,8 +604,9 @@ static ArtfMesh meshOf(Loader* l, const Json* p, bool skinned, uint32_t slot) {
             v[i].nz = componentOf(&normal, i, 2);
         }
         if (hasUv) {
-            v[i].u = componentOf(&uv, i, 0);
-            v[i].v = componentOf(&uv, i, 1);
+            const float u = componentOf(&uv, i, 0), w = componentOf(&uv, i, 1);
+            v[i].u = uvMap.offset[0] + uvMap.m[0] * u + uvMap.m[1] * w;
+            v[i].v = uvMap.offset[1] + uvMap.m[2] * u + uvMap.m[3] * w;
         }
         if (hasColor) {
             const float a = color.components == 4 ? componentOf(&color, i, 3) : 1.f;
@@ -707,6 +752,74 @@ static void applyPose(ArtfScene* s, ModelData* d) {
         artfInstanceSetJoints(s, part->instance, joints.items, skin->count);
     }
     artfVecFree(&joints);
+    for (size_t i = 0; i < d->lights.len; ++i) {
+        const ModelLight* L = &d->lights.items[i];
+        const ArtfMat4* w = &d->nodes[L->node].world;
+        /* (a light shines down its node's -z) */
+        const ArtfVec3 at = artfVec3(w->m[12], w->m[13], w->m[14]);
+        const ArtfVec3 goes = artfVec3Normalize(artfVec3(-w->m[8], -w->m[9], -w->m[10]));
+        if (L->sun) {
+            artfSceneSetSun(s, goes, L->color);
+            continue;
+        }
+        if (!L->light) continue;
+        artfLightSet(s, L->light, at, L->color, L->radius);
+        if (L->spot) artfLightSetSpot(s, L->light, goes, L->inner, L->outer);
+    }
+}
+
+/* KHR_lights_punctual. Intensities are the file's (candela, lux for the sun); Artful's lights end at a radius
+ * instead of fading by the square of distance: the range given, or where that would have reached a twentieth,
+ * and as bright as the square law at a quarter of it. */
+static void lightOf(Loader* l, const Json* node, uint32_t index) {
+    const Json* use = member(l, member(l, node, "extensions"), "KHR_lights_punctual");
+    if (!use) return;
+    const Json* list = member(l, member(l, member(l, l->root, "extensions"), "KHR_lights_punctual"), "lights");
+    const int64_t which = indexOf(l, use, "light");
+    const Json* light = which < 0 ? NULL : element(l, list, (uint32_t)which);
+    if (!light) return;
+    float rgb[3] = {1, 1, 1};
+    readNumbers(l, member(l, light, "color"), rgb, 3);
+    const float intensity = artfMaxf((float)numberOf(l, light, "intensity", 1), 0);
+    const Json* type = member(l, light, "type");
+    ModelLight m;
+    memset(&m, 0, sizeof m);
+    m.node = index;
+    if (stringIs(type, "directional")) {
+        m.sun = true;
+        m.color = artfVec3Scale(artfVec3(rgb[0], rgb[1], rgb[2]), intensity);
+    } else {
+        m.spot = stringIs(type, "spot");
+        if (!m.spot && !stringIs(type, "point")) {
+            artfLog("artful: glTF: a light of a kind that cannot be read");
+            return;
+        }
+        const float range = (float)numberOf(l, light, "range", 0);
+        m.radius = range > 0 ? range : sqrtf(20.f * artfMaxf(intensity, 1e-6f));
+        m.color = artfVec3Scale(artfVec3(rgb[0], rgb[1], rgb[2]), intensity * 18.2f / (m.radius * m.radius));
+        const Json* cone = member(l, light, "spot");
+        m.inner = (float)numberOf(l, cone, "innerConeAngle", 0);
+        m.outer = (float)numberOf(l, cone, "outerConeAngle", .78539816);
+        m.light = artfSceneAddLight(l->scene, artfVec3(0, 0, 0), m.color, m.radius);
+        if (!m.light) {
+            artfLog("artful: glTF: more lights than the scene can hold (%d)", ARTF_MAX_LIGHTS);
+            return;
+        }
+    }
+    artfVecPush(&l->model->lights, m);
+}
+
+static void cameraOf(Loader* l, const Json* node, uint32_t index) {
+    const int64_t which = indexOf(l, node, "camera");
+    if (which < 0) return;
+    const Json* camera = element(l, member(l, l->root, "cameras"), (uint32_t)which);
+    const Json* perspective = member(l, camera, "perspective");
+    if (!perspective) {
+        if (camera) artfLog("artful: glTF: an orthographic camera is left out");
+        return;
+    }
+    const ModelCamera c = {index, (float)numberOf(l, perspective, "yfov", .8), (float)numberOf(l, perspective, "znear", .1)};
+    artfVecPush(&l->model->cameras, c);
 }
 
 static void placeNode(Loader* l, const Json* node, uint32_t index, int depth) {
@@ -739,6 +852,8 @@ static void placeNode(Loader* l, const Json* node, uint32_t index, int depth) {
             }
         }
     }
+    lightOf(l, node, index);
+    cameraOf(l, node, index);
     const Json* children = member(l, node, "children");
     for (const Json* c = children && children->kind == J_ARRAY ? nodeAt(l, children->first) : NULL; c; c = nodeAt(l, c->next))
         if (c->kind == J_NUMBER) placeNode(l, element(l, l->nodes, (uint32_t)c->number), (uint32_t)c->number, depth + 1);
@@ -876,6 +991,8 @@ static void modelFree(ModelData* d) {
     artfFree(d->skins);
     artfFree(d->clips);
     artfVecFree(&d->parts);
+    artfVecFree(&d->lights);
+    artfVecFree(&d->cameras);
     artfFree(d);
 }
 
@@ -990,6 +1107,21 @@ void artfModelSetTransform(ArtfScene* s, ArtfModel m, const ArtfTransform* trans
     applyPose(s, d);
 }
 
+uint32_t artfModelCameraCount(const ArtfScene* s, ArtfModel m) { const ModelData* d = modelAt(s, m); return d ? (uint32_t)d->cameras.len : 0; }
+
+bool artfModelCamera(const ArtfScene* s, ArtfModel m, uint32_t camera, ArtfCamera* out) {
+    const ModelData* d = modelAt(s, m);
+    if (!d || camera >= d->cameras.len) return false;
+    const ModelCamera* c = &d->cameras.items[camera];
+    const ArtfMat4* w = &d->nodes[c->node].world;
+    out->position = artfVec3(w->m[12], w->m[13], w->m[14]);
+    out->target = artfVec3Sub(out->position, artfVec3Normalize(artfVec3(w->m[8], w->m[9], w->m[10])));
+    out->up = artfVec3Normalize(artfVec3(w->m[4], w->m[5], w->m[6]));
+    out->fovY = c->fovY;
+    out->near_ = c->near_;
+    return true;
+}
+
 uint32_t artfModelInstanceCount(const ArtfScene* s, ArtfModel m) { const ModelData* d = modelAt(s, m); return d ? (uint32_t)d->parts.len : 0; }
 uint32_t artfModelClipCount(const ArtfScene* s, ArtfModel m) { const ModelData* d = modelAt(s, m); return d ? d->clipCount : 0; }
 const char* artfModelClipName(const ArtfScene* s, ArtfModel m, uint32_t clip) { const ModelData* d = modelAt(s, m); return d && clip < d->clipCount ? d->clips[clip].name : ""; }
@@ -1013,7 +1145,7 @@ static bool openJson(Loader* l, const char* text, size_t size) {
     const Json* required = member(l, l->root, "extensionsRequired");
     if (required && required->kind == J_ARRAY)
         for (const Json* e = nodeAt(l, required->first); e; e = nodeAt(l, e->next))
-            if (!stringIs(e, "KHR_mesh_quantization")) {
+            if (!stringIs(e, "KHR_mesh_quantization") && !stringIs(e, "KHR_texture_transform") && !stringIs(e, "KHR_materials_emissive_strength")) {
                 artfLog("artful: glTF: the file requires %.*s, which cannot be read here", e->kind == J_STRING ? (int)e->length : 0, e->text);
                 return 0;
             }
