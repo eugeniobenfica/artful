@@ -89,7 +89,7 @@ static void testPacking(void) {
         CHECK(found);
     }
     artfSceneFree(s);
-    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 92 * 16);
+    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 95 * 16);
 }
 
 static void testMeshlets(void) {
@@ -2975,6 +2975,124 @@ static void testEnvironment(void) {
     CHECK(!artfImageDecodeHdr("not one", 7, &fw, &fh));
 }
 
+/* A frame in floats: the same picture as before with nothing after it; each effect the same on both backends; lights
+ * past the frame's own; light that bounced. */
+static ArtfScene* bleedScene(void) {
+    ArtfScene* s = plainScene();
+    const ArtfMaterial white = whiteMaterial(s);
+    artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(.5f, .5f, .5f));
+    artfSceneSetAmbient(s, artfVec3(.05f, .05f, .05f), artfVec3(.05f, .05f, .05f));
+    setCamera(s, 0, 3, 7, 0, 0, 0);
+    ArtfMaterialDesc redWall = {artfVec3(1, .02f, .02f), 0, 0, 1, artfVec3(0, 0, 0)};
+    ArtfTransform t = artfTransformAt(0, -1, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 40, 1), white, &t);
+    const ArtfTransform wall = artfTransformTrs(artfVec3(2.2f, 1, 0), artfQuatAxisAngle(artfVec3(0, 1, 0), -1.5708f), artfVec3(4, 2, 1));
+    artfSceneAddInstance(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &redWall), &wall);
+    const ArtfMesh ball = artfSceneAddSphere(s, .8f, 24, 32);
+    ArtfMaterialDesc mirrorDesc = artfMaterialDefaults();
+    mirrorDesc.baseColor = artfVec3(.9f, .9f, .9f);
+    mirrorDesc.metallic = 1;
+    mirrorDesc.roughness = .1f;
+    addAt(s, ball, artfSceneAddMaterial(s, &mirrorDesc), -1, -.2f, 0, 1);
+    return s;
+}
+
+static void testFloats(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* c = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* plain = artfRendererNew(&o);
+        o.hdr = true;
+        ArtfRenderer* floats = artfRendererNew(&o);
+        if (!plain || !floats) {
+            artfRendererFree(plain);
+            artfRendererFree(floats);
+            continue;
+        }
+        ArtfScene* s = bleedScene();
+        drawInto(plain, s, a);
+        drawInto(floats, s, b);
+        /* nothing after it: the picture as it was, to a level */
+        int worst = 0;
+        for (int i = 0; i < W * H; ++i)
+            for (int k = 0; k < 24; k += 8) worst = artfMaxi(worst, abs((int)(a[i] >> k & 255) - (int)(b[i] >> k & 255)));
+        printf("%s, a frame in floats against one in bytes: %d at most\n", backend ? "GPU" : "CPU", worst);
+        CHECK(worst <= 1);
+        /* each effect changes the picture, and the same way every time */
+        const ArtfPostDesc each[6] = {{.bloom = .5f, .bloomThreshold = .1f}, {.occlusion = 1, .occlusionRadius = .8f}, {.reflections = 1}, {.focus = 3, .aperture = 10},
+                                      {.volumetric = 1, .scattering = .5f}, {.temporal = true}};
+        for (int e = 0; e < 6; ++e) {
+            artfSceneSetPost(s, &each[e]);
+            if (e == 4) artfSceneSetFog(s, artfVec3(.5f, .5f, .55f), .05f);
+            drawInto(floats, s, c);
+            const double changed = differentShare(b, c, 2);
+            if (changed <= (e == 5 || e == 2 ? .001 : .01)) printf("effect %d changed %.4f of the pixels\n", e, changed);
+            CHECK(changed > (e == 5 || e == 2 ? .001 : .01));
+            if (e < 5) {
+                drawInto(floats, s, a);
+                CHECK(differentShare(a, c, 0) == 0);
+            }
+            if (e == 4) artfSceneSetFog(s, artfVec3(0, 0, 0), 0);
+        }
+        artfSceneSetPost(s, NULL);
+        /* light that bounced: the floor by the red wall turns red */
+        const int fx = W / 2 + 28, fy = H / 2 + 34;
+        drawInto(plain, s, a);
+        const ArtfIndirectDesc probes = {{8, 4, 8}, 64, .5f, 1, {-4, -1.5f, -3}, {4, 3, 3}};
+        artfSceneSetIndirect(s, &probes);
+        for (int k = 0; k < 6; ++k) drawInto(plain, s, b);
+        const double before = meanOf(a, fx, fy, 16) - meanOf(a, fx, fy, 8), after = meanOf(b, fx, fy, 16) - meanOf(b, fx, fy, 8);
+        printf("%s, light that bounced: red over green by the wall, %.1f without, %.1f with\n", backend ? "GPU" : "CPU", before, after);
+        CHECK(after > before + 3);
+        artfSceneFree(s);
+        artfRendererFree(plain);
+        artfRendererFree(floats);
+    }
+    /* the backends agree, on each effect and on light that bounced */
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    o.hdr = true;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        o.backend = ARTF_BACKEND_SOFTWARE;
+        ArtfRenderer* cpu = artfRendererNew(&o);
+        const ArtfPostDesc all = {.bloom = .2f, .occlusion = 1, .reflections = 1, .focus = 6, .aperture = 6};
+        ArtfScene* s = bleedScene();
+        artfSceneSetPost(s, &all);
+        const ArtfIndirectDesc probes = {{8, 4, 8}, 64, .5f, 1, {-4, -1.5f, -3}, {4, 3, 3}};
+        artfSceneSetIndirect(s, &probes);
+        drawInto(cpu, s, a);
+        artfSceneSetIndirect(s, &probes); /* (the probes start over, so both see the same steps) */
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 16);
+        printf("all effects and probes, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .03);
+        /* lights past the frame's own */
+        artfSceneSetPost(s, NULL);
+        artfSceneSetIndirect(s, NULL);
+        artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+        uint32_t st = 5;
+        for (int i = 0; i < 100; ++i) {
+            st = st * 747796405u + 2891336453u;
+            const float x = (float)(st >> 8 & 255) / 255.f * 8.f - 4.f, z = (float)(st >> 16 & 255) / 255.f * 6.f - 3.f;
+            CHECK(artfSceneAddLight(s, artfVec3(x, -.6f, z), artfVec3((float)(i % 3 == 0), (float)(i % 3 == 1), (float)(i % 3 == 2)), 1.5f) != 0);
+        }
+        drawInto(cpu, s, a);
+        drawInto(gpu, s, b);
+        CHECK(meanOf(a, W / 2, H * 3 / 4, 16) > 30);
+        const double lightsApart = differentShare(a, b, 16);
+        printf("100 lights past the frame's own, the GPU against the CPU: %.2f%% of pixels apart\n", lightsApart * 100);
+        CHECK(lightsApart < .02);
+        artfSceneFree(s);
+        artfRendererFree(cpu);
+        artfRendererFree(gpu);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+}
+
 static void testGltfTargets(void) {
     static const char file[] = "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"byteLength\":80,\"uri\":\"data:application/octet-stream;base64,AAABAAIAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAA=\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":8,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":44,\"byteLength\":36}],\"accessors\":[{\"bufferView\":0,\"componentType\":5123,\"type\":\"SCALAR\",\"count\":3},{\"bufferView\":1,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3,\"max\":[1,1,0],\"min\":[0,0,0]},{\"bufferView\":2,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3}],\"meshes\":[{\"weights\":[1],\"primitives\":[{\"attributes\":{\"POSITION\":1},\"indices\":0,\"targets\":[{\"POSITION\":2}]}]}],\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
     ArtfScene* s = artfSceneNew();
@@ -3906,6 +4024,7 @@ int main(void) {
     testGltfTargets();
     testGltfExtensions();
     testEnvironment();
+    testFloats();
     testLostDevice();
     testRefusedSwapchain();
     testBlocks();

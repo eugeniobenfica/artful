@@ -657,6 +657,19 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         }
         diffuse.x = v8fLoad(got[0]); diffuse.y = v8fLoad(got[1]); diffuse.z = v8fLoad(got[2]);
     }
+    if (frame->indirect[0][3] > 0) {
+        /* or from the probes near it: light that bounced */
+        _Alignas(32) float laneW[3][8], laneD[3][8], got[3][8];
+        v8fStore(laneW[0], world.x); v8fStore(laneW[1], world.y); v8fStore(laneW[2], world.z);
+        v8fStore(laneD[0], n.x); v8fStore(laneD[1], n.y); v8fStore(laneD[2], n.z);
+        for (int i = 0; i < 8; ++i) {
+            const float p[3] = {laneW[0][i], laneW[1][i], laneW[2][i]}, nn[3] = {laneD[0][i], laneD[1][i], laneD[2][i]};
+            float c[3];
+            artfIndirectAt(&f->scene->indirect, p, nn, c);
+            for (int k = 0; k < 3; ++k) got[k][i] = c[k] * frame->indirect[0][3];
+        }
+        diffuse.x = v8fLoad(got[0]); diffuse.y = v8fLoad(got[1]); diffuse.z = v8fLoad(got[2]);
+    }
     diffuse.x = v8fMul(diffuse.x, open);
     diffuse.y = v8fMul(diffuse.y, open);
     diffuse.z = v8fMul(diffuse.z, open);
@@ -849,7 +862,7 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
     s->originX = ox;
     s->originY = oy;
     s->texture = material->texture ? &f->scene->textures.items[material->texture] : NULL;
-    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->look[1] > 0 || f->shadows || material->graph;
+    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || material->graph;
     s->bumpy = material->normalMap != 0;
     const ArtfTextureData* textures = f->scene->textures.items;
     s->sizing = s->texture ? s->texture : material->normalMap ? &textures[material->normalMap] : material->surfaceMap ? &textures[material->surfaceMap] : material->occlusionMap ? &textures[material->occlusionMap] : NULL;

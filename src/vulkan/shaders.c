@@ -21,7 +21,7 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_SIZE = 92 };
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_SIZE = 95 };
 
 typedef struct Resources {
     SpvId frame, instances, visible, meshes, materials, indirect, hiz, flags, environment;
@@ -919,6 +919,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     }
     /* lights past the frame's own: their list for each square of the frame (artfSceneLightTiles) */
     SpvId extraLights = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 60);
+    SpvId probes = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 62);
     SpvId tileLights = spvResource(s, blockOf(s, r.uintArray, false), SPV_STORAGE_StorageBuffer, 61);
     SpvId pixelCoord = fragCoord;
     if (!pixelCoord) {
@@ -1061,6 +1062,31 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     }
     spvIfEnd(s, aroundMerge);
 
+    /* or from the probes near it: light that bounced, as artfIndirectAt */
+    SpvId indirectRow = frameVec(s, &r, F_INDIRECT), indirectMerge;
+    spvIfBegin(s, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, W(indirectRow), FLOAT(0.f)), &indirectMerge);
+    {
+        SpvId origin = spvShuffle3(s, indirectRow), spacing = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 1)), dims = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 2));
+        SpvId place = spvOp2(s, SPV_OP_FDiv, s->vec3, SUB_V3(ADD_V3(world, MUL_V3(n, SCALE_V3(spacing, FLOAT(.25f)))), origin), spacing);
+        SpvId last = SUB_V3(dims, same3(s, 1.f));
+        place = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, place, same3(s, 0.f)), last);
+        SpvId base = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl1(s, SPV_GLSL_Floor, s->vec3, place), SUB_V3(dims, same3(s, 2.f)));
+        SpvId w = SUB_V3(place, base);
+        SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims));
+        SpvId bx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(base)), by = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(base)), bz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(base));
+        SpvId sum = same3(s, 0.f);
+        for (int c = 0; c < 8; ++c) {
+            SpvId x = ADD_U(bx, UINT((uint32_t)(c & 1))), y = ADD_U(by, UINT((uint32_t)(c >> 1 & 1))), z = ADD_U(bz, UINT((uint32_t)(c >> 2)));
+            SpvId weight = MUL_F(MUL_F(c & 1 ? X(w) : SUB_F(FLOAT(1.f), X(w)), c & 2 ? Y(w) : SUB_F(FLOAT(1.f), Y(w))), c & 4 ? Z(w) : SUB_F(FLOAT(1.f), Z(w)));
+            SpvId at = MUL_U(ADD_U(MUL_U(ADD_U(MUL_U(z, dy), y), dx), x), UINT(4));
+            SpvId c0 = spvShuffle3(s, bufferVec(s, &r, probes, at));
+            SpvId lean = vec3Of(s, DOT3(spvShuffle3(s, bufferVec(s, &r, probes, ADD_U(at, UINT(1)))), n), DOT3(spvShuffle3(s, bufferVec(s, &r, probes, ADD_U(at, UINT(2)))), n),
+                                DOT3(spvShuffle3(s, bufferVec(s, &r, probes, ADD_U(at, UINT(3)))), n));
+            sum = ADD_V3(sum, SCALE_V3(spvGlsl2(s, SPV_GLSL_FMax, s->vec3, ADD_V3(c0, lean), same3(s, 0.f)), weight));
+        }
+        spvStore(s, acc.diffuse, SCALE_V3(sum, MUL_F(W(indirectRow), open)));
+    }
+    spvIfEnd(s, indirectMerge);
     /* (what came from all around, for ambient occlusion after the frame) */
     SpvId aroundDiffuse = spvLoad(s, s->vec3, acc.diffuse), aroundHighlight = spvLoad(s, s->vec3, acc.highlight);
     /* the sun's shadow: as artfShadowOfSun */

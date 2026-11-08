@@ -72,6 +72,8 @@ void artfSceneFree(ArtfScene* s) {
     artfTraceFini(&s->trace);
     artfFree(s->hole.map);
     artfFree(s->environment);
+    artfFree(s->indirect.probes);
+    artfFree(s->indirect.next);
     artfFluidFree(s->hole.fluid);
     artfFree(s);
 }
@@ -982,6 +984,39 @@ void artfFrameJitter(ArtfFrameData* frame, uint32_t n, int width, int height) {
     }
 }
 
+void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc) {
+    ArtfIndirect* g = &s->indirect;
+    artfFree(g->probes);
+    artfFree(g->next);
+    memset(g, 0, sizeof *g);
+    if (!desc) return;
+    g->desc = *desc;
+    static const int start[3] = {8, 4, 8};
+    for (int k = 0; k < 3; ++k) g->dims[k] = artfClampi(desc->probes[k] > 0 ? desc->probes[k] : start[k], 2, 64);
+    float low[3], high[3];
+    if (desc->low.x != desc->high.x || desc->low.y != desc->high.y || desc->low.z != desc->high.z) {
+        for (int k = 0; k < 3; ++k) {
+            low[k] = artfMinf((&desc->low.x)[k], (&desc->high.x)[k]);
+            high[k] = artfMaxf((&desc->low.x)[k], (&desc->high.x)[k]);
+        }
+    } else {
+        ArtfVec3 center;
+        float radius;
+        if (!artfSceneBounds(s, &center, &radius)) return;
+        for (int k = 0; k < 3; ++k) {
+            low[k] = (&center.x)[k] - radius;
+            high[k] = (&center.x)[k] + radius;
+        }
+    }
+    for (int k = 0; k < 3; ++k) {
+        g->origin[k] = low[k];
+        g->spacing[k] = artfMaxf(high[k] - low[k], 1e-3f) / (float)(g->dims[k] - 1);
+    }
+    g->probes = artfCalloc((size_t)artfIndirectCount(g) * 16, 4);
+    g->next = artfCalloc((size_t)artfIndirectCount(g) * 16, 4);
+    g->on = true;
+}
+
 void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc) {
     if (desc) s->post = *desc;
     else memset(&s->post, 0, sizeof s->post);
@@ -1214,6 +1249,13 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
                               {p->reflections, p->volumetric, artfClampf(p->scattering, -.95f, .95f), p->temporal ? 1.f : 0.f},
                               {p->focus, p->aperture, 0, 0}};
     memcpy(out->post, post, sizeof post);
+    if (s->indirect.on && s->indirect.probes) {
+        const ArtfIndirect* g = &s->indirect;
+        const float rows[3][4] = {{g->origin[0], g->origin[1], g->origin[2], g->desc.strength > 0 ? g->desc.strength : 1.f},
+                                  {g->spacing[0], g->spacing[1], g->spacing[2], 0},
+                                  {(float)g->dims[0], (float)g->dims[1], (float)g->dims[2], 0}};
+        memcpy(out->indirect, rows, sizeof rows);
+    }
     memcpy(out->previous, vp.m, sizeof vp.m);
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;

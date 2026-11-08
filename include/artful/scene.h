@@ -365,6 +365,23 @@ typedef struct ArtfPostDesc {
 /* NULL: none. */
 void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc);
 
+/* ---- light that bounced, every frame ----
+ * A grid of probes over a box (the scene's bounds, as they are when this is called, unless given): each frame each probe follows a few
+ * rays through the scene (as tracing does, on the calling thread's cores, for both backends), and keeps what light
+ * reaches it from each way, mixed with what it had. Surfaces take light from all around from the probes near them, in
+ * place of sky and ground or a picture: so light bounces from one surface to the next, once more each frame. Light
+ * can leak through a wall thinner than the probes are apart. */
+typedef struct ArtfIndirectDesc {
+    int probes[3];      /* across the bounds; 0: 8, 4, 8 */
+    int rays;           /* each probe follows each frame; 0: 64 */
+    float hysteresis;   /* how much of what it had a probe keeps each frame: more is steadier, and slower; 0: .9 */
+    float strength;     /* 0: 1 */
+    ArtfVec3 low, high; /* the box the probes fill; both zero: the scene's bounds */
+} ArtfIndirectDesc;
+
+/* NULL: none. */
+void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc);
+
 /* ---- tracing ----
  * Light followed along rays, in place of drawing triangles: on both backends, and on any GPU, as this
  * needs no ray tracing hardware. Each frame adds samples to what the frames before gathered, for as long

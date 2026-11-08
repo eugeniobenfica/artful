@@ -586,6 +586,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         memset(f->data.post, 0, sizeof f->data.post);
     }
     artfSceneResidencyStep(scene, &f->data, f->height);
+    if (f->data.indirect[0][3] > 0 && scene->trace.desc.mode == ARTF_TRACE_NONE) artfSceneIndirectStep(scene, &f->data, s->pool);
     f->extraCount = 0;
     if (f->data.eye[2][3] > 0) {
         if (!f->extra) f->extra = artfMalloc(ARTF_MAX_LIGHTS * sizeof *f->extra);

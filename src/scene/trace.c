@@ -2,6 +2,7 @@
  * themselves, as plain C. The CPU draws with these; the GPU reads the same trees, and its shader
  * (shaders.c, artfShaderTrace) is this same arithmetic. */
 #include "scene/sceneInternal.h"
+#include "core/threads.h"
 
 #include <stdlib.h>
 
@@ -850,4 +851,118 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         out[k] += covered ? seen : 0.f;
     }
     out[3] += covered ? 1.f : 0.f;
+}
+
+/* ---- light that bounced: probes ----
+ *
+ * Each step each probe sends rays the same random ways (from the step's number: the same on every processor), and
+ * what comes back along each, from the sky, a light, or a surface lit directly and by the probes before, makes a
+ * first-order spherical harmonic: the mean, and how it leans. What a surface facing n takes from all around is, over
+ * pi, the mean plus 2/3 of its lean along n (Ramamoorthi and Hanrahan), and the probes keep that directly. */
+
+void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float* out) {
+    float at[3], w[3];
+    int i0[3];
+    for (int k = 0; k < 3; ++k) {
+        /* (a little out along the normal: a probe on the surface's own side counts more) */
+        at[k] = artfClampf((p[k] + n[k] * g->spacing[k] * .25f - g->origin[k]) / g->spacing[k], 0, (float)(g->dims[k] - 1));
+        i0[k] = artfMini((int)at[k], g->dims[k] - 2);
+        w[k] = at[k] - (float)i0[k];
+    }
+    out[0] = out[1] = out[2] = 0;
+    for (int c = 0; c < 8; ++c) {
+        const int x = i0[0] + (c & 1), y = i0[1] + (c >> 1 & 1), z = i0[2] + (c >> 2);
+        const float weight = (c & 1 ? w[0] : 1.f - w[0]) * (c & 2 ? w[1] : 1.f - w[1]) * (c & 4 ? w[2] : 1.f - w[2]);
+        const float* probe = g->probes + ((size_t)(z * g->dims[1] + y) * g->dims[0] + x) * 16;
+        for (int k = 0; k < 3; ++k) out[k] += weight * artfMaxf(probe[k] + probe[4 + 4 * k] * n[0] + probe[5 + 4 * k] * n[1] + probe[6 + 4 * k] * n[2], 0);
+    }
+}
+
+typedef struct ProbeJob { ArtfScene* s; const ArtfFrameData* f; } ProbeJob;
+
+static void probeJob(void* user, uint32_t index, uint32_t worker) {
+    (void)worker;
+    const ProbeJob* j = user;
+    ArtfScene* s = j->s;
+    const ArtfFrameData* f = j->f;
+    ArtfIndirect* g = &s->indirect;
+    const int x = (int)(index % (uint32_t)g->dims[0]), y = (int)(index / (uint32_t)g->dims[0] % (uint32_t)g->dims[1]), z = (int)(index / (uint32_t)(g->dims[0] * g->dims[1]));
+    const float o[3] = {g->origin[0] + (float)x * g->spacing[0], g->origin[1] + (float)y * g->spacing[1], g->origin[2] + (float)z * g->spacing[2]};
+    const int rays = g->desc.rays > 0 ? g->desc.rays : 64;
+    const float* env = f->sky[3] > 0 ? s->environment : NULL;
+    uint32_t state = hashOf(index * 9781u + g->frames * 6271u + 1u);
+    float mean[3] = {0, 0, 0}, lean[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    const float one[3] = {1, 1, 1};
+    for (int r = 0; r < rays; ++r) {
+        float d[3];
+        randomInBall(&state, d);
+        normalize3(d);
+        float light[3] = {0, 0, 0};
+        Hit h;
+        if (!closest(&s->trace, o, d, 3e37f, true, &h)) {
+            if (env) {
+                artfEnvSample(env, ARTF_ENV_DIFFUSE - 1, d[0], d[1], d[2], light);
+                for (int k = 0; k < 3; ++k) light[k] *= f->sky[3];
+            } else {
+                const float up = d[1] * .5f + .5f;
+                for (int k = 0; k < 3; ++k) light[k] = f->ground[k] + (f->sky[k] - f->ground[k]) * up;
+            }
+        } else {
+            Surface m;
+            surfaceAt(s, &h, o, d, &m);
+            /* (a probe inside something sees its backs: it takes nothing from them) */
+            if (m.front) {
+                float p[3], lifted[3];
+                const float view[3] = {-d[0], -d[1], -d[2]};
+                for (int k = 0; k < 3; ++k) p[k] = o[k] + d[k] * h.t;
+                const float reach = reachOf(p);
+                for (int k = 0; k < 3; ++k) lifted[k] = p[k] + m.normal[k] * reach;
+                for (int k = 0; k < 3; ++k) light[k] = m.emissive[k];
+                if (f->sunColor[0] > 0 || f->sunColor[1] > 0 || f->sunColor[2] > 0) lightFrom(s, lifted, view, &m, f->toSun, 3e37f, 1.f, f->sunColor, one, light);
+                for (uint32_t i = 0; i < f->lightCount; ++i) {
+                    const ArtfLightData* L = &f->lights[i];
+                    float to[3] = {L->position[0] - lifted[0], L->position[1] - lifted[1], L->position[2] - lifted[2]};
+                    const float d2 = dot3(to, to), distance = sqrtf(artfMaxf(d2, 1e-8f));
+                    const float fade = artfMaxf(1.f - d2 / (L->radius * L->radius), 0);
+                    for (int k = 0; k < 3; ++k) to[k] /= distance;
+                    const float spot = artfClampf((-dot3(to, L->direction) - L->spotCut) * L->spotScale, 0, 1);
+                    lightFrom(s, lifted, view, &m, to, distance, fade * fade * spot, L->color, one, light);
+                }
+                /* what bounced to it before: the probes, as the last step left them */
+                float around[3];
+                artfIndirectAt(g, p, m.normal, around);
+                for (int k = 0; k < 3; ++k) light[k] += m.albedo[k] * around[k];
+            }
+        }
+        for (int k = 0; k < 3; ++k) {
+            light[k] = artfMinf(light[k], LIGHT_LIMIT);
+            mean[k] += light[k];
+            for (int a = 0; a < 3; ++a) lean[k][a] += light[k] * d[a];
+        }
+    }
+    float* out = g->next + (size_t)index * 16;
+    const float* was = g->probes + (size_t)index * 16;
+    const float keep = g->frames ? (g->desc.hysteresis > 0 ? artfClampf(g->desc.hysteresis, 0, .999f) : .9f) : 0.f;
+    const float each = 1.f / (float)rays;
+    for (int k = 0; k < 3; ++k) {
+        out[k] = was[k] * keep + mean[k] * each * (1.f - keep);
+        for (int a = 0; a < 3; ++a) out[4 + 4 * k + a] = was[4 + 4 * k + a] * keep + 2.f * lean[k][a] * each * (1.f - keep);
+        out[7 + 4 * k] = 0;
+    }
+    out[3] = 0;
+}
+
+void artfSceneIndirectStep(ArtfScene* s, const ArtfFrameData* frame, ArtfPool* pool) {
+    ArtfIndirect* g = &s->indirect;
+    if (!g->on || !g->probes) return;
+    artfSceneTraceSync(s);
+    ProbeJob j = {s, frame};
+    if (pool) artfPoolRun(pool, probeJob, &j, artfIndirectCount(g));
+    else
+        for (uint32_t i = 0; i < artfIndirectCount(g); ++i) probeJob(&j, i, 0);
+    float* t = g->probes;
+    g->probes = g->next;
+    g->next = t;
+    ++g->frames;
+    ++g->version;
 }

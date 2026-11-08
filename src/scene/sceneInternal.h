@@ -186,6 +186,23 @@ typedef struct ArtfLightData {
     float direction[3], spotCut; /* where it goes to; the cosine of the outside */
 } ArtfLightData;
 
+/* Light that bounced (trace.c): a grid of probes, each four vec4s: the light from all around, then of red, green and
+ * blue how it changes with the normal; what a surface facing n takes, over pi, is c0 + (r . n, g . n, b . n). */
+typedef struct ArtfIndirect {
+    bool on;
+    ArtfIndirectDesc desc;
+    int dims[3];
+    float origin[3], spacing[3];
+    float* probes;      /* dims product x 16 */
+    float* next;        /* what this step makes */
+    uint32_t frames;
+    uint64_t version;   /* a step changed them */
+} ArtfIndirect;
+ARTF_INLINE uint32_t artfIndirectCount(const ArtfIndirect* g) { return (uint32_t)(g->dims[0] * g->dims[1] * g->dims[2]); }
+
+/* Light from all around a surface at p facing n, from the probes near it, over pi. */
+void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float* out);
+
 /* The lights a frame holds itself: those past them are listed by the squares of the frame they reach. */
 #define ARTF_FRAME_LIGHTS 16
 #define ARTF_LIGHT_TILE 64       /* a square's side, in pixels: the CPU's tiles */
@@ -217,7 +234,13 @@ typedef struct ArtfFrameData {
      * scattering, temporal (1 or 0); focus, aperture, and this frame's jitter, in pixels. */
     float post[3][4];
     float previous[16]; /* the frame before's viewProj, with no jitter: where a point was */
+    /* Light that bounced: the grid's corner and strength (0: off); how far apart its probes are; how many each way. */
+    float indirect[3][4];
 } ArtfFrameData;
+
+/* A step of the probes: their rays, from what a frame says of light (needs artfSceneTraceSync). */
+typedef struct ArtfPool ArtfPool;
+void artfSceneIndirectStep(ArtfScene* s, const ArtfFrameData* frame, ArtfPool* pool);
 
 /* Lights past the frame's own, in handle order: how many, into out (ARTF_MAX_LIGHTS of room). */
 uint32_t artfSceneExtraLights(const ArtfScene* s, ArtfLightData* out);
@@ -411,6 +434,7 @@ struct ArtfScene {
     ArtfHole hole;
     ArtfTrace trace;
     ArtfPostDesc post;
+    ArtfIndirect indirect;
     float* environment;         /* ARTF_ENV_FLOATS, or NULL: sky and ground */
     float environmentLight;     /* what it is multiplied by */
     bool environmentShown;      /* behind the scene */

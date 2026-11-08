@@ -12,6 +12,7 @@
  *                 [--hdr]: the frame in floats, and then: [--glow x] [--glow-threshold t] [--occlusion x]
  *                 [--occlusion-radius r] [--reflections x] [--volumetric x] [--scattering g] [--temporal]
  *                 [--focus distance --aperture pixels] [--fog density r g b]
+ *                 [--indirect]: light that bounces, from probes, every frame
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
  *
@@ -307,6 +308,7 @@ int main(int argc, char** argv) {
     ArtfPostDesc post;
     memset(&post, 0, sizeof post);
     float fog[4] = {0, 0, 0, 0};
+    bool indirect = false;
     ArtfTraceDesc trace = {ARTF_TRACE_NONE, 1, 0, 0, false};
     int traceSamples = 1;
     ArtfRendererOptions o;
@@ -341,6 +343,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--volumetric") && i + 1 < argc) post.volumetric = (float)atof(argv[++i]);
         else if (!strcmp(a, "--scattering") && i + 1 < argc) post.scattering = (float)atof(argv[++i]);
         else if (!strcmp(a, "--temporal")) post.temporal = true;
+        else if (!strcmp(a, "--indirect")) indirect = true;
         else if (!strcmp(a, "--focus") && i + 1 < argc) post.focus = (float)atof(argv[++i]);
         else if (!strcmp(a, "--aperture") && i + 1 < argc) post.aperture = (float)atof(argv[++i]);
         else if (!strcmp(a, "--fog") && i + 4 < argc) { for (int k = 0; k < 4; ++k) fog[k] = (float)atof(argv[++i]); }
@@ -392,6 +395,11 @@ int main(int argc, char** argv) {
     if (sceneExposure > 0) artfSceneSetExposure(s, sceneExposure);
     artfSceneSetPost(s, &post);
     if (fog[0] > 0) artfSceneSetFog(s, artfVec3(fog[1], fog[2], fog[3]), fog[0]);
+    if (indirect) {
+        ArtfIndirectDesc probes;
+        memset(&probes, 0, sizeof probes);
+        artfSceneSetIndirect(s, &probes);
+    }
     if (environment) {
         FILE* file = fopen(environment, "rb");
         if (!file) { fprintf(stderr, "cannot read %s\n", environment); return 1; }
@@ -444,7 +452,7 @@ int main(int argc, char** argv) {
     }
     if (!artfRendererDraw(r, s)) { fputs("the device was lost\n", stderr); return 1; }
     /* (temporal antialiasing gathers over frames: a still picture gets sixteen) */
-    for (int k = 1; k < 16 && post.temporal && o.hdr; ++k) artfRendererDraw(r, s);
+    for (int k = 1; k < 16 && ((post.temporal && o.hdr) || indirect); ++k) artfRendererDraw(r, s);
     if (trace.mode && !frames) {
         const double start = artfNowMs();
         for (int i = 1; i < traceSamples; ++i)
