@@ -586,6 +586,14 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         memset(f->data.post, 0, sizeof f->data.post);
     }
     artfSceneResidencyStep(scene, &f->data, f->height);
+    f->extraCount = 0;
+    if (f->data.eye[2][3] > 0) {
+        if (!f->extra) f->extra = artfMalloc(ARTF_MAX_LIGHTS * sizeof *f->extra);
+        f->extraCount = artfSceneExtraLights(scene, f->extra);
+        artfFree(f->tileLights);
+        f->tileLights = artfMalloc((size_t)f->tilesX * f->tilesY * (1 + ARTF_TILE_LIGHTS) * 4);
+        artfSceneLightTiles(&f->data, f->width, f->height, f->extra, f->extraCount, f->tileLights);
+    }
     f->nearW = scene->camera.near_;
     const bool occlusion = scene->features[ARTF_FEATURE_OCCLUSION];
     const float* bg = f->data.background;
@@ -735,6 +743,8 @@ static void softFree(ArtfRenderer* r) {
     artfFree(f->postDepth);
     artfFree(f->postSurface);
     artfSoftPostFree(&s->post);
+    artfFree(f->extra);
+    artfFree(f->tileLights);
     artfAlignedFree(s->pixels);
     artfFree(s);
 }

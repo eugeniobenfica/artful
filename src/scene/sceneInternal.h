@@ -186,6 +186,11 @@ typedef struct ArtfLightData {
     float direction[3], spotCut; /* where it goes to; the cosine of the outside */
 } ArtfLightData;
 
+/* The lights a frame holds itself: those past them are listed by the squares of the frame they reach. */
+#define ARTF_FRAME_LIGHTS 16
+#define ARTF_LIGHT_TILE 64       /* a square's side, in pixels: the CPU's tiles */
+#define ARTF_TILE_LIGHTS 64      /* the most one square lists */
+
 /* What a frame needs to know, as the GPU's uniform block. Everything lit is in linear light. */
 typedef struct ArtfFrameData {
     float viewProj[16];
@@ -199,7 +204,7 @@ typedef struct ArtfFrameData {
     uint32_t lightCount, instanceCount;
     float lodScale;     /* a mesh of error e fits at distance d when e * lodScale <= d; 0: lod is off */
     uint32_t hizLevels; /* the GPU's depth pyramid */
-    ArtfLightData lights[ARTF_MAX_LIGHTS];
+    ArtfLightData lights[ARTF_FRAME_LIGHTS];
     float focalX, focalY, nearW;
     uint32_t meshCount;
     uint32_t hiz[ARTF_HIZ_LEVELS][4]; /* of each level: where it starts, its width and its height */
@@ -213,6 +218,12 @@ typedef struct ArtfFrameData {
     float post[3][4];
     float previous[16]; /* the frame before's viewProj, with no jitter: where a point was */
 } ArtfFrameData;
+
+/* Lights past the frame's own, in handle order: how many, into out (ARTF_MAX_LIGHTS of room). */
+uint32_t artfSceneExtraLights(const ArtfScene* s, ArtfLightData* out);
+/* Of each square of the frame (ARTF_LIGHT_TILE a side, by rows), which of those lights reach it: a count, then up to
+ * ARTF_TILE_LIGHTS of their places in what artfSceneExtraLights gave. lists: squares x (1 + ARTF_TILE_LIGHTS). */
+void artfSceneLightTiles(const ArtfFrameData* frame, int width, int height, const ArtfLightData* lights, uint32_t count, uint32_t* lists);
 
 /* Moves the frame within a pixel, by the n-th of Halton's points, for temporal antialiasing: viewProj and post[2]. */
 void artfFrameJitter(ArtfFrameData* frame, uint32_t n, int width, int height);
@@ -230,7 +241,7 @@ typedef struct ArtfShadowView {
 typedef struct ArtfShadowFrame {
     float splits[4];    /* where each of the sun's maps ends, from the eye */
     uint32_t sun[4];    /* its first view + 1 (0: it casts none), how many, a map's side */
-    uint32_t lights[ARTF_MAX_LIGHTS][4]; /* by the frame's lights: first view + 1, and views << 8; 0: none */
+    uint32_t lights[ARTF_FRAME_LIGHTS][4]; /* by the frame's lights: first view + 1, and views << 8; 0: none */
     ArtfShadowView views[ARTF_SHADOW_VIEWS];
 } ArtfShadowFrame;
 

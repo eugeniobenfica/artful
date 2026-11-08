@@ -918,6 +918,50 @@ void artfSceneRemoveLight(ArtfScene* s, ArtfLight l) {
 void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera) { s->camera = *camera; }
 void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color) { s->background = color; }
 
+uint32_t artfSceneExtraLights(const ArtfScene* s, ArtfLightData* out) {
+    uint32_t seen = 0, count = 0;
+    for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) {
+        if (!s->lightOn[i]) continue;
+        if (seen++ >= ARTF_FRAME_LIGHTS) out[count++] = s->lights[i];
+    }
+    return count;
+}
+
+void artfSceneLightTiles(const ArtfFrameData* f, int width, int height, const ArtfLightData* lights, uint32_t count, uint32_t* lists) {
+    const int tilesX = (width + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE, tilesY = (height + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE;
+    /* the view's frame: right and up, each as long as the tangent of half the view that way */
+    float right[3], up[3], tanX = 0, tanY = 0;
+    for (int k = 0; k < 3; ++k) {
+        tanX += f->eye[0][k] * f->eye[0][k];
+        tanY += f->eye[1][k] * f->eye[1][k];
+    }
+    tanX = sqrtf(tanX);
+    tanY = sqrtf(tanY);
+    for (int k = 0; k < 3; ++k) {
+        right[k] = f->eye[0][k] / tanX;
+        up[k] = f->eye[1][k] / tanY;
+    }
+    for (int ty = 0; ty < tilesY; ++ty)
+        for (int tx = 0; tx < tilesX; ++tx) {
+            uint32_t* list = lists + (size_t)(ty * tilesX + tx) * (1 + ARTF_TILE_LIGHTS);
+            list[0] = 0;
+            /* the square's edges, as slopes of the view */
+            const float x0 = ((float)(tx * ARTF_LIGHT_TILE) / (float)width * 2.f - 1.f) * tanX, x1 = ((float)artfMini((tx + 1) * ARTF_LIGHT_TILE, width) / (float)width * 2.f - 1.f) * tanX;
+            const float y1 = (1.f - (float)(ty * ARTF_LIGHT_TILE) / (float)height * 2.f) * tanY, y0 = (1.f - (float)artfMini((ty + 1) * ARTF_LIGHT_TILE, height) / (float)height * 2.f) * tanY;
+            const float l0 = sqrtf(1.f + x0 * x0), l1 = sqrtf(1.f + x1 * x1), m0 = sqrtf(1.f + y0 * y0), m1 = sqrtf(1.f + y1 * y1);
+            for (uint32_t i = 0; i < count && list[0] < ARTF_TILE_LIGHTS; ++i) {
+                const ArtfLightData* L = &lights[i];
+                const float c[3] = {L->position[0] - f->cameraPos[0], L->position[1] - f->cameraPos[1], L->position[2] - f->cameraPos[2]};
+                const float z = c[0] * f->eye[2][0] + c[1] * f->eye[2][1] + c[2] * f->eye[2][2];
+                const float x = c[0] * right[0] + c[1] * right[1] + c[2] * right[2], y = c[0] * up[0] + c[1] * up[1] + c[2] * up[2];
+                const float r = L->radius;
+                /* (outside a plane through the eye by more than the radius: it cannot reach the square) */
+                if (z < -r || x - x0 * z < -r * l0 || x1 * z - x < -r * l1 || y - y0 * z < -r * m0 || y1 * z - y < -r * m1) continue;
+                list[1 + list[0]++] = i;
+            }
+        }
+}
+
 static float halton(uint32_t i, uint32_t base) {
     float f = 1.f, r = 0.f;
     for (; i; i /= base) {
@@ -1074,7 +1118,7 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
     }
 
     uint32_t frameLight = 0;
-    for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) {
+    for (uint32_t i = 0; i < ARTF_MAX_LIGHTS && frameLight < ARTF_FRAME_LIGHTS; ++i) {
         if (!s->lightOn[i]) continue;
         const uint32_t index = frameLight++;
         if (!s->lightCasts[i]) continue;
@@ -1155,7 +1199,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->lodScale = s->features[ARTF_FEATURE_LOD] ? (float)height * .5f * proj.m[5] / s->lodError : 0.f;
     out->look[3] = s->features[ARTF_FEATURE_LOD_FADE] ? ARTF_LOD_FADE : 0.f;
     out->fog[3] = (float)width;
-    for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i)
+    for (uint32_t i = 0; i < ARTF_MAX_LIGHTS && out->lightCount < ARTF_FRAME_LIGHTS; ++i)
         if (s->lightOn[i]) out->lights[out->lightCount++] = s->lights[i];
     if (s->environment) {
         out->sky[3] = s->environmentLight;
@@ -1173,6 +1217,12 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     memcpy(out->previous, vp.m, sizeof vp.m);
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;
+    {
+        /* (how many lights there are past the frame's own: their lists come apart) */
+        uint32_t on = 0;
+        for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) on += s->lightOn[i];
+        out->eye[2][3] = (float)(on > ARTF_FRAME_LIGHTS ? on - ARTF_FRAME_LIGHTS : 0);
+    }
     for (int k = 0; k < 3; ++k) {
         out->eye[0][k] = (&right.x)[k] * wide;
         out->eye[1][k] = (&up.x)[k] * tall;

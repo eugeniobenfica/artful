@@ -1,7 +1,7 @@
 /* artful-render — draws a test scene and writes it to a PNG, or measures it.
  *
  *   artful-render [--backend vulkan|software] [--simd portable|128|256] [--threads n] [--size w h]
- *                 [--scene spheres|field|heavy|city|layers|blackhole] [--frames n] [--out file.png]
+ *                 [--scene spheres|field|heavy|city|layers|lights|blackhole] [--frames n] [--out file.png]
  *                 [--antialias]: four samples a pixel  [--clear]: no background, and a PNG with alpha
  *                 [--shadows side]: the sun casts shadows, in maps of that side
  *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room
@@ -188,6 +188,19 @@ static void sceneSpheres(ArtfScene* s) {
     camera(s, 0, 2.4f, 6.5f);
 }
 
+/* The spheres at night, under 256 small colored lights: what lights past the frame's own cost. */
+static void sceneLights(ArtfScene* s) {
+    sceneSpheres(s);
+    artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+    artfSceneSetAmbient(s, artfVec3(.02f, .02f, .03f), artfVec3(.01f, .01f, .01f));
+    uint32_t st = 11;
+    for (int i = 0; i < 256; ++i) {
+        const ArtfVec3 at = artfVec3((frandom(&st) - .5f) * 30.f, -1.f + frandom(&st) * .6f, (frandom(&st) - .5f) * 30.f - 4.f);
+        const ArtfVec3 color = artfVec3(frandom(&st) * 2.f, frandom(&st) * 2.f, frandom(&st) * 2.f);
+        artfSceneAddLight(s, at, color, 1.5f + frandom(&st) * 1.5f);
+    }
+}
+
 /* many small things: what a frame's fixed costs look like */
 static void sceneField(ArtfScene* s, int side) {
     ArtfMesh cube = artfSceneAddCube(s, .7f), ball = artfSceneAddSphere(s, .45f, 8, 12);
@@ -372,6 +385,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(sceneName, "heavy")) sceneHeavy(s);
     else if (!strcmp(sceneName, "city")) sceneCity(s);
     else if (!strcmp(sceneName, "layers")) sceneLayers(s);
+    else if (!strcmp(sceneName, "lights")) sceneLights(s);
     else if (isHole) sceneBlackHole(s, &hole);
     else sceneSpheres(s);
     if (pngAlpha) artfSceneSetBackgroundAlpha(s, 0);

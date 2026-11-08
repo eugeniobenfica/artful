@@ -541,6 +541,7 @@ typedef struct LitBatch {
     int count;
     int level;
     uint32_t lights;
+    const uint32_t* extra; /* the tile's list of lights past the frame's own; NULL: none */
     bool colored, layered;
     float opacity;
     const ArtfMaterialData* material;
@@ -563,7 +564,7 @@ static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
 
 /* The color of eight pixels. A light out of reach adds exactly nothing, so which lights are looked
  * at changes the time this takes, never the pixels. */
-static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
+static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
                       bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
     const bool shiny = material->specular > 0 || material->metallic > 0 || material->graph;
@@ -724,6 +725,20 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         if (f->shadows && f->shadows->frame->lights[i][0]) spot = v8fMul(spot, shadowLanes(f, (int)i, world, n));
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
     }
+    /* those past them that reach this tile: the same light, with no shadow */
+    for (uint32_t k = 0; extra && k < extra[0]; ++k) {
+        const ArtfLightData* L = &f->extra[extra[1 + k]];
+        Lanes3 d = {v8fSub(v8fSet(L->position[0]), world.x), v8fSub(v8fSet(L->position[1]), world.y), v8fSub(v8fSet(L->position[2]), world.z)};
+        V8F d2 = dot3(d, d);
+        V8F invLength = v8fDiv(v8fSet(1.f), v8fSqrt(v8fMax(d2, v8fSet(1e-8f))));
+        Lanes3 toLight = {v8fMul(d.x, invLength), v8fMul(d.y, invLength), v8fMul(d.z, invLength)};
+        V8F fade = v8fMax(v8fSub(v8fSet(1.f), v8fMul(d2, v8fSet(1.f / (L->radius * L->radius)))), zero);
+        if (v8iSigns(v8fGt(fade, zero)) == 0) continue; /* (none of the eight is in reach) */
+        Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
+        V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
+        spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
+        addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
+    }
 
     Lanes3 lit = {v8fAdd(v8fAdd(v8fMul(albedo.x, diffuse.x), highlight.x), own.x),
                   v8fAdd(v8fAdd(v8fMul(albedo.y, diffuse.y), highlight.y), own.y),
@@ -788,7 +803,7 @@ static void batchFlush(LitBatch* b, const ArtfSoftFrame* f, uint32_t* color) {
         tangent.x = v8fLoad(b->tx); tangent.y = v8fLoad(b->ty); tangent.z = v8fLoad(b->tz);
         bitangent.x = v8fLoad(b->bx); bitangent.y = v8fLoad(b->by); bitangent.z = v8fLoad(b->bz);
     }
-    const LitOut lit = lightLanes(f, frame, b->material, b->textures, b->texture, b->lights, b->level, n, world, v8fLoad(b->u), v8fLoad(b->v), b->colored, b->layered, tint, alpha, &tangent, &bitangent);
+    const LitOut lit = lightLanes(f, frame, b->material, b->textures, b->texture, b->lights, b->extra, b->level, n, world, v8fLoad(b->u), v8fLoad(b->v), b->colored, b->layered, tint, alpha, &tangent, &bitangent);
     v8iStore(colors, lit.color);
     for (int i = 0; i < b->count; ++i) color[b->at[i]] = colors[i];
     if (f->post) {
@@ -834,7 +849,7 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
     s->originX = ox;
     s->originY = oy;
     s->texture = material->texture ? &f->scene->textures.items[material->texture] : NULL;
-    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || frame->look[1] > 0 || f->shadows || material->graph;
+    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->look[1] > 0 || f->shadows || material->graph;
     s->bumpy = material->normalMap != 0;
     const ArtfTextureData* textures = f->scene->textures.items;
     s->sizing = s->texture ? s->texture : material->normalMap ? &textures[material->normalMap] : material->surfaceMap ? &textures[material->surfaceMap] : material->occlusionMap ? &textures[material->occlusionMap] : NULL;
@@ -1021,7 +1036,7 @@ static void shadeTriangle(ArtfSoftFrame* f, LitBatch* batch, const ArtfRasterTri
                     alpha = v8fMul(alpha, LERP(col, 3));
                 }
                 Lanes3 tangent = {v8fSet(s.tangent[0]), v8fSet(s.tangent[1]), v8fSet(s.tangent[2])}, bitangent = {v8fSet(s.bitangent[0]), v8fSet(s.bitangent[1]), v8fSet(s.bitangent[2])};
-                storeLit(f, color + y * ARTF_TILE + x, lightLanes(f, frame, s.material, f->scene->textures.items, s.texture, s.lights, mipAt(&s, (float)x + 3.5f, fy), n, world, LERP(uv, 0), LERP(uv, 1), s.colored, s.layered, tint, alpha, &tangent, &bitangent));
+                storeLit(f, color + y * ARTF_TILE + x, lightLanes(f, frame, s.material, f->scene->textures.items, s.texture, s.lights, batch->extra, mipAt(&s, (float)x + 3.5f, fy), n, world, LERP(uv, 0), LERP(uv, 1), s.colored, s.layered, tint, alpha, &tangent, &bitangent));
 #undef LERP
                 continue;
             }
@@ -1081,6 +1096,7 @@ static void shadePlane(ArtfSoftFrame* f, ArtfWorker* w, const ArtfRasterTri* con
     LitBatch batch;
     batch.count = 0;
     batch.lights = 0;
+    batch.extra = f->extraCount ? f->tileLights + (size_t)((oy / ARTF_TILE) * f->tilesX + ox / ARTF_TILE) * (1 + ARTF_TILE_LIGHTS) : NULL;
     batch.material = NULL;
     batch.texture = NULL;
     batch.level = 0;

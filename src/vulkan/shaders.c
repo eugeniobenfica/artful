@@ -917,6 +917,14 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         frontFacing = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->boolType), SPV_STORAGE_Input);
         spvDecorate(s, frontFacing, SPV_DECORATE_BuiltIn, SPV_BUILTIN_FrontFacing);
     }
+    /* lights past the frame's own: their list for each square of the frame (artfSceneLightTiles) */
+    SpvId extraLights = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 60);
+    SpvId tileLights = spvResource(s, blockOf(s, r.uintArray, false), SPV_STORAGE_StorageBuffer, 61);
+    SpvId pixelCoord = fragCoord;
+    if (!pixelCoord) {
+        pixelCoord = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->vec4), SPV_STORAGE_Input);
+        spvDecorate(s, pixelCoord, SPV_DECORATE_BuiltIn, SPV_BUILTIN_FragCoord);
+    }
     SpvId outColor = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
     spvDecorate(s, outColor, SPV_DECORATE_Location, 0);
     SpvId outSurface = 0;
@@ -1130,6 +1138,48 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     spvBranch(s, header);
     spvLabel(s, done);
 
+    /* those past them that reach this square: the same light, with no shadow */
+    SpvId extraCount = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_EYE + 2))), anyExtra;
+    spvIfBegin(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, UINT(0), extraCount), &anyExtra);
+    {
+        SpvId coord = spvLoad(s, s->vec4, pixelCoord);
+        SpvId tx = spvOp2(s, SPV_OP_UDiv, s->uintType, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(coord)), UINT(ARTF_LIGHT_TILE));
+        SpvId ty = spvOp2(s, SPV_OP_UDiv, s->uintType, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(coord)), UINT(ARTF_LIGHT_TILE));
+        SpvId tilesX = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_FOG))), UINT(ARTF_LIGHT_TILE - 1)), UINT(ARTF_LIGHT_TILE));
+        SpvId base = MUL_U(ADD_U(MUL_U(ty, tilesX), tx), UINT(1 + ARTF_TILE_LIGHTS));
+        SpvId listed = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, base));
+        spvStore(s, counter, UINT(0));
+        SpvId eHeader = spvNewId(s), eTest = spvNewId(s), eBody = spvNewId(s), eNext = spvNewId(s), eDone = spvNewId(s);
+        spvBranch(s, eHeader);
+        spvLabel(s, eHeader);
+        spvLoopMerge(s, eDone, eNext);
+        spvBranch(s, eTest);
+        spvLabel(s, eTest);
+        SpvId k = spvLoad(s, s->uintType, counter);
+        spvBranchIf(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, k, listed), eBody, eDone);
+        spvLabel(s, eBody);
+        {
+            SpvId li = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(ADD_U(base, UINT(1)), k)));
+            SpvId at = MUL_U(li, UINT(3));
+            SpvId lightA = bufferVec(s, &r, extraLights, at), lightB = bufferVec(s, &r, extraLights, ADD_U(at, UINT(1))), lightC = bufferVec(s, &r, extraLights, ADD_U(at, UINT(2)));
+            SpvId d = SUB_V3(spvShuffle3(s, lightA), world);
+            SpvId d2 = DOT3(d, d);
+            SpvId invLength = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, MAX_F(d2, FLOAT(1e-8f))));
+            SpvId radius = W(lightA);
+            SpvId fade = MAX_F(SUB_F(FLOAT(1.f), DIV_F(d2, MUL_F(radius, radius))), FLOAT(0.f));
+            SpvId toLight = SCALE_V3(d, invLength);
+            SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(toLight, spvShuffle3(s, lightC))), W(lightC)), W(lightB));
+            spot = MIN_F(MAX_F(spot, FLOAT(0.f)), FLOAT(1.f));
+            addLight(s, &acc, &reflecting, n, view, toLight, MUL_F(MUL_F(fade, fade), spot), spvShuffle3(s, lightB));
+        }
+        spvBranch(s, eNext);
+        spvLabel(s, eNext);
+        spvStore(s, counter, ADD_U(spvLoad(s, s->uintType, counter), UINT(1)));
+        spvBranch(s, eHeader);
+        spvLabel(s, eDone);
+    }
+    spvIfEnd(s, anyExtra);
+
     SpvId lit = ADD_V3(ADD_V3(MUL_V3(SCALE_V3(albedo, notMetal), spvLoad(s, s->vec3, acc.diffuse)), spvLoad(s, s->vec3, acc.highlight)), emission);
     /* air, then film, as on the CPU */
     SpvId look = frameVec(s, &r, F_LOOK), fog = spvShuffle3(s, frameVec(s, &r, F_FOG));
@@ -1152,8 +1202,12 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId share = DIV_F(around, MAX_F(DOT3(unfogged, lum3), FLOAT(1e-6f)));
         spvStore(s, outSurface, packSurfaceSpv(s, n, rough, metal, share));
         spvEndMain(s);
-        const SpvId hdrInterface[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, fragCoord, vInstance};
-        spvEntryPoint(s, SPV_MODEL_Fragment, main, hdrInterface, cutout ? 11 : 7);
+        const SpvId all[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, pixelCoord, vInstance};
+        SpvId hdrInterface[12];
+        uint32_t used = 0;
+        for (int k = 0; k < 12; ++k)
+            if (all[k]) hdrInterface[used++] = all[k];
+        spvEntryPoint(s, SPV_MODEL_Fragment, main, hdrInterface, used);
         spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
         return finish(s, size);
     }
@@ -1192,8 +1246,12 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     }
     spvEndMain(s);
 
-    const SpvId interface[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, vOpacity, frontFacing, vFade, fragCoord, vInstance, sampleMask};
-    spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, lists > 1 ? 12 : lists ? 11 : cutout ? 10 : 6);
+    const SpvId all[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, vOpacity, frontFacing, vFade, pixelCoord, vInstance, sampleMask};
+    SpvId interface[12];
+    uint32_t used = 0;
+    for (int k = 0; k < 12; ++k)
+        if (all[k]) interface[used++] = all[k];
+    spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, used);
     spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
     if (lists) spvExecutionMode(s, main, 9 /* EarlyFragmentTests */, 0, 0, 0, 0);
     return finish(s, size);
@@ -2517,7 +2575,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             {
                 SpvId li = LOAD_U(t->lightIndex);
                 SpvId isSun = IS_EQ(li, lightCount);
-                SpvId row = ADD_U(UINT(F_LIGHTS), MUL_U(spvGlsl2(s, SPV_GLSL_UMin, s->uintType, li, UINT(ARTF_MAX_LIGHTS - 1)), UINT(F_LIGHT_ROWS)));
+                SpvId row = ADD_U(UINT(F_LIGHTS), MUL_U(spvGlsl2(s, SPV_GLSL_UMin, s->uintType, li, UINT(ARTF_FRAME_LIGHTS - 1)), UINT(F_LIGHT_ROWS)));
                 SpvId lightA = frameVecAt(s, &t->r, row), lightB = frameVecAt(s, &t->r, ADD_U(row, UINT(1))), lightC = frameVecAt(s, &t->r, ADD_U(row, UINT(2)));
                 SpvId toPoint = SUB_V3(spvShuffle3(s, lightA), lifted);
                 SpvId d2 = DOT3(toPoint, toPoint), distance = SQRT_F(MAX_F(d2, FLOAT(1e-8f)));

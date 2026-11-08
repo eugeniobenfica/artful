@@ -21,7 +21,10 @@ typedef uint32_t ArtfInstance;
 typedef uint32_t ArtfLight;
 
 /* How many point lights can be on at once. */
-#define ARTF_MAX_LIGHTS 16
+/* Lights a scene holds. The first 16 that are on (by handle) are drawn as they always were, and may cast shadows;
+ * those past them light what they reach, by the 64 x 64 squares of the frame each falls in, up to 64 a square,
+ * with no shadow, and tracing leaves them out. */
+#define ARTF_MAX_LIGHTS 1024
 
 typedef struct ArtfScene ArtfScene;
 
@@ -298,7 +301,7 @@ void artfSceneSetEnvironmentLight(ArtfScene* s, float light, bool shown);
 /* Decodes a Radiance .hdr (RGBE) into linear RGB, three floats a pixel, for artfSceneSetEnvironment. The caller owns
  * them (artfFree). NULL: it is not one, or it is damaged. */
 float* artfImageDecodeHdr(const void* data, size_t size, int* width, int* height);
-/* 0 when ARTF_MAX_LIGHTS are on already. radius: where its light ends. */
+/* 0 when ARTF_MAX_LIGHTS are there already. radius: where its light ends. Only the first 16 cast shadows. */
 ArtfLight artfSceneAddLight(ArtfScene* s, ArtfVec3 position, ArtfVec3 color, float radius);
 void artfLightSet(ArtfScene* s, ArtfLight l, ArtfVec3 position, ArtfVec3 color, float radius);
 /* Makes it a spot: light goes toward direction, full up to inner radians from it, none past outer. */

@@ -120,6 +120,10 @@ typedef struct ArtfSoftFrame {
     float* postLight[4]; /* premultiplied light, and alpha */
     float* postDepth;    /* 1 / w; 0 where nothing is */
     uint32_t* postSurface;
+    /* lights past the frame's own, and of each tile, which of them reach it (artfSceneLightTiles) */
+    ArtfLightData* extra;
+    uint32_t extraCount;
+    uint32_t* tileLights;
 } ArtfSoftFrame;
 
 /* ---- post.c ---- */

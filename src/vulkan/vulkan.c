@@ -69,6 +69,7 @@ typedef struct Slot {
     VkDescriptorSet set;
     bool timed; /* its timestamps hold a frame */
     GpuBuffer frame, instances, visible, indirect, template_, materials, overlayStaging, hole, fluid, layerList, trace;
+    GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
     GpuBuffer shadow, shadowList, shadowCommands, shadowViewCommands, shadowCasters, posed, skinTable, motion, meshletCommands, meshletState, layerCommands;
     VkBuffer meshletBoundTable; /* what its set says bindings 40 and 41 are */
     bool meshletBound;
@@ -275,6 +276,9 @@ typedef struct Vulkan {
     float previous[16];             /* the frame before's viewProj */
     bool hasPrevious, historyValid;
     uint32_t postFrames;
+    ArtfLightData* lightScratch;    /* lights past the frame's own, and their lists, before they go up */
+    uint32_t* listScratch;
+    VkDeviceSize listScratchSize;
     uint64_t holeMapVersion, holeMapScene;
 
     /* the overlay */
@@ -443,6 +447,8 @@ static bool hizMake(Vulkan* v) {
 
 int artfVulkanSubmitsLeft = -1;
 bool artfVulkanRefuseSwapchain = false;
+
+static void lightDescriptors(Vulkan* v, Slot* s);
 
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
 static bool postTargetsMake(Vulkan* v) {
@@ -849,7 +855,7 @@ static bool pipelinesMake(Vulkan* v) {
 
     /* the one descriptor set */
     const VkFlags graphics = SHADER_VERTEX | SHADER_FRAGMENT;
-    const DescriptorSetLayoutBinding bindings[60] = {
+    const DescriptorSetLayoutBinding bindings[62] = {
         {0, DESCRIPTOR_UNIFORM, 1, graphics | SHADER_COMPUTE, NULL}, {1, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {2, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL}, {3, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {4, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL}, {5, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
@@ -870,18 +876,19 @@ static bool pipelinesMake(Vulkan* v) {
         {44, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL}, {45, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL},
         {46, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {47, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {48, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {49, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
+        {60, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {61, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL},
         /* what comes after a frame in floats */
         {50, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {51, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {52, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {53, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {54, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {55, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {56, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {57, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {58, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}, {59, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}};
-    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, v->floats ? 60 : 50, bindings};
+    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, v->floats ? 62 : 52, bindings};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     const PushConstantRange push[2] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}};
     const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 1, &v->setLayout, 2, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
-    const DescriptorPoolSize sizes[3] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 50}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}};
+    const DescriptorPoolSize sizes[3] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 52}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, 3, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -1417,7 +1424,10 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
         rebind = true;
     }
     if (rebind)
-        for (int i = 0; i < SLOTS; ++i) writeBufferDescriptors(v, &v->slots[i]);
+        for (int i = 0; i < SLOTS; ++i) {
+        writeBufferDescriptors(v, &v->slots[i]);
+        lightDescriptors(v, &v->slots[i]);
+    }
     return true;
 }
 
@@ -2204,6 +2214,39 @@ static void drawLayers(Vulkan* v, VkCommandBuffer c, uint32_t count) {
     }
 }
 
+/* ---- lights past the frame's own ---- */
+
+static void lightDescriptors(Vulkan* v, Slot* s) {
+    const DescriptorBufferInfo lights = {s->extraLights.buffer, 0, ~(VkDeviceSize)0}, lists = {s->tileLights.buffer, 0, ~(VkDeviceSize)0};
+    const WriteDescriptorSet writes[2] = {{ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 60, 0, 1, DESCRIPTOR_STORAGE, NULL, &lights, NULL},
+                                          {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 61, 0, 1, DESCRIPTOR_STORAGE, NULL, &lists, NULL}};
+    v->vkUpdateDescriptorSets(v->device, 2, writes, 0, NULL);
+}
+
+/* Into this slot's buffers: the lights, and each square's list (its fence was waited for). */
+static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, const ArtfFrameData* frame) {
+    if (frame->eye[2][3] <= 0) return true;
+    const uint32_t tilesX = ((uint32_t)v->width + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE, tilesY = ((uint32_t)v->height + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE;
+    const VkDeviceSize need = (VkDeviceSize)tilesX * tilesY * (1 + ARTF_TILE_LIGHTS) * 4;
+    if (s->tileLights.size < need) {
+        bufferFree(v, &s->tileLights);
+        if (!bufferNew(v, &s->tileLights, need, BUFFER_STORAGE, true)) return false;
+        lightDescriptors(v, s);
+    }
+    /* (made in main memory, then copied: what the GPU reads is slow to read back, as the lists' counts are) */
+    if (!v->lightScratch) v->lightScratch = artfMalloc(ARTF_MAX_LIGHTS * sizeof(ArtfLightData));
+    if (v->listScratchSize < need) {
+        artfFree(v->listScratch);
+        v->listScratch = artfMalloc((size_t)need);
+        v->listScratchSize = need;
+    }
+    const uint32_t count = artfSceneExtraLights(scene, v->lightScratch);
+    artfSceneLightTiles(frame, v->width, v->height, v->lightScratch, count, v->listScratch);
+    memcpy(s->extraLights.mapped, v->lightScratch, (size_t)count * sizeof(ArtfLightData));
+    memcpy(s->tileLights.mapped, v->listScratch, (size_t)need);
+    return true;
+}
+
 /* ---- what comes after a frame in floats: post.c's order ---- */
 
 static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) {
@@ -2334,6 +2377,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     frame.hizLevels = v->hizLevels;
     memcpy(frame.hiz, v->hizTable, sizeof frame.hiz);
     memcpy(s->frame.mapped, &frame, sizeof frame);
+    if (!syncLights(v, s, scene, &frame)) return false;
     syncSlot(v, s, scene);
     uint32_t layerCount = 0, traceAdding = 0;
     bool traceClear = false;
@@ -2734,9 +2778,13 @@ static void vkFree(ArtfRenderer* r) {
             if (v->postPipelines[i]) v->vkDestroyPipeline(v->device, v->postPipelines[i], NULL);
         if (v->presentPipeline) v->vkDestroyPipeline(v->device, v->presentPipeline, NULL);
         if (v->presentPass) v->vkDestroyRenderPass(v->device, v->presentPass, NULL);
+        artfFree(v->lightScratch);
+        artfFree(v->listScratch);
         for (int i = 0; i < SLOTS; ++i) {
             Slot* s = &v->slots[i];
             bufferFree(v, &s->frame);
+            bufferFree(v, &s->extraLights);
+            bufferFree(v, &s->tileLights);
             bufferFree(v, &s->hole);
             bufferFree(v, &s->fluid);
             bufferFree(v, &s->instances);
@@ -3083,6 +3131,8 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     for (int i = 0; i < SLOTS; ++i) {
         Slot* s = &v->slots[i];
         if (!bufferNew(v, &s->frame, sizeof(ArtfFrameData), BUFFER_UNIFORM, true)) goto failed;
+        if (!bufferNew(v, &s->extraLights, (VkDeviceSize)ARTF_MAX_LIGHTS * sizeof(ArtfLightData), BUFFER_STORAGE, true)) goto failed;
+        if (!bufferNew(v, &s->tileLights, 4, BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->hole, sizeof(ArtfHoleFrame), BUFFER_UNIFORM, true)) goto failed;
         if (!bufferNew(v, &s->trace, sizeof(ArtfTraceFrame), BUFFER_UNIFORM, true)) goto failed;
         if (!bufferNew(v, &s->shadow, sizeof(ArtfShadowFrame), BUFFER_UNIFORM, true)) goto failed;
