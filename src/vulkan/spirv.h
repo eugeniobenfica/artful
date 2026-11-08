@@ -82,6 +82,9 @@ void spvStore(Spv* s, SpvId pointer, SpvId value);
 SpvId spvAtomicAdd(Spv* s, SpvId pointer, SpvId value);
 SpvId spvImageSample(Spv* s, SpvId sampledImage, SpvId uv);
 SpvId spvImageSampleLod(Spv* s, SpvId sampledImage, SpvId uv, SpvId lod); /* outside fragment shaders */
+SpvId spvImageFetchAs(Spv* s, SpvId resultType, SpvId imageType, SpvId sampledImage, SpvId coords); /* level 0, of any type */
+SpvId spvTypeSampledImage2DOf(Spv* s, SpvId sampledType, SpvId* imageType); /* of uints, say */
+SpvId spvTypeVector(Spv* s, SpvId element, uint32_t count);
 SpvId spvImageFetch(Spv* s, SpvId imageType, SpvId sampledImage, SpvId coords);
 SpvId spvImageFetchSample(Spv* s, SpvId imageType, SpvId sampledImage, SpvId coords, SpvId sample);
 void spvBranch(Spv* s, SpvId label);

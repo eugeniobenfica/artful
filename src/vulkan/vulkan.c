@@ -32,7 +32,7 @@
 #endif
 
 enum {
-    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
+    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
     LAYOUT_UNDEFINED = 0, LAYOUT_COLOR = 2, LAYOUT_DEPTH = 3, LAYOUT_DEPTH_READ = 4, LAYOUT_SHADER_READ = 5, LAYOUT_TRANSFER_SRC = 6, LAYOUT_TRANSFER_DST = 7, LAYOUT_PRESENT = 1000001002,
     IMAGE_TRANSFER_SRC = 1, IMAGE_TRANSFER_DST = 2, IMAGE_SAMPLED = 4, IMAGE_COLOR = 0x10, IMAGE_DEPTH = 0x20,
     BUFFER_TRANSFER_SRC = 1, BUFFER_TRANSFER_DST = 2, BUFFER_UNIFORM = 0x10, BUFFER_STORAGE = 0x20, BUFFER_INDEX = 0x40, BUFFER_VERTEX = 0x80, BUFFER_INDIRECT = 0x100,
@@ -261,6 +261,20 @@ typedef struct Vulkan {
     GpuBuffer environment;          /* a scene's maps of all around (binding 49): four bytes until one has some */
     uint64_t environmentVersion, environmentScene;
     VkPipeline environmentPipeline; /* behind the scene */
+    /* A frame in floats (ArtfRendererOptions.hdr): the scene draws light and surfaces, the passes of postShaders.inc
+     * follow, and presentPass puts it in the frame, with the overlay. */
+    bool floats, independentBlend;
+    int sceneFormat;                /* what the scene's passes draw into: floats, or the frame's own */
+    GpuImage floatColor, floatSurface;
+    VkRenderPass presentPass;
+    VkFramebuffer presentFramebuffers[MAX_SWAPCHAIN_IMAGES];
+    VkPipeline presentPipeline;
+    VkPipeline postPipelines[10];   /* gather, occlusion, its blur, reflections, fog, its use, temporal, focus, bloom down, up */
+    GpuBuffer postLight, postDepth, postSurface, postScratch, postHistory, postOcclusion, postFog, postBloom;
+    uint32_t postBloomSizes[6][3];  /* of each level: where it starts, its width, its height */
+    float previous[16];             /* the frame before's viewProj */
+    bool hasPrevious, historyValid;
+    uint32_t postFrames;
     uint64_t holeMapVersion, holeMapScene;
 
     /* the overlay */
@@ -370,6 +384,16 @@ static void targetsFree(Vulkan* v) {
         v->framebuffers[i] = 0;
         v->views[i] = 0;
     }
+    for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i) {
+        if (v->presentFramebuffers[i]) v->vkDestroyFramebuffer(v->device, v->presentFramebuffers[i], NULL);
+        v->presentFramebuffers[i] = 0;
+    }
+    imageFree(v, &v->floatColor);
+    imageFree(v, &v->floatSurface);
+    GpuBuffer* const post[8] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom};
+    for (int i = 0; i < 8; ++i) bufferFree(v, post[i]);
+    v->historyValid = false;
+    v->hasPrevious = false;
     imageFree(v, &v->depth);
     imageFree(v, &v->samples4);
     imageFree(v, &v->offscreen);
@@ -419,6 +443,47 @@ static bool hizMake(Vulkan* v) {
 
 int artfVulkanSubmitsLeft = -1;
 bool artfVulkanRefuseSwapchain = false;
+
+/* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
+static bool postTargetsMake(Vulkan* v) {
+    if (!imageNew(v, &v->floatColor, v->sceneFormat, v->width, v->height, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    if (!imageNew(v, &v->floatSurface, FORMAT_R32_UINT, v->width, v->height, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    const VkDeviceSize pixels = (VkDeviceSize)v->width * v->height;
+    const VkDeviceSize fog = (VkDeviceSize)((v->width + 3) / 4) * ((v->height + 3) / 4);
+    VkDeviceSize bloom = 0;
+    uint32_t w = (uint32_t)v->width, h = (uint32_t)v->height;
+    for (int l = 0; l < 6; ++l) {
+        w = (w + 1) / 2 ? (w + 1) / 2 : 1;
+        h = (h + 1) / 2 ? (h + 1) / 2 : 1;
+        v->postBloomSizes[l][0] = (uint32_t)bloom;
+        v->postBloomSizes[l][1] = w;
+        v->postBloomSizes[l][2] = h;
+        bloom += (VkDeviceSize)w * h;
+    }
+    GpuBuffer* const buffers[8] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom};
+    const VkDeviceSize sizes[8] = {pixels * 16, pixels * 4, pixels * 4, pixels * 16, pixels * 16, pixels * 4, fog * 16, bloom * 16};
+    for (int i = 0; i < 8; ++i)
+        if (!bufferNew(v, buffers[i], sizes[i], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
+    for (int k = 0; k < SLOTS; ++k) {
+        WriteDescriptorSet writes[10];
+        DescriptorBufferInfo infos[8];
+        for (int i = 0; i < 8; ++i) {
+            const DescriptorBufferInfo info = {buffers[i]->buffer, 0, ~(VkDeviceSize)0};
+            infos[i] = info;
+            const WriteDescriptorSet write = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 50 + (uint32_t)i, 0, 1, DESCRIPTOR_STORAGE, NULL, &infos[i], NULL};
+            writes[i] = write;
+        }
+        const DescriptorImageInfo color = {v->depthSampler, v->floatColor.view, LAYOUT_SHADER_READ}, surface = {v->depthSampler, v->floatSurface.view, LAYOUT_SHADER_READ};
+        const WriteDescriptorSet images[2] = {{ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 58, 0, 1, DESCRIPTOR_COMBINED, &color, NULL, NULL},
+                                             {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 59, 0, 1, DESCRIPTOR_COMBINED, &surface, NULL, NULL}};
+        writes[8] = images[0];
+        writes[9] = images[1];
+        v->vkUpdateDescriptorSets(v->device, 10, writes, 0, NULL);
+    }
+    v->historyValid = false;
+    v->hasPrevious = false;
+    return true;
+}
 
 static bool targetsMake(Vulkan* v) {
     if (v->surface) {
@@ -485,10 +550,16 @@ static bool targetsMake(Vulkan* v) {
         FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->resolvePass, 1, &v->samples4.view, (uint32_t)v->width, (uint32_t)v->height, 1};
         if (v->vkCreateFramebuffer(v->device, &info, NULL, &v->resolveFramebuffer) != VK_OK) return false;
     }
+    if (v->floats && !postTargetsMake(v)) return false;
     for (uint32_t i = 0; i < v->imageCount; ++i) {
         const VkImageView one[2] = {v->views[i], v->depth.view}, resolved[3] = {v->samples4.view, v->depth.view, v->views[i]};
-        FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->renderPass, many ? 3 : 2, many ? resolved : one, (uint32_t)v->width, (uint32_t)v->height, 1};
+        const VkImageView floats[3] = {v->floatColor.view, v->depth.view, v->floatSurface.view};
+        FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->renderPass, v->floats ? 3 : many ? 3 : 2, v->floats ? floats : many ? resolved : one, (uint32_t)v->width, (uint32_t)v->height, 1};
         if (v->vkCreateFramebuffer(v->device, &info, NULL, &v->framebuffers[i]) != VK_OK) return false;
+        if (v->floats) {
+            FramebufferCreateInfo present = {ST_FRAMEBUFFER, NULL, 0, v->presentPass, 1, &v->views[i], (uint32_t)v->width, (uint32_t)v->height, 1};
+            if (v->vkCreateFramebuffer(v->device, &present, NULL, &v->presentFramebuffers[i]) != VK_OK) return false;
+        }
     }
     if (!imageNew(v, &v->overlay, FORMAT_BGRA8, v->width, v->height, 1, 1, IMAGE_SAMPLED | IMAGE_TRANSFER_DST, ASPECT_COLOR)) return false;
     writeOverlayDescriptor(v);
@@ -522,28 +593,48 @@ static VkShaderModule shaderModule(Vulkan* v, uint32_t* code, size_t size) {
 }
 
 /* colorLoad, depthLoad: 0 clears, 1 keeps what is there; depthStore: what is drawn stays for a shader. */
+/* A pipeline's blending into the scene's passes: with a frame in floats, the surface is beside the color, and only
+ * what is solid writes it. */
+static PipelineColorBlend blendOf(const Vulkan* v, ColorBlendAttachment* pair, ColorBlendAttachment color, bool surface) {
+    pair[0] = color;
+    const ColorBlendAttachment kept = {0, 0, 0, 0, 0, 0, 0, surface ? 1u : 0u};
+    pair[1] = kept;
+    const PipelineColorBlend b = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, v->floats ? 2u : 1u, pair, {0, 0, 0, 0}};
+    return b;
+}
+
 static bool renderPassMake(Vulkan* v, VkRenderPass* out, bool load, bool store, int colorFinal, bool readDepth) {
+    /* (with a frame in floats, depth is kept for what comes after, and the surface goes beside the color) */
+    if (v->floats) store = true;
     const int colorFrom = load ? LAYOUT_COLOR : LAYOUT_UNDEFINED, depthFrom = load ? LAYOUT_DEPTH_READ : LAYOUT_UNDEFINED;
     /* With several samples a pixel what is drawn stays in the pass, and only its mean comes out, unless
      * another pass goes on from it. (The early one has a mean too, that the late one replaces: passes
      * must match to share a framebuffer.) */
     const bool many = v->samples > 1;
     const int samples = v->samples;
-    const AttachmentDescription attachments[3] = {
-        {0, v->colorFormat, samples, load ? 0 : 1, many && !store ? 1 : 0 /* store */, 2, 1, colorFrom, many ? LAYOUT_COLOR : colorFinal},
+    const AttachmentDescription attachments[4] = {
+        {0, v->sceneFormat, samples, load ? 0 : 1, many && !store ? 1 : 0 /* store */, 2, 1, colorFrom, many ? LAYOUT_COLOR : colorFinal},
         /* (the depth buffer is not kept unless asked: on a tiler it never leaves the chip) */
         {0, FORMAT_D32, samples, load ? 0 : 1, store ? 0 : 1, 2, 1, depthFrom, store ? LAYOUT_DEPTH_READ : LAYOUT_DEPTH},
-        {0, v->colorFormat, 1, 2, 0, 2, 1, LAYOUT_UNDEFINED, colorFinal}};
+        {0, v->sceneFormat, 1, 2, 0, 2, 1, LAYOUT_UNDEFINED, colorFinal},
+        {0, FORMAT_R32_UINT, 1, load ? 0 : 1, 0, 2, 1, colorFrom, colorFinal}};
     /* (readDepth: only colors, which stay for the pass that comes next: a shader reads depth) */
-    const AttachmentReference color = {0, LAYOUT_COLOR}, depth = {1, LAYOUT_DEPTH}, resolved = {2, LAYOUT_COLOR};
-    const SubpassDescription subpass = {0, 0, 0, NULL, 1, &color, many && !readDepth ? &resolved : NULL, readDepth ? NULL : &depth, 0, NULL};
+    const AttachmentReference depth = {1, LAYOUT_DEPTH}, resolved = {2, LAYOUT_COLOR};
+    const AttachmentReference colors[2] = {{0, LAYOUT_COLOR}, {readDepth ? 1u : 2u, LAYOUT_COLOR}};
+    AttachmentDescription used[4];
+    uint32_t count = 0;
+    used[count++] = attachments[0];
+    if (!readDepth) used[count++] = attachments[1];
+    if (many && !readDepth) used[count++] = attachments[2];
+    if (v->floats) used[count++] = attachments[3];
+    const SubpassDescription subpass = {0, 0, 0, NULL, v->floats ? 2 : 1, colors, many && !readDepth ? &resolved : NULL, readDepth ? NULL : &depth, 0, NULL};
     const VkFlags draw = STAGE_COLOR | STAGE_EARLY_TESTS | STAGE_LATE_TESTS;
     /* what came before with the same images; and, for the pyramid, what comes after. (All passes have both:
      * they must match, dependencies too, to share pipelines and a framebuffer.) */
     const SubpassDependency dependencies[2] = {
         {~0u, 0, draw | STAGE_COMPUTE, draw, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE, ACCESS_COLOR_READ | ACCESS_COLOR_WRITE | ACCESS_DEPTH_READ | ACCESS_DEPTH_WRITE, 0},
         {0, ~0u, draw, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE, ACCESS_SHADER_READ, 0}};
-    const RenderPassCreateInfo pass = {ST_RENDER_PASS, NULL, 0, readDepth ? 1 : many ? 3 : 2, attachments, 1, &subpass, 2, dependencies};
+    const RenderPassCreateInfo pass = {ST_RENDER_PASS, NULL, 0, count, used, 1, &subpass, 2, dependencies};
     return v->vkCreateRenderPass(v->device, &pass, NULL, out) == VK_OK;
 }
 
@@ -629,7 +720,7 @@ static bool cutoutPipelinesMake(Vulkan* v, const ArtfGraphData* graphs, uint32_t
         if (old[i]) v->vkDestroyPipeline(v->device, old[i], NULL);
     v->layerListPipeline = 0;
     size_t size;
-    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, 0);
+    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, 0, v->floats);
     VkShaderModule fragment = shaderModule(v, code, size);
     if (!fragment) return false;
     const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
@@ -651,9 +742,10 @@ static bool cutoutPipelinesMake(Vulkan* v, const ArtfGraphData* graphs, uint32_t
     const ColorBlendAttachment opaque = {0, 0, 0, 0, 0, 0, 0, 15};
     const ColorBlendAttachment premultiplied = {1, 1 /* one */, 7 /* one minus source alpha */, 0, 1, 7, 0, 15};
     const ColorBlendAttachment noColor = {0, 0, 0, 0, 0, 0, 0, 0};
-    const PipelineColorBlend blendOff = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &opaque, {0, 0, 0, 0}};
-    const PipelineColorBlend blendOn = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &premultiplied, {0, 0, 0, 0}};
-    const PipelineColorBlend blendNone = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &noColor, {0, 0, 0, 0}};
+    ColorBlendAttachment pairOff[2], pairOn[2], pairNone[2];
+    const PipelineColorBlend blendOff = blendOf(v, pairOff, opaque, true);
+    const PipelineColorBlend blendOn = blendOf(v, pairOn, premultiplied, false);
+    const PipelineColorBlend blendNone = blendOf(v, pairNone, noColor, false);
     const int states[2] = {0, 1};
     const PipelineDynamic dynamic = {ST_PIPELINE_DYNAMIC, NULL, 0, 2, states};
     const PipelineShaderStage stages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, v->sceneVertexModule, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, fragment, "main", NULL}};
@@ -690,7 +782,7 @@ static bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
     }
     if (v->layerListPipeline && v->layerResolvePipeline) return true;
     size_t size;
-    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, scene->graphs.items, (uint32_t)scene->graphs.len, v->samples);
+    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, scene->graphs.items, (uint32_t)scene->graphs.len, v->samples, false);
     VkShaderModule fragment = shaderModule(v, code, size);
     code = artfShaderOverlayVertex(&size);
     VkShaderModule whole = shaderModule(v, code, size);
@@ -714,8 +806,9 @@ static bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
     depthOff.sType = ST_PIPELINE_DEPTH_STENCIL;
     const ColorBlendAttachment noColor = {0, 0, 0, 0, 0, 0, 0, 0};
     const ColorBlendAttachment premultiplied = {1, 1 /* one */, 7 /* one minus source alpha */, 0, 1, 7, 0, 15};
-    const PipelineColorBlend blendNone = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &noColor, {0, 0, 0, 0}};
-    const PipelineColorBlend blendOn = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &premultiplied, {0, 0, 0, 0}};
+    ColorBlendAttachment pairNone[2], pairOn[2];
+    const PipelineColorBlend blendNone = blendOf(v, pairNone, noColor, false);
+    const PipelineColorBlend blendOn = blendOf(v, pairOn, premultiplied, false);
     const int states[2] = {0, 1};
     const PipelineDynamic dynamic = {ST_PIPELINE_DYNAMIC, NULL, 0, 2, states};
     const PipelineShaderStage listStages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, v->sceneVertexModule, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, fragment, "main", NULL}};
@@ -737,7 +830,17 @@ static bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
 static bool pipelinesMake(Vulkan* v) {
     pipelineCacheOpen(v);
     if (!shadowPassMake(v)) return false;
-    const int finalLayout = v->surface ? LAYOUT_PRESENT : LAYOUT_TRANSFER_SRC;
+    const int frameLayout = v->surface ? LAYOUT_PRESENT : LAYOUT_TRANSFER_SRC;
+    /* (with floats, the scene's passes leave their images to be read, and presentPass makes the frame) */
+    const int finalLayout = v->floats ? LAYOUT_SHADER_READ : frameLayout;
+    if (v->floats) {
+        const AttachmentDescription frameColor = {0, v->colorFormat, 1, 2 /* don't care */, 0 /* store */, 2, 1, LAYOUT_UNDEFINED, frameLayout};
+        const AttachmentReference ref = {0, LAYOUT_COLOR};
+        const SubpassDescription sub = {0, 0, 0, NULL, 1, &ref, NULL, NULL, 0, NULL};
+        const SubpassDependency deps[1] = {{~0u, 0, STAGE_COMPUTE | STAGE_COLOR, STAGE_FRAGMENT | STAGE_COLOR, ACCESS_SHADER_WRITE | ACCESS_COLOR_WRITE, ACCESS_SHADER_READ | ACCESS_COLOR_WRITE, 0}};
+        const RenderPassCreateInfo present = {ST_RENDER_PASS, NULL, 0, 1, &frameColor, 1, &sub, 1, deps};
+        if (v->vkCreateRenderPass(v->device, &present, NULL, &v->presentPass) != VK_OK) return false;
+    }
     if (!renderPassMake(v, &v->renderPass, false, false, finalLayout, false)) return false;
     if (!renderPassMake(v, &v->earlyPass, false, true, LAYOUT_COLOR, false)) return false;
     if (!renderPassMake(v, &v->latePass, true, false, finalLayout, false)) return false;
@@ -746,7 +849,7 @@ static bool pipelinesMake(Vulkan* v) {
 
     /* the one descriptor set */
     const VkFlags graphics = SHADER_VERTEX | SHADER_FRAGMENT;
-    const DescriptorSetLayoutBinding bindings[50] = {
+    const DescriptorSetLayoutBinding bindings[60] = {
         {0, DESCRIPTOR_UNIFORM, 1, graphics | SHADER_COMPUTE, NULL}, {1, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {2, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL}, {3, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {4, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL}, {5, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
@@ -758,7 +861,7 @@ static bool pipelinesMake(Vulkan* v) {
         {17, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {18, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {19, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {20, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {21, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {22, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {23, DESCRIPTOR_UNIFORM, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
-        {24, DESCRIPTOR_UNIFORM, 1, graphics | SHADER_COMPUTE, NULL}, {25, DESCRIPTOR_COMBINED, 1, SHADER_FRAGMENT, NULL}, {26, DESCRIPTOR_STORAGE, 1, SHADER_VERTEX | SHADER_COMPUTE, NULL},
+        {24, DESCRIPTOR_UNIFORM, 1, graphics | SHADER_COMPUTE, NULL}, {25, DESCRIPTOR_COMBINED, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {26, DESCRIPTOR_STORAGE, 1, SHADER_VERTEX | SHADER_COMPUTE, NULL},
         {27, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {28, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {29, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {30, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {31, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {32, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {33, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {34, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {35, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {36, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
@@ -766,14 +869,19 @@ static bool pipelinesMake(Vulkan* v) {
         {40, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {41, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {42, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {43, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {44, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL}, {45, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL},
         {46, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {47, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
-        {48, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {49, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL}};
-    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, 50, bindings};
+        {48, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {49, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
+        /* what comes after a frame in floats */
+        {50, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {51, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {52, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
+        {53, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {54, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {55, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
+        {56, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {57, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
+        {58, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}, {59, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}};
+    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, v->floats ? 60 : 50, bindings};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     const PushConstantRange push[2] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}};
     const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 1, &v->setLayout, 2, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
-    const DescriptorPoolSize sizes[3] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 42}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 3)}};
+    const DescriptorPoolSize sizes[3] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 50}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, 3, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -807,17 +915,17 @@ static bool pipelinesMake(Vulkan* v) {
     compute[8] = shaderModule(v, code, size);
     code = artfShaderSceneVertex(&size);
     VkShaderModule sceneVertex = shaderModule(v, code, size);
-    code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0);
+    code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0, v->floats);
     VkShaderModule sceneFragment = shaderModule(v, code, size);
     code = artfShaderOverlayVertex(&size);
     VkShaderModule overlayVertex = shaderModule(v, code, size);
     code = artfShaderOverlayFragment(&size);
     VkShaderModule overlayFragment = shaderModule(v, code, size);
-    code = artfShaderHoleBackdrop(&size);
+    code = artfShaderHoleBackdrop(&size, v->floats);
     VkShaderModule backdropFragment = shaderModule(v, code, size);
-    code = artfShaderTraceShow(&size);
+    code = artfShaderTraceShow(&size, v->floats);
     VkShaderModule traceFragment = shaderModule(v, code, size);
-    code = artfShaderEnvironmentBackdrop(&size);
+    code = artfShaderEnvironmentBackdrop(&size, v->floats);
     VkShaderModule environmentFragment = shaderModule(v, code, size);
     code = artfShaderShadowVertex(&size);
     VkShaderModule shadowVertex = shaderModule(v, code, size);
@@ -866,8 +974,12 @@ static bool pipelinesMake(Vulkan* v) {
     depthOff.sType = ST_PIPELINE_DEPTH_STENCIL;
     const ColorBlendAttachment opaque = {0, 0, 0, 0, 0, 0, 0, 15};
     const ColorBlendAttachment premultiplied = {1, 1 /* one */, 7 /* one minus source alpha */, 0, 1, 7, 0, 15};
-    const PipelineColorBlend blendOff = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &opaque, {0, 0, 0, 0}};
-    const PipelineColorBlend blendOn = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &premultiplied, {0, 0, 0, 0}};
+    ColorBlendAttachment pairOff[2], pairOn[2], pairBehind[2];
+    const PipelineColorBlend blendOff = blendOf(v, pairOff, opaque, true);
+    const PipelineColorBlend blendOn = blendOf(v, pairOn, premultiplied, false);
+    const PipelineColorBlend blendBehind = blendOf(v, pairBehind, opaque, false); /* (what is behind the scene has no surface) */
+    /* the overlay goes over the frame: with floats, in presentPass, after what comes after */
+    const PipelineColorBlend overlayBlend = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &premultiplied, {0, 0, 0, 0}};
     const int states[2] = {0, 1}; /* viewport, scissor: a new size needs no new pipeline */
     const PipelineDynamic dynamic = {ST_PIPELINE_DYNAMIC, NULL, 0, 2, states};
     const PipelineShaderStage sceneStages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, sceneVertex, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, sceneFragment, "main", NULL}};
@@ -882,13 +994,13 @@ static bool pipelinesMake(Vulkan* v) {
     const PipelineColorBlend noBlend = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 0, NULL, {0, 0, 0, 0}};
     const GraphicsPipelineCreateInfo graphicsInfo[7] = {
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, sceneStages, &vertexInput, &assembly, NULL, &viewport, &rasterBack, &multisample, &depthOn, &blendOff, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
-        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, overlayStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendOn, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
-        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, backdropStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendOff, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, overlayStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, v->floats ? &overlayBlend : &blendOn, &dynamic, v->pipelineLayout, v->floats ? v->presentPass : v->renderPass, 0, 0, -1},
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, backdropStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendBehind, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, traceStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendOn, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
         /* what casts shadows: both sides, as rays have it; with no pixel shader where it can do without */
         {ST_GRAPHICS_PIPELINE, NULL, 0, 1, shadowStages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &oneSample, &depthNear, &noBlend, &dynamic, v->pipelineLayout, v->shadowPass, 0, 0, -1},
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, shadowStages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &oneSample, &depthNear, &noBlend, &dynamic, v->pipelineLayout, v->shadowPass, 0, 0, -1},
-        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, environmentStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendOff, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1}};
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, environmentStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendBehind, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1}};
     VkPipeline made[7] = {0, 0, 0, 0, 0, 0, 0};
     ok = ok && v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 7, graphicsInfo, NULL, made) == VK_OK;
     v->scenePipeline = made[0];
@@ -898,6 +1010,26 @@ static bool pipelinesMake(Vulkan* v) {
     v->shadowPipeline = made[4];
     v->shadowHolesPipeline = made[5];
     v->environmentPipeline = made[6];
+    if (ok && v->floats) {
+        /* what comes after: postShaders.inc */
+        uint32_t* (*const makers[10])(size_t*) = {artfShaderPostGather, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFog,
+                                                  artfShaderPostFogApply, artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp};
+        for (int i = 0; i < 10 && ok; ++i) {
+            uint32_t* postCode = makers[i](&size);
+            VkShaderModule module = shaderModule(v, postCode, size);
+            const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
+            ok = module && v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &c, NULL, &v->postPipelines[i]) == VK_OK;
+            if (module) v->vkDestroyShaderModule(v->device, module, NULL);
+        }
+        uint32_t* finalCode = artfShaderPostFinal(&size);
+        VkShaderModule finalModule = shaderModule(v, finalCode, size);
+        const PipelineShaderStage presentStages[2] = {overlayStages[0], {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, finalModule, "main", NULL}};
+        const ColorBlendAttachment whole = {0, 0, 0, 0, 0, 0, 0, 15};
+        const PipelineColorBlend replace = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 1, &whole, {0, 0, 0, 0}};
+        const GraphicsPipelineCreateInfo present = {ST_GRAPHICS_PIPELINE, NULL, 0, 2, presentStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &oneSample, &depthOff, &replace, &dynamic, v->pipelineLayout, v->presentPass, 0, 0, -1};
+        ok = ok && finalModule && v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 1, &present, NULL, &v->presentPipeline) == VK_OK;
+        if (finalModule) v->vkDestroyShaderModule(v->device, finalModule, NULL);
+    }
     ok = ok && cutoutPipelinesMake(v, NULL, 0);
 
     for (int i = 0; i < COMPUTE_SHADERS; ++i) v->vkDestroyShaderModule(v->device, compute[i], NULL);
@@ -2072,6 +2204,70 @@ static void drawLayers(Vulkan* v, VkCommandBuffer c, uint32_t count) {
     }
 }
 
+/* ---- what comes after a frame in floats: post.c's order ---- */
+
+static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) {
+    v->vkCmdBindPipeline(c, 1, v->postPipelines[pipeline]);
+    v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &push);
+    v->vkCmdDispatch(c, (count + 63) / 64, 1, 1);
+    memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
+}
+
+static void postCopy(Vulkan* v, VkCommandBuffer c, GpuBuffer* from, GpuBuffer* to) {
+    const BufferCopy copy = {0, 0, from->size < to->size ? from->size : to->size};
+    v->vkCmdCopyBuffer(c, from->buffer, to->buffer, 1, &copy);
+    memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
+}
+
+enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FOG, POST_FOG_APPLY, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP };
+
+static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* frame, uint32_t image, const Viewport* viewport, const Rect2D* area) {
+    const uint32_t pixels = (uint32_t)v->width * (uint32_t)v->height;
+    v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+    postStep(v, c, POST_GATHER, 0, pixels);
+    if (frame->post[0][2] > 0) {
+        postStep(v, c, POST_OCCLUSION, 0, pixels);
+        postStep(v, c, POST_OCCLUSION_BLUR, 0, pixels);
+    }
+    if (frame->post[1][0] > 0) {
+        postStep(v, c, POST_REFLECTION, 0, pixels);
+        postCopy(v, c, &v->postScratch, &v->postLight);
+    }
+    if (frame->post[1][1] > 0 && frame->look[1] > 0) {
+        postStep(v, c, POST_FOG, 0, (uint32_t)((v->width + 3) / 4) * (uint32_t)((v->height + 3) / 4));
+        postStep(v, c, POST_FOG_APPLY, 0, pixels);
+    }
+    if (frame->post[1][3] > 0) {
+        postStep(v, c, POST_TEMPORAL, v->historyValid ? 1u : 0u, pixels);
+        postCopy(v, c, &v->postScratch, &v->postLight);
+        postCopy(v, c, &v->postLight, &v->postHistory);
+        v->historyValid = true;
+    } else {
+        v->historyValid = false;
+    }
+    if (frame->post[2][1] > 0 && frame->post[2][0] > 0) {
+        postStep(v, c, POST_FOCUS, 0, pixels);
+        postCopy(v, c, &v->postScratch, &v->postLight);
+    }
+    if (frame->post[0][0] > 0) {
+        for (uint32_t l = 0; l < 6; ++l) postStep(v, c, POST_BLOOM_DOWN, l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
+        for (int l = 4; l >= 0; --l) postStep(v, c, POST_BLOOM_UP, (uint32_t)l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
+    }
+    memoryBarrier(v, c, STAGE_COMPUTE | STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
+    RenderPassBeginInfo present = {ST_RENDER_PASS_BEGIN, NULL, v->presentPass, v->presentFramebuffers[image], *area, 0, NULL};
+    v->vkCmdBeginRenderPass(c, &present, 0);
+    v->vkCmdSetViewport(c, 0, 1, viewport);
+    v->vkCmdSetScissor(c, 0, 1, area);
+    v->vkCmdBindPipeline(c, 0, v->presentPipeline);
+    v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+    v->vkCmdDraw(c, 3, 1, 0, 0);
+    if (v->overlayPixels && v->overlayUsable) {
+        v->vkCmdBindPipeline(c, 0, v->overlayPipeline);
+        v->vkCmdDraw(c, 3, 1, 0, 0);
+    }
+    v->vkCmdEndRenderPass(c);
+}
+
 static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     Vulkan* v = (Vulkan*)r;
     const double start = artfNowMs();
@@ -2124,6 +2320,17 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
 
     ArtfFrameData frame;
     artfSceneFrame(scene, v->width, v->height, &frame);
+    if (v->floats) {
+        /* the frame before, and with temporal antialiasing, a place within the pixel: as softDraw */
+        float now[16];
+        memcpy(now, frame.viewProj, sizeof now);
+        if (v->hasPrevious) memcpy(frame.previous, v->previous, sizeof v->previous);
+        memcpy(v->previous, now, sizeof now);
+        v->hasPrevious = true;
+        if (scene->post.temporal) artfFrameJitter(&frame, v->postFrames++, v->width, v->height);
+    } else {
+        memset(frame.post, 0, sizeof frame.post);
+    }
     frame.hizLevels = v->hizLevels;
     memcpy(frame.hiz, v->hizTable, sizeof frame.hiz);
     memcpy(s->frame.mapped, &frame, sizeof frame);
@@ -2231,7 +2438,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
 
     VkCommandBuffer c = s->commands;
     /* (its descriptors change here: not once the set is bound) */
-    const bool sorted = layerCount && v->fragmentStores && (v->samples == 1 || v->sampleShading) && scene->features[ARTF_FEATURE_LAYERS_SORTED];
+    const bool sorted = layerCount && v->fragmentStores && !v->floats && (v->samples == 1 || v->sampleShading) && scene->features[ARTF_FEATURE_LAYERS_SORTED];
     if (sorted && !layerListsMake(v, scene)) return false;
     if (sorted) {
         /* (one call for all of them: what they add to the lists has no order) */
@@ -2314,9 +2521,14 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         }
     }
 
-    ClearValue clears[2];
+    ClearValue clears[3];
     memset(clears, 0, sizeof clears);
     memcpy(clears[0].color, frame.background, sizeof clears[0].color);
+    if (v->floats) {
+        /* (the background as light: what shows, squared, as on the CPU) */
+        const float alpha = frame.background[3], over = alpha > 0 ? 1.f / alpha : 0.f;
+        for (int k = 0; k < 3; ++k) clears[0].color[k] = frame.background[k] * frame.background[k] * over;
+    }
     const Rect2D area = {{0, 0}, {(uint32_t)v->width, (uint32_t)v->height}};
     /* (the height negative: y goes up in clip space, as on the CPU) */
     const Viewport viewport = {0, (float)v->height, (float)v->width, -(float)v->height, 0, 1};
@@ -2326,7 +2538,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->vkCmdFillBuffer(c, v->layerCounts.buffer, 0, ~(VkDeviceSize)0, 0);
         memoryBarrier(v, c, STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
     }
-    RenderPassBeginInfo pass = {ST_RENDER_PASS_BEGIN, NULL, occlusion || sorted ? v->earlyPass : v->renderPass, v->framebuffers[image], area, 2, clears};
+    RenderPassBeginInfo pass = {ST_RENDER_PASS_BEGIN, NULL, occlusion || sorted ? v->earlyPass : v->renderPass, v->framebuffers[image], area, v->floats ? 3 : 2, clears};
     v->vkCmdBeginRenderPass(c, &pass, 0);
     v->vkCmdSetViewport(c, 0, 1, &viewport);
     v->vkCmdSetScissor(c, 0, 1, &area);
@@ -2399,12 +2611,13 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         v->vkCmdDraw(c, 3, 1, 0, 0);
     }
-    if (v->overlayPixels && v->overlayUsable) {
+    if (v->overlayPixels && v->overlayUsable && !v->floats) {
         v->vkCmdBindPipeline(c, 0, v->overlayPipeline);
         v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         v->vkCmdDraw(c, 3, 1, 0, 0);
     }
     v->vkCmdEndRenderPass(c);
+    if (v->floats) postRecord(v, c, s, &frame, image, &viewport, &area);
     if (s->timed) v->vkCmdWriteTimestamp(c, STAGE_BOTTOM, v->timestamps, slotIndex * 2 + 1);
     v->vkEndCommandBuffer(c);
 
@@ -2517,6 +2730,10 @@ static void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->holeMap);
         bufferFree(v, &v->environment);
         if (v->environmentPipeline) v->vkDestroyPipeline(v->device, v->environmentPipeline, NULL);
+        for (int i = 0; i < 10; ++i)
+            if (v->postPipelines[i]) v->vkDestroyPipeline(v->device, v->postPipelines[i], NULL);
+        if (v->presentPipeline) v->vkDestroyPipeline(v->device, v->presentPipeline, NULL);
+        if (v->presentPass) v->vkDestroyRenderPass(v->device, v->presentPass, NULL);
         for (int i = 0; i < SLOTS; ++i) {
             Slot* s = &v->slots[i];
             bufferFree(v, &s->frame);
@@ -2740,6 +2957,7 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             v->drawCounted = v->multiDraw && f12.drawIndirectCount;
             v->fragmentStores = features.features.fragmentStoresAndAtomics;
             v->sampleShading = features.features.sampleRateShading;
+            v->independentBlend = features.features.independentBlend;
             v->takesEtc = features.features.textureCompressionETC2 && !getenv("ARTFUL_NO_BLOCKS");
             v->takesAstc = features.features.textureCompressionASTC_LDR && !getenv("ARTFUL_NO_BLOCKS");
             v->takesBc = features.features.textureCompressionBC && !getenv("ARTFUL_NO_BLOCKS");
@@ -2789,6 +3007,7 @@ static bool createDevice(Vulkan* v) {
     features.features.drawIndirectFirstInstance = 1;
     features.features.fragmentStoresAndAtomics = v->fragmentStores;
     features.features.sampleRateShading = v->sampleShading;
+    features.features.independentBlend = v->independentBlend;
     const char* extensions[2] = {"VK_KHR_swapchain", "VK_KHR_portability_subset"};
     const uint32_t extensionCount = !v->surface ? 0 : v->native.kind == ARTF_SURFACE_METAL ? 2 : 1;
     const DeviceCreateInfo info = {ST_DEVICE_CREATE_INFO, &features, 0, 1, &queue, 0, NULL, extensionCount, extensions, NULL};
@@ -2810,6 +3029,9 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     v->height = o->height;
     v->noVsync = o->noVsync;
     v->samples = o->antialias ? 4 : 1;
+    /* (a frame in floats smooths edges by time, not by samples: four a pixel are left out with it, on the GPU) */
+    v->floats = o->hdr;
+    if (v->floats) v->samples = 1;
     v->compressTextures = o->compressTextures;
     PhysicalDeviceProperties props;
     if (o->pipelineCache) {
@@ -2822,6 +3044,11 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
         goto failed;
     }
     snprintf(v->description, sizeof v->description, "%s", props.deviceName);
+    if (v->floats && !v->independentBlend) {
+        artfLog("artful: this device cannot draw a frame in floats (no independentBlend)");
+        goto failed;
+    }
+    v->sceneFormat = v->floats ? FORMAT_RGBA16_FLOAT : v->colorFormat;
     /* (timestampComputeAndGraphics and timestampPeriod, where the limits have them) */
     uint32_t timestampsThere;
     memcpy(&timestampsThere, props.rest + 348, 4);

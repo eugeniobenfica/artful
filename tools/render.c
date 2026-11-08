@@ -429,6 +429,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (!artfRendererDraw(r, s)) { fputs("the device was lost\n", stderr); return 1; }
+    /* (temporal antialiasing gathers over frames: a still picture gets sixteen) */
+    for (int k = 1; k < 16 && post.temporal && o.hdr; ++k) artfRendererDraw(r, s);
     if (trace.mode && !frames) {
         const double start = artfNowMs();
         for (int i = 1; i < traceSamples; ++i)

@@ -21,11 +21,11 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_SIZE = 85 };
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_SIZE = 92 };
 
 typedef struct Resources {
     SpvId frame, instances, visible, meshes, materials, indirect, hiz, flags, environment;
-    SpvId ptrUniformVec4, ptrStorageVec4, ptrStorageUint, ptrStorageFloat, uintArray, vec4Array;
+    SpvId ptrUniformVec4, ptrStorageVec4, ptrStorageUint, ptrStorageFloat, uintArray, vec4Array, floatArray;
     SpvId zero;
 } Resources;
 
@@ -54,7 +54,8 @@ static void declare(Spv* s, Resources* r, bool writable) {
     r->meshes = spvResource(s, blockOf(s, vec4Array, false), SPV_STORAGE_StorageBuffer, 3);
     r->materials = spvResource(s, blockOf(s, vec4Array, false), SPV_STORAGE_StorageBuffer, 4);
     r->ptrStorageFloat = spvTypePointer(s, SPV_STORAGE_StorageBuffer, s->floatType);
-    r->environment = spvResource(s, blockOf(s, spvTypeArray(s, s->floatType, 0, 4), false), SPV_STORAGE_StorageBuffer, 49);
+    r->floatArray = spvTypeArray(s, s->floatType, 0, 4);
+    r->environment = spvResource(s, blockOf(s, r->floatArray, false), SPV_STORAGE_StorageBuffer, 49);
     if (writable) {
         r->indirect = spvResource(s, blockOf(s, uintArray, true), SPV_STORAGE_StorageBuffer, 5);
         r->hiz = spvResource(s, blockOf(s, uintArray, true), SPV_STORAGE_StorageBuffer, 9);
@@ -842,7 +843,33 @@ static SpvId textureAt(Spv* s, SpvId textures, SpvId sampled, SpvId index, SpvId
     return spvImageSample(s, image, uv);
 }
 
-uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists) {
+/* As packSurface in kernels.inc: a normal folded onto an octahedron (9 + 9 bits), roughness (5), metal (4) and the
+ * share of light from all around (5). */
+static SpvId packSurfaceSpv(Spv* s, SpvId n, SpvId rough, SpvId metal, SpvId ambient) {
+#define P_F(v) spvConstFloat(s, v)
+#define P_SIGN(a) spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, a, P_F(0.f)), P_F(-1.f), P_F(1.f))
+#define P_ABS(a) spvGlsl1(s, SPV_GLSL_FAbs, s->floatType, a)
+#define P_Q(x, top) spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(MIN_F(MAX_F(x, P_F(0.f)), P_F(1.f)), P_F(top)), P_F(.5f)))
+    SpvId sum = MAX_F(ADD_F(ADD_F(P_ABS(X(n)), P_ABS(Y(n))), P_ABS(Z(n))), P_F(1e-20f));
+    SpvId a = DIV_F(X(n), sum), b = DIV_F(Y(n), sum);
+    SpvId below = spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, Z(n), P_F(0.f));
+    SpvId fa = MUL_F(SUB_F(P_F(1.f), P_ABS(b)), P_SIGN(a)), fb = MUL_F(SUB_F(P_F(1.f), P_ABS(a)), P_SIGN(b));
+    a = spvSelect(s, s->floatType, below, fa, a);
+    b = spvSelect(s, s->floatType, below, fb, b);
+    SpvId qa = P_Q(ADD_F(MUL_F(a, P_F(.5f)), P_F(.5f)), 511.f), qb = P_Q(ADD_F(MUL_F(b, P_F(.5f)), P_F(.5f)), 511.f);
+#define P_OR(x, y) spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, x, y)
+#define P_UP(x, k) spvOp2(s, 196 /* OpShiftLeftLogical */, s->uintType, x, spvConstUint(s, k))
+    SpvId out = P_OR(P_OR(qa, P_UP(qb, 9)), P_OR(P_OR(P_UP(P_Q(rough, 31.f), 18), P_UP(P_Q(metal, 15.f), 23)), P_UP(P_Q(ambient, 31.f), 27)));
+#undef P_F
+#undef P_SIGN
+#undef P_ABS
+#undef P_Q
+#undef P_OR
+#undef P_UP
+    return out;
+}
+
+uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, bool hdr) {
     Spv b, *s = &b;
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
@@ -892,6 +919,12 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     }
     SpvId outColor = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
     spvDecorate(s, outColor, SPV_DECORATE_Location, 0);
+    SpvId outSurface = 0;
+    if (hdr) {
+        /* (a frame in floats: the surface beside the light, as packSurface on the CPU) */
+        outSurface = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->uintType), SPV_STORAGE_Output);
+        spvDecorate(s, outSurface, SPV_DECORATE_Location, 1);
+    }
 
     SpvId main = spvBeginMain(s);
     SpvId ptrFn3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3), ptrFnUint = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
@@ -1020,6 +1053,8 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     }
     spvIfEnd(s, aroundMerge);
 
+    /* (what came from all around, for ambient occlusion after the frame) */
+    SpvId aroundDiffuse = spvLoad(s, s->vec3, acc.diffuse), aroundHighlight = spvLoad(s, s->vec3, acc.highlight);
     /* the sun's shadow: as artfShadowOfSun */
     SpvId eye = spvShuffle3(s, frameVec(s, &r, F_CAMERA));
     SpvId sunRow = shadowRow(s, &shadows, UINT(S_SUN)), splits = shadowRow(s, &shadows, UINT(S_SPLITS));
@@ -1100,7 +1135,28 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId look = frameVec(s, &r, F_LOOK), fog = spvShuffle3(s, frameVec(s, &r, F_FOG));
     SpvId air = MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(world, spvShuffle3(s, frameVec(s, &r, F_CAMERA)))), Y(look));
     SpvId keep = DIV_F(FLOAT(1.f), ADD_F(ADD_F(FLOAT(1.f), air), MUL_F(MUL_F(air, air), FLOAT(.5f))));
-    lit = pick3(s, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Y(look), FLOAT(0.f)), ADD_V3(fog, SCALE_V3(SUB_V3(lit, fog), keep)), lit);
+    SpvId fogged = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Y(look), FLOAT(0.f));
+    if (hdr) {
+        /* (fog that light goes through is drawn after the frame, in its place) */
+        SpvId volumetric = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Y(frameVec(s, &r, F_POST + 1)), FLOAT(0.f));
+        fogged = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, fogged, spvOp1(s, SPV_OP_LogicalNot, s->boolType, volumetric));
+    }
+    SpvId unfogged = lit;
+    lit = pick3(s, fogged, ADD_V3(fog, SCALE_V3(SUB_V3(lit, fog), keep)), lit);
+    if (hdr) {
+        /* light as it is, premultiplied; and the surface */
+        SpvId alphaHdr = MIN_F(MAX_F(shown, FLOAT(0.f)), FLOAT(1.f));
+        spvStore(s, outColor, vec4Of(s, SCALE_V3(spvGlsl2(s, SPV_GLSL_FMax, s->vec3, lit, same3(s, 0.f)), alphaHdr), alphaHdr));
+        SpvId lum3 = vec3Of(s, FLOAT(.3f), FLOAT(.59f), FLOAT(.11f));
+        SpvId around = DOT3(ADD_V3(MUL_V3(SCALE_V3(albedo, notMetal), aroundDiffuse), aroundHighlight), lum3);
+        SpvId share = DIV_F(around, MAX_F(DOT3(unfogged, lum3), FLOAT(1e-6f)));
+        spvStore(s, outSurface, packSurfaceSpv(s, n, rough, metal, share));
+        spvEndMain(s);
+        const SpvId hdrInterface[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, fragCoord, vInstance};
+        spvEntryPoint(s, SPV_MODEL_Fragment, main, hdrInterface, cutout ? 11 : 7);
+        spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
+        return finish(s, size);
+    }
     lit = exposed(s, lit, X(look));
     /* to the frame's colors: the square root of light, as on the CPU */
     SpvId lo = vec3Of(s, FLOAT(0.f), FLOAT(0.f), FLOAT(0.f)), hi = vec3Of(s, FLOAT(1.f), FLOAT(1.f), FLOAT(1.f));
@@ -1796,7 +1852,7 @@ uint32_t* artfShaderBloomUp(size_t* size) {
 }
 
 /* The picture of all around, behind the scene: as environmentFill in kernels.inc. */
-uint32_t* artfShaderEnvironmentBackdrop(size_t* size) {
+uint32_t* artfShaderEnvironmentBackdrop(size_t* size, bool hdr) {
     Spv b, *s = &b;
     spvInit(s);
     Resources r;
@@ -1813,6 +1869,15 @@ uint32_t* artfShaderEnvironmentBackdrop(size_t* size) {
     SpvId py = SUB_F(FLOAT(1.f), MUL_F(DIV_F(Y(coord), W(up)), FLOAT(2.f)));
     SpvId d = ADD_V3(ADD_V3(forward, SCALE_V3(spvShuffle3(s, right), px)), SCALE_V3(spvShuffle3(s, up), py));
     SpvId light = SCALE_V3(envSample(s, &r, UINT(0), d), W(frameVec(s, &r, F_SKY)));
+    if (hdr) {
+        SpvId a = W(frameVec(s, &r, 14));
+        spvStore(s, outColor, vec4Of(s, SCALE_V3(light, a), a));
+        spvEndMain(s);
+        const SpvId io[2] = {fragCoord, outColor};
+        spvEntryPoint(s, SPV_MODEL_Fragment, main, io, 2);
+        spvExecutionMode(s, main, 7, 0, 0, 0, 0);
+        return finish(s, size);
+    }
     light = exposed(s, light, X(frameVec(s, &r, F_LOOK)));
     SpvId shown = spvGlsl1(s, SPV_GLSL_Sqrt, s->vec3, spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, light, same3(s, 0.f)), same3(s, 1.f)));
     SpvId alpha = W(frameVec(s, &r, 14));
@@ -1826,7 +1891,7 @@ uint32_t* artfShaderEnvironmentBackdrop(size_t* size) {
 }
 
 /* The frame's background: the light and its glow, tone mapped, under whatever the scene draws. */
-uint32_t* artfShaderHoleBackdrop(size_t* size) {
+uint32_t* artfShaderHoleBackdrop(size_t* size, bool hdr) {
     Spv b, *s = &b;
     spvInit(s);
     HoleResources r;
@@ -1858,6 +1923,15 @@ uint32_t* artfShaderHoleBackdrop(size_t* size) {
     SpvId mapped = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvOp2(s, SPV_OP_FDiv, s->vec3, top, bottom), vec3Of(s, FLOAT(1.f), FLOAT(1.f), FLOAT(1.f)));
     SpvId shown = spvGlsl1(s, SPV_GLSL_Sqrt, s->vec3, mapped);
 
+    if (hdr) {
+        /* (its own exposure and tone mapping, as the CPU's: back to light for what comes after) */
+        spvStore(s, outColor, vec4Of(s, MUL_V3(shown, shown), FLOAT(1.f)));
+        spvEndMain(s);
+        const SpvId io[2] = {fragCoord, outColor};
+        spvEntryPoint(s, SPV_MODEL_Fragment, main, io, 2);
+        spvExecutionMode(s, main, 7, 0, 0, 0, 0);
+        return finish(s, size);
+    }
     SpvId noise = holeHash(s, ADD_U(x, MUL_U(y, UINT(8192))), UINT(7), UINT(13));
     SpvId dither = MUL_F(SUB_F(BYTE_OF(noise, 0), FLOAT(.5f)), FLOAT(1.f / 255.f));
     spvStore(s, outColor, vec4Of(s, ADD_V3(shown, vec3Of(s, dither, dither, dither)), FLOAT(1.f)));
@@ -2645,7 +2719,7 @@ uint32_t* artfShaderLayerResolve(size_t* size, int samples) {
     return finish(s, size);
 }
 
-uint32_t* artfShaderTraceShow(size_t* size) {
+uint32_t* artfShaderTraceShow(size_t* size, bool hdr) {
     Spv b, *s = &b;
     spvInit(s);
     Resources r;
@@ -2666,7 +2740,16 @@ uint32_t* artfShaderTraceShow(size_t* size) {
     SpvId gathered = bufferVec(s, &r, sum, ADD_U(x, MUL_U(y, AS_UINT(X(sizes)))));
     SpvId covered = W(gathered);
     SpvId alpha = DIV_F(covered, total);
-    SpvId light = exposed(s, SCALE_V3(spvShuffle3(s, gathered), DIV_F(FLOAT(1.f), MAX_F(covered, FLOAT(1e-6f)))), X(frameVec(s, &r, F_LOOK)));
+    SpvId raw = SCALE_V3(spvShuffle3(s, gathered), DIV_F(FLOAT(1.f), MAX_F(covered, FLOAT(1e-6f))));
+    if (hdr) {
+        spvStore(s, outColor, vec4Of(s, SCALE_V3(raw, alpha), alpha));
+        spvEndMain(s);
+        const SpvId io[2] = {fragCoord, outColor};
+        spvEntryPoint(s, SPV_MODEL_Fragment, main, io, 2);
+        spvExecutionMode(s, main, 7, 0, 0, 0, 0);
+        return finish(s, size);
+    }
+    SpvId light = exposed(s, raw, X(frameVec(s, &r, F_LOOK)));
     SpvId lo = vec3Of(s, FLOAT(0.f), FLOAT(0.f), FLOAT(0.f)), hi = vec3Of(s, FLOAT(1.f), FLOAT(1.f), FLOAT(1.f));
     SpvId clamped = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, light, lo), hi);
     spvStore(s, outColor, vec4Of(s, SCALE_V3(spvGlsl1(s, SPV_GLSL_Sqrt, s->vec3, clamped), alpha), alpha));
@@ -3082,3 +3165,5 @@ uint32_t* artfShaderDenoiseEnd(size_t* size) {
     vecPut(s, &d, d.noisy, d.pixel, vec4Of(s, SCALE_V3(lit, alpha), alpha));
     return denoiseEnd(s, main, global, merge, size);
 }
+
+#include "vulkan/postShaders.inc"

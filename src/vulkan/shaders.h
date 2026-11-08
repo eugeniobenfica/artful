@@ -20,7 +20,7 @@ uint32_t* artfShaderSceneVertex(size_t* size);
  * one must not, so that a GPU can test depth before it. */
 /* lists: how many samples a pixel has, if a layer's pixels go to their pixel's list, for artfShaderLayerResolve, and not
  * to the frame; 0: they do not. */
-uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists);
+uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, bool hdr);
 uint32_t* artfShaderLayerResolve(size_t* size, int samples);
 /* Shadow maps: depth from a light; and, for what has holes, what leaves pixels. */
 uint32_t* artfShaderShadowVertex(size_t* size);
@@ -36,14 +36,26 @@ uint32_t* artfShaderDenoiseLight(size_t* size);
 uint32_t* artfShaderDenoiseTime(size_t* size);
 uint32_t* artfShaderDenoiseSpace(size_t* size, int pass);
 uint32_t* artfShaderDenoiseEnd(size_t* size);
-uint32_t* artfShaderTraceShow(size_t* size);
+uint32_t* artfShaderTraceShow(size_t* size, bool hdr);
 uint32_t* artfShaderOverlayFragment(size_t* size);
 /* A black hole: its rays, then the bloom's levels going down and coming back, then the frame's
  * background. (Its vertices are the overlay's: one triangle.) */
 uint32_t* artfShaderHoleTrace(size_t* size);
 uint32_t* artfShaderBloomDown(size_t* size, bool fromLight);
 uint32_t* artfShaderBloomUp(size_t* size);
-uint32_t* artfShaderHoleBackdrop(size_t* size);
-uint32_t* artfShaderEnvironmentBackdrop(size_t* size);
+uint32_t* artfShaderHoleBackdrop(size_t* size, bool hdr);
+uint32_t* artfShaderEnvironmentBackdrop(size_t* size, bool hdr);
+/* What comes after a frame in floats (postShaders.inc): post.c's passes. */
+uint32_t* artfShaderPostGather(size_t* size);
+uint32_t* artfShaderPostOcclusion(size_t* size);
+uint32_t* artfShaderPostOcclusionBlur(size_t* size);
+uint32_t* artfShaderPostReflection(size_t* size);
+uint32_t* artfShaderPostFog(size_t* size);
+uint32_t* artfShaderPostFogApply(size_t* size);
+uint32_t* artfShaderPostTemporal(size_t* size);
+uint32_t* artfShaderPostFocus(size_t* size);
+uint32_t* artfShaderPostBloomDown(size_t* size);
+uint32_t* artfShaderPostBloomUp(size_t* size);
+uint32_t* artfShaderPostFinal(size_t* size);
 
 #endif

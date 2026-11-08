@@ -1420,7 +1420,8 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         return 1;
     }
 
-    rasterizeTile(f, w, index, ox, oy);
+    /* (a tile with nothing in it leaves its depth as the last tile had it: nothing reads it, but what comes after) */
+    const bool drawn = rasterizeTile(f, w, index, ox, oy);
 
     const V8I zeroI = v8iSet(0);
     const V8I background = v8iSet((int32_t)f->background);
@@ -1530,7 +1531,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
                 _Alignas(32) float out[4][8], depth[8];
                 v8fStore(out[0], c.x); v8fStore(out[1], c.y); v8fStore(out[2], c.z);
                 v8fStore(out[3], v8fLoad((const float*)(color + ARTF_POST_ALPHA + x)));
-                v8fStore(depth, v8fLoad(w->depth + y * ARTF_TILE + x));
+                v8fStore(depth, drawn ? v8fLoad(w->depth + y * ARTF_TILE + x) : v8fSet(0.f));
                 const int n = artfMini(8, tw - x);
                 for (int k = 0; k < 4; ++k) memcpy(f->postLight[k] + row + x, out[k], (size_t)n * 4);
                 memcpy(f->postDepth + row + x, depth, (size_t)n * 4);
