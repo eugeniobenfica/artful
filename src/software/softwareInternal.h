@@ -67,6 +67,7 @@ typedef struct ArtfWorker {
     float* fragmentDepth;
     uint32_t* fragmentColor;
     uint8_t* fragmentCount;
+    float* postDepth;   /* with a frame in floats: what is solid, before layers */
     ARTF_VEC(const ArtfRasterTri*) tris;
     ARTF_VEC(const ArtfRasterTri*) layers; /* what shows what is behind it: by instance, the farthest first */
     ARTF_VEC(uint8_t) seen;

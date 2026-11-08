@@ -3093,6 +3093,65 @@ static void testFloats(void) {
     artfFree(c);
 }
 
+/* Particles and terrain: made of the scene's own parts, so the backends draw them alike. */
+static void testExtras(void) {
+    ArtfScene* s = artfSceneNew();
+    setCamera(s, 0, 1, 6, 0, 0, 0);
+    static float heights[33 * 33];
+    for (int z = 0; z < 33; ++z)
+        for (int x = 0; x < 33; ++x) heights[z * 33 + x] = (float)((x - 16) * (x - 16) + (z - 16) * (z - 16)) / 512.f;
+    const ArtfMesh hill = artfSceneAddTerrain(s, heights, 33, 33, .25f, 2.f, 1.f);
+    CHECK(hill != 0);
+    CHECK(s->meshes.items[hill - 1].vertexCount == 33 * 33 && s->meshes.items[hill - 1].indexCount == 32 * 32 * 6);
+    const ArtfTransform below = artfTransformAt(0, -1.5f, 0, 1);
+    artfSceneAddInstance(s, hill, whiteMaterial(s), &below);
+    ArtfEmitterDesc d;
+    memset(&d, 0, sizeof d);
+    d.velocity = artfVec3(0, 1, 0);
+    d.spread = .3f;
+    d.rate = 200;
+    d.life = 1;
+    d.size = .3f;
+    d.sizeEnd = .1f;
+    d.color = artfVec3(1, .6f, .2f);
+    d.colorEnd = artfVec3(1, .2f, .1f);
+    d.opacity = 1;
+    d.glow = 4;
+    d.most = 100;
+    const ArtfEmitter e = artfSceneAddEmitter(s, &d);
+    for (int i = 0; i < 30; ++i) artfEmitterStep(s, e, 1.f / 30.f);
+    /* as many as the rate and the life allow, and no more than most */
+    const uint32_t alive = artfEmitterAlive(s, e);
+    CHECK(alive >= 90 && alive <= 100);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    drawInto(cpu, s, a);
+    /* the fire glows over the hill: somewhere above the middle, bright */
+    int brightest = 0;
+    for (int y = H / 4; y < H / 2; ++y)
+        for (int x = W / 2 - 20; x < W / 2 + 20; ++x) brightest = artfMaxi(brightest, (int)(a[y * W + x] >> 16 & 255));
+    CHECK(brightest > 240);
+    o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("particles and terrain, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .02);
+        artfRendererFree(gpu);
+    }
+    /* gone, they leave nothing */
+    artfSceneRemoveEmitter(s, e);
+    drawInto(cpu, s, b);
+    CHECK(differentShare(a, b, 24) > .002);
+    artfRendererFree(cpu);
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+}
+
 static void testGltfTargets(void) {
     static const char file[] = "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"byteLength\":80,\"uri\":\"data:application/octet-stream;base64,AAABAAIAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAA=\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":8,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":44,\"byteLength\":36}],\"accessors\":[{\"bufferView\":0,\"componentType\":5123,\"type\":\"SCALAR\",\"count\":3},{\"bufferView\":1,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3,\"max\":[1,1,0],\"min\":[0,0,0]},{\"bufferView\":2,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3}],\"meshes\":[{\"weights\":[1],\"primitives\":[{\"attributes\":{\"POSITION\":1},\"indices\":0,\"targets\":[{\"POSITION\":2}]}]}],\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
     ArtfScene* s = artfSceneNew();
@@ -4025,6 +4084,7 @@ int main(void) {
     testGltfExtensions();
     testEnvironment();
     testFloats();
+    testExtras();
     testLostDevice();
     testRefusedSwapchain();
     testBlocks();

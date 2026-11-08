@@ -715,6 +715,7 @@ static void softFree(ArtfRenderer* r) {
         artfAlignedFree(f->workers[i].ids);
         artfAlignedFree(f->workers[i].color);
         artfAlignedFree(f->workers[i].layer);
+        artfAlignedFree(f->workers[i].postDepth);
         artfFree(f->workers[i].solidDepth);
         artfFree(f->workers[i].fragmentDepth);
         artfFree(f->workers[i].fragmentColor);
@@ -775,6 +776,7 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
         f->workers[i].ids = artfAlignedMalloc(planes, 64);
         f->workers[i].color = artfAlignedMalloc(colors, 64);
         f->workers[i].layer = artfAlignedMalloc(colors, 64);
+        if (f->post) f->workers[i].postDepth = artfAlignedMalloc(ARTF_TILE_PIXELS * 4, 64);
     }
     allocateTargets(s, artfMaxi(o->width, 1), artfMaxi(o->height, 1));
     return &s->base;

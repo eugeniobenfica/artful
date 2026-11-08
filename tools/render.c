@@ -1,7 +1,7 @@
 /* artful-render — draws a test scene and writes it to a PNG, or measures it.
  *
  *   artful-render [--backend vulkan|software] [--simd portable|128|256] [--threads n] [--size w h]
- *                 [--scene spheres|field|heavy|city|layers|lights|blackhole] [--frames n] [--out file.png]
+ *                 [--scene spheres|field|heavy|city|layers|lights|outdoors|blackhole] [--frames n] [--out file.png]
  *                 [--antialias]: four samples a pixel  [--clear]: no background, and a PNG with alpha
  *                 [--shadows side]: the sun casts shadows, in maps of that side
  *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room
@@ -26,6 +26,7 @@
  * With --frames a black hole's time goes on, so that what a frame took includes the fluid's step. */
 #include "artful/artful.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -187,6 +188,82 @@ static void sceneSpheres(ArtfScene* s) {
     artfSceneAddInstance(s, cube, artfSceneAddMaterial(s, &box), &t);
     artfSceneAddLight(s, artfVec3(-1.5f, 1.5f, 2.5f), artfVec3(.2f, .5f, 1.2f), 7.f);
     camera(s, 0, 2.4f, 6.5f);
+}
+
+/* Hills from value noise, a fire and its smoke: terrain and particles, which need nothing of a backend. */
+static float noiseAt(float x, float z) {
+    const int ix = (int)floorf(x), iz = (int)floorf(z);
+    const float fx = x - (float)ix, fz = z - (float)iz;
+    float corner[4];
+    for (int k = 0; k < 4; ++k) {
+        uint32_t h = (uint32_t)(ix + (k & 1)) * 73856093u ^ (uint32_t)(iz + (k >> 1)) * 19349663u;
+        h ^= h >> 13;
+        h *= 0x5BD1E995u;
+        h ^= h >> 15;
+        corner[k] = (float)(h & 0xFFFF) / 65535.f;
+    }
+    const float sx = fx * fx * (3.f - 2.f * fx), sz = fz * fz * (3.f - 2.f * fz);
+    const float top = corner[0] + (corner[1] - corner[0]) * sx, bottom = corner[2] + (corner[3] - corner[2]) * sx;
+    return top + (bottom - top) * sz;
+}
+
+static ArtfEmitter fire, smoke;
+
+static void sceneOutdoors(ArtfScene* s) {
+    enum { SIDE = 129 };
+    float* heights = malloc(SIDE * SIDE * 4);
+    for (int z = 0; z < SIDE; ++z)
+        for (int x = 0; x < SIDE; ++x) {
+            const float fx = (float)x / 16.f, fz = (float)z / 16.f;
+            const float edge = fabsf((float)x / (SIDE - 1) - .5f) + fabsf((float)z / (SIDE - 1) - .5f);
+            heights[z * SIDE + x] = noiseAt(fx, fz) * .7f + noiseAt(fx * 2.f, fz * 2.f) * .3f + edge * edge * 3.f;
+        }
+    ArtfMaterialDesc grass = {artfVec3(.25f, .4f, .15f), 0, .2f, .8f, artfVec3(0, 0, 0)};
+    const ArtfTransform ground = artfTransformAt(0, -2.f, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddTerrain(s, heights, SIDE, SIDE, .5f, 3.f, 8.f), artfSceneAddMaterial(s, &grass), &ground);
+    free(heights);
+    ArtfMaterialDesc stone = {artfVec3(.5f, .48f, .45f), 0, .4f, .5f, artfVec3(0, 0, 0)};
+    const ArtfTransform rock = artfTransformAt(3.f, -.2f, -2.f, 1.4f);
+    artfSceneAddInstance(s, artfSceneAddSphere(s, 1.f, 24, 32), artfSceneAddMaterial(s, &stone), &rock);
+    ArtfEmitterDesc flames;
+    memset(&flames, 0, sizeof flames);
+    flames.position = artfVec3(0, -.2f, 0);
+    flames.area = .3f;
+    flames.velocity = artfVec3(0, 1.6f, 0);
+    flames.spread = .25f;
+    flames.rate = 120;
+    flames.life = .9f;
+    flames.size = .45f;
+    flames.sizeEnd = .1f;
+    flames.color = artfVec3(1, .55f, .15f);
+    flames.colorEnd = artfVec3(.8f, .15f, .05f);
+    flames.opacity = .9f;
+    flames.glow = 6.f;
+    flames.most = 200;
+    fire = artfSceneAddEmitter(s, &flames);
+    ArtfEmitterDesc fumes = flames;
+    fumes.position = artfVec3(0, .6f, 0);
+    fumes.velocity = artfVec3(.3f, .9f, 0);
+    fumes.rate = 30;
+    fumes.life = 4.f;
+    fumes.size = .5f;
+    fumes.sizeEnd = 2.f;
+    fumes.color = artfVec3(.3f, .3f, .3f);
+    fumes.colorEnd = artfVec3(.5f, .5f, .52f);
+    fumes.opacity = .35f;
+    fumes.opacityEnd = 0;
+    fumes.glow = 0;
+    fumes.most = 160;
+    smoke = artfSceneAddEmitter(s, &fumes);
+    camera(s, 0, 2.f, 9.f); /* (before the steps: particles turn to the camera as it is when they move) */
+    for (int i = 0; i < 120; ++i) {
+        artfEmitterStep(s, fire, 1.f / 30.f);
+        artfEmitterStep(s, smoke, 1.f / 30.f);
+    }
+    artfSceneAddLight(s, artfVec3(0, .4f, 0), artfVec3(3.f, 1.4f, .4f), 9.f);
+    artfSceneSetSun(s, artfVec3(-.4f, -.35f, .6f), artfVec3(1.4f, 1.2f, 1.f));
+    artfSceneSetAmbient(s, artfVec3(.25f, .3f, .4f), artfVec3(.1f, .1f, .08f));
+    artfSceneSetBackground(s, artfVec3(.55f, .65f, .8f));
 }
 
 /* The spheres at night, under 256 small colored lights: what lights past the frame's own cost. */
@@ -389,6 +466,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(sceneName, "city")) sceneCity(s);
     else if (!strcmp(sceneName, "layers")) sceneLayers(s);
     else if (!strcmp(sceneName, "lights")) sceneLights(s);
+    else if (!strcmp(sceneName, "outdoors")) sceneOutdoors(s);
     else if (isHole) sceneBlackHole(s, &hole);
     else sceneSpheres(s);
     if (pngAlpha) artfSceneSetBackgroundAlpha(s, 0);

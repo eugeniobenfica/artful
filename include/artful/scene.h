@@ -345,6 +345,38 @@ void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color);
  * scene covers, to put it over something else. A black hole fills the frame all the same. */
 void artfSceneSetBackgroundAlpha(ArtfScene* s, float alpha);
 
+/* ---- what is made of the scene's own parts ----
+ * Particles: an emitter's are instances of one quad, each facing the eye and fading as it ages; artfEmitterStep moves
+ * them, makes new ones and turns them to the camera as it is then. They show through each other, as layers do. */
+typedef struct ArtfEmitterDesc {
+    ArtfVec3 position;    /* where they are born, give or take area each way */
+    float area;
+    ArtfVec3 velocity;    /* how they leave, give or take spread of its speed each way */
+    float spread;
+    ArtfVec3 gravity;     /* what pulls them, per second */
+    float drag;           /* how fast they slow: 0 not at all */
+    float rate;           /* born a second */
+    float life;           /* seconds; 0: 2 */
+    float size, sizeEnd;  /* a side, when born and when it dies */
+    ArtfVec3 color, colorEnd;
+    float opacity, opacityEnd;
+    float glow;           /* how much of their color is light of their own */
+    ArtfTexture texture;  /* its alpha is its shape; 0: a soft round puff */
+    uint32_t most;        /* alive at once; 0: 1024 */
+} ArtfEmitterDesc;
+typedef uint32_t ArtfEmitter;
+
+ArtfEmitter artfSceneAddEmitter(ArtfScene* s, const ArtfEmitterDesc* desc);
+/* All but most, which stays as it was made. */
+void artfEmitterSet(ArtfScene* s, ArtfEmitter e, const ArtfEmitterDesc* desc);
+void artfEmitterStep(ArtfScene* s, ArtfEmitter e, float seconds);
+uint32_t artfEmitterAlive(const ArtfScene* s, ArtfEmitter e);
+void artfSceneRemoveEmitter(ArtfScene* s, ArtfEmitter e);
+
+/* Terrain: a mesh from heights (width x depth of them, by rows, times height), cell apart, centered, facing +y, with
+ * texture coordinates repeating uvRepeat times across. Its lighter versions are made as any mesh's. */
+ArtfMesh artfSceneAddTerrain(ArtfScene* s, const float* heights, int width, int depth, float cell, float height, float uvRepeat);
+
 /* ---- after the frame: what a renderer made with ArtfRendererOptions.hdr does to it ----
  * Each is off at 0. Lengths are the world's; what a scene asks of a renderer without hdr is not done. */
 typedef struct ArtfPostDesc {

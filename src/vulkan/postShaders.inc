@@ -170,11 +170,17 @@ POST_MAIN(artfShaderPostGather)
     postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
     const SpvId parts[2] = {spvOp1(s, SPV_OP_Bitcast, s->intType, x), spvOp1(s, SPV_OP_Bitcast, s->intType, y)};
     SpvId at = spvCompose(s, ivec2, parts, 2);
+    /* (the push constant: 1 for depth alone, after what is solid and before layers write theirs; 0 for the rest) */
+    SpvId depthAlone = spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0)), rest, depthOnly;
+    spvIfBegin(s, P_NOT(depthAlone), &rest);
     spvStore(s, postPtr(s, p, p->light, s->vec4, i), spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, color), at));
     spvStore(s, postPtr(s, p, p->surface, s->uintType, i), spvExtract(s, s->uintType, spvImageFetchAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at), 0));
+    spvIfEnd(s, rest);
+    spvIfBegin(s, depthAlone, &depthOnly);
     /* (reversed depth is near / distance: 1 / w is depth over near) */
     SpvId z = X(spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, depthImage), at));
     spvStore(s, postPtr(s, p, p->depth, s->floatType, i), DIV_F(z, Z(frameVec(s, &p->r, F_PROJECTION))));
+    spvIfEnd(s, depthOnly);
 POST_FINISH()
 
 /* ---- ambient occlusion: as occlusionRow and occlusionBlurRow ---- */

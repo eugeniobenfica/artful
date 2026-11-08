@@ -2602,7 +2602,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->vkCmdFillBuffer(c, v->layerCounts.buffer, 0, ~(VkDeviceSize)0, 0);
         memoryBarrier(v, c, STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
     }
-    RenderPassBeginInfo pass = {ST_RENDER_PASS_BEGIN, NULL, occlusion || sorted ? v->earlyPass : v->renderPass, v->framebuffers[image], area, v->floats ? 3 : 2, clears};
+    RenderPassBeginInfo pass = {ST_RENDER_PASS_BEGIN, NULL, occlusion || sorted || v->floats ? v->earlyPass : v->renderPass, v->framebuffers[image], area, v->floats ? 3 : 2, clears};
     v->vkCmdBeginRenderPass(c, &pass, 0);
     v->vkCmdSetViewport(c, 0, 1, &viewport);
     v->vkCmdSetScissor(c, 0, 1, &area);
@@ -2633,13 +2633,23 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
             v->vkCmdDispatchIndirect(c, s->meshletState.buffer, (VkDeviceSize)meshletHalf(v) * 4);
         }
         memoryBarrier(v, c, STAGE_COMPUTE, STAGE_DRAW_INDIRECT | STAGE_VERTEX_SHADER, ACCESS_SHADER_WRITE, ACCESS_INDIRECT | ACCESS_SHADER_READ);
-        pass.renderPass = sorted ? v->midPass : v->latePass;
+        pass.renderPass = sorted || v->floats ? v->midPass : v->latePass;
         v->vkCmdBeginRenderPass(c, &pass, 0);
         v->vkCmdSetViewport(c, 0, 1, &viewport);
         v->vkCmdSetScissor(c, 0, 1, &area);
         drawCommands(v, c, s, v->scenePipeline, meshCount, meshCount);
         if (meshlets) v->vkCmdDrawIndexedIndirectCount(c, s->meshletCommands.buffer, (VkDeviceSize)MESHLET_COMMANDS * 20, s->meshletState.buffer, ((VkDeviceSize)meshletHalf(v) + MESHLET_DRAWN) * 4, MESHLET_COMMANDS, 20);
         if (cutouts) drawCommands(v, c, s, v->cutoutPipeline, meshCount * 3, meshCount);
+    }
+    if (v->floats) {
+        /* what comes after reads the depth of what is solid: it is taken now, before layers write theirs */
+        v->vkCmdEndRenderPass(c);
+        v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+        postStep(v, c, POST_GATHER, 1, (uint32_t)v->width * (uint32_t)v->height);
+        pass.renderPass = v->latePass;
+        v->vkCmdBeginRenderPass(c, &pass, 0);
+        v->vkCmdSetViewport(c, 0, 1, &viewport);
+        v->vkCmdSetScissor(c, 0, 1, &area);
     }
     if (sorted) {
         v->vkCmdBindPipeline(c, 0, v->layerListPipeline);

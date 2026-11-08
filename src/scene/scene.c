@@ -69,6 +69,7 @@ void artfSceneFree(ArtfScene* s) {
     for (size_t i = 0; i < s->graphs.len; ++i) artfFree(s->graphs.items[i].nodes);
     artfVecFree(&s->graphs);
     if (s->modelsFree) s->modelsFree(s->models);
+    if (s->emittersFree) s->emittersFree(s->emitters);
     artfTraceFini(&s->trace);
     artfFree(s->hole.map);
     artfFree(s->environment);

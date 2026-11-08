@@ -434,6 +434,10 @@ struct ArtfScene {
     ArtfHole hole;
     ArtfTrace trace;
     ArtfPostDesc post;
+    void* emitters;                         /* extras.c's, and how to free them */
+    void (*emittersFree)(void* emitters);
+    ArtfMesh particleQuad;
+    ArtfTexture particlePuff;
     ArtfIndirect indirect;
     float* environment;         /* ARTF_ENV_FLOATS, or NULL: sky and ground */
     float environmentLight;     /* what it is multiplied by */
