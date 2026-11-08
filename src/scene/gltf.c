@@ -2,6 +2,7 @@
  * and every length is checked before it is used, and what is wrong is logged and left out. */
 #include "artful/gltf.h"
 #include "scene/sceneInternal.h"
+#include "core/threads.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,6 +181,10 @@ typedef struct Loader {
     ArtfTexture* images;    /* of each image, once it was needed; 0: not yet */
     ArtfPreparedTexture** preparedImages; /* what artfPrepareModel made, until it is taken */
     ArtfPreparedMesh** preparedMeshes;
+    /* What prepareAll has read and the workers make into meshes: of each slot, its vertices and triangles. */
+    ArtfVertex** pendingVertices;
+    uint32_t** pendingTriangles;
+    uint32_t *pendingVertexCount, *pendingIndexCount;
     bool preparing;         /* no scene yet */
     ArtfMaterial* materials;
     uint32_t materialCount, imageCount;
@@ -676,7 +681,13 @@ static ArtfMesh meshOf(Loader* l, const Json* p, bool skinned, uint32_t slot) {
     if (skin || targetCount) {
         mesh = artfSceneAddMorphMesh(l->scene, v, count, triangles, good, skin, targets, targetCount);
     } else if (l->preparing) {
-        l->preparedMeshes[slot] = artfPrepareMesh(v, count, triangles, good, true);
+        /* (made on the workers: see prepareAll) */
+        l->pendingVertices[slot] = v;
+        l->pendingTriangles[slot] = triangles;
+        l->pendingVertexCount[slot] = count;
+        l->pendingIndexCount[slot] = good;
+        v = NULL;
+        triangles = NULL;
     } else {
         mesh = artfSceneAddMesh(l->scene, v, count, triangles, good);
     }
@@ -1279,12 +1290,16 @@ static ArtfModel loaderFinish(ArtfScene* s, Loader* l, uint32_t made) {
     return handle;
 }
 
+static void prepareAll(Loader* l);
+
 ArtfModel artfSceneLoadModelMemory(ArtfScene* s, const void* data, size_t size, const char* folder, const ArtfTransform* transform) {
     Loader loader, *l = &loader;
     memset(l, 0, sizeof *l);
     l->scene = s;
     l->folder = folder;
-    return loaderFinish(s, l, loaderOpen(l, data, size) ? loadJson(l, transform) : 0);
+    if (!loaderOpen(l, data, size)) return loaderFinish(s, l, 0);
+    prepareAll(l);
+    return loaderFinish(s, l, loadJson(l, transform));
 }
 
 struct ArtfPreparedModel {
@@ -1293,23 +1308,50 @@ struct ArtfPreparedModel {
     char folder[1024];
 };
 
-/* The slow part: images and the meshes that nodes place whole. What bends is made when it is added: it has no levels. */
+/* The slow part: images and the meshes that nodes place whole. What bends is made when it is added: it has no levels.
+ * The file is read on this thread; decoding the images and making the meshes, with their lighter versions, are shared
+ * by all cores, each item on its own: an item is made as it would be alone. */
+typedef struct PrepareWork {
+    Loader* l;
+    const uint8_t** imageData;
+    uint8_t** imageOwned;
+    size_t* imageSize;
+} PrepareWork;
+
+static void prepareOne(void* user, uint32_t index, uint32_t worker) {
+    (void)worker;
+    const PrepareWork* w = user;
+    Loader* l = w->l;
+    if (index < l->imageCount) {
+        const uint8_t* data = w->imageData[index];
+        const size_t size = w->imageSize[index];
+        if (data && !(size > 12 && !memcmp((const char*)data + 1, "KTX 20", 6))) {
+            int width = 0, height = 0;
+            uint32_t* pixels = artfImageDecode(data, size, &width, &height);
+            if (pixels) l->preparedImages[index] = artfPrepareTexture(pixels, width, height, 0);
+            artfFree(pixels);
+        }
+        return;
+    }
+    const uint32_t slot = index - l->imageCount;
+    if (!l->pendingVertices[slot]) return;
+    l->preparedMeshes[slot] = artfPrepareMesh(l->pendingVertices[slot], l->pendingVertexCount[slot], l->pendingTriangles[slot], l->pendingIndexCount[slot], true);
+    artfFree(l->pendingVertices[slot]);
+    artfFree(l->pendingTriangles[slot]);
+    l->pendingVertices[slot] = NULL;
+    l->pendingTriangles[slot] = NULL;
+}
+
 static void prepareAll(Loader* l) {
     l->preparing = true;
     l->preparedImages = artfCalloc(l->imageCount + 1, sizeof *l->preparedImages);
     l->preparedMeshes = artfCalloc((size_t)l->primitiveTotal + 1, sizeof *l->preparedMeshes);
-    for (uint32_t i = 0; i < l->imageCount; ++i) {
-        uint8_t* owned = NULL;
-        size_t size = 0;
-        const uint8_t* data = imageBytes(l, i, &owned, &size);
-        if (data && !(size > 12 && !memcmp((const char*)data + 1, "KTX 20", 6))) {
-            int width = 0, height = 0;
-            uint32_t* pixels = artfImageDecode(data, size, &width, &height);
-            if (pixels) l->preparedImages[i] = artfPrepareTexture(pixels, width, height, 0);
-            artfFree(pixels);
-        }
-        artfFree(owned);
-    }
+    l->pendingVertices = artfCalloc((size_t)l->primitiveTotal + 1, sizeof *l->pendingVertices);
+    l->pendingTriangles = artfCalloc((size_t)l->primitiveTotal + 1, sizeof *l->pendingTriangles);
+    l->pendingVertexCount = artfCalloc((size_t)l->primitiveTotal + 1, 4);
+    l->pendingIndexCount = artfCalloc((size_t)l->primitiveTotal + 1, 4);
+    PrepareWork w = {l, artfCalloc(l->imageCount + 1, sizeof(uint8_t*)), artfCalloc(l->imageCount + 1, sizeof(uint8_t*)), artfCalloc(l->imageCount + 1, sizeof(size_t))};
+    for (uint32_t i = 0; i < l->imageCount; ++i) w.imageData[i] = imageBytes(l, i, &w.imageOwned[i], &w.imageSize[i]);
     const uint32_t nodes = l->nodes && l->nodes->kind == J_ARRAY ? l->nodes->count : 0;
     for (const Json* n = nodes ? nodeAt(l, l->nodes->first) : NULL; n; n = nodeAt(l, n->next)) {
         const int64_t mesh = indexOf(l, n, "mesh");
@@ -1319,9 +1361,25 @@ static void prepareAll(Loader* l) {
         const uint32_t count = primitives && primitives->kind == J_ARRAY ? primitives->count : 0;
         for (uint32_t i = 0; i < count; ++i) {
             const uint32_t slot = l->primitiveStart[mesh] + i;
-            if (!l->preparedMeshes[slot]) meshOf(l, element(l, primitives, i), false, slot);
+            if (!l->preparedMeshes[slot] && !l->pendingVertices[slot]) meshOf(l, element(l, primitives, i), false, slot);
         }
     }
+    const uint32_t items = l->imageCount + l->primitiveTotal;
+    ArtfPool* pool = items > 1 ? artfPoolNew(0) : NULL;
+    if (pool) artfPoolRun(pool, prepareOne, &w, items);
+    else
+        for (uint32_t i = 0; i < items; ++i) prepareOne(&w, i, 0);
+    artfPoolFree(pool);
+    for (uint32_t i = 0; i < l->imageCount; ++i) artfFree(w.imageOwned[i]);
+    artfFree(w.imageData);
+    artfFree(w.imageOwned);
+    artfFree(w.imageSize);
+    artfFree(l->pendingVertices);
+    artfFree(l->pendingTriangles);
+    artfFree(l->pendingVertexCount);
+    artfFree(l->pendingIndexCount);
+    l->pendingVertices = NULL;
+    l->pendingTriangles = NULL;
     l->preparing = false;
 }
 
