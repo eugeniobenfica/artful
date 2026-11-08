@@ -89,7 +89,7 @@ static void testPacking(void) {
         CHECK(found);
     }
     artfSceneFree(s);
-    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 82 * 16);
+    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 85 * 16);
 }
 
 static void testMeshlets(void) {
@@ -2887,6 +2887,94 @@ static void testGltfExtensions(void) {
     artfSceneFree(s);
 }
 
+/* Light from all around, from a picture: the maps, a Radiance file, and both backends drawing the same. */
+static void testEnvironment(void) {
+    /* a picture lit above and dark below, with a brighter patch where -z is */
+    enum { PW = 64, PH = 32 };
+    float* picture = artfMalloc(PW * PH * 12);
+    for (int y = 0; y < PH; ++y)
+        for (int x = 0; x < PW; ++x) {
+            float* p = picture + 3 * (y * PW + x);
+            const float v = y < PH / 2 ? 1.f : 0.f;
+            p[0] = p[1] = p[2] = v;
+            if (y >= PH / 2 - 4 && y < PH / 2 && x >= PW / 2 - 2 && x < PW / 2 + 2) p[0] = 50.f;
+        }
+    ArtfScene* s = artfSceneNew();
+    CHECK(artfSceneSetEnvironment(s, picture, PW, PH, 1.f, true));
+    float c[3];
+    artfEnvSample(s->environment, ARTF_ENV_DIFFUSE, 0, 1, 0, c);
+    CHECK(fabsf(c[1] - 1.f) < .02f);
+    artfEnvSample(s->environment, ARTF_ENV_DIFFUSE, 0, -1, 0, c);
+    CHECK(c[1] < .02f);
+    artfEnvSample(s->environment, ARTF_ENV_DIFFUSE, 1, 0, 0, c);
+    CHECK(fabsf(c[1] - .5f) < .05f);
+    /* the patch is toward -z, a little above the horizon: sharp in the first map, spread in the rough ones */
+    float sharp[3], away[3], rough[3];
+    artfEnvSample(s->environment, 0, 0, .1f, -1, sharp);
+    artfEnvSample(s->environment, 0, 0, .1f, 1, away);
+    artfEnvSample(s->environment, 4, 0, .1f, -1, rough);
+    CHECK(sharp[0] > 20.f && away[0] < 1.5f && rough[0] > 1.f && rough[0] < sharp[0]);
+    /* the border repeats what is across the fold: no seam below */
+    float left[3], right[3];
+    artfEnvSample(s->environment, 2, -.01f, -1, .3f, left);
+    artfEnvSample(s->environment, 2, .01f, -1, .3f, right);
+    CHECK(fabsf(left[1] - right[1]) < .02f);
+
+    /* the same scene, on both backends */
+    const ArtfMesh ball = artfSceneAddSphere(s, 1, 32, 48);
+    ArtfMaterialDesc metal = artfMaterialDefaults();
+    metal.baseColor = artfVec3(.9f, .9f, .9f);
+    metal.metallic = 1;
+    metal.roughness = .3f;
+    artfSceneAddInstance(s, ball, artfSceneAddMaterial(s, &metal), NULL);
+    artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+    const ArtfCamera eye = {{0, .5f, 3.5f}, {0, 0, 0}, {0, 1, 0}, .9f, .1f};
+    artfSceneSetCamera(s, &eye);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    drawInto(cpu, s, a);
+    /* the background is the picture: dark below, lit above */
+    CHECK((a[(H - 1) * W] & 255) < 20 && (a[0] & 255) > 200);
+    o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("light from all around, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+        artfRendererFree(gpu);
+    }
+    /* without it, the ball shows sky and ground instead */
+    artfSceneSetEnvironment(s, NULL, 0, 0, 0, false);
+    drawInto(cpu, s, b);
+    CHECK(differentShare(a, b, 24) > .2);
+    artfRendererFree(cpu);
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+    artfFree(picture);
+
+    /* a Radiance file, flat and in runs: 1, 2 and 0.5 */
+    static const uint8_t flat[] = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n\x80\x80\x80\x81\x80\x80\x80\x82";
+    int fw = 0, fh = 0;
+    float* got = artfImageDecodeHdr(flat, sizeof flat - 1, &fw, &fh);
+    CHECK(got && fw == 2 && fh == 1 && got[0] == 1.f && got[3] == 2.f);
+    artfFree(got);
+    uint8_t runs[64 + 8 * 4];
+    const char head[] = "#?RADIANCE\n\n-Y 1 +X 8\n";
+    size_t at = sizeof head - 1;
+    memcpy(runs, head, at);
+    runs[at++] = 2; runs[at++] = 2; runs[at++] = 0; runs[at++] = 8;
+    for (int ch = 0; ch < 4; ++ch) { runs[at++] = 128 + 8; runs[at++] = ch == 3 ? 128 : 128; }
+    got = artfImageDecodeHdr(runs, at, &fw, &fh);
+    CHECK(got && fw == 8 && got[21] == .5f);
+    artfFree(got);
+    CHECK(!artfImageDecodeHdr(runs, at - 3, &fw, &fh));
+    CHECK(!artfImageDecodeHdr("not one", 7, &fw, &fh));
+}
+
 static void testGltfTargets(void) {
     static const char file[] = "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"byteLength\":80,\"uri\":\"data:application/octet-stream;base64,AAABAAIAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAQAAAAAA=\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":8,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":44,\"byteLength\":36}],\"accessors\":[{\"bufferView\":0,\"componentType\":5123,\"type\":\"SCALAR\",\"count\":3},{\"bufferView\":1,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3,\"max\":[1,1,0],\"min\":[0,0,0]},{\"bufferView\":2,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3}],\"meshes\":[{\"weights\":[1],\"primitives\":[{\"attributes\":{\"POSITION\":1},\"indices\":0,\"targets\":[{\"POSITION\":2}]}]}],\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
     ArtfScene* s = artfSceneNew();
@@ -3817,6 +3905,7 @@ int main(void) {
     testGltfSparse();
     testGltfTargets();
     testGltfExtensions();
+    testEnvironment();
     testLostDevice();
     testRefusedSwapchain();
     testBlocks();

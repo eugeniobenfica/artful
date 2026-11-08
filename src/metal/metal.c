@@ -49,7 +49,7 @@ enum {
 };
 
 #define MAX_TEXTURES 1024
-#define BINDINGS 34
+#define BINDINGS 50 /* (as many as Vulkan's set has: the shaders name them by binding) */
 #define BLANK_BYTES 65536
 
 /* ---- the runtime ---- */
@@ -858,6 +858,7 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     if (tracing && !syncTrace(v, scene)) return false;
     ArtfFrameData frame;
     artfSceneFrame(scene, v->width, v->height, &frame);
+    frame.sky[3] = frame.ground[3] = 0; /* (light from all around is left out here: the maps are never sent) */
     artfSceneResidencyStep(scene, &frame, v->height);
     memcpy(v->frame.mapped, &frame, sizeof frame);
     uploadOverlay(v);

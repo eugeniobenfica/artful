@@ -7,6 +7,8 @@
  *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room
  *                 [--trace rays|paths] [--trace-samples n]: light followed along rays, for n samples a
  *                 pixel, gathered over frames (1 to start with); [--bounces n]; [--denoise]
+ *                 [--environment file.hdr]: light from all around, from a picture of it; [--environment-light x];
+ *                 [--show-environment]: it is the background too; [--scene-exposure x]
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
  *
@@ -283,6 +285,9 @@ int main(int argc, char** argv) {
     artfSetLog(printLog, NULL);
     const char* model = NULL;
     int shadowSide = 0;
+    const char* environment = NULL;
+    float environmentLight = 1.f, sceneExposure = 0;
+    bool showEnvironment = false;
     ArtfTraceDesc trace = {ARTF_TRACE_NONE, 1, 0, 0, false};
     int traceSamples = 1;
     ArtfRendererOptions o;
@@ -305,6 +310,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--antialias")) o.antialias = true;
         else if (!strcmp(a, "--denoise")) trace.denoise = true;
         else if (!strcmp(a, "--shadows") && i + 1 < argc) shadowSide = atoi(argv[++i]);
+        else if (!strcmp(a, "--environment") && i + 1 < argc) environment = argv[++i];
+        else if (!strcmp(a, "--environment-light") && i + 1 < argc) environmentLight = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--show-environment")) showEnvironment = true;
+        else if (!strcmp(a, "--scene-exposure") && i + 1 < argc) sceneExposure = (float)atof(argv[++i]);
         else if (!strcmp(a, "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(a, "--trace") && i + 1 < argc) trace.mode = !strcmp(argv[++i], "paths") ? ARTF_TRACE_PATHS : ARTF_TRACE_RAYS;
         else if (!strcmp(a, "--trace-samples") && i + 1 < argc) traceSamples = atoi(argv[++i]);
@@ -348,6 +357,25 @@ int main(int argc, char** argv) {
     else if (isHole) sceneBlackHole(s, &hole);
     else sceneSpheres(s);
     if (pngAlpha) artfSceneSetBackgroundAlpha(s, 0);
+    if (sceneExposure > 0) artfSceneSetExposure(s, sceneExposure);
+    if (environment) {
+        FILE* file = fopen(environment, "rb");
+        if (!file) { fprintf(stderr, "cannot read %s\n", environment); return 1; }
+        fseek(file, 0, SEEK_END);
+        const long size = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        void* data = malloc((size_t)size);
+        const size_t got = fread(data, 1, (size_t)size, file);
+        fclose(file);
+        int w = 0, h = 0;
+        float* rgb = got == (size_t)size ? artfImageDecodeHdr(data, (size_t)size, &w, &h) : NULL;
+        free(data);
+        if (!rgb) { fprintf(stderr, "%s is not a Radiance picture\n", environment); return 1; }
+        const double e0 = artfNowMs();
+        artfSceneSetEnvironment(s, rgb, w, h, environmentLight, showEnvironment);
+        printf("environment of %d x %d made into maps in %.1f ms\n", w, h, artfNowMs() - e0);
+        artfFree(rgb);
+    }
     if (shadowSide) {
         const ArtfShadowDesc shadows = {shadowSide, 0};
         artfSceneSetShadows(s, &shadows);

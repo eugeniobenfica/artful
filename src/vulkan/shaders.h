@@ -44,5 +44,6 @@ uint32_t* artfShaderHoleTrace(size_t* size);
 uint32_t* artfShaderBloomDown(size_t* size, bool fromLight);
 uint32_t* artfShaderBloomUp(size_t* size);
 uint32_t* artfShaderHoleBackdrop(size_t* size);
+uint32_t* artfShaderEnvironmentBackdrop(size_t* size);
 
 #endif

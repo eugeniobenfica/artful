@@ -78,5 +78,6 @@ int main(int argc, char** argv) {
     SAVE("bloomNext", artfShaderBloomDown(&size, false));
     SAVE("bloomUp", artfShaderBloomUp(&size));
     SAVE("holeBackdrop", artfShaderHoleBackdrop(&size));
+    SAVE("environmentBackdrop", artfShaderEnvironmentBackdrop(&size));
     return failed;
 }

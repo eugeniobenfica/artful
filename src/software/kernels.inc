@@ -586,6 +586,19 @@ static V8I lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const 
     Lanes3 diffuse = {v8fAdd(v8fSet(frame->ground[0]), v8fMul(up, v8fSet(frame->sky[0] - frame->ground[0]))),
                       v8fAdd(v8fSet(frame->ground[1]), v8fMul(up, v8fSet(frame->sky[1] - frame->ground[1]))),
                       v8fAdd(v8fSet(frame->ground[2]), v8fMul(up, v8fSet(frame->sky[2] - frame->ground[2])))};
+    /* or from a picture of all around: lane by lane, as the GPU does it */
+    const float* environment = frame->sky[3] > 0 ? f->scene->environment : NULL;
+    _Alignas(32) float laneN[3][8];
+    if (environment) {
+        _Alignas(32) float got[3][8];
+        v8fStore(laneN[0], n.x); v8fStore(laneN[1], n.y); v8fStore(laneN[2], n.z);
+        for (int i = 0; i < 8; ++i) {
+            float c[3];
+            artfEnvSample(environment, ARTF_ENV_DIFFUSE, laneN[0][i], laneN[1][i], laneN[2][i], c);
+            for (int k = 0; k < 3; ++k) got[k][i] = c[k] * frame->sky[3];
+        }
+        diffuse.x = v8fLoad(got[0]); diffuse.y = v8fLoad(got[1]); diffuse.z = v8fLoad(got[2]);
+    }
     diffuse.x = v8fMul(diffuse.x, open);
     diffuse.y = v8fMul(diffuse.y, open);
     diffuse.z = v8fMul(diffuse.z, open);
@@ -613,6 +626,23 @@ static V8I lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const 
         AMBIENT(1, y)
         AMBIENT(2, z)
 #undef AMBIENT
+        if (environment) {
+            /* the picture in the mirror direction, as blurred as the surface is rough */
+            _Alignas(32) float laneV[3][8], laneRough[8], got[3][8];
+            v8fStore(laneV[0], view.x); v8fStore(laneV[1], view.y); v8fStore(laneV[2], view.z);
+            v8fStore(laneRough, rough);
+            for (int i = 0; i < 8; ++i) {
+                const float nx = laneN[0][i], ny = laneN[1][i], nz = laneN[2][i];
+                const float twiceNv = 2.f * (nx * laneV[0][i] + ny * laneV[1][i] + nz * laneV[2][i]);
+                float c[3];
+                artfEnvReflected(environment, laneRough[i], nx * twiceNv - laneV[0][i], ny * twiceNv - laneV[1][i], nz * twiceNv - laneV[2][i], c);
+                for (int k = 0; k < 3; ++k) got[k][i] = c[k] * frame->sky[3];
+            }
+            const Lanes3 env = {v8fLoad(got[0]), v8fLoad(got[1]), v8fLoad(got[2])};
+            highlight.x = v8fMul(env.x, v8fAdd(v8fMul(reflecting.f0.x, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.x), reflecting.f0.x), far)));
+            highlight.y = v8fMul(env.y, v8fAdd(v8fMul(reflecting.f0.y, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.y), reflecting.f0.y), far)));
+            highlight.z = v8fMul(env.z, v8fAdd(v8fMul(reflecting.f0.z, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.z), reflecting.f0.z), far)));
+        }
         const V8F keep = v8fSub(one, metal);
         albedo.x = v8fMul(albedo.x, keep);
         albedo.y = v8fMul(albedo.y, keep);
@@ -1192,6 +1222,30 @@ static void depthTile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     f->hizTiles[index] = tileFar;
 }
 
+/* The picture of all around, behind the scene: as the GPU's backdrop draws it. */
+static void environmentFill(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, int th) {
+    const ArtfFrameData* d = &f->data;
+    const float* env = f->scene->environment;
+    const float light = d->sky[3], exposure = d->look[0], alpha = d->background[3];
+    for (int y = 0; y < th; ++y)
+        for (int x = 0; x < tw; ++x) {
+            const float px = ((float)(ox + x) + .5f) / (float)f->width * 2.f - 1.f, py = 1.f - ((float)(oy + y) + .5f) / (float)f->height * 2.f;
+            float c[3];
+            artfEnvSample(env, 0, d->eye[2][0] + px * d->eye[0][0] + py * d->eye[1][0], d->eye[2][1] + px * d->eye[0][1] + py * d->eye[1][1],
+                          d->eye[2][2] + px * d->eye[0][2] + py * d->eye[1][2], c);
+            uint32_t bits = (uint32_t)(alpha * 255.f + .5f) << 24;
+            for (int k = 0; k < 3; ++k) {
+                float v = c[k] * light;
+                if (exposure > 0) {
+                    v *= exposure;
+                    v = v * (v * 2.51f + .03f) / (v * (v * 2.43f + .59f) + .14f);
+                }
+                bits |= (uint32_t)(sqrtf(artfClampf(v, 0, 1)) * alpha * 255.f + .5f) << (16 - 8 * k);
+            }
+            w->color[y * ARTF_TILE + x] = bits;
+        }
+}
+
 static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     ArtfWorker* w = &f->workers[workerIndex];
     const int ox = (int)(index % (uint32_t)f->tilesX) * ARTF_TILE, oy = (int)(index / (uint32_t)f->tilesX) * ARTF_TILE;
@@ -1215,7 +1269,10 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     const V8I zeroI = v8iSet(0);
     const V8I background = v8iSet((int32_t)f->background);
     if (f->hole) lensFill(f, w, ox, oy, tw, th);
-    else for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) v8iStore(w->color + i, background);
+    else {
+        for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) v8iStore(w->color + i, background);
+        if (f->data.sky[3] > 0 && f->data.ground[3] > 0 && f->scene->environment) environmentFill(f, w, ox, oy, tw, th);
+    }
     for (int k = 1; k < f->samples; ++k) memcpy(w->color + k * ARTF_TILE_PIXELS, w->color, ARTF_TILE_PIXELS * 4);
 
     if (w->tris.len) {

@@ -71,6 +71,7 @@ void artfSceneFree(ArtfScene* s) {
     if (s->modelsFree) s->modelsFree(s->models);
     artfTraceFini(&s->trace);
     artfFree(s->hole.map);
+    artfFree(s->environment);
     artfFluidFree(s->hole.fluid);
     artfFree(s);
 }
@@ -1131,4 +1132,19 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->fog[3] = (float)width;
     for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i)
         if (s->lightOn[i]) out->lights[out->lightCount++] = s->lights[i];
+    if (s->environment) {
+        out->sky[3] = s->environmentLight;
+        out->ground[3] = s->environmentShown ? 1.f : 0.f;
+    }
+    const ArtfVec3 forward = artfVec3Normalize(artfVec3Sub(c->target, c->position));
+    const ArtfVec3 right = artfVec3Normalize(artfVec3Cross(forward, c->up));
+    const ArtfVec3 up = artfVec3Cross(right, forward);
+    const float wide = 1.f / artfMaxf(proj.m[0], 1e-6f), tall = 1.f / artfMaxf(proj.m[5], 1e-6f);
+    out->eye[0][3] = (float)width;
+    out->eye[1][3] = (float)height;
+    for (int k = 0; k < 3; ++k) {
+        out->eye[0][k] = (&right.x)[k] * wide;
+        out->eye[1][k] = (&up.x)[k] * tall;
+        out->eye[2][k] = (&forward.x)[k];
+    }
 }

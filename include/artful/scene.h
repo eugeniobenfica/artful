@@ -288,6 +288,16 @@ bool artfSceneBounds(const ArtfScene* s, ArtfVec3* center, float* radius);
 void artfSceneSetSun(ArtfScene* s, ArtfVec3 direction, ArtfVec3 color);
 /* Light from all around: sky from above, ground from below. */
 void artfSceneSetAmbient(ArtfScene* s, ArtfVec3 sky, ArtfVec3 ground);
+/* Light from all around, from a picture of it: equirectangular (longitude across, from +z round by -x to -z in the
+ * middle and on; latitude down, +y at the top row), linear RGB, three floats a pixel. It takes the place of sky and
+ * ground for all that is lit, reflected and traced, times light; shown: it is the background too, where the scene
+ * draws nothing. Made into maps here, on all cores: about 100 ms. NULL: sky and ground again. false: no picture. */
+bool artfSceneSetEnvironment(ArtfScene* s, const float* rgb, int width, int height, float light, bool shown);
+/* The same maps, with another light, or shown or not: costs nothing. */
+void artfSceneSetEnvironmentLight(ArtfScene* s, float light, bool shown);
+/* Decodes a Radiance .hdr (RGBE) into linear RGB, three floats a pixel, for artfSceneSetEnvironment. The caller owns
+ * them (artfFree). NULL: it is not one, or it is damaged. */
+float* artfImageDecodeHdr(const void* data, size_t size, int* width, int* height);
 /* 0 when ARTF_MAX_LIGHTS are on already. radius: where its light ends. */
 ArtfLight artfSceneAddLight(ArtfScene* s, ArtfVec3 position, ArtfVec3 color, float radius);
 void artfLightSet(ArtfScene* s, ArtfLight l, ArtfVec3 position, ArtfVec3 color, float radius);

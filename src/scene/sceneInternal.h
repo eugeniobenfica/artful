@@ -205,6 +205,9 @@ typedef struct ArtfFrameData {
     uint32_t hiz[ARTF_HIZ_LEVELS][4]; /* of each level: where it starts, its width and its height */
     float look[4];      /* exposure (0: none), the fog's density, the sun's size, how long a level's fade is: its share of the distance */
     float fog[4];       /* its color, and the frame's width */
+    /* Toward a pixel at (x, y) of clip space: eye[2] + x eye[0] + y eye[1]. (sky[3]: the environment's light, 0 when
+     * there is none; ground[3]: 1 when it is shown.) */
+    float eye[3][4];
 } ArtfFrameData;
 
 /* One square of the shadow atlas: a place seen from a light. Clip space: x and y from -1 to 1, depth from 0 to
@@ -389,7 +392,66 @@ struct ArtfScene {
     float lodError;
     ArtfHole hole;
     ArtfTrace trace;
+    float* environment;         /* ARTF_ENV_FLOATS, or NULL: sky and ground */
+    float environmentLight;     /* what it is multiplied by */
+    bool environmentShown;      /* behind the scene */
+    uint64_t environmentVersion;
 };
+
+/* ---- light from all around, from a picture (environment.c) ----
+ * Maps of an octahedron around +y, folded below, each with a border of one texel: five of light as surfaces of
+ * roughness 0, .25, .5, .75 and 1 reflect it, then what a surface facing a way takes from all around (over pi). Three
+ * floats a texel. The GPU reads the same floats, and its shaders do the same arithmetic. */
+#define ARTF_ENV_LEVELS 6
+#define ARTF_ENV_DIFFUSE 5
+#define ARTF_ENV_FLOATS (3 * (514 * 514 + 66 * 66 + 34 * 34 + 3 * 18 * 18))
+ARTF_INLINE uint32_t artfEnvSize(int level) { return level == 0 ? 512u : level == 1 ? 64u : level == 2 ? 32u : 16u; }
+ARTF_INLINE uint32_t artfEnvStart(int level) {
+    uint32_t at = 0;
+    for (int i = 0; i < level; ++i) at += 3 * (artfEnvSize(i) + 2) * (artfEnvSize(i) + 2);
+    return at;
+}
+
+/* Where a direction falls on a map, from 0 to 1. */
+ARTF_INLINE void artfEnvPlace(float x, float y, float z, float* u, float* v) {
+    const float sum = artfMaxf(fabsf(x) + fabsf(y) + fabsf(z), 1e-20f);
+    float a = x / sum, b = z / sum;
+    if (y < 0) {
+        const float folded = (1.f - fabsf(b)) * (a >= 0 ? 1.f : -1.f);
+        b = (1.f - fabsf(a)) * (b >= 0 ? 1.f : -1.f);
+        a = folded;
+    }
+    *u = a * .5f + .5f;
+    *v = b * .5f + .5f;
+}
+
+/* What a map holds toward a direction, between its four nearest texels. */
+ARTF_INLINE void artfEnvSample(const float* env, int level, float x, float y, float z, float* out) {
+    const uint32_t n = artfEnvSize(level), w = n + 2;
+    const float* m = env + artfEnvStart(level);
+    float u, v;
+    artfEnvPlace(x, y, z, &u, &v);
+    const float tx = artfClampf(u * (float)n + .5f, 0, (float)n), ty = artfClampf(v * (float)n + .5f, 0, (float)n);
+    const float cx = floorf(tx), cy = floorf(ty), fx = tx - cx, fy = ty - cy;
+    const uint32_t ix = (uint32_t)cx, iy = (uint32_t)cy;
+    const float* p00 = m + 3 * (iy * w + ix);
+    const float* p10 = p00 + 3;
+    const float* p01 = p00 + 3 * w;
+    const float* p11 = p01 + 3;
+    for (int k = 0; k < 3; ++k) {
+        const float top = p00[k] + (p10[k] - p00[k]) * fx, bottom = p01[k] + (p11[k] - p01[k]) * fx;
+        out[k] = top + (bottom - top) * fy;
+    }
+}
+
+/* Light reflected toward a direction by a surface this rough: between the two nearest maps. */
+ARTF_INLINE void artfEnvReflected(const float* env, float rough, float x, float y, float z, float* out) {
+    const float at = artfClampf(rough, 0, 1) * 4.f, first = artfMinf(floorf(at), 3.f), share = at - first;
+    float a[3], b[3];
+    artfEnvSample(env, (int)first, x, y, z, a);
+    artfEnvSample(env, (int)first + 1, x, y, z, b);
+    for (int k = 0; k < 3; ++k) out[k] = a[k] + (b[k] - a[k]) * share;
+}
 
 /* Fills in what a frame of that size needs. */
 void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* out);

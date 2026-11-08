@@ -378,8 +378,8 @@ uint64_t artfSceneTraceKey(const ArtfScene* s, const ArtfFrameData* frame) {
     const uint8_t* p = (const uint8_t*)frame;
     for (size_t i = 0; i < offsetof(ArtfFrameData, hiz); ++i)
         if (i < offsetof(ArtfFrameData, hizLevels) || i >= offsetof(ArtfFrameData, lights)) h = (h ^ p[i]) * 1099511628211ull;
-    const uint64_t versions[8] = {s->trace.desc.denoise, s->id, s->textureVersion, s->instanceVersion, s->structureVersion, s->materialVersion, (uint64_t)s->trace.desc.mode, (uint64_t)s->trace.desc.bounces};
-    for (int i = 0; i < 8; ++i) h = (h ^ versions[i]) * 1099511628211ull;
+    const uint64_t versions[9] = {s->trace.desc.denoise, s->id, s->textureVersion, s->instanceVersion, s->structureVersion, s->materialVersion, (uint64_t)s->trace.desc.mode, (uint64_t)s->trace.desc.bounces, s->environmentVersion};
+    for (int i = 0; i < 9; ++i) h = (h ^ versions[i]) * 1099511628211ull;
     for (size_t i = offsetof(ArtfFrameData, look); i < sizeof *frame; ++i) h = (h ^ p[i]) * 1099511628211ull;
     for (uint32_t i = 0; i < frame->lightCount; ++i) {
         const uint8_t* l = (const uint8_t*)&frame->lights[i];
@@ -724,7 +724,11 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         Hit h;
         if (!closest(&s->trace, o, d, 3e37f, false, &h)) {
             /* the sky, for what has met something: what has not leaves the frame's own background */
-            if (covered) {
+            if (covered && f->sky[3] > 0 && s->environment) {
+                float around[3];
+                artfEnvSample(s->environment, 0, d[0], d[1], d[2], around);
+                for (int k = 0; k < 3; ++k) light[k] += path[k] * around[k] * f->sky[3];
+            } else if (covered) {
                 const float up = d[1] * .5f + .5f;
                 for (int k = 0; k < 3; ++k) light[k] += path[k] * (f->ground[k] + (f->sky[k] - f->ground[k]) * up);
             }
@@ -795,12 +799,16 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         const float stray = m.rough * m.rough;
         if (!c->paths) {
             /* rays: light from all around as the rasterizer has it, and a mirror for what reflects */
+            const float* env = f->sky[3] > 0 ? s->environment : NULL;
             const float up = m.normal[1] * .5f + .5f;
-            for (int k = 0; k < 3; ++k) light[k] += path[k] * m.albedo[k] * m.open * (f->ground[k] + (f->sky[k] - f->ground[k]) * up);
+            float around[3];
+            if (env) artfEnvSample(env, ARTF_ENV_DIFFUSE, m.normal[0], m.normal[1], m.normal[2], around);
+            for (int k = 0; k < 3; ++k) light[k] += path[k] * m.albedo[k] * m.open * (env ? around[k] * f->sky[3] : f->ground[k] + (f->sky[k] - f->ground[k]) * up);
             if (!m.shiny) break;
             if (bounces >= c->bounces) {
                 const float reflectedUp = mirror[1] * .5f + .5f;
-                for (int k = 0; k < 3; ++k) light[k] += path[k] * m.mirror[k] * m.open * (f->ground[k] + (f->sky[k] - f->ground[k]) * reflectedUp);
+                if (env) artfEnvReflected(env, m.rough, mirror[0], mirror[1], mirror[2], around);
+                for (int k = 0; k < 3; ++k) light[k] += path[k] * m.mirror[k] * m.open * (env ? around[k] * f->sky[3] : f->ground[k] + (f->sky[k] - f->ground[k]) * reflectedUp);
                 break;
             }
             for (int k = 0; k < 3; ++k) {
