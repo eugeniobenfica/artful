@@ -29,7 +29,8 @@ static float smooth(float a, float b, float x) {
 static float noise(float x, float y, uint32_t period, uint32_t seed) {
     const float fx = floorf(x), fy = floorf(y);
     const float tx = x - fx, ty = y - fy;
-    const uint32_t x0 = (uint32_t)fx % period, x1 = (x0 + 1) % period, y0 = (uint32_t)fy, y1 = y0 + 1;
+    /* (through a signed integer: a negative float made unsigned is undefined in C) */
+    const uint32_t x0 = (uint32_t)(int32_t)fx % period, x1 = (x0 + 1) % period, y0 = (uint32_t)(int32_t)fy, y1 = y0 + 1;
     const float a = (float)(hashOf(x0, y0, seed) >> 8), b = (float)(hashOf(x1, y0, seed) >> 8);
     const float c = (float)(hashOf(x0, y1, seed) >> 8), d = (float)(hashOf(x1, y1, seed) >> 8);
     const float sx = tx * tx * (3.f - 2.f * tx), sy = ty * ty * (3.f - 2.f * ty);

@@ -2984,7 +2984,7 @@ static void encodeTriangles(Bytes* out, const uint16_t* t, size_t count) {
             if (fec == 0) ++next;
             if (fec == 15) {
                 const int32_t d = (int32_t)(c - last);
-                vbytePut(&data, (uint32_t)((d << 1) ^ (d >> 31)));
+                vbytePut(&data, (((uint32_t)d << 1) ^ (d < 0 ? 0xFFFFFFFFu : 0u)));
             }
             if (fec >= 13) last = c;
             PUSH_V(c, fec == 0 || fec >= 13);
@@ -2997,7 +2997,7 @@ static void encodeTriangles(Bytes* out, const uint16_t* t, size_t count) {
             const uint32_t abc[3] = {a, b, c};
             for (int k = 0; k < 3; ++k) {
                 const int32_t d = (int32_t)(abc[k] - last);
-                vbytePut(&data, (uint32_t)((d << 1) ^ (d >> 31)));
+                vbytePut(&data, (((uint32_t)d << 1) ^ (d < 0 ? 0xFFFFFFFFu : 0u)));
                 last = abc[k];
             }
             PUSH_V(a, 1);
@@ -3026,7 +3026,7 @@ static void encodeIndexSequence(Bytes* out, const uint16_t* t, size_t count) {
         const uint32_t which = i & 1;
         const int32_t d = (int32_t)(t[i] - last[which]);
         last[which] = t[i];
-        vbytePut(out, ((uint32_t)((d << 1) ^ (d >> 31))) << 1 | which);
+        vbytePut(out, ((((uint32_t)d << 1) ^ (d < 0 ? 0xFFFFFFFFu : 0u))) << 1 | which);
     }
     for (int i = 0; i < 4; ++i) bytePut(out, 0);
 }

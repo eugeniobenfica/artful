@@ -8,7 +8,7 @@
 
 <p><b>A 3D renderer. Written in C. Nothing else.</b></p>
 
-<a href="https://github.com/eugeniobenfica/artful/releases/latest"><img src="https://img.shields.io/badge/version-0.3.0-E8875F?style=flat-square&labelColor=141417" alt="Version 0.3.0"></a>
+<a href="https://github.com/eugeniobenfica/artful/releases/latest"><img src="https://img.shields.io/badge/version-0.4.0-E8875F?style=flat-square&labelColor=141417" alt="Version 0.4.0"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E8875F?style=flat-square&labelColor=141417" alt="MIT license"></a>
 <a href="docs/architecture.md"><img src="https://img.shields.io/badge/C11-no_third--party_libraries-E8875F?style=flat-square&labelColor=141417" alt="C11, no third-party libraries"></a>
 <br>
@@ -400,9 +400,9 @@ to the last pixel of a run of frames.
 
 | Platform | SDK |
 | :--- | :--- |
-| **Windows** x64, MinGW-w64 | [artful-0.3.0-windows-x64-mingw.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.3.0/artful-0.3.0-windows-x64-mingw.zip), with `artful-render` and `artful-blackhole` |
-| **Windows** x64, MSVC | [artful-0.3.0-windows-x64-msvc.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.3.0/artful-0.3.0-windows-x64-msvc.zip) |
-| **Android** arm64, armv7, x86_64 | [artful-0.3.0-android.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.3.0/artful-0.3.0-android.zip) |
+| **Windows** x64, MinGW-w64 | [artful-0.4.0-windows-x64-mingw.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.4.0/artful-0.4.0-windows-x64-mingw.zip), with `artful-render` and `artful-blackhole` |
+| **Windows** x64, MSVC | [artful-0.4.0-windows-x64-msvc.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.4.0/artful-0.4.0-windows-x64-msvc.zip) |
+| **Android** arm64, armv7, x86_64 | [artful-0.4.0-android.zip](https://github.com/eugeniobenfica/artful/releases/download/v0.4.0/artful-0.4.0-android.zip) |
 
 Each SDK holds the static library, its headers and a CMake package for `find_package(artful)`; checksums are in
 `SHA256SUMS.txt`. On Linux and macOS, build it from the sources: it takes a few seconds.
