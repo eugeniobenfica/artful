@@ -573,6 +573,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     f->scene = scene;
     artfSceneDecodeTextures(scene);
     artfScenePosesApply(scene);
+    artfSceneFaceParticles(scene);
     artfSceneFrame(scene, f->width, f->height, &f->data);
     if (f->post) {
         /* the frame before, and with temporal antialiasing, a place within the pixel */
@@ -582,7 +583,6 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         memcpy(s->previous, now, sizeof now);
         s->hasPrevious = true;
         if (scene->post.temporal) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
-        f->postFog = scene->post.volumetric > 0 && f->data.look[1] > 0;
     } else {
         memset(f->data.post, 0, sizeof f->data.post);
     }
@@ -591,12 +591,14 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     f->extraCount = 0;
     if (f->data.eye[2][3] > 0) {
         if (!f->extra) f->extra = artfMalloc(ARTF_MAX_LIGHTS * sizeof *f->extra);
-        f->extraCount = artfSceneExtraLights(scene, f->extra);
+        f->extraCount = artfSceneExtraLights(scene, &f->data, f->extra);
         artfFree(f->tileLights);
         f->tileLights = artfMalloc((size_t)f->tilesX * f->tilesY * (1 + ARTF_TILE_LIGHTS) * 4);
         artfSceneLightTiles(&f->data, f->width, f->height, f->extra, f->extraCount, f->tileLights);
     }
     f->nearW = scene->camera.near_;
+    if (!f->decals) f->decals = artfMalloc(ARTF_MAX_DECALS * sizeof *f->decals);
+    f->decalCount = artfSceneDecals(scene, &f->data, f->height, f->decals);
     const bool occlusion = scene->features[ARTF_FEATURE_OCCLUSION];
     const float* bg = f->data.background;
     f->background = (uint32_t)(artfClampf(bg[3], 0, 1) * 255.f + .5f) << 24 | (uint32_t)(artfClampf(bg[0], 0, 1) * 255.f + .5f) << 16 | (uint32_t)(artfClampf(bg[1], 0, 1) * 255.f + .5f) << 8 | (uint32_t)(artfClampf(bg[2], 0, 1) * 255.f + .5f);
@@ -617,6 +619,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     /* each group writes from where its instances start: the list has holes until it is packed */
     f->tracing = scene->trace.desc.mode != ARTF_TRACE_NONE;
+    f->postFog = f->post && !f->tracing && f->data.post[1][1] > 0 && f->data.look[1] > 0;
     for (uint32_t g = 0; g < ARTF_CHUNKS; ++g) {
         s->groups[g] = f->visible + (size_t)count * g / ARTF_CHUNKS;
         s->groupCounts[g] = 0;
@@ -655,6 +658,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     if (!f->tracing) addLayers(s, scene);
     f->shadows = !f->tracing && scene->shadows.resolution ? artfShadowMapsDraw(s->shadowMaps, scene, &f->data) : NULL;
+    if (f->postFog) artfSoftFroxels(&s->post, f);
     const double t2 = artfNowMs();
 
     f->hole = scene->hole.on;
@@ -728,6 +732,7 @@ static void softFree(ArtfRenderer* r) {
     artfFree(f->chunks);
     artfFree(f->workers);
     artfFree(f->visible);
+    artfFree(f->decals);
     artfFree(f->meshletStarts);
     artfFree(f->tileClass);
     artfFree(f->tileDirty);

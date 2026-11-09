@@ -550,6 +550,18 @@ typedef struct LitBatch {
     bool bumpy;
 } LitBatch;
 
+/* The same for the k-th light past the frame's own. */
+static V8F shadowLanesExtra(const ArtfSoftFrame* f, uint32_t k, const float* position, Lanes3 world, Lanes3 n) {
+    _Alignas(32) float wx[8], wy[8], wz[8], nx[8], ny[8], nz[8], out[8];
+    v8fStore(wx, world.x); v8fStore(wy, world.y); v8fStore(wz, world.z);
+    v8fStore(nx, n.x); v8fStore(ny, n.y); v8fStore(nz, n.z);
+    for (int i = 0; i < 8; ++i) {
+        const float p[3] = {wx[i], wy[i], wz[i]}, normal[3] = {nx[i], ny[i], nz[i]};
+        out[i] = artfShadowOfExtra(f->shadows, k, position, p, normal);
+    }
+    return v8fLoad(out);
+}
+
 /* How much light gets to eight places, one by one: shadow maps are read at random, so lanes gain little. */
 static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n) {
     _Alignas(32) float wx[8], wy[8], wz[8], nx[8], ny[8], nz[8], out[8];
@@ -560,6 +572,68 @@ static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
         out[i] = light < 0 ? artfShadowOfSun(f->shadows, f->data.cameraPos, p, normal) : artfShadowOfLight(f->shadows, (uint32_t)light, f->data.lights[light].position, p, normal);
     }
     return v8fLoad(out);
+}
+
+/* Light that bounced, at eight places: artfIndirectAt's arithmetic, in the same order, eight at a time. */
+static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n) {
+    const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
+    V8F q[3], w[3];
+    V8I i0[3];
+    const V8F pk[3] = {p.x, p.y, p.z}, nk[3] = {n.x, n.y, n.z};
+    for (int k = 0; k < 3; ++k) {
+        q[k] = v8fAdd(pk[k], v8fMul(v8fMul(nk[k], v8fSet(g->spacing[k])), v8fSet(.25f)));
+        const V8F at = v8fMin(v8fMax(v8fDiv(v8fSub(q[k], v8fSet(g->origin[k])), v8fSet(g->spacing[k])), zero), v8fSet((float)(g->dims[k] - 1)));
+        V8I i = v8fToI(at);
+        i = v8iSelect(v8iGt(i, v8iSet(g->dims[k] - 2)), i, v8iSet(g->dims[k] - 2));
+        i0[k] = i;
+        w[k] = v8fSub(at, v8iToF(i));
+    }
+    const uint32_t count = artfIndirectCount(g);
+    const uint32_t* bits = (const uint32_t*)g->probes;
+    V8F sum[3] = {zero, zero, zero}, weights = zero;
+    for (int c = 0; c < 8; ++c) {
+        const V8I x = v8iAdd(i0[0], v8iSet(c & 1)), y = v8iAdd(i0[1], v8iSet(c >> 1 & 1)), z = v8iAdd(i0[2], v8iSet(c >> 2));
+        V8F weight = v8fMul(v8fMul(c & 1 ? w[0] : v8fSub(one, w[0]), c & 2 ? w[1] : v8fSub(one, w[1])), c & 4 ? w[2] : v8fSub(one, w[2]));
+        const V8I index = v8iAdd(v8iMul(v8iAdd(v8iMul(z, v8iSet(g->dims[1])), y), v8iSet(g->dims[0])), x);
+        const V8I base = v8iMul(index, v8iSet(16));
+#define PROBE(j) v8iAsF(v8iGather(bits, v8iAdd(base, v8iSet(j))))
+        if (!g->desc.throughWalls) {
+            const V8F there[3] = {v8fAdd(v8fSet(g->origin[0]), v8fMul(v8iToF(x), v8fSet(g->spacing[0]))), v8fAdd(v8fSet(g->origin[1]), v8fMul(v8iToF(y), v8fSet(g->spacing[1]))),
+                                  v8fAdd(v8fSet(g->origin[2]), v8fMul(v8iToF(z), v8fSet(g->spacing[2])))};
+            const V8F d0 = v8fSub(q[0], there[0]), d1 = v8fSub(q[1], there[1]), d2 = v8fSub(q[2], there[2]);
+            const V8F distance = v8fSqrt(v8fAdd(v8fAdd(v8fMul(d0, d0), v8fMul(d1, d1)), v8fMul(d2, d2)));
+            const V8F inv = v8fSelect(v8fGt(distance, v8fSet(1e-6f)), zero, v8fDiv(one, distance));
+            const V8F facing = v8fMul(v8fSub(one, v8fMul(v8fAdd(v8fAdd(v8fMul(d0, nk[0]), v8fMul(d1, nk[1])), v8fMul(d2, nk[2])), inv)), v8fSet(.5f));
+            weight = v8fMul(weight, v8fAdd(v8fMul(facing, facing), v8fSet(.2f)));
+            /* as artfProbeFold, and the nearest texel */
+            const V8F total = v8fAdd(v8fAdd(v8fAdd(v8fAbs(d0), v8fAbs(d1)), v8fAbs(d2)), v8fSet(1e-20f));
+            V8F a = v8fDiv(d0, total), b = v8fDiv(d1, total);
+            const V8I below = v8fLt(d2, zero);
+            const V8F sa = v8fSelect(v8fLt(a, zero), one, v8fSet(-1.f)), sb = v8fSelect(v8fLt(b, zero), one, v8fSet(-1.f));
+            const V8F fa = v8fMul(v8fSub(one, v8fAbs(b)), sa), fb = v8fMul(v8fSub(one, v8fAbs(a)), sb);
+            a = v8fSelect(below, a, fa);
+            b = v8fSelect(below, b, fb);
+            const V8F u = v8fAdd(v8fMul(a, v8fSet(.5f)), v8fSet(.5f)), v = v8fAdd(v8fMul(b, v8fSet(.5f)), v8fSet(.5f));
+            V8I tx = v8fToI(v8fMul(u, v8fSet((float)ARTF_PROBE_SIDE))), ty = v8fToI(v8fMul(v, v8fSet((float)ARTF_PROBE_SIDE)));
+            tx = v8iSelect(v8iGt(tx, v8iSet(ARTF_PROBE_SIDE - 1)), tx, v8iSet(ARTF_PROBE_SIDE - 1));
+            ty = v8iSelect(v8iGt(ty, v8iSet(ARTF_PROBE_SIDE - 1)), ty, v8iSet(ARTF_PROBE_SIDE - 1));
+            const V8I texel = v8iAdd(v8iAdd(v8iSet((int32_t)(count * 16)), v8iMul(index, v8iSet(ARTF_PROBE_MAP))), v8iMul(v8iAdd(v8iMul(ty, v8iSet(ARTF_PROBE_SIDE)), tx), v8iSet(2)));
+            const V8F mean = v8iAsF(v8iGather(bits, texel)), square = v8iAsF(v8iGather(bits, v8iAdd(texel, v8iSet(1))));
+            const V8F variance = v8fMax(v8fSub(square, v8fMul(mean, mean)), v8fSet(1e-4f)), past = v8fSub(distance, mean);
+            const V8F seen = v8fDiv(variance, v8fAdd(variance, v8fMul(past, past)));
+            const V8F hidden = v8fMax(v8fMul(v8fMul(seen, seen), seen), v8fSet(.002f));
+            weight = v8fSelect(v8fGt(distance, mean), weight, v8fMul(weight, hidden));
+        }
+        weights = v8fAdd(weights, weight);
+        for (int k = 0; k < 3; ++k) {
+            const V8F taken = v8fAdd(v8fAdd(v8fAdd(PROBE(k), v8fMul(PROBE(4 + 4 * k), nk[0])), v8fMul(PROBE(5 + 4 * k), nk[1])), v8fMul(PROBE(6 + 4 * k), nk[2]));
+            sum[k] = v8fAdd(sum[k], v8fMul(weight, v8fMax(taken, zero)));
+        }
+#undef PROBE
+    }
+    const V8F scale = v8fSelect(v8fGt(weights, v8fSet(1e-6f)), zero, v8fDiv(one, weights));
+    const Lanes3 out = {v8fMul(sum[0], scale), v8fMul(sum[1], scale), v8fMul(sum[2], scale)};
+    return out;
 }
 
 /* The color of eight pixels. A light out of reach adds exactly nothing, so which lights are looked
@@ -639,6 +713,35 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         own.x = v8fLoad(io.emissive[0]); own.y = v8fLoad(io.emissive[1]); own.z = v8fLoad(io.emissive[2]);
     }
 
+    /* decals over it, in the order they were added: not on what blends */
+    if (f->decalCount && !(material->flags & ARTF_MATERIAL_BLEND)) {
+        const V8F half = v8fSet(.5f);
+        for (uint32_t k = 0; k < f->decalCount; ++k) {
+            const ArtfDecalData* d = &f->decals[k];
+            const float* m = d->toBox;
+            const V8F lx = v8fAdd(v8fAdd(v8fMul(world.x, v8fSet(m[0])), v8fMul(world.y, v8fSet(m[1]))), v8fAdd(v8fMul(world.z, v8fSet(m[2])), v8fSet(m[3])));
+            const V8F ly = v8fAdd(v8fAdd(v8fMul(world.x, v8fSet(m[4])), v8fMul(world.y, v8fSet(m[5]))), v8fAdd(v8fMul(world.z, v8fSet(m[6])), v8fSet(m[7])));
+            const V8F lz = v8fAdd(v8fAdd(v8fMul(world.x, v8fSet(m[8])), v8fMul(world.y, v8fSet(m[9]))), v8fAdd(v8fMul(world.z, v8fSet(m[10])), v8fSet(m[11])));
+            const V8I in = v8iAnd(v8iAnd(v8fLt(v8fAbs(lx), half), v8fLt(v8fAbs(ly), half)), v8fLt(v8fAbs(lz), half));
+            if (v8iSigns(in) == 0) continue;
+            /* facing up the box, and away from its top and bottom */
+            const float upLength = sqrtf(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]), inv = upLength > 0 ? 1.f / upLength : 0.f;
+            const Lanes3 up = {v8fSet(m[4] * inv), v8fSet(m[5] * inv), v8fSet(m[6] * inv)};
+            const V8F facing = v8fMin(v8fMax(v8fMul(v8fSub(dot3(n, up), v8fSet(.2f)), v8fSet(1.f / .3f)), zero), one);
+            const V8F y2 = v8fMul(v8fMul(ly, ly), v8fSet(4.f)), fade = v8fMax(v8fSub(one, v8fMul(y2, y2)), zero);
+            const ArtfTextureData* t = &textures[d->texture];
+            const int level = (int)d->level;
+            V8F texel = one;
+            const Lanes3 c = sampleTexture(t->pixels + t->offsets[level], artfMaxi(t->width >> level, 1), artfMaxi(t->height >> level, 1), v8fAdd(lx, half), v8fAdd(lz, half), &texel);
+            const V8F cover = v8fSelect(in, zero, v8fMul(v8fMul(texel, v8fSet(d->opacity)), v8fMul(facing, fade)));
+            albedo.x = v8fAdd(albedo.x, v8fMul(v8fSub(v8fMul(v8fSet(d->color[0]), v8fMul(c.x, c.x)), albedo.x), cover));
+            albedo.y = v8fAdd(albedo.y, v8fMul(v8fSub(v8fMul(v8fSet(d->color[1]), v8fMul(c.y, c.y)), albedo.y), cover));
+            albedo.z = v8fAdd(albedo.z, v8fMul(v8fSub(v8fMul(v8fSet(d->color[2]), v8fMul(c.z, c.z)), albedo.z), cover));
+            if (d->roughness > 0) rough = v8fAdd(rough, v8fMul(v8fSub(v8fSet(d->roughness), rough), cover));
+        }
+    }
+
+    const Lanes3 baseColor = albedo; /* (what an unlit material shows) */
     /* light from all around, then the sun */
     V8F up = v8fAdd(v8fMul(n.y, v8fSet(.5f)), v8fSet(.5f));
     Lanes3 diffuse = {v8fAdd(v8fSet(frame->ground[0]), v8fMul(up, v8fSet(frame->sky[0] - frame->ground[0]))),
@@ -659,16 +762,9 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
     }
     if (frame->indirect[0][3] > 0) {
         /* or from the probes near it: light that bounced */
-        _Alignas(32) float laneW[3][8], laneD[3][8], got[3][8];
-        v8fStore(laneW[0], world.x); v8fStore(laneW[1], world.y); v8fStore(laneW[2], world.z);
-        v8fStore(laneD[0], n.x); v8fStore(laneD[1], n.y); v8fStore(laneD[2], n.z);
-        for (int i = 0; i < 8; ++i) {
-            const float p[3] = {laneW[0][i], laneW[1][i], laneW[2][i]}, nn[3] = {laneD[0][i], laneD[1][i], laneD[2][i]};
-            float c[3];
-            artfIndirectAt(&f->scene->indirect, p, nn, c);
-            for (int k = 0; k < 3; ++k) got[k][i] = c[k] * frame->indirect[0][3];
-        }
-        diffuse.x = v8fLoad(got[0]); diffuse.y = v8fLoad(got[1]); diffuse.z = v8fLoad(got[2]);
+        const Lanes3 got = indirectLanes(&f->scene->indirect, world, n);
+        const V8F strength = v8fSet(frame->indirect[0][3]);
+        diffuse.x = v8fMul(got.x, strength); diffuse.y = v8fMul(got.y, strength); diffuse.z = v8fMul(got.z, strength);
     }
     diffuse.x = v8fMul(diffuse.x, open);
     diffuse.y = v8fMul(diffuse.y, open);
@@ -720,6 +816,7 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         albedo.z = v8fMul(albedo.z, keep);
     }
     const Lanes3 aroundDiffuse = diffuse, aroundHighlight = highlight; /* (for ambient occlusion) */
+
     if (frame->sunColor[0] > 0 || frame->sunColor[1] > 0 || frame->sunColor[2] > 0) {
         Lanes3 toSun = {v8fSet(frame->toSun[0]), v8fSet(frame->toSun[1]), v8fSet(frame->toSun[2])};
         addLight(n, view, toSun, f->shadows ? shadowLanes(f, -1, world, n) : v8fSet(1.f), frame->sunColor, shiny, &reflecting, &diffuse, &highlight);
@@ -738,9 +835,10 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         if (f->shadows && f->shadows->frame->lights[i][0]) spot = v8fMul(spot, shadowLanes(f, (int)i, world, n));
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
     }
-    /* those past them that reach this tile: the same light, with no shadow */
+    /* those past them that reach this tile: the same light; the first few with a shadow of their own */
     for (uint32_t k = 0; extra && k < extra[0]; ++k) {
-        const ArtfLightData* L = &f->extra[extra[1 + k]];
+        const uint32_t index = extra[1 + k];
+        const ArtfLightData* L = &f->extra[index];
         Lanes3 d = {v8fSub(v8fSet(L->position[0]), world.x), v8fSub(v8fSet(L->position[1]), world.y), v8fSub(v8fSet(L->position[2]), world.z)};
         V8F d2 = dot3(d, d);
         V8F invLength = v8fDiv(v8fSet(1.f), v8fSqrt(v8fMax(d2, v8fSet(1e-8f))));
@@ -750,12 +848,19 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
+        if (f->shadows && index < ARTF_SHADOW_EXTRA && f->shadows->frame->extra[index][0]) spot = v8fMul(spot, shadowLanesExtra(f, index, L->position, world, n));
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
     }
 
     Lanes3 lit = {v8fAdd(v8fAdd(v8fMul(albedo.x, diffuse.x), highlight.x), own.x),
                   v8fAdd(v8fAdd(v8fMul(albedo.y, diffuse.y), highlight.y), own.y),
                   v8fAdd(v8fAdd(v8fMul(albedo.z, diffuse.z), highlight.z), own.z)};
+    if (material->flags & ARTF_MATERIAL_UNLIT) {
+        /* its color as it is, and its own light */
+        lit.x = v8fAdd(baseColor.x, own.x);
+        lit.y = v8fAdd(baseColor.y, own.y);
+        lit.z = v8fAdd(baseColor.z, own.z);
+    }
     if (frame->look[1] > 0 && !f->postFog) {
         Lanes3 fromEye = {v8fSub(world.x, v8fSet(frame->cameraPos[0])), v8fSub(world.y, v8fSet(frame->cameraPos[1])), v8fSub(world.z, v8fSet(frame->cameraPos[2]))};
         /* (with no exp, whose bits differ from one C library to the next) */
@@ -765,6 +870,25 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         lit.x = v8fAdd(fr, v8fMul(v8fSub(lit.x, fr), keep));
         lit.y = v8fAdd(fg, v8fMul(v8fSub(lit.y, fg), keep));
         lit.z = v8fAdd(fb, v8fMul(v8fSub(lit.z, fb), keep));
+    }
+    V8F airLeft = one; /* (what fog leaves of the light: ambient occlusion takes from that alone) */
+    if (f->postFog) {
+        /* fog that light goes through: from the grid, where this point falls in the frame */
+        _Alignas(32) float lw[3][8], got[4][8];
+        v8fStore(lw[0], world.x); v8fStore(lw[1], world.y); v8fStore(lw[2], world.z);
+        const float* m = frame->viewProj;
+        for (int i = 0; i < 8; ++i) {
+            const float x = lw[0][i], y = lw[1][i], z = lw[2][i];
+            const float cx = m[0] * x + m[4] * y + m[8] * z + m[12], cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+            const float cw = artfMaxf(m[3] * x + m[7] * y + m[11] * z + m[15], 1e-5f);
+            float c[4];
+            artfFroxelAt(f, (cx / cw * .5f + .5f) * (float)f->width - .5f, (.5f - cy / cw * .5f) * (float)f->height - .5f, cw, c);
+            for (int j = 0; j < 4; ++j) got[j][i] = c[j];
+        }
+        airLeft = v8fLoad(got[3]);
+        lit.x = v8fAdd(v8fMul(lit.x, airLeft), v8fLoad(got[0]));
+        lit.y = v8fAdd(v8fMul(lit.y, airLeft), v8fLoad(got[1]));
+        lit.z = v8fAdd(v8fMul(lit.z, airLeft), v8fLoad(got[2]));
     }
     LitOut out;
     if (f->post) {
@@ -776,7 +900,7 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         const V8F all = v8fAdd(v8fAdd(v8fMul(lit.x, v8fSet(.3f)), v8fMul(lit.y, v8fSet(.59f))), v8fMul(lit.z, v8fSet(.11f)));
         const V8F around = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fMul(albedo.x, aroundDiffuse.x), aroundHighlight.x), v8fSet(.3f)), v8fMul(v8fAdd(v8fMul(albedo.y, aroundDiffuse.y), aroundHighlight.y), v8fSet(.59f))),
                                   v8fMul(v8fAdd(v8fMul(albedo.z, aroundDiffuse.z), aroundHighlight.z), v8fSet(.11f)));
-        out.surface = packSurface(n, rough, metal, v8fDiv(around, v8fMax(all, v8fSet(1e-6f))));
+        out.surface = packSurface(n, rough, metal, v8fDiv(v8fMul(around, airLeft), v8fMax(all, v8fSet(1e-6f))));
         return out;
     }
     if (frame->look[0] > 0) {
@@ -862,7 +986,7 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
     s->originX = ox;
     s->originY = oy;
     s->texture = material->texture ? &f->scene->textures.items[material->texture] : NULL;
-    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || material->graph;
+    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || material->graph || f->decalCount || f->postFog;
     s->bumpy = material->normalMap != 0;
     const ArtfTextureData* textures = f->scene->textures.items;
     s->sizing = s->texture ? s->texture : material->normalMap ? &textures[material->normalMap] : material->surfaceMap ? &textures[material->surfaceMap] : material->occlusionMap ? &textures[material->occlusionMap] : NULL;
@@ -1095,11 +1219,12 @@ static void shadeTriangle(ArtfSoftFrame* f, LitBatch* batch, const ArtfRasterTri
 }
 
 /* The triangles that show in a plane, into its colors, each pixel once. */
-static void shadePlane(ArtfSoftFrame* f, ArtfWorker* w, const ArtfRasterTri* const* tris, size_t count, const uint32_t* plane, const uint32_t* first, uint32_t* color, int ox, int oy, int tw, int th) {
+/* rows: those from y0 to y1 (exclusive) that the triangles can be in. */
+static void shadePlane(ArtfSoftFrame* f, ArtfWorker* w, const ArtfRasterTri* const* tris, size_t count, const uint32_t* plane, const uint32_t* first, uint32_t* color, int ox, int oy, int tw, int y0, int y1) {
     artfVecReserve(&w->seen, count + 1);
     memset(w->seen.items, 0, count + 1);
     uint8_t* seen = w->seen.items;
-    for (int y = 0; y < th; ++y) {
+    for (int y = y0; y < y1; ++y) {
         const uint32_t* ids = plane + y * ARTF_TILE;
         const uint32_t* same = first ? first + y * ARTF_TILE : NULL;
         uint32_t last = 0;
@@ -1182,16 +1307,23 @@ static void drawLayers(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, 
     const ArtfRasterTri* const* tris = w->layers.items;
     const size_t count = w->layers.len;
     for (size_t at = 0, end; at < count; at = end) {
-        for (end = at; end < count && tris[end]->instance == tris[at]->instance; ++end) {}
-        for (int i = 0; i < ARTF_TILE_PIXELS * f->samples; i += 8) v8iStore(w->ids + i, zeroI);
+        /* (only the rows its triangles reach: a particle is small) */
+        int y0 = th, y1 = 0;
+        for (end = at; end < count && tris[end]->instance == tris[at]->instance; ++end) {
+            y0 = artfMini(y0, artfMaxi(tris[end]->minY - oy, 0));
+            y1 = artfMaxi(y1, artfMini(tris[end]->maxY - oy + 1, th));
+        }
+        if (y0 >= y1) continue;
+        for (int k = 0; k < f->samples; ++k)
+            for (int i = y0 * ARTF_TILE; i < y1 * ARTF_TILE; i += 8) v8iStore(w->ids + k * ARTF_TILE_PIXELS + i, zeroI);
         for (size_t i = at; i < end; ++i) rasterizeSamples(f, w, tris[i], (uint32_t)(i - at + 1), ox, oy);
         for (int k = 0; k < f->samples; ++k) {
             const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
-            shadePlane(f, w, tris + at, end - at, w->ids + plane, k ? w->ids : NULL, w->layer + plane, ox, oy, tw, th);
+            shadePlane(f, w, tris + at, end - at, w->ids + plane, k ? w->ids : NULL, w->layer + plane, ox, oy, tw, y0, y1);
         }
         for (int k = 0; k < f->samples; ++k) {
             const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
-            for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) {
+            for (int i = y0 * ARTF_TILE; i < y1 * ARTF_TILE; i += 8) {
                 const V8I id = v8iLoad(w->ids + plane + i), empty = v8iEq(id, zeroI);
                 if (v8iSigns(empty) == 0xFF) continue;
                 const V8I under = v8iLoad(w->color + plane + i);
@@ -1234,7 +1366,7 @@ static void drawLayersSorted(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, in
         for (size_t i = at; i < end; ++i) rasterizeSamples(f, w, tris[i], (uint32_t)(i - at + 1), ox, oy);
         for (int k = 0; k < f->samples; ++k) {
             const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
-            shadePlane(f, w, tris + at, end - at, w->ids + plane, k ? w->ids : NULL, w->layer + plane, ox, oy, tw, th);
+            shadePlane(f, w, tris + at, end - at, w->ids + plane, k ? w->ids : NULL, w->layer + plane, ox, oy, tw, 0, th);
         }
         for (size_t i = 0; i < all; ++i) {
             if (!w->ids[i]) continue;
@@ -1422,6 +1554,33 @@ static void environmentFill(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int o
         }
 }
 
+/* Fog that light goes through, over what is behind the scene, where nothing solid was drawn: the grid's farthest
+ * slice, by how much shows. Each sample of each pixel, where its depth is still the cleared one. */
+static void fogBackdrop(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, int th, bool drawn) {
+    for (int y = 0; y < th; ++y)
+        for (int x = 0; x < tw; x += 8) {
+            bool any = !drawn;
+            for (int k = 0; k < f->samples && !any; ++k) any = v8iSigns(v8fGt(v8fSet(1e-30f), v8fLoad(w->depth + k * ARTF_TILE_PIXELS + y * ARTF_TILE + x))) != 0;
+            if (!any) continue;
+            _Alignas(32) float got[4][8];
+            for (int i = 0; i < 8; ++i) {
+                float c[4];
+                artfFroxelAt(f, (float)(ox + x + i), (float)(oy + y), 3e38f, c);
+                for (int j = 0; j < 4; ++j) got[j][i] = c[j];
+            }
+            const V8F left = v8fLoad(got[3]);
+            for (int k = 0; k < f->samples; ++k) {
+                uint32_t* at = w->color + k * ARTF_TILE_PIXELS + y * ARTF_TILE + x;
+                const V8F alpha = v8fLoad((const float*)(at + ARTF_POST_ALPHA));
+                const V8I behind = drawn ? v8fGt(v8fSet(1e-30f), v8fLoad(w->depth + k * ARTF_TILE_PIXELS + y * ARTF_TILE + x)) : v8iSet(-1);
+                const Lanes3 was = unpack9e5(v8iLoad(at));
+                const Lanes3 now = {v8fAdd(v8fMul(was.x, left), v8fMul(v8fLoad(got[0]), alpha)), v8fAdd(v8fMul(was.y, left), v8fMul(v8fLoad(got[1]), alpha)),
+                                    v8fAdd(v8fMul(was.z, left), v8fMul(v8fLoad(got[2]), alpha))};
+                v8iStore(at, v8iSelect(behind, v8iLoad(at), pack9e5(now)));
+            }
+        }
+}
+
 static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     ArtfWorker* w = &f->workers[workerIndex];
     const int ox = (int)(index % (uint32_t)f->tilesX) * ARTF_TILE, oy = (int)(index / (uint32_t)f->tilesX) * ARTF_TILE;
@@ -1485,7 +1644,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         /* the triangles that still show after all the others */
         for (int k = 0; k < f->samples; ++k) {
             const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
-            shadePlane(f, w, w->tris.items, w->tris.len, w->ids + plane, k ? w->ids : NULL, w->color + plane, ox, oy, tw, th);
+            shadePlane(f, w, w->tris.items, w->tris.len, w->ids + plane, k ? w->ids : NULL, w->color + plane, ox, oy, tw, 0, th);
         }
         /* what shows the same as in the first sample takes its color from there */
         for (int k = 1; k < f->samples; ++k) {
@@ -1501,6 +1660,8 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
             }
         }
     }
+    /* fog that light goes through, over what is behind the scene: where nothing solid is, before layers */
+    if (f->postFog) fogBackdrop(f, w, ox, oy, tw, th, drawn);
     /* (what comes after reads the depth of what is solid: layers write theirs over it) */
     if (f->post) memcpy(w->postDepth, w->depth, ARTF_TILE_PIXELS * 4);
     if (w->layers.len) {

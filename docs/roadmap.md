@@ -12,8 +12,8 @@ Decided with the project's owner, for what stands between Artful and large proje
 
 ## In this order
 
-1. **Checking.** Validation layers with synchronization, `spirv-val`, AddressSanitizer and MSVC are done; Linux waits
-   for WSL, which needs Windows to restart.
+1. ~~**Checking.**~~ Done: validation layers with synchronization, `spirv-val`, AddressSanitizer and MSVC here; Linux
+   (GCC and Clang, under the validation layers and sanitizers), macOS, Windows and Android on GitHub's CI.
 2. ~~**Physically based shading.**~~ Done: it replaced Blinn-Phong, with normal maps and occlusion maps.
 3. ~~**Shadows when drawing.**~~ Done: cascades for the sun, a map for each spot, a cube for each point light.
 4. ~~**Skinning and glTF's clips.**~~ Done: `artfAnimationSet`, bones on the GPU where Vulkan draws, eight joints a
@@ -27,4 +27,11 @@ Decided with the project's owner, for what stands between Artful and large proje
 8. ~~**Denoising.**~~ Done: `ArtfTraceDesc.denoise`, on both backends, with objects' motion and with what changes over
    surfaces that stay.
 9. **Metal.** Written, and never run. It says so until a Mac is found. It leaves out occlusion, black holes,
-   materials in C and textures compressed on the GPU.
+   materials in C, textures compressed on the GPU, and all of 0.3 and 0.4: the frame in floats, lights past the
+   sixteen, probes, decals.
+10. ~~**What a frame in floats does after it.**~~ Done in 0.3: bloom, ambient occlusion, reflections, fog that light
+    goes through, temporal antialiasing, depth of field; and in 0.4 four samples on the GPU too, and the fog as a grid
+    that layers read.
+11. ~~**Many lights, light that bounced, particles, terrain, decals.**~~ Done in 0.3 and 0.4: 1024 lights, the first
+    32 past the sixteen with shadows; probes that walls stop; particles drawn together; decals.
+12. **What is left before 1.0**: in [stability.md](stability.md).

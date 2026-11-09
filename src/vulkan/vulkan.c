@@ -71,6 +71,7 @@ typedef struct Slot {
     bool timed; /* its timestamps hold a frame */
     GpuBuffer frame, instances, visible, indirect, template_, materials, overlayStaging, hole, fluid, layerList, trace;
     GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
+    GpuBuffer decals;                  /* the decals that may show (63) */
     GpuBuffer probes;                  /* light that bounced (62) */
     GpuBuffer shadow, shadowList, shadowCommands, shadowViewCommands, shadowCasters, posed, skinTable, motion, meshletCommands, meshletState, layerCommands;
     VkBuffer meshletBoundTable; /* what its set says bindings 40 and 41 are */
@@ -211,10 +212,12 @@ typedef struct Vulkan {
     VkDescriptorSetLayout setLayout;
     VkPipelineLayout pipelineLayout;
     VkPipeline cullPipelines[3], hizFirstPipeline, hizNextPipeline, scenePipeline, cutoutPipeline, overlayPipeline, layerDepthPipeline, layerPipeline;
+    VkPipeline particlePipeline;  /* particles one after another, in one draw: depth tested and written as each goes */
     VkPipeline tracePipeline, traceShowPipeline, shadowPipeline, shadowHolesPipeline;
     VkShaderModule sceneVertexModule; /* kept: a scene's graphs make new pipelines */
     uint64_t graphScene;
     uint32_t graphCount;
+    bool probes, walls, froxels;    /* the scene's pixel shaders read probes, their maps, the fog's grid: made again when that changes */
     /* shadow maps: all in one atlas of depth */
     VkRenderPass shadowPass;
     VkFramebuffer shadowFramebuffer;
@@ -272,7 +275,8 @@ typedef struct Vulkan {
     VkRenderPass presentPass;
     VkFramebuffer presentFramebuffers[MAX_SWAPCHAIN_IMAGES];
     VkPipeline presentPipeline;
-    VkPipeline postPipelines[11];   /* gather, occlusion, its blur, reflections, fog, its use, temporal, focus, bloom down, up */
+    VkPipeline postPipelines[10];   /* gather, occlusion, its blur, reflections, froxels, temporal, focus, bloom down, up, reflections' use */
+    VkPipeline fogPipeline;         /* fog that light goes through, over what is behind the scene */
     GpuBuffer postLight, postDepth, postSurface, postScratch, postHistory, postOcclusion, postFog, postBloom;
     uint32_t postBloomSizes[6][3];  /* of each level: where it starts, its width, its height */
     float previous[16];             /* the frame before's viewProj */
@@ -456,9 +460,9 @@ static void lightDescriptors(Vulkan* v, Slot* s);
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
 static bool postTargetsMake(Vulkan* v) {
     if (!imageNew(v, &v->floatColor, v->sceneFormat, v->width, v->height, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
-    if (!imageNew(v, &v->floatSurface, FORMAT_R32_UINT, v->width, v->height, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    if (!imageNew(v, &v->floatSurface, FORMAT_R32_UINT, v->width, v->height, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
     const VkDeviceSize pixels = (VkDeviceSize)v->width * v->height;
-    const VkDeviceSize fog = (VkDeviceSize)((v->width + 3) / 4) * ((v->height + 3) / 4);
+    const VkDeviceSize fog = (VkDeviceSize)((v->width + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ((v->height + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ARTF_FROXEL_SLICES;
     VkDeviceSize bloom = 0;
     uint32_t w = (uint32_t)v->width, h = (uint32_t)v->height;
     for (int l = 0; l < 6; ++l) {
@@ -553,7 +557,7 @@ static bool targetsMake(Vulkan* v) {
         if (v->vkCreateImageView(v->device, &view, NULL, &v->views[0]) != VK_OK) return false;
     }
     const bool many = v->samples > 1;
-    if (many && !imageNew(v, &v->samples4, v->colorFormat, v->width, v->height, 1, v->samples, IMAGE_COLOR, ASPECT_COLOR)) return false;
+    if (many && !imageNew(v, &v->samples4, v->sceneFormat, v->width, v->height, 1, v->samples, IMAGE_COLOR, ASPECT_COLOR)) return false;
     if (!imageNew(v, &v->depth, FORMAT_D32, v->width, v->height, 1, v->samples, IMAGE_DEPTH | IMAGE_SAMPLED, ASPECT_DEPTH)) return false;
     if (many) {
         FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->resolvePass, 1, &v->samples4.view, (uint32_t)v->width, (uint32_t)v->height, 1};
@@ -563,7 +567,8 @@ static bool targetsMake(Vulkan* v) {
     for (uint32_t i = 0; i < v->imageCount; ++i) {
         const VkImageView one[2] = {v->views[i], v->depth.view}, resolved[3] = {v->samples4.view, v->depth.view, v->views[i]};
         const VkImageView floats[3] = {v->floatColor.view, v->depth.view, v->floatSurface.view};
-        FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->renderPass, v->floats ? 3 : many ? 3 : 2, v->floats ? floats : many ? resolved : one, (uint32_t)v->width, (uint32_t)v->height, 1};
+        const VkImageView floatsMany[4] = {v->samples4.view, v->depth.view, v->floatColor.view, v->floatSurface.view};
+        FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->renderPass, v->floats ? (many ? 4 : 3) : many ? 3 : 2, v->floats ? (many ? floatsMany : floats) : many ? resolved : one, (uint32_t)v->width, (uint32_t)v->height, 1};
         if (v->vkCreateFramebuffer(v->device, &info, NULL, &v->framebuffers[i]) != VK_OK) return false;
         if (v->floats) {
             FramebufferCreateInfo present = {ST_FRAMEBUFFER, NULL, 0, v->presentPass, 1, &v->views[i], (uint32_t)v->width, (uint32_t)v->height, 1};
@@ -626,17 +631,19 @@ static bool renderPassMake(Vulkan* v, VkRenderPass* out, bool load, bool store, 
         /* (the depth buffer is not kept unless asked: on a tiler it never leaves the chip) */
         {0, FORMAT_D32, samples, load ? 0 : 1, store ? 0 : 1, 2, 1, depthFrom, store ? LAYOUT_DEPTH_READ : LAYOUT_DEPTH},
         {0, v->sceneFormat, 1, 2, 0, 2, 1, LAYOUT_UNDEFINED, colorFinal},
-        {0, FORMAT_R32_UINT, 1, load ? 0 : 1, 0, 2, 1, colorFrom, colorFinal}};
+        {0, FORMAT_R32_UINT, samples, load ? 0 : 1, 0, 2, 1, colorFrom, colorFinal}};
     /* (readDepth: only colors, which stay for the pass that comes next: a shader reads depth) */
-    const AttachmentReference depth = {1, LAYOUT_DEPTH}, resolved = {2, LAYOUT_COLOR};
-    const AttachmentReference colors[2] = {{0, LAYOUT_COLOR}, {readDepth ? 1u : 2u, LAYOUT_COLOR}};
+    const AttachmentReference depth = {1, LAYOUT_DEPTH};
+    /* (the surface is the last; with samples, only the light is resolved: the surface's first sample is read) */
+    const uint32_t surfaceAt = readDepth ? 1u : many ? 3u : 2u;
+    const AttachmentReference colors[2] = {{0, LAYOUT_COLOR}, {surfaceAt, LAYOUT_COLOR}}, resolved[2] = {{2, LAYOUT_COLOR}, {~0u, 0}};
     AttachmentDescription used[4];
     uint32_t count = 0;
     used[count++] = attachments[0];
     if (!readDepth) used[count++] = attachments[1];
     if (many && !readDepth) used[count++] = attachments[2];
     if (v->floats) used[count++] = attachments[3];
-    const SubpassDescription subpass = {0, 0, 0, NULL, v->floats ? 2 : 1, colors, many && !readDepth ? &resolved : NULL, readDepth ? NULL : &depth, 0, NULL};
+    const SubpassDescription subpass = {0, 0, 0, NULL, v->floats ? 2 : 1, colors, many && !readDepth ? resolved : NULL, readDepth ? NULL : &depth, 0, NULL};
     const VkFlags draw = STAGE_COLOR | STAGE_EARLY_TESTS | STAGE_LATE_TESTS;
     /* what came before with the same images; and, for the pyramid, what comes after. (All passes have both:
      * they must match, dependencies too, to share pipelines and a framebuffer.) */
@@ -721,15 +728,53 @@ static bool shadowAtlasMake(Vulkan* v, int width, int height) {
     return true;
 }
 
+static uint32_t shaderVariant(const Vulkan* v) {
+    return (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->probes ? ARTF_SHADER_PROBES : 0u) | (v->probes && v->walls ? ARTF_SHADER_WALLS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u);
+}
+
+/* The pipeline of what is plain and solid, made again: when the probes come or go. */
+static bool scenePipelineMake(Vulkan* v) {
+    if (v->scenePipeline) v->vkDestroyPipeline(v->device, v->scenePipeline, NULL);
+    v->scenePipeline = 0;
+    size_t size;
+    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0, shaderVariant(v));
+    VkShaderModule fragment = shaderModule(v, code, size);
+    if (!fragment) return false;
+    const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
+    const VertexAttribute attributes[3] = {{0, 0, FORMAT_RGBA16_UNORM, 0}, {1, 0, FORMAT_RG16_SNORM, 8}, {2, 0, FORMAT_RG16_FLOAT, 12}};
+    const PipelineVertexInput vertexInput = {ST_PIPELINE_VERTEX_INPUT, NULL, 0, 1, &binding, 3, attributes};
+    const PipelineInputAssembly assembly = {ST_PIPELINE_INPUT_ASSEMBLY, NULL, 0, 3 /* triangle list */, 0};
+    const PipelineViewport viewport = {ST_PIPELINE_VIEWPORT, NULL, 0, 1, NULL, 1, NULL};
+    const PipelineRasterization rasterBack = {ST_PIPELINE_RASTERIZATION, NULL, 0, 0, 0, 0, 2 /* back */, 0 /* counter-clockwise */, 0, 0, 0, 0, 1.f};
+    const PipelineMultisample multisample = {ST_PIPELINE_MULTISAMPLE, NULL, 0, v->samples, 0, 0, NULL, 0, 0};
+    PipelineDepthStencil depthOn;
+    memset(&depthOn, 0, sizeof depthOn);
+    depthOn.sType = ST_PIPELINE_DEPTH_STENCIL;
+    depthOn.depthTest = 1;
+    depthOn.depthWrite = 1;
+    depthOn.depthCompare = 4; /* greater: depth is reversed */
+    const ColorBlendAttachment opaque = {0, 0, 0, 0, 0, 0, 0, 15};
+    ColorBlendAttachment pairOff[2];
+    const PipelineColorBlend blendOff = blendOf(v, pairOff, opaque, true);
+    const int states[2] = {0, 1};
+    const PipelineDynamic dynamic = {ST_PIPELINE_DYNAMIC, NULL, 0, 2, states};
+    const PipelineShaderStage stages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, v->sceneVertexModule, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, fragment, "main", NULL}};
+    const GraphicsPipelineCreateInfo info = {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterBack, &multisample, &depthOn, &blendOff, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1};
+    const bool ok = v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 1, &info, NULL, &v->scenePipeline) == VK_OK;
+    v->vkDestroyShaderModule(v->device, fragment, NULL);
+    return ok;
+}
+
 /* What depends on a scene's materials of its own: all that is drawn with the cutout shader, which has a branch
  * for each. That is what plain surfaces do not pay for. */
 static bool cutoutPipelinesMake(Vulkan* v, const ArtfGraphData* graphs, uint32_t count) {
-    const VkPipeline old[4] = {v->layerDepthPipeline, v->layerPipeline, v->cutoutPipeline, v->layerListPipeline};
-    for (int i = 0; i < 4; ++i)
+    const VkPipeline old[5] = {v->layerDepthPipeline, v->layerPipeline, v->cutoutPipeline, v->layerListPipeline, v->particlePipeline};
+    v->particlePipeline = 0;
+    for (int i = 0; i < 5; ++i)
         if (old[i]) v->vkDestroyPipeline(v->device, old[i], NULL);
     v->layerListPipeline = 0;
     size_t size;
-    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, 0, v->floats);
+    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, 0, shaderVariant(v));
     VkShaderModule fragment = shaderModule(v, code, size);
     if (!fragment) return false;
     const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
@@ -758,17 +803,20 @@ static bool cutoutPipelinesMake(Vulkan* v, const ArtfGraphData* graphs, uint32_t
     const int states[2] = {0, 1};
     const PipelineDynamic dynamic = {ST_PIPELINE_DYNAMIC, NULL, 0, 2, states};
     const PipelineShaderStage stages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, v->sceneVertexModule, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, fragment, "main", NULL}};
-    const GraphicsPipelineCreateInfo info[3] = {
+    const GraphicsPipelineCreateInfo info[4] = {
         /* a layer: its depth alone, so that its nearest surface is known; then that surface, blended */
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOn, &blendNone, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthSame, &blendOn, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
         /* what has holes or backs: solid, but it decides itself which pixels it has */
-        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOn, &blendOff, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1}};
-    VkPipeline made[3] = {0, 0, 0};
-    const bool ok = v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 3, info, NULL, made) == VK_OK;
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOn, &blendOff, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
+        /* particles: a quad has one surface, so one pass does what the two do for a layer */
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOn, &blendOn, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1}};
+    VkPipeline made[4] = {0, 0, 0, 0};
+    const bool ok = v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 4, info, NULL, made) == VK_OK;
     v->layerDepthPipeline = made[0];
     v->layerPipeline = made[1];
     v->cutoutPipeline = made[2];
+    v->particlePipeline = made[3];
     v->vkDestroyShaderModule(v->device, fragment, NULL);
     return ok;
 }
@@ -791,7 +839,7 @@ static bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
     }
     if (v->layerListPipeline && v->layerResolvePipeline) return true;
     size_t size;
-    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, scene->graphs.items, (uint32_t)scene->graphs.len, v->samples, false);
+    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, true, scene->graphs.items, (uint32_t)scene->graphs.len, v->samples, shaderVariant(v) & ~(uint32_t)ARTF_SHADER_FLOATS);
     VkShaderModule fragment = shaderModule(v, code, size);
     code = artfShaderOverlayVertex(&size);
     VkShaderModule whole = shaderModule(v, code, size);
@@ -858,7 +906,7 @@ static bool pipelinesMake(Vulkan* v) {
 
     /* the one descriptor set */
     const VkFlags graphics = SHADER_VERTEX | SHADER_FRAGMENT;
-    const DescriptorSetLayoutBinding bindings[63] = {
+    const DescriptorSetLayoutBinding bindings[64] = {
         {0, DESCRIPTOR_UNIFORM, 1, graphics | SHADER_COMPUTE, NULL}, {1, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {2, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL}, {3, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {4, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL}, {5, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
@@ -880,19 +928,19 @@ static bool pipelinesMake(Vulkan* v) {
         {46, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {47, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {48, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {49, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {60, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {61, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL},
-        {62, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL},
+        {62, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {63, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL},
         /* what comes after a frame in floats */
         {50, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {51, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {52, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {53, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {54, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {55, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
-        {56, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {57, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
+        {56, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {57, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {58, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}, {59, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}};
-    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, v->floats ? 63 : 53, bindings};
+    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, v->floats ? 64 : 54, bindings};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     const PushConstantRange push[2] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}};
     const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 1, &v->setLayout, 2, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
-    const DescriptorPoolSize sizes[3] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 53}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}};
+    const DescriptorPoolSize sizes[3] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 54}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, 3, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -926,7 +974,7 @@ static bool pipelinesMake(Vulkan* v) {
     compute[8] = shaderModule(v, code, size);
     code = artfShaderSceneVertex(&size);
     VkShaderModule sceneVertex = shaderModule(v, code, size);
-    code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0, v->floats);
+    code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0, shaderVariant(v));
     VkShaderModule sceneFragment = shaderModule(v, code, size);
     code = artfShaderOverlayVertex(&size);
     VkShaderModule overlayVertex = shaderModule(v, code, size);
@@ -1005,7 +1053,7 @@ static bool pipelinesMake(Vulkan* v) {
     const PipelineColorBlend noBlend = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, 0, NULL, {0, 0, 0, 0}};
     const GraphicsPipelineCreateInfo graphicsInfo[7] = {
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, sceneStages, &vertexInput, &assembly, NULL, &viewport, &rasterBack, &multisample, &depthOn, &blendOff, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
-        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, overlayStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, v->floats ? &overlayBlend : &blendOn, &dynamic, v->pipelineLayout, v->floats ? v->presentPass : v->renderPass, 0, 0, -1},
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, overlayStages, &noInput, &assembly, NULL, &viewport, &rasterNone, v->floats ? &oneSample : &multisample, &depthOff, v->floats ? &overlayBlend : &blendOn, &dynamic, v->pipelineLayout, v->floats ? v->presentPass : v->renderPass, 0, 0, -1},
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, backdropStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendBehind, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
         {ST_GRAPHICS_PIPELINE, NULL, 0, 2, traceStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendOn, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
         /* what casts shadows: both sides, as rays have it; with no pixel shader where it can do without */
@@ -1023,11 +1071,10 @@ static bool pipelinesMake(Vulkan* v) {
     v->environmentPipeline = made[6];
     if (ok && v->floats) {
         /* what comes after: postShaders.inc */
-        uint32_t* (*const makers[11])(size_t*) = {artfShaderPostGather, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFog,
-                                                  artfShaderPostFogApply, artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp,
-                                                  artfShaderPostReflectionApply};
-        for (int i = 0; i < 11 && ok; ++i) {
-            uint32_t* postCode = makers[i](&size);
+        uint32_t* (*const makers[10])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
+                                                  artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply};
+        for (int i = 0; i < 10 && ok; ++i) {
+            uint32_t* postCode = i == 0 ? artfShaderPostGather(&size, v->samples) : makers[i](&size);
             VkShaderModule module = shaderModule(v, postCode, size);
             const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
             ok = module && v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &c, NULL, &v->postPipelines[i]) == VK_OK;
@@ -1041,6 +1088,16 @@ static bool pipelinesMake(Vulkan* v) {
         const GraphicsPipelineCreateInfo present = {ST_GRAPHICS_PIPELINE, NULL, 0, 2, presentStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &oneSample, &depthOff, &replace, &dynamic, v->pipelineLayout, v->presentPass, 0, 0, -1};
         ok = ok && finalModule && v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 1, &present, NULL, &v->presentPipeline) == VK_OK;
         if (finalModule) v->vkDestroyShaderModule(v->device, finalModule, NULL);
+        /* fog over what is behind: light * left + added * what shows of it (destination alpha), alpha kept */
+        uint32_t* fogCode = artfShaderFogBackdrop(&size);
+        VkShaderModule fogModule = shaderModule(v, fogCode, size);
+        const PipelineShaderStage fogStages[2] = {overlayStages[0], {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, fogModule, "main", NULL}};
+        const ColorBlendAttachment overBehind = {1, 8 /* destination alpha */, 6 /* source alpha */, 0, 0 /* zero */, 1 /* one */, 0, 15};
+        ColorBlendAttachment pairFog[2];
+        const PipelineColorBlend fogBlend = blendOf(v, pairFog, overBehind, false);
+        const GraphicsPipelineCreateInfo fog = {ST_GRAPHICS_PIPELINE, NULL, 0, 2, fogStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &fogBlend, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1};
+        ok = ok && fogModule && v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 1, &fog, NULL, &v->fogPipeline) == VK_OK;
+        if (fogModule) v->vkDestroyShaderModule(v->device, fogModule, NULL);
     }
     ok = ok && cutoutPipelinesMake(v, NULL, 0);
 
@@ -2086,7 +2143,7 @@ static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b
 
 static bool syncShadowList(Vulkan* v, Slot* s, const ArtfScene* scene, uint32_t views) {
     const uint32_t meshes = (uint32_t)v->meshes.len;
-    if (s->shadowInstances == scene->instanceVersion && s->shadowStructure == scene->structureVersion && s->shadowMaterials == scene->materialVersion && s->shadowScene == scene->id && s->shadowMeshes == meshes && s->shadowViews == views && s->shadowList.buffer) return true;
+    if (s->shadowInstances == scene->tracedVersion && s->shadowStructure == scene->structureVersion && s->shadowMaterials == scene->materialVersion && s->shadowScene == scene->id && s->shadowMeshes == meshes && s->shadowViews == views && s->shadowList.buffer) return true;
     /* room for all that casts in every view; what is really there, the shader says */
     const VkDeviceSize listBytes = ((VkDeviceSize)scene->instances.len + 1) * 8 * views, commandBytes = ((VkDeviceSize)meshes * 40 + 40) * views;
     const VkDeviceSize casterBytes = ((VkDeviceSize)scene->instances.len + 2) * 16;
@@ -2146,7 +2203,7 @@ static bool syncShadowList(Vulkan* v, Slot* s, const ArtfScene* scene, uint32_t 
     casters[1] = meshes * 2;
     s->shadowCasterCount = n;
     s->shadowViews = views;
-    s->shadowInstances = scene->instanceVersion;
+    s->shadowInstances = scene->tracedVersion;
     s->shadowStructure = scene->structureVersion;
     s->shadowMaterials = scene->materialVersion;
     s->shadowScene = scene->id;
@@ -2164,7 +2221,7 @@ static void shadowDraw(Vulkan* v, VkCommandBuffer c, Slot* s, VkPipeline pipelin
 }
 
 /* The maps that changed, each in its square of the atlas, with only what can reach it. */
-static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowFrame* shadows, uint32_t views, uint32_t changed) {
+static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowFrame* shadows, uint32_t views, uint64_t changed) {
     if (!changed) return;
     /* each view's commands start empty, and the shader fills them */
     const VkFlags reading = STAGE_DRAW_INDIRECT | STAGE_VERTEX_SHADER;
@@ -2186,12 +2243,12 @@ static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowF
     v->vkCmdBindPipeline(c, 0, v->shadowPipeline);
     v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
     const uint32_t meshes = (uint32_t)v->meshes.len;
-    const float side = (float)shadows->sun[2];
     for (uint32_t i = 0; i < views; ++i) {
         if (!(changed >> i & 1)) continue;
         const float* info = shadows->views[i].info;
+        const float side = shadows->views[i].size[0];
         const Viewport viewport = {info[0], info[1], side, side, 0, 1};
-        const Rect2D square = {{(int32_t)info[0], (int32_t)info[1]}, {shadows->sun[2], shadows->sun[2]}};
+        const Rect2D square = {{(int32_t)info[0], (int32_t)info[1]}, {(uint32_t)side, (uint32_t)side}};
         v->vkCmdSetViewport(c, 0, 1, &viewport);
         v->vkCmdSetScissor(c, 0, 1, &square);
         ClearAttachment clear;
@@ -2209,24 +2266,37 @@ static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowF
 
 /* What shows what is behind it, the farthest first: its depth among what is there, and then its colors
  * where that depth is its own, so that only its nearest surface shows. */
-static void drawLayers(Vulkan* v, VkCommandBuffer c, uint32_t count) {
+static void drawLayers(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene, uint32_t count) {
+#define PARTICLE(k) (scene->instances.items[v->layers.items[k].instance].flags & ARTF_INSTANCE_PARTICLE)
     for (uint32_t i = 0; i < count; ++i) {
         const MeshRange* m = &v->meshes.items[v->layers.items[i].mesh];
+        if (PARTICLE(i)) {
+            /* particles one after another, of one quad: one draw for them all, in their order */
+            uint32_t end = i + 1;
+            while (end < count && PARTICLE(end) && v->layers.items[end].mesh == v->layers.items[i].mesh) ++end;
+            v->vkCmdBindPipeline(c, 0, v->particlePipeline);
+            v->vkCmdDrawIndexed(c, m->indexCount, end - i, m->firstIndex, m->vertexOffset, layersAt(v) + i);
+            i = end - 1;
+            continue;
+        }
         v->vkCmdBindPipeline(c, 0, v->layerDepthPipeline);
         v->vkCmdDrawIndexed(c, m->indexCount, 1, m->firstIndex, m->vertexOffset, layersAt(v) + i);
         v->vkCmdBindPipeline(c, 0, v->layerPipeline);
         v->vkCmdDrawIndexed(c, m->indexCount, 1, m->firstIndex, m->vertexOffset, layersAt(v) + i);
     }
+#undef PARTICLE
 }
 
 /* ---- lights past the frame's own ---- */
 
 static void lightDescriptors(Vulkan* v, Slot* s) {
     const DescriptorBufferInfo lights = {s->extraLights.buffer, 0, ~(VkDeviceSize)0}, lists = {s->tileLights.buffer, 0, ~(VkDeviceSize)0}, probes = {s->probes.buffer, 0, ~(VkDeviceSize)0};
-    const WriteDescriptorSet writes[3] = {{ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 60, 0, 1, DESCRIPTOR_STORAGE, NULL, &lights, NULL},
+    const DescriptorBufferInfo decals = {s->decals.buffer, 0, ~(VkDeviceSize)0};
+    const WriteDescriptorSet writes[4] = {{ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 60, 0, 1, DESCRIPTOR_STORAGE, NULL, &lights, NULL},
                                           {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 61, 0, 1, DESCRIPTOR_STORAGE, NULL, &lists, NULL},
-                                          {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 62, 0, 1, DESCRIPTOR_STORAGE, NULL, &probes, NULL}};
-    v->vkUpdateDescriptorSets(v->device, 3, writes, 0, NULL);
+                                          {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 62, 0, 1, DESCRIPTOR_STORAGE, NULL, &probes, NULL},
+                                          {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 63, 0, 1, DESCRIPTOR_STORAGE, NULL, &decals, NULL}};
+    v->vkUpdateDescriptorSets(v->device, 4, writes, 0, NULL);
 }
 
 /* A step of the probes, on this thread's workers, and what they hold into this slot's buffer. */
@@ -2234,7 +2304,7 @@ static bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameDa
     if (frame->indirect[0][3] <= 0 || scene->trace.desc.mode != ARTF_TRACE_NONE) return true;
     if (!v->pool) v->pool = artfPoolNew(0);
     artfSceneIndirectStep(scene, frame, v->pool);
-    const VkDeviceSize need = (VkDeviceSize)artfIndirectCount(&scene->indirect) * 64;
+    const VkDeviceSize need = (VkDeviceSize)artfIndirectCount(&scene->indirect) * ARTF_PROBE_FLOATS * 4;
     if (s->probes.size < need) {
         bufferFree(v, &s->probes);
         if (!bufferNew(v, &s->probes, need, BUFFER_STORAGE, true)) return false;
@@ -2261,7 +2331,7 @@ static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, const ArtfFra
         v->listScratch = artfMalloc((size_t)need);
         v->listScratchSize = need;
     }
-    const uint32_t count = artfSceneExtraLights(scene, v->lightScratch);
+    const uint32_t count = artfSceneExtraLights(scene, frame, v->lightScratch);
     artfSceneLightTiles(frame, v->width, v->height, v->lightScratch, count, v->listScratch);
     memcpy(s->extraLights.mapped, v->lightScratch, (size_t)count * sizeof(ArtfLightData));
     memcpy(s->tileLights.mapped, v->listScratch, (size_t)need);
@@ -2283,7 +2353,7 @@ static void postCopy(Vulkan* v, VkCommandBuffer c, GpuBuffer* from, GpuBuffer* t
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
 }
 
-enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FOG, POST_FOG_APPLY, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY };
+enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY };
 
 static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* frame, uint32_t image, const Viewport* viewport, const Rect2D* area) {
     const uint32_t pixels = (uint32_t)v->width * (uint32_t)v->height;
@@ -2296,10 +2366,6 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     if (frame->post[1][0] > 0) {
         postStep(v, c, POST_REFLECTION, 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
         postStep(v, c, POST_REFLECTION_APPLY, 0, pixels);
-    }
-    if (frame->post[1][1] > 0 && frame->look[1] > 0) {
-        postStep(v, c, POST_FOG, 0, (uint32_t)((v->width + 3) / 4) * (uint32_t)((v->height + 3) / 4));
-        postStep(v, c, POST_FOG_APPLY, 0, pixels);
     }
     if (frame->post[1][3] > 0) {
         postStep(v, c, POST_TEMPORAL, v->historyValid ? 1u : 0u, pixels);
@@ -2336,10 +2402,22 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     Vulkan* v = (Vulkan*)r;
     const double start = artfNowMs();
     if (v->lost) return false;
+    artfSceneFaceParticles(scene);
     if (v->targetsStale && !targetsRemake(v)) return false;
     if (!v->framebuffers[0]) return true; /* a window with no size */
     if (!syncScene(v, scene)) return false;
     if (!syncEnvironment(v, scene)) return false;
+    /* probes that come or go: the scene's pixel shaders, with or without what reads them */
+    const bool probes = scene->indirect.on && scene->indirect.probes, walls = probes && !scene->indirect.desc.throughWalls;
+    const bool fogGrid = v->floats && scene->post.volumetric > 0 && scene->fogDensity > 0;
+    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels) {
+        v->vkDeviceWaitIdle(v->device);
+        v->probes = probes;
+        v->walls = walls;
+        v->froxels = fogGrid;
+        if (!scenePipelineMake(v) || !cutoutPipelinesMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
+        v->graphCount = (uint32_t)scene->graphs.len;
+    }
     /* new materials of the program's own: new shaders */
     if (v->graphCount != scene->graphs.len || (v->graphScene != scene->id && (v->graphCount || scene->graphs.len))) {
         v->vkDeviceWaitIdle(v->device);
@@ -2392,11 +2470,14 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         memcpy(v->previous, now, sizeof now);
         v->hasPrevious = true;
         if (scene->post.temporal) artfFrameJitter(&frame, v->postFrames++, v->width, v->height);
+        if (tracing) frame.post[1][1] = 0; /* (fog that light goes through is drawn, not traced) */
     } else {
         memset(frame.post, 0, sizeof frame.post);
     }
     frame.hizLevels = v->hizLevels;
     memcpy(frame.hiz, v->hizTable, sizeof frame.hiz);
+    /* the decals that may show, straight into this slot's buffer (its fence was waited for) */
+    frame.indirect[1][3] = (float)artfSceneDecals(scene, &frame, v->height, s->decals.mapped);
     memcpy(s->frame.mapped, &frame, sizeof frame);
     if (!syncLights(v, s, scene, &frame) || !syncIndirect(v, s, scene, &frame)) return false;
     syncSlot(v, s, scene);
@@ -2405,12 +2486,12 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     if (!stagePoses(v, s, scene)) return false;
     ArtfShadowFrame shadows;
     const uint32_t shadowViews = tracing ? 0 : artfSceneShadowFrame(scene, &frame, &shadows);
-    uint32_t shadowChanged = 0;
+    uint64_t shadowChanged = 0;
     v->shadowMapsDrawn = 0;
     if (tracing) memset(&shadows, 0, sizeof shadows);
     memcpy(s->shadow.mapped, &shadows, sizeof shadows);
     if (shadowViews) {
-        const int side = (int)shadows.sun[2], width = side * ARTF_SHADOW_ATLAS_COLUMNS, height = side * (int)((shadowViews + ARTF_SHADOW_ATLAS_COLUMNS - 1) / ARTF_SHADOW_ATLAS_COLUMNS);
+        const int width = (int)shadows.sun[2] * ARTF_SHADOW_ATLAS_COLUMNS, height = (int)shadows.sun[3];
         if (width != v->shadowWidth || height > v->shadowHeight) {
             v->vkDeviceWaitIdle(v->device);
             if (!shadowAtlasMake(v, width, height)) return false;
@@ -2418,10 +2499,11 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         if (!syncShadowList(v, s, scene, shadowViews)) return false;
         if (!shadowCullMake(v)) return false;
         for (uint32_t i = 0; i < shadowViews; ++i) {
-            const uint64_t key = artfShadowViewKey(scene, &shadows.views[i], shadows.sun[2]);
-            if (key == v->shadowKeys[i] && !artfShadowViewTouched(scene, &shadows.views[i], shadows.sun[2], v->shadowSeen)) continue;
+            const uint32_t side = (uint32_t)shadows.views[i].size[0];
+            const uint64_t key = artfShadowViewKey(scene, &shadows.views[i], side);
+            if (key == v->shadowKeys[i] && !artfShadowViewTouched(scene, &shadows.views[i], side, v->shadowSeen)) continue;
             v->shadowKeys[i] = key;
-            shadowChanged |= 1u << i;
+            shadowChanged |= 1ull << i;
             ++v->shadowMapsDrawn;
         }
         v->shadowSeen = scene->shadowChangeCount;
@@ -2568,6 +2650,15 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
 
     if (hole) traceHole(v, c, s, &holeFrame, holeApart);
     if (shadowViews) drawShadows(v, c, s, &shadows, shadowViews, shadowChanged);
+    const bool froxels = v->floats && frame.post[1][1] > 0 && frame.look[1] > 0;
+    if (froxels) {
+        /* fog that light goes through: its grid, from the sun's maps, for what is drawn to read (after the frame before read it) */
+        memoryBarrier(v, c, STAGE_FRAGMENT, STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
+        v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+        const uint32_t cells = (uint32_t)((v->width + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * (uint32_t)((v->height + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE);
+        postStep(v, c, POST_FROXELS, 0, cells);
+        memoryBarrier(v, c, STAGE_COMPUTE, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ);
+    }
     if (tracing) {
         /* (the frame before read and wrote what this one is about to) */
         const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
@@ -2609,6 +2700,11 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     v->vkCmdSetScissor(c, 0, 1, &area);
     if (hole || (frame.sky[3] > 0 && frame.ground[3] > 0)) {
         v->vkCmdBindPipeline(c, 0, hole ? v->backdropPipeline : v->environmentPipeline);
+        v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+        v->vkCmdDraw(c, 3, 1, 0, 0);
+    }
+    if (froxels) {
+        v->vkCmdBindPipeline(c, 0, v->fogPipeline);
         v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         v->vkCmdDraw(c, 3, 1, 0, 0);
     }
@@ -2679,7 +2775,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
             v->vkCmdSetScissor(c, 0, 1, &area);
         }
     } else if (layerCount) {
-        drawLayers(v, c, layerCount);
+        drawLayers(v, c, scene, layerCount);
     }
     if (tracing && (v->traceDone || scene->trace.desc.denoise)) {
         v->vkCmdBindPipeline(c, 0, v->traceShowPipeline);
@@ -2805,8 +2901,9 @@ static void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->holeMap);
         bufferFree(v, &v->environment);
         if (v->environmentPipeline) v->vkDestroyPipeline(v->device, v->environmentPipeline, NULL);
-        for (int i = 0; i < 11; ++i)
+        for (int i = 0; i < 10; ++i)
             if (v->postPipelines[i]) v->vkDestroyPipeline(v->device, v->postPipelines[i], NULL);
+        if (v->fogPipeline) v->vkDestroyPipeline(v->device, v->fogPipeline, NULL);
         if (v->presentPipeline) v->vkDestroyPipeline(v->device, v->presentPipeline, NULL);
         if (v->presentPass) v->vkDestroyRenderPass(v->device, v->presentPass, NULL);
         artfFree(v->lightScratch);
@@ -2816,6 +2913,7 @@ static void vkFree(ArtfRenderer* r) {
             Slot* s = &v->slots[i];
             bufferFree(v, &s->frame);
             bufferFree(v, &s->extraLights);
+            bufferFree(v, &s->decals);
             bufferFree(v, &s->tileLights);
             bufferFree(v, &s->probes);
             bufferFree(v, &s->hole);
@@ -2866,6 +2964,7 @@ static void vkFree(ArtfRenderer* r) {
         if (v->resolvePass) v->vkDestroyRenderPass(v->device, v->resolvePass, NULL);
         if (v->layerDepthPipeline) v->vkDestroyPipeline(v->device, v->layerDepthPipeline, NULL);
         if (v->layerPipeline) v->vkDestroyPipeline(v->device, v->layerPipeline, NULL);
+        if (v->particlePipeline) v->vkDestroyPipeline(v->device, v->particlePipeline, NULL);
         const VkPipeline holePipelines[5] = {v->holePipeline, v->bloomFirstPipeline, v->bloomNextPipeline, v->bloomUpPipeline, v->backdropPipeline};
         for (int i = 0; i < 5; ++i)
             if (holePipelines[i]) v->vkDestroyPipeline(v->device, holePipelines[i], NULL);
@@ -3110,9 +3209,7 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     v->height = o->height;
     v->noVsync = o->noVsync;
     v->samples = o->antialias ? 4 : 1;
-    /* (a frame in floats smooths edges by time, not by samples: four a pixel are left out with it, on the GPU) */
     v->floats = o->hdr;
-    if (v->floats) v->samples = 1;
     v->compressTextures = o->compressTextures;
     PhysicalDeviceProperties props;
     if (o->pipelineCache) {
@@ -3165,6 +3262,7 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
         Slot* s = &v->slots[i];
         if (!bufferNew(v, &s->frame, sizeof(ArtfFrameData), BUFFER_UNIFORM, true)) goto failed;
         if (!bufferNew(v, &s->extraLights, (VkDeviceSize)ARTF_MAX_LIGHTS * sizeof(ArtfLightData), BUFFER_STORAGE, true)) goto failed;
+        if (!bufferNew(v, &s->decals, (VkDeviceSize)ARTF_MAX_DECALS * sizeof(ArtfDecalData), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->tileLights, 4, BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->probes, 16, BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->hole, sizeof(ArtfHoleFrame), BUFFER_UNIFORM, true)) goto failed;

@@ -18,18 +18,25 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - A material in C picks its mipmap from neighbouring pixels along a row, on the CPU, so a surface slanted the other way
   may show more detail than it should. When tracing it reads the largest resident mipmap.
 - What shows through casts no shadow when drawing triangles.
-- A frame in floats (`hdr`): on the GPU it has one sample a pixel, and layers go by their centers there and on the CPU.
-  Reflections see only what the frame shows: what is off screen or behind something is not reflected. Ambient
-  occlusion and fog read depth, not geometry: thin things and their backs are guessed. Temporal antialiasing follows
-  pixels by depth and the view alone: what moves leaves a trail where its history does not fit. The black hole keeps
-  its own exposure and tone mapping. Fog that light goes through is reckoned to what is solid: layers in front of the
-  sky (smoke, glass) are fogged as the sky is, and fade into it. Metal leaves all of it out.
-- Lights past the first 16 cast no shadow, are listed up to 64 for each 64 x 64 square of the frame, and are left out
-  of tracing and of what the probes gather.
-- Light that bounced (probes) leaks through walls thinner than the probes are apart, and fills a box set when it is
-  turned on: a scene that grows needs it set again. It does not reach specular reflections.
-- Particles are stepped on the calling thread, one instance each, and face the camera as it was when stepped. There are
-  no decals.
+- A frame in floats (`hdr`): layers go by their centers. With four samples, what comes after reads the first sample's
+  depth and surface. Reflections see only what the frame shows: what is off screen or behind something is not
+  reflected, and the light from all around stays there instead. Ambient occlusion reads depth, not geometry: thin
+  things and their backs are guessed. Temporal antialiasing follows pixels by depth and the view alone: what moves
+  leaves a trail where its history does not fit. The black hole keeps its own exposure and tone mapping. Fog that
+  light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is
+  wide, and it reaches 4 / density along the view. It is not traced. Metal leaves all of it out.
+- Lights past the first 16 are listed up to 64 for each 64 x 64 square of the frame, and are left out of tracing and of
+  what the probes gather. Of those that ask for shadows, the 32 that matter most each frame (near the eye, wide, in
+  view) get them, in maps a quarter as wide as the others; 48 such maps at most, six to a point light.
+- Light that bounced (probes) fills a box set when it is turned on: a scene that grows needs it set again. A wall
+  stops it once probes see it, as far as an 8 x 8 map of directions can tell; a wall much thinner than the probes are
+  apart, with probes on both sides near it, can still let some through; `throughWalls` leaves walls out, for less
+  work. It does not reach specular reflections.
+- Particles are stepped on the calling thread, one instance each; they are not traced, unless the whole frame is.
+- On the GPU, turning probes, their walls or fog that light goes through on or off makes the scene's pixel shaders
+  again: that frame waits for them.
+- Decals are tested against each drawn pixel, all of those in view: dozens are cheap, hundreds cost. They go on what is
+  solid, not on what blends, and read one mipmap, chosen for the box's distance.
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual
   approximation): at grazing angles a rough surface's reflection is less stretched than it should be. Its maps are
   512 texels a side at most, so the picture shown behind the scene is soft at a wide view's center. Metal leaves it
@@ -44,9 +51,12 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   draw white).
 - Making levels of detail takes time, on the calling thread: about half a second for 100,000 triangles
   on a slow desktop.
-- glTF: Draco and meshopt compression and Basis Universal's formats are not read, nor orthographic cameras. A file's
-  lights end at a radius, as Artful's do, and are not the square law: as bright as it at a quarter of their reach.
-  Each material has one set of texture coordinates, moved by the transform of its first texture.
+- glTF: Draco compression and Basis Universal's formats are not read. `EXT_meshopt_compression` is decoded as its
+  specification has it, and checked against streams made by an encoder in the tests, not yet against meshoptimizer's
+  own files. An orthographic camera comes out as a perspective one from far behind, through a field a hundredth of a
+  radian high. A file's lights end at a radius, as Artful's do, and are not the square law: as bright as it at a
+  quarter of their reach. Each material has one set of texture coordinates, moved by the transform of its first
+  texture. Transmission is drawn as blending, and bends light only when traced.
 - **Metal has never been run.** It was written without a Mac: CI builds it on macOS and puts its shaders through
   Apple's compiler, and no more than that is known. So it is chosen only by name. It needs Metal 3; it leaves out
   occlusion, black holes, materials in C and light from a picture, and sends textures up decoded. Linux and macOS are

@@ -39,7 +39,8 @@ ArtfModel artfSceneAddPreparedModel(ArtfScene* s, ArtfPreparedModel* prepared, c
 
 void artfModelSetTransform(ArtfScene* s, ArtfModel m, const ArtfTransform* transform);
 uint32_t artfModelInstanceCount(const ArtfScene* s, ArtfModel m);
-/* The file's perspective cameras, where their nodes are now: for artfSceneSetCamera. false: there is none. */
+/* The file's cameras, where their nodes are now: for artfSceneSetCamera. false: there is none. An orthographic one
+ * comes out as a perspective one from far behind, through a narrow field: as near to it as a perspective can be. */
 uint32_t artfModelCameraCount(const ArtfScene* s, ArtfModel m);
 bool artfModelCamera(const ArtfScene* s, ArtfModel m, uint32_t camera, ArtfCamera* out);
 uint32_t artfModelClipCount(const ArtfScene* s, ArtfModel m);

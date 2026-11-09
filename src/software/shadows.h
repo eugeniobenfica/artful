@@ -23,5 +23,7 @@ const ArtfShadowSource* artfShadowMapsDraw(ArtfShadowMaps* m, const ArtfScene* s
 /* How much light gets to a place, 0 to 1. */
 float artfShadowOfSun(const ArtfShadowSource* s, const float* eye, const float* world, const float* normal);
 float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world, const float* normal);
+/* Of the k-th light past the frame's own (artfSceneExtraLights's order). */
+float artfShadowOfExtra(const ArtfShadowSource* s, uint32_t k, const float* position, const float* world, const float* normal);
 
 #endif

@@ -2887,6 +2887,294 @@ static void testGltfExtensions(void) {
     artfSceneFree(s);
 }
 
+/* ---- EXT_meshopt_compression: encoders as meshoptimizer's streams are laid out, to check the decoders against ---- */
+
+typedef struct Bytes { uint8_t* p; size_t n, cap; } Bytes;
+static void bytePut(Bytes* b, uint8_t v) {
+    if (b->n == b->cap) {
+        b->cap = b->cap ? b->cap * 2 : 256;
+        b->p = realloc(b->p, b->cap);
+    }
+    b->p[b->n++] = v;
+}
+static void vbytePut(Bytes* b, uint32_t v) {
+    do {
+        const uint8_t group = (uint8_t)(v & 127);
+        v >>= 7;
+        bytePut(b, (uint8_t)(group | (v ? 128 : 0)));
+    } while (v);
+}
+
+/* Vertices: each group of sixteen bytes in the fewest bits that hold it, as the encoder chooses. */
+static void encodeVertices(Bytes* out, const uint8_t* v, size_t count, size_t stride) {
+    bytePut(out, 0xA0);
+    uint8_t last[256];
+    memcpy(last, v, stride);
+    size_t block = 8192 / stride & ~(size_t)15;
+    if (block > 256) block = 256;
+    for (size_t first = 0; first < count; first += block) {
+        const size_t n = count - first < block ? count - first : block, aligned = (n + 15) & ~(size_t)15;
+        for (size_t k = 0; k < stride; ++k) {
+            uint8_t deltas[256] = {0};
+            uint8_t p = last[k];
+            for (size_t i = 0; i < n; ++i) {
+                const uint8_t now = v[(first + i) * stride + k], d = (uint8_t)(now - p);
+                deltas[i] = (uint8_t)((d << 1) ^ (uint8_t)((int8_t)d >> 7)); /* zig-zag */
+                p = now;
+            }
+            last[k] = p;
+            const size_t groups = aligned / 16, headerAt = out->n;
+            for (size_t h = 0; h < (groups + 3) / 4; ++h) bytePut(out, 0);
+            for (size_t g = 0; g < groups; ++g) {
+                const uint8_t* d = deltas + g * 16;
+                int best = 3;
+                size_t bestSize = 16;
+                for (int bits = 0; bits < 3; ++bits) {
+                    const int width = bits == 0 ? 0 : bits == 1 ? 2 : 4, all = (1 << width) - 1;
+                    size_t size = (size_t)(16 * width / 8);
+                    bool fits = true;
+                    for (int i = 0; i < 16; ++i) {
+                        if (width == 0) fits &= d[i] == 0;
+                        else size += d[i] >= all;
+                    }
+                    if (fits && size < bestSize) { best = bits; bestSize = size; }
+                }
+                out->p[headerAt + g / 4] |= (uint8_t)(best << (g % 4 * 2));
+                if (best == 3) {
+                    for (int i = 0; i < 16; ++i) bytePut(out, d[i]);
+                } else if (best > 0) {
+                    const int width = best == 1 ? 2 : 4, all = (1 << width) - 1, each = 8 / width;
+                    for (int i = 0; i < 16; i += each) {
+                        uint8_t byte = 0;
+                        for (int j = 0; j < each; ++j) byte = (uint8_t)(byte << width | (d[i + j] >= all ? all : d[i + j]));
+                        bytePut(out, byte);
+                    }
+                    for (int i = 0; i < 16; ++i)
+                        if (d[i] >= all) bytePut(out, d[i]);
+                }
+            }
+        }
+    }
+    /* the first vertex, at the end */
+    const size_t tail = stride < 32 ? 32 : stride;
+    for (size_t i = 0; i < tail - stride; ++i) bytePut(out, 0);
+    for (size_t i = 0; i < stride; ++i) bytePut(out, v[i]);
+}
+
+/* Triangles: an edge met lately when there is one, a new vertex or one met lately or a free one; else three free. */
+static void encodeTriangles(Bytes* out, const uint16_t* t, size_t count) {
+    uint32_t edges[16][2], vertices[16], edge = 0, vertex = 0, next = 0, last = 0;
+    memset(edges, 0xFF, sizeof edges);
+    memset(vertices, 0xFF, sizeof vertices);
+    Bytes codes = {0}, data = {0};
+#define PUSH_V(x, adv) (vertices[vertex] = (x), vertex = (vertex + (adv)) & 15)
+#define PUSH_E(x, y) (edges[edge][0] = (x), edges[edge][1] = (y), edge = (edge + 1) & 15)
+    for (size_t i = 0; i < count; i += 3) {
+        const uint32_t a = t[i], b = t[i + 1], c = t[i + 2];
+        int fe = -1;
+        for (int k = 0; k < 16 && fe < 0; ++k)
+            if (edges[(edge - 1 - k) & 15][0] == a && edges[(edge - 1 - k) & 15][1] == b) fe = k;
+        if (fe >= 0) {
+            int fec = -1;
+            if (c == next) fec = 0;
+            for (int k = 1; k < 13 && fec < 0; ++k)
+                if (vertices[(vertex - 1 - k) & 15] == c) fec = k;
+            if (fec < 0) fec = c == last - 1 ? 13 : c == last + 1 ? 14 : 15;
+            bytePut(&codes, (uint8_t)(fe << 4 | fec));
+            if (fec == 0) ++next;
+            if (fec == 15) {
+                const int32_t d = (int32_t)(c - last);
+                vbytePut(&data, (uint32_t)((d << 1) ^ (d >> 31)));
+            }
+            if (fec >= 13) last = c;
+            PUSH_V(c, fec == 0 || fec >= 13);
+            PUSH_E(c, b);
+            PUSH_E(a, c);
+        } else {
+            /* three free: 0xff, and a byte of fifteens */
+            bytePut(&codes, 0xFF);
+            bytePut(&data, 0xFF);
+            const uint32_t abc[3] = {a, b, c};
+            for (int k = 0; k < 3; ++k) {
+                const int32_t d = (int32_t)(abc[k] - last);
+                vbytePut(&data, (uint32_t)((d << 1) ^ (d >> 31)));
+                last = abc[k];
+            }
+            PUSH_V(a, 1);
+            PUSH_V(b, 1);
+            PUSH_V(c, 1);
+            PUSH_E(b, a);
+            PUSH_E(c, b);
+            PUSH_E(a, c);
+        }
+    }
+#undef PUSH_V
+#undef PUSH_E
+    bytePut(out, 0xE1);
+    for (size_t i = 0; i < codes.n; ++i) bytePut(out, codes.p[i]);
+    for (size_t i = 0; i < data.n; ++i) bytePut(out, data.p[i]);
+    for (int i = 0; i < 16; ++i) bytePut(out, 0); /* (the table: not used here) */
+    free(codes.p);
+    free(data.p);
+}
+
+static void encodeIndexSequence(Bytes* out, const uint16_t* t, size_t count) {
+    bytePut(out, 0xD1);
+    uint32_t last[2] = {0, 0};
+    for (size_t i = 0; i < count; ++i) {
+        /* (alternating between the two lasts, to use both) */
+        const uint32_t which = i & 1;
+        const int32_t d = (int32_t)(t[i] - last[which]);
+        last[which] = t[i];
+        vbytePut(out, ((uint32_t)((d << 1) ^ (d >> 31))) << 1 | which);
+    }
+    for (int i = 0; i < 4; ++i) bytePut(out, 0);
+}
+
+static void base64Put(char* out, const uint8_t* p, size_t n) {
+    static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        const uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        out[o++] = digits[v >> 18 & 63];
+        out[o++] = digits[v >> 12 & 63];
+        out[o++] = i + 1 < n ? digits[v >> 6 & 63] : '=';
+        out[o++] = i + 2 < n ? digits[v & 63] : '=';
+    }
+    out[o] = 0;
+}
+
+/* A hill of 9 x 9 vertices, as a plain file and as one compressed with EXT_meshopt_compression (triangles in one
+ * primitive, the same indices as a sequence in another): both draw the same. Then the filters, alone. And the
+ * materials' extensions, and an orthographic camera. */
+static void testGltfMeshopt(void) {
+    enum { SIDE = 9, VERTS = SIDE * SIDE, TRIS = (SIDE - 1) * (SIDE - 1) * 2 };
+    static float positions[VERTS * 3];
+    static uint16_t indices[TRIS * 3];
+    for (int z = 0; z < SIDE; ++z)
+        for (int x = 0; x < SIDE; ++x) {
+            float* p = positions + (z * SIDE + x) * 3;
+            p[0] = (float)x * .25f - 1.f;
+            p[1] = (float)((x - 4) * (x - 4) + (z - 4) * (z - 4)) * -.02f;
+            p[2] = (float)z * .25f - 1.f;
+        }
+    int n = 0;
+    for (int z = 0; z + 1 < SIDE; ++z)
+        for (int x = 0; x + 1 < SIDE; ++x) {
+            const uint16_t a = (uint16_t)(z * SIDE + x), b = (uint16_t)(a + SIDE);
+            /* (the second starts on an edge of the first) */
+            indices[n++] = a; indices[n++] = b; indices[n++] = (uint16_t)(b + 1);
+            indices[n++] = a; indices[n++] = (uint16_t)(b + 1); indices[n++] = (uint16_t)(a + 1);
+        }
+    Bytes v = {0}, tri = {0}, seq = {0};
+    encodeVertices(&v, (const uint8_t*)positions, VERTS, 12);
+    encodeTriangles(&tri, indices, TRIS * 3);
+    encodeIndexSequence(&seq, indices, TRIS * 3);
+    /* the decoders, straight */
+    static float gotPositions[VERTS * 3];
+    static uint16_t gotTriangles[TRIS * 3], gotSequence[TRIS * 3];
+    CHECK(artfMeshoptDecodeVertices((uint8_t*)gotPositions, VERTS, 12, v.p, v.n) == 0 && !memcmp(gotPositions, positions, sizeof positions));
+    CHECK(artfMeshoptDecodeTriangles((uint8_t*)gotTriangles, TRIS * 3, 2, tri.p, tri.n) == 0 && !memcmp(gotTriangles, indices, sizeof indices));
+    CHECK(artfMeshoptDecodeIndices((uint8_t*)gotSequence, TRIS * 3, 2, seq.p, seq.n) == 0 && !memcmp(gotSequence, indices, sizeof indices));
+    CHECK(artfMeshoptDecodeVertices((uint8_t*)gotPositions, VERTS, 12, v.p, v.n - 1) != 0); /* (cut short: refused) */
+    /* both files: plain, and with the compressed views (their fallback buffer holds nothing) */
+    const size_t plainSize = sizeof positions + sizeof indices;
+    uint8_t* plain = malloc(plainSize);
+    memcpy(plain, positions, sizeof positions);
+    memcpy(plain + sizeof positions, indices, sizeof indices);
+    const size_t packedSize = v.n + tri.n + seq.n;
+    uint8_t* packed = malloc(packedSize + 8);
+    memcpy(packed, v.p, v.n);
+    memcpy(packed + v.n, tri.p, tri.n);
+    memcpy(packed + v.n + tri.n, seq.p, seq.n);
+    char* b64Plain = malloc(plainSize * 2 + 8);
+    char* b64Packed = malloc(packedSize * 2 + 8);
+    base64Put(b64Plain, plain, plainSize);
+    base64Put(b64Packed, packed, packedSize);
+    char* json = malloc(plainSize * 4 + packedSize * 4 + 8192);
+    const char* mesh = "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1},{\"attributes\":{\"POSITION\":0},\"indices\":2}]}],"
+                       "\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0";
+    const char* accessors = "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"type\":\"VEC3\",\"count\":81,\"max\":[1,0,1],\"min\":[-1,-0.64,-1]},"
+                            "{\"bufferView\":1,\"componentType\":5123,\"type\":\"SCALAR\",\"count\":384},{\"bufferView\":2,\"componentType\":5123,\"type\":\"SCALAR\",\"count\":384}]";
+    ArtfScene* scenes[2];
+    for (int k = 0; k < 2; ++k) {
+        if (!k)
+            sprintf(json, "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"byteLength\":%u,\"uri\":\"data:application/octet-stream;base64,%s\"}],"
+                          "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":972,\"byteStride\":12},{\"buffer\":0,\"byteOffset\":972,\"byteLength\":768},"
+                          "{\"buffer\":0,\"byteOffset\":972,\"byteLength\":768}],%s,%s}",
+                    (unsigned)plainSize, b64Plain, accessors, mesh);
+        else
+            sprintf(json, "{\"asset\":{\"version\":\"2.0\"},\"extensionsRequired\":[\"EXT_meshopt_compression\"],\"extensionsUsed\":[\"EXT_meshopt_compression\"],"
+                          "\"buffers\":[{\"byteLength\":%u,\"uri\":\"data:application/octet-stream;base64,%s\"},{\"byteLength\":1740,\"extensions\":{\"EXT_meshopt_compression\":{\"fallback\":true}}}],"
+                          "\"bufferViews\":[{\"buffer\":1,\"byteOffset\":0,\"byteLength\":972,\"byteStride\":12,\"extensions\":{\"EXT_meshopt_compression\":{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u,\"byteStride\":12,\"count\":81,\"mode\":\"ATTRIBUTES\"}}},"
+                          "{\"buffer\":1,\"byteOffset\":972,\"byteLength\":768,\"extensions\":{\"EXT_meshopt_compression\":{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"byteStride\":2,\"count\":384,\"mode\":\"TRIANGLES\"}}},"
+                          "{\"buffer\":1,\"byteOffset\":972,\"byteLength\":768,\"extensions\":{\"EXT_meshopt_compression\":{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"byteStride\":2,\"count\":384,\"mode\":\"INDICES\"}}}],%s,%s}",
+                    (unsigned)packedSize, b64Packed, (unsigned)v.n, (unsigned)v.n, (unsigned)tri.n, (unsigned)(v.n + tri.n), (unsigned)seq.n, accessors, mesh);
+        scenes[k] = plainScene();
+        setCamera(scenes[k], 0, 2, 2.5f, 0, -.3f, 0);
+        artfSceneSetSun(scenes[k], artfVec3(-.4f, -1, -.2f), artfVec3(1, 1, 1));
+        artfSceneSetAmbient(scenes[k], artfVec3(.1f, .1f, .1f), artfVec3(.1f, .1f, .1f));
+        CHECK(artfSceneLoadModelMemory(scenes[k], json, strlen(json), NULL, NULL) != 0);
+    }
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    drawInto(cpu, scenes[0], a);
+    drawInto(cpu, scenes[1], b);
+    CHECK(differentShare(a, b, 0) == 0 && meanOf(a, W / 2, H / 2, 8) > 20);
+    artfRendererFree(cpu);
+    artfSceneFree(scenes[0]);
+    artfSceneFree(scenes[1]);
+    artfFree(a);
+    artfFree(b);
+    free(json); free(b64Plain); free(b64Packed); free(plain); free(packed); free(v.p); free(tri.p); free(seq.p);
+
+    /* the filters: an octahedron's normal, a quaternion, a float from a mantissa and an exponent */
+    int8_t oct[4] = {0, 127, 127, 0}; /* (up: u 0, v 1, and the one length) */
+    artfMeshoptFilter((uint8_t*)oct, 1, 4, 1);
+    CHECK(oct[0] == 0 && oct[1] == 127 && oct[2] == 0);
+    int16_t quat[4] = {0, 0, 0, 3 | (32767 & ~3)}; /* (the identity: w left out, as index 3 says; x, y, z nothing) */
+    quat[3] = (int16_t)(32767 & ~3) | 3;
+    artfMeshoptFilter((uint8_t*)quat, 1, 8, 2);
+    CHECK(quat[3] == 32767 && quat[0] == 0 && quat[1] == 0 && quat[2] == 0);
+    uint32_t e = (uint32_t)(-2 & 255) << 24 | 6u; /* 6 * 2^-2 */
+    artfMeshoptFilter((uint8_t*)&e, 1, 4, 3);
+    float ef;
+    memcpy(&ef, &e, 4);
+    CHECK(ef == 1.5f);
+
+    /* materials: lit by nothing, an index of 1.2, light that goes through; and an orthographic camera */
+    static const float corners[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    char b64[64];
+    base64Put(b64, (const uint8_t*)corners, sizeof corners);
+    char file[2048];
+    snprintf(file, sizeof file,
+             "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_materials_unlit\",\"KHR_materials_ior\",\"KHR_materials_transmission\"],"
+             "\"buffers\":[{\"byteLength\":36,\"uri\":\"data:application/octet-stream;base64,%s\"}],\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],"
+             "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"type\":\"VEC3\",\"count\":3,\"max\":[1,1,0],\"min\":[0,0,0]}],"
+             "\"materials\":[{\"extensions\":{\"KHR_materials_unlit\":{}}},{\"extensions\":{\"KHR_materials_ior\":{\"ior\":1.2}}},"
+             "{\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":0.8},\"KHR_materials_ior\":{\"ior\":1.33}}}],"
+             "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0},{\"attributes\":{\"POSITION\":0},\"material\":1},"
+             "{\"attributes\":{\"POSITION\":0},\"material\":2}]}],"
+             "\"cameras\":[{\"type\":\"orthographic\",\"orthographic\":{\"xmag\":2,\"ymag\":1.5,\"znear\":0.1,\"zfar\":50}}],"
+             "\"nodes\":[{\"mesh\":0},{\"translation\":[0,0,5],\"camera\":0}],\"scenes\":[{\"nodes\":[0,1]}],\"scene\":0}",
+             b64);
+    ArtfScene* s = artfSceneNew();
+    const ArtfModel m = artfSceneLoadModelMemory(s, file, strlen(file), NULL, NULL);
+    CHECK(m != 0 && s->materials.len >= 3);
+    const ArtfMaterialData* made = &s->materials.items[s->materials.len - 3];
+    CHECK(made[0].flags & ARTF_MATERIAL_UNLIT);
+    CHECK(fabsf(made[1].specular - .2066f) < .001f && !(made[1].flags & ARTF_MATERIAL_UNLIT));
+    CHECK(made[2].flags & ARTF_MATERIAL_BLEND && fabsf(made[2].opacity - .2f) < 1e-5f && fabsf(made[2].ior - 1.33f) < 1e-5f);
+    ArtfCamera eye;
+    CHECK(artfModelCameraCount(s, m) == 1 && artfModelCamera(s, m, 0, &eye));
+    /* far behind, looking the same way, as high where the camera was */
+    CHECK(eye.fovY < .02f && eye.position.z > 200.f && eye.target.z < eye.position.z);
+    CHECK(fabsf((eye.position.z - 5.f) * .0050000417f - 1.5f) < .01f);
+    artfSceneFree(s);
+}
+
 /* Light from all around, from a picture: the maps, a Radiance file, and both backends drawing the same. */
 static void testEnvironment(void) {
     /* a picture lit above and dark below, with a brighter patch where -z is */
@@ -3091,6 +3379,172 @@ static void testFloats(void) {
     artfFree(a);
     artfFree(b);
     artfFree(c);
+}
+
+/* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
+ * next to nothing, though a probe outside is nearer to it than one inside. */
+static void testProbesWalls(void) {
+    ArtfScene* s = artfSceneNew();
+    setCamera(s, 0, 0, 10, 0, 0, 0);
+    artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+    artfSceneSetAmbient(s, artfVec3(1, 1, 1), artfVec3(1, 1, 1));
+    artfSceneAddInstance(s, artfSceneAddCube(s, 4), whiteMaterial(s), NULL);
+    const ArtfIndirectDesc probes = {{8, 8, 8}, 128, .5f, 1, {-6, -6, -6}, {6, 6, 6}};
+    artfSceneSetIndirect(s, &probes);
+    ArtfFrameData frame;
+    artfSceneFrame(s, W, H, &frame);
+    for (int k = 0; k < 8; ++k) artfSceneIndirectStep(s, &frame, NULL);
+    const float inside[3] = {1.8f, 0, 0}, inward[3] = {-1, 0, 0}, outside[3] = {2.3f, 0, 0}, outward[3] = {1, 0, 0};
+    float in[3], out[3];
+    artfIndirectAt(&s->indirect, inside, inward, in);
+    artfIndirectAt(&s->indirect, outside, outward, out);
+    printf("light that bounced, inside a box by its wall: %.3f of what is just outside\n", in[1] / out[1]);
+    CHECK(out[1] > .5f && in[1] < out[1] * .1f);
+    artfSceneFree(s);
+    /* the kernels read the probes eight at a time: the same bytes as the portable ones, with walls and without */
+    for (int through = 0; through < 2; ++through) {
+        s = bleedScene();
+        ArtfIndirectDesc d = {{8, 4, 8}, 64, .5f, 1, {-4, -1.5f, -3}, {4, 3, 3}, through != 0};
+        uint32_t* a = artfMalloc(W * H * 4);
+        uint32_t* b = artfMalloc(W * H * 4);
+        ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* fast = artfRendererNew(&o);
+        artfSceneSetIndirect(s, &d);
+        drawInto(fast, s, a);
+        o = options(ARTF_BACKEND_SOFTWARE, 0, true);
+        ArtfRenderer* plain = artfRendererNew(&o);
+        artfSceneSetIndirect(s, &d); /* (the probes start over: the same steps) */
+        drawInto(plain, s, b);
+        CHECK(differentShare(a, b, 0) == 0);
+        artfRendererFree(fast);
+        artfRendererFree(plain);
+        artfSceneFree(s);
+        artfFree(a);
+        artfFree(b);
+    }
+}
+
+/* A frame in floats with four samples a pixel: on the GPU as on the CPU, with what comes after and fog that light goes
+ * through; and smoother than with one. */
+static void testFloatsSamples(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    o.hdr = true;
+    o.antialias = true;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (!gpu) return;
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    o.antialias = false;
+    ArtfRenderer* single = artfRendererNew(&o);
+    ArtfScene* s = bleedScene();
+    const ArtfPostDesc all = {.bloom = .2f, .occlusion = 1, .reflections = 1, .volumetric = 1, .scattering = .4f};
+    artfSceneSetPost(s, &all);
+    artfSceneSetFog(s, artfVec3(.5f, .5f, .55f), .03f);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    drawInto(cpu, s, a);
+    drawInto(gpu, s, b);
+    const double apart = differentShare(a, b, 16);
+    printf("four samples in floats, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+    CHECK(apart < .03);
+    drawInto(single, s, b);
+    CHECK(differentShare(a, b, 4) > .002); /* (edges come out otherwise) */
+    artfSceneFree(s);
+    artfRendererFree(gpu);
+    artfRendererFree(cpu);
+    artfRendererFree(single);
+    artfFree(a);
+    artfFree(b);
+}
+
+/* Lights past the frame's sixteen that ask for shadows get them, in the atlas's small maps: on both backends alike. */
+static void testExtraShadows(void) {
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+    artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
+    setCamera(s, 0, 6, 6, 0, 0, 0);
+    const ArtfMaterial white = whiteMaterial(s);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 20, 1), white, NULL);
+    const ArtfTransform above = artfTransformAt(0, 1, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddCube(s, 1), white, &above);
+    /* the frame's sixteen: far off and dark */
+    for (int i = 0; i < 16; ++i) artfSceneAddLight(s, artfVec3(100.f + (float)i, 50, 0), artfVec3(0, 0, 0), 1);
+    /* behind the cube and above it: its shadow falls toward the eye */
+    const ArtfLight lamp = artfSceneAddLight(s, artfVec3(0, 3, -1.5f), artfVec3(1, 1, 1), 8);
+    const ArtfShadowDesc shadows = {1024, 30};
+    artfSceneSetShadows(s, &shadows);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    drawInto(cpu, s, a);
+    artfLightSetShadow(s, lamp, true);
+    drawInto(cpu, s, b);
+    /* under the cube, by the eye's side of it: darker with the shadow */
+    const double without = meanOf(a, W / 2, H * 2 / 3, 8), with = meanOf(b, W / 2, H * 2 / 3, 8);
+    printf("a light past the sixteen, under a cube: %.1f without its shadow, %.1f with\n", without, with);
+    CHECK(with < without * .6);
+    o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        drawInto(gpu, s, a);
+        const double apart = differentShare(a, b, 24);
+        printf("its shadow, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .02);
+        artfRendererFree(gpu);
+    }
+    artfRendererFree(cpu);
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+}
+
+/* Decals: a picture over the floor, through a box; the same on both backends, and gone when removed. */
+static void testDecals(void) {
+    ArtfScene* s = plainScene();
+    setCamera(s, 0, 4, 3, 0, 0, 0);
+    const ArtfTransform floor = artfTransformAt(0, 0, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 20, 1), whiteMaterial(s), &floor);
+    /* a checker, red where it shows and clear between */
+    static uint32_t checker[32 * 32];
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) checker[y * 32 + x] = ((x / 8 + y / 8) & 1) ? 0xFFFF2020u : 0x00000000u;
+    ArtfDecalDesc d;
+    memset(&d, 0, sizeof d);
+    d.transform = artfTransformTrs(artfVec3(0, 0, 0), artfQuatAxisAngle(artfVec3(0, 1, 0), .3f), artfVec3(2, 1, 2));
+    d.texture = artfSceneAddTexture(s, checker, 32, 32, 0);
+    d.color = artfVec3(1, 1, 1);
+    d.opacity = 1;
+    const ArtfDecal decal = artfSceneAddDecal(s, &d);
+    CHECK(decal != 0);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    drawInto(cpu, s, a);
+    /* red and white squares where the box meets the floor */
+    int red = 0;
+    for (int i = 0; i < W * H; ++i) red += (a[i] >> 16 & 255) > 200 && (a[i] >> 8 & 255) < 120;
+    printf("a decal: %d pixels red\n", red);
+    CHECK(red > W * H / 50);
+    o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("a decal, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+        artfRendererFree(gpu);
+    }
+    artfSceneRemoveDecal(s, decal);
+    drawInto(cpu, s, b);
+    red = 0;
+    for (int i = 0; i < W * H; ++i) red += (b[i] >> 16 & 255) > 200 && (b[i] >> 8 & 255) < 120;
+    CHECK(red == 0);
+    artfRendererFree(cpu);
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
 }
 
 /* Particles and terrain: made of the scene's own parts, so the backends draw them alike. */
@@ -4082,8 +4536,13 @@ int main(void) {
     testGltfSparse();
     testGltfTargets();
     testGltfExtensions();
+    testGltfMeshopt();
     testEnvironment();
     testFloats();
+    testProbesWalls();
+    testExtraShadows();
+    testFloatsSamples();
+    testDecals();
     testExtras();
     testLostDevice();
     testRefusedSwapchain();

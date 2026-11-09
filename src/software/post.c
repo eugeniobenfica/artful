@@ -8,13 +8,15 @@
  *                 world, against the depth; blurred over 4 x 4, and taken from the share of light that came from all
  *                 around, which the tiles kept.
  *   reflections   a ray along the mirror direction, through the depth, in 24 steps; where it meets something, what
- *                 the frame shows there, by how much the surface mirrors, fading toward the frame's edges.
- *   fog           a ray from the eye to each pixel, at a quarter of the pixels, in 16 steps: light the sun sends
- *                 through its shadows and what the sky gives, less what the air takes; then up to every pixel.
+ *                 the frame shows there in place of the light from all around that the surface reflected, fading
+ *                 toward the frame's edges.
  *   temporal      where each pixel was in the frame before, by its depth, and that frame's light there, kept within
  *                 what this frame shows around the pixel.
  *   focus         a disc of 24 samples, as wide as each pixel's circle of confusion.
  *   bloom         light past the threshold, down a pyramid of halves and back up: a wide, soft glow.
+ *
+ * Fog that light goes through comes before them all, and before the tiles: a grid of froxels (artfSoftFroxels) that
+ * each surface reads as it is lit, layers too, and the background.
  *
  * No exp, pow or sin from the C library: the same bytes on every processor. */
 #include "software/softwareInternal.h"
@@ -174,8 +176,10 @@ static void occlusionBlurRow(ArtfSoftPost* p, int y) {
 
 /* ---- reflections ---- */
 
-/* At half the frame's resolution, a pixel for each two by two: what it mirrors (into bloom's first level, before
- * bloom needs it) and how much (into occlusion's plane, after occlusion is done). reflectionApplyRow takes it up. */
+/* At half the frame's resolution, a pixel for each two by two: what the march found takes the place of what the surface
+ * was lit with from all around in the mirror direction (the picture, or the sky's two colors), which hid it. What that
+ * changes goes into bloom's first level, before bloom needs it; reflectionApplyRow takes it up. Where the march finds
+ * nothing, the light from all around stays as the surface was lit. */
 static void reflectionRow(ArtfSoftPost* p, int hy) {
     const ArtfFrameData* f = &p->f->data;
     const float strength = f->post[1][0];
@@ -184,7 +188,6 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
         const int x = artfMini(hx * 2, p->width - 1), y = artfMini(hy * 2, p->height - 1);
         const size_t i = (size_t)y * p->width + x, half = (size_t)hy * hw + hx;
         for (int c = 0; c < 3; ++c) p->bloom[c][half] = 0;
-        p->occlusion[half] = 0;
         const uint32_t s = p->f->postSurface[i];
         const float d = distanceAt(p, x, y), rough = roughOf(s);
         if (d <= 0 || !s || rough > .6f) continue;
@@ -234,16 +237,25 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
         const float edge = artfMinf(artfMinf(hx2, (float)p->width - 1 - hx2), artfMinf(hy2, (float)p->height - 1 - hy2));
         const float fade = artfClampf(edge / ((float)p->width * .08f), 0, 1);
         const float smooth = 1.f - rough / .6f, metal = metalOf(s);
-        const float c5 = 1.f + vn, fresnel = c5 * c5 * c5 * c5 * c5;
-        const float mirror = (.04f + .96f * metal + (1.f - .04f - .96f * metal) * fresnel) * smooth * smooth * fade * strength;
+        /* as the surface was lit from all around in the mirror direction (kernels.inc's highlight) */
+        const float f0 = .04f + .96f * metal, c5 = 1.f - artfMaxf(-vn, 1e-4f), fresnel = c5 * c5 * c5 * c5 * c5;
+        const float mirror = f0 + (artfMaxf(1.f - rough, f0) - f0) * fresnel, sure = smooth * smooth * fade * strength;
+        float around[3];
+        const float* environment = f->sky[3] > 0 ? p->f->scene->environment : NULL;
+        if (environment) {
+            artfEnvReflected(environment, rough, r[0], r[1], r[2], around);
+            for (int c = 0; c < 3; ++c) around[c] *= f->sky[3];
+        } else {
+            const float up = r[1] * .5f + .5f;
+            for (int c = 0; c < 3; ++c) around[c] = f->ground[c] + (f->sky[c] - f->ground[c]) * up;
+        }
         /* a metal's reflection is tinted by its color: that of the light it shows, as near as is known */
         float tint[3] = {1, 1, 1};
         if (metal > 0) {
             const float sum = p->f->postLight[0][i] + p->f->postLight[1][i] + p->f->postLight[2][i];
             for (int c = 0; c < 3; ++c) tint[c] = 1.f + metal * (sum > 1e-6f ? p->f->postLight[c][i] * 3.f / sum - 1.f : 0.f);
         }
-        for (int c = 0; c < 3; ++c) p->bloom[c][half] = tap(p->f->postLight[c], p->width, p->height, hx2, hy2) * tint[c] * mirror;
-        p->occlusion[half] = mirror;
+        for (int c = 0; c < 3; ++c) p->bloom[c][half] = (tap(p->f->postLight[c], p->width, p->height, hx2, hy2) - around[c]) * tint[c] * mirror * sure;
     }
 }
 
@@ -252,67 +264,82 @@ static void reflectionApplyRow(ArtfSoftPost* p, int y) {
     for (int x = 0; x < p->width; ++x) {
         const size_t i = (size_t)y * p->width + x;
         const float fx = ((float)x + .5f) * .5f - .5f, fy = ((float)y + .5f) * .5f - .5f;
-        const float mirror = tap(p->occlusion, hw, hh, fx, fy);
-        for (int c = 0; c < 3; ++c) p->f->postLight[c][i] = p->f->postLight[c][i] * (1.f - mirror) + tap(p->bloom[c], hw, hh, fx, fy);
+        for (int c = 0; c < 3; ++c) p->f->postLight[c][i] = artfMaxf(p->f->postLight[c][i] + tap(p->bloom[c], hw, hh, fx, fy), 0.f);
     }
 }
 
-/* ---- fog that light goes through ---- */
-
-#define FOG_SCALE 4
-#define FOG_STEPS 16
+/* ---- fog that light goes through: froxels ---- */
 
 /* (1 + x + x^2 / 2)^-1, for e^-x: as the fog drawn with the frame */
 static inline float through(float x) { return 1.f / (1.f + x + x * x * .5f); }
 
-static void fogRow(ArtfSoftPost* p, int y) {
+/* A row of the grid's columns: from the eye out through each slice, the sun through its shadows and what the sky gives,
+ * less what the air takes. */
+static void froxelRow(ArtfSoftPost* p, int j) {
     const ArtfFrameData* f = &p->f->data;
-    const int fw = p->fogWidth;
-    const float density = f->look[1], amount = f->post[1][1], g = f->post[1][2];
-    for (int x = 0; x < fw; ++x) {
-        /* the nearest of the pixels this one stands for, so that fog does not run past edges */
-        float d = 3e38f;
-        for (int dy = 0; dy < FOG_SCALE; ++dy)
-            for (int dx = 0; dx < FOG_SCALE; ++dx) {
-                const int qx = artfMini(x * FOG_SCALE + dx, p->width - 1), qy = artfMini(y * FOG_SCALE + dy, p->height - 1);
-                const float there = distanceAt(p, qx, qy);
-                d = artfMinf(d, there > 0 ? there : 3e38f);
-            }
-        const float far = artfMinf(d, 4.f / artfMaxf(density, 1e-6f));
+    const float density = f->look[1], amount = f->post[1][1], g = f->post[1][2], far = 4.f / artfMaxf(density, 1e-6f);
+    for (int i = 0; i < p->froxelsX; ++i) {
         float dir[3];
-        const float cx = (float)x * FOG_SCALE + FOG_SCALE * .5f - .5f, cy = (float)y * FOG_SCALE + FOG_SCALE * .5f - .5f;
+        const float cx = (float)(i * ARTF_FROXEL_TILE) + ARTF_FROXEL_TILE * .5f - .5f, cy = (float)(j * ARTF_FROXEL_TILE) + ARTF_FROXEL_TILE * .5f - .5f;
         worldAt(f, p->width, p->height, cx, cy, 1.f, dir);
         for (int k = 0; k < 3; ++k) dir[k] -= f->cameraPos[k];
         const float along = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
         /* Henyey-Greenstein, toward the sun */
         const float mu = (dir[0] * f->toSun[0] + dir[1] * f->toSun[1] + dir[2] * f->toSun[2]) / along;
         const float hg = 1.f + g * g - 2.f * g * mu, phase = (1.f - g * g) / (12.566371f * hg * sqrtf(hg));
-        const float step = far / FOG_STEPS, jitter = (float)(hash((uint32_t)(y * fw + x) * 2654435761u) & 255) / 256.f;
         float light[3] = {0, 0, 0}, left = 1.f;
-        const float stepThrough = through(density * step * along);
-        for (int k = 0; k < FOG_STEPS; ++k) {
-            const float t = ((float)k + jitter) * step;
+        float* out = p->froxels + ((size_t)j * p->froxelsX + i) * ARTF_FROXEL_SLICES * 4;
+        for (int k = 0; k < ARTF_FROXEL_SLICES; ++k) {
+            const float a = (float)k / ARTF_FROXEL_SLICES, b = (float)(k + 1) / ARTF_FROXEL_SLICES;
+            const float d0 = far * a * a, d1 = far * b * b, t = (d0 + d1) * .5f;
             float q[3];
-            for (int j = 0; j < 3; ++j) q[j] = f->cameraPos[j] + dir[j] * t;
+            for (int c = 0; c < 3; ++c) q[c] = f->cameraPos[c] + dir[c] * t;
             const float sun = p->f->shadows ? artfShadowOfSun(p->f->shadows, f->cameraPos, q, f->toSun) : 1.f;
-            const float taken = left * (1.f - stepThrough);
+            const float stepThrough = through(density * (d1 - d0) * along), taken = left * (1.f - stepThrough);
             for (int c = 0; c < 3; ++c) light[c] += taken * (f->sunColor[c] * sun * phase * 12.566371f + f->fog[c]);
             left *= stepThrough;
+            float* cell = out + (size_t)k * 4;
+            for (int c = 0; c < 3; ++c) cell[c] = light[c] * amount;
+            cell[3] = 1.f - (1.f - left) * amount;
         }
-        const size_t i = (size_t)y * fw + x;
-        for (int c = 0; c < 3; ++c) p->fog[c][i] = light[c] * amount;
-        p->fog[3][i] = 1.f - (1.f - left) * amount;
     }
 }
 
-static void fogApplyRow(ArtfSoftPost* p, int y) {
-    const int fw = p->fogWidth, fh = p->fogHeight;
-    for (int x = 0; x < p->width; ++x) {
-        const size_t i = (size_t)y * p->width + x;
-        const float fx = ((float)x + .5f) / FOG_SCALE - .5f, fy = ((float)y + .5f) / FOG_SCALE - .5f;
-        const float left = tap(p->fog[3], fw, fh, fx, fy);
-        for (int c = 0; c < 3; ++c) p->f->postLight[c][i] = p->f->postLight[c][i] * left + tap(p->fog[c], fw, fh, fx, fy) * p->f->postLight[3][i];
+void artfSoftFroxels(ArtfSoftPost* p, ArtfSoftFrame* f) {
+    p->f = f;
+    f->froxels = p->froxels;
+    f->froxelsX = p->froxelsX;
+    f->froxelsY = p->froxelsY;
+    rows(p, p->froxelsY, froxelRow);
+}
+
+void artfFroxelAt(const ArtfSoftFrame* f, float sx, float sy, float w, float* out) {
+    const ArtfFrameData* d = &f->data;
+    const int gx = f->froxelsX, gy = f->froxelsY;
+    const float far = 4.f / artfMaxf(d->look[1], 1e-6f);
+    const float fx = artfClampf((sx - (ARTF_FROXEL_TILE * .5f - .5f)) / ARTF_FROXEL_TILE, 0, (float)(gx - 1));
+    const float fy = artfClampf((sy - (ARTF_FROXEL_TILE * .5f - .5f)) / ARTF_FROXEL_TILE, 0, (float)(gy - 1));
+    const float fz = artfClampf(sqrtf(artfMaxf(w, 0) / far) * ARTF_FROXEL_SLICES - 1.f, -1.f, ARTF_FROXEL_SLICES - 1);
+    const int x0 = (int)fx, y0 = (int)fy, x1 = artfMini(x0 + 1, gx - 1), y1 = artfMini(y0 + 1, gy - 1);
+    const int z0 = fz < 0 ? -1 : (int)fz, z1 = artfMini(z0 + 1, ARTF_FROXEL_SLICES - 1);
+    const float tx = fx - (float)x0, ty = fy - (float)y0, tz = fz - (float)z0;
+    /* (the four columns around it: each holds its slices one after the other) */
+    const size_t column = ARTF_FROXEL_SLICES * 4;
+    const size_t a = ((size_t)y0 * gx + x0) * column, b = ((size_t)y0 * gx + x1) * column, c = ((size_t)y1 * gx + x0) * column, e = ((size_t)y1 * gx + x1) * column;
+    float near_[4] = {0, 0, 0, 1}, beyond[4];
+    const float* s1 = f->froxels + (size_t)z1 * 4;
+    for (int k = 0; k < 4; ++k) {
+        const float top = s1[a + k] + (s1[b + k] - s1[a + k]) * tx, bottom = s1[c + k] + (s1[e + k] - s1[c + k]) * tx;
+        beyond[k] = top + (bottom - top) * ty;
     }
+    if (z0 >= 0) {
+        const float* s0 = f->froxels + (size_t)z0 * 4;
+        for (int k = 0; k < 4; ++k) {
+            const float top = s0[a + k] + (s0[b + k] - s0[a + k]) * tx, bottom = s0[c + k] + (s0[e + k] - s0[c + k]) * tx;
+            near_[k] = top + (bottom - top) * ty;
+        }
+    } /* (else at the eye: nothing added, all left) */
+    for (int k = 0; k < 4; ++k) out[k] = near_[k] + (beyond[k] - near_[k]) * tz;
 }
 
 /* ---- temporal antialiasing ---- */
@@ -471,9 +498,9 @@ void artfSoftPostSize(ArtfSoftPost* p, int width, int height) {
         p->history[c] = artfMalloc(pixels * 4);
     }
     p->occlusion = artfMalloc(pixels * 4);
-    p->fogWidth = (width + FOG_SCALE - 1) / FOG_SCALE;
-    p->fogHeight = (height + FOG_SCALE - 1) / FOG_SCALE;
-    for (int c = 0; c < 4; ++c) p->fog[c] = artfMalloc((size_t)p->fogWidth * p->fogHeight * 4);
+    p->froxelsX = (width + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE;
+    p->froxelsY = (height + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE;
+    p->froxels = artfMalloc((size_t)p->froxelsX * p->froxelsY * ARTF_FROXEL_SLICES * 16);
     size_t at = 0;
     int w = width, h = height;
     for (int l = 0; l < ARTF_POST_BLOOM_LEVELS; ++l) {
@@ -495,10 +522,8 @@ void artfSoftPostFree(ArtfSoftPost* p) {
         artfFree(p->bloom[c]);
         p->scratch[c] = p->history[c] = p->bloom[c] = NULL;
     }
-    for (int c = 0; c < 4; ++c) {
-        artfFree(p->fog[c]);
-        p->fog[c] = NULL;
-    }
+    artfFree(p->froxels);
+    p->froxels = NULL;
     artfFree(p->occlusion);
     p->occlusion = NULL;
     p->width = p->height = 0;
@@ -515,10 +540,6 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
     if (d->post[1][0] > 0) {
         rows(p, p->bloomH[0], reflectionRow);
         rows(p, p->height, reflectionApplyRow);
-    }
-    if (d->post[1][1] > 0 && d->look[1] > 0) {
-        rows(p, p->fogHeight, fogRow);
-        rows(p, p->height, fogApplyRow);
     }
     if (d->post[1][3] > 0) {
         rows(p, p->height, temporalRow);

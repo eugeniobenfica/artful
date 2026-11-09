@@ -12,7 +12,7 @@
  *                 [--hdr]: the frame in floats, and then: [--glow x] [--glow-threshold t] [--occlusion x]
  *                 [--occlusion-radius r] [--reflections x] [--volumetric x] [--scattering g] [--temporal]
  *                 [--focus distance --aperture pixels] [--fog density r g b]
- *                 [--indirect]: light that bounces, from probes, every frame
+ *                 [--indirect]: light that bounces, from probes, every frame; [--through-walls]: lighter, and it leaks
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
  *
@@ -385,7 +385,7 @@ int main(int argc, char** argv) {
     ArtfPostDesc post;
     memset(&post, 0, sizeof post);
     float fog[4] = {0, 0, 0, 0};
-    bool indirect = false;
+    bool indirect = false, throughWalls = false;
     ArtfTraceDesc trace = {ARTF_TRACE_NONE, 1, 0, 0, false};
     int traceSamples = 1;
     ArtfRendererOptions o;
@@ -421,6 +421,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--scattering") && i + 1 < argc) post.scattering = (float)atof(argv[++i]);
         else if (!strcmp(a, "--temporal")) post.temporal = true;
         else if (!strcmp(a, "--indirect")) indirect = true;
+        else if (!strcmp(a, "--through-walls")) throughWalls = true;
         else if (!strcmp(a, "--focus") && i + 1 < argc) post.focus = (float)atof(argv[++i]);
         else if (!strcmp(a, "--aperture") && i + 1 < argc) post.aperture = (float)atof(argv[++i]);
         else if (!strcmp(a, "--fog") && i + 4 < argc) { for (int k = 0; k < 4; ++k) fog[k] = (float)atof(argv[++i]); }
@@ -476,6 +477,7 @@ int main(int argc, char** argv) {
     if (indirect) {
         ArtfIndirectDesc probes;
         memset(&probes, 0, sizeof probes);
+        probes.throughWalls = throughWalls;
         artfSceneSetIndirect(s, &probes);
     }
     if (environment) {

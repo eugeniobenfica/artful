@@ -603,7 +603,7 @@ static ArtfMaterialData materialData(const ArtfScene* s, const ArtfMaterialDesc*
                           d->texture < s->textures.len ? d->texture : 0,
                           blend ? 1.f - artfClampf(d->transparency, 0, 1) : 1.f,
                           mask ? (d->alphaCutoff > 0 ? d->alphaCutoff : .5f) : 0.f,
-                          (mask ? ARTF_MATERIAL_MASK : 0u) | (blend ? ARTF_MATERIAL_BLEND : 0u) | (d->doubleSided ? ARTF_MATERIAL_DOUBLE : 0u),
+                          (mask ? ARTF_MATERIAL_MASK : 0u) | (blend ? ARTF_MATERIAL_BLEND : 0u) | (d->doubleSided ? ARTF_MATERIAL_DOUBLE : 0u) | (d->unlit ? ARTF_MATERIAL_UNLIT : 0u),
                           d->ior > 0 ? d->ior : 0.f, artfClampf(d->metallic, 0, 1), d->normalScale > 0 ? d->normalScale : 1.f, d->occlusionStrength > 0 ? d->occlusionStrength : 1.f,
                           d->normalMap < count ? d->normalMap : 0, d->surfaceMap < count ? d->surfaceMap : 0, d->occlusionMap < count ? d->occlusionMap : 0,
                           d->graph <= s->graphs.len ? d->graph : 0, {{0}}};
@@ -648,6 +648,7 @@ void artfMaterialSet(ArtfScene* s, ArtfMaterial m, const ArtfMaterialDesc* desc)
     for (size_t i = 0; i < s->instances.len; ++i)
         if (s->instances.items[i].material == m) refreshInstance(s, &s->instances.items[i]);
     ++s->instanceVersion;
+    ++s->tracedVersion;
 }
 
 void artfMaterialSetParam(ArtfScene* s, ArtfMaterial m, uint32_t index, float x, float y, float z, float w) {
@@ -672,12 +673,27 @@ static ArtfInstanceData* instanceOf(ArtfScene* s, ArtfInstance i) {
 
 /* Where an instance is, for maps to know what they can keep. */
 static void noteChange(ArtfScene* s, const ArtfInstanceData* d) {
+    if (d->flags & ARTF_INSTANCE_PARTICLE) return; /* (it casts nothing) */
     const ArtfMeshData* mesh = &s->meshes.items[d->mesh];
     const float* m = d->m;
     const float* c = mesh->center;
     float* out = s->shadowChanges[s->shadowChangeCount++ % ARTF_SHADOW_CHANGES];
     for (int k = 0; k < 3; ++k) out[k] = m[k * 4] * c[0] + m[k * 4 + 1] * c[1] + m[k * 4 + 2] * c[2] + m[k * 4 + 3];
     out[3] = mesh->radius * d->maxScale;
+}
+
+/* An instance changed: what tracing and shadows see changed too, unless it is a particle. */
+static void changed(ArtfScene* s, const ArtfInstanceData* d) {
+    ++s->instanceVersion;
+    if (!(d->flags & ARTF_INSTANCE_PARTICLE)) ++s->tracedVersion;
+}
+
+void artfInstanceMarkParticle(ArtfScene* s, ArtfInstance i) {
+    ArtfInstanceData* d = instanceOf(s, i);
+    if (!d) return;
+    d->flags |= ARTF_INSTANCE_PARTICLE;
+    ++s->instanceVersion;
+    ++s->tracedVersion;
 }
 
 static void setTransform(ArtfInstanceData* d, const ArtfTransform* t) {
@@ -722,6 +738,7 @@ ArtfInstance artfSceneAddInstance(ArtfScene* s, ArtfMesh mesh, ArtfMaterial mate
     artfVecPush(&s->instanceHandles, handle);
     ++s->structureVersion;
     ++s->instanceVersion;
+    ++s->tracedVersion;
     return (uint32_t)s->handleGenerations.items[handle - 1] << 24 | handle;
 }
 
@@ -749,6 +766,7 @@ void artfSceneRemoveInstance(ArtfScene* s, ArtfInstance i) {
     s->freeHandle = i;
     ++s->structureVersion;
     ++s->instanceVersion;
+    ++s->tracedVersion;
 }
 
 void artfInstanceSetTransform(ArtfScene* s, ArtfInstance i, const ArtfTransform* transform) {
@@ -757,7 +775,7 @@ void artfInstanceSetTransform(ArtfScene* s, ArtfInstance i, const ArtfTransform*
     noteChange(s, d);
     setTransform(d, transform);
     noteChange(s, d);
-    ++s->instanceVersion;
+    changed(s, d);
 }
 
 void artfInstanceSetMaterial(ArtfScene* s, ArtfInstance i, ArtfMaterial material) {
@@ -766,7 +784,7 @@ void artfInstanceSetMaterial(ArtfScene* s, ArtfInstance i, ArtfMaterial material
     d->material = material < s->materials.len ? material : 0;
     refreshInstance(s, d);
     noteChange(s, d);
-    ++s->instanceVersion;
+    changed(s, d);
 }
 
 void artfInstanceSetOpacity(ArtfScene* s, ArtfInstance i, float opacity) {
@@ -775,7 +793,7 @@ void artfInstanceSetOpacity(ArtfScene* s, ArtfInstance i, float opacity) {
     d->opacity = (uint16_t)(artfClampf(opacity, 0, 1) * 65535.f + .5f);
     refreshInstance(s, d);
     noteChange(s, d);
-    ++s->instanceVersion;
+    changed(s, d);
 }
 
 /* Vertices follow when something reads them. A box of another size is written to the GPU's table with the rest. */
@@ -784,7 +802,7 @@ static void posed(ArtfScene* s, ArtfInstanceData* d, ArtfMeshData* m) {
     if (artfMeshPoseFit(m)) ++s->lodVersion;
     noteChange(s, d);
     ++m->deformVersion;
-    ++s->instanceVersion;
+    changed(s, d);
 }
 
 void artfInstanceSetJoints(ArtfScene* s, ArtfInstance i, const ArtfTransform* joints, uint32_t count) {
@@ -923,11 +941,61 @@ void artfSceneRemoveLight(ArtfScene* s, ArtfLight l) {
 void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera) { s->camera = *camera; }
 void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color) { s->background = color; }
 
-uint32_t artfSceneExtraLights(const ArtfScene* s, ArtfLightData* out) {
-    uint32_t seen = 0, count = 0;
+/* Of the lights past the frame's own, those that cast shadows this frame, the most needed first: that ask for them, in
+ * view, by how big they are against how far: their numbers, into out; how many. As many as the atlas holds. */
+static uint32_t shadowedExtras(const ArtfScene* s, const ArtfFrameData* frame, uint32_t* out) {
+    if (!s->shadows.resolution) return 0;
+    uint32_t chosen = 0, seen = 0;
+    float scores[ARTF_SHADOW_EXTRA];
     for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) {
         if (!s->lightOn[i]) continue;
-        if (seen++ >= ARTF_FRAME_LIGHTS) out[count++] = s->lights[i];
+        if (seen++ < ARTF_FRAME_LIGHTS || !s->lightCasts[i]) continue;
+        const ArtfLightData* L = &s->lights[i];
+        bool inView = true;
+        for (int p = 0; p < 5 && inView; ++p) {
+            const float* pl = frame->planes[p];
+            inView = pl[0] * L->position[0] + pl[1] * L->position[1] + pl[2] * L->position[2] + pl[3] >= -L->radius;
+        }
+        if (!inView) continue;
+        const float dx = L->position[0] - frame->cameraPos[0], dy = L->position[1] - frame->cameraPos[1], dz = L->position[2] - frame->cameraPos[2];
+        const float score = L->radius / artfMaxf(sqrtf(dx * dx + dy * dy + dz * dz), L->radius * .25f);
+        /* (kept in order, the best first; at a tie, the first light) */
+        uint32_t at = chosen < ARTF_SHADOW_EXTRA ? chosen : ARTF_SHADOW_EXTRA;
+        while (at > 0 && scores[at - 1] < score) --at;
+        if (at >= ARTF_SHADOW_EXTRA) continue;
+        const uint32_t last = chosen < ARTF_SHADOW_EXTRA ? chosen : ARTF_SHADOW_EXTRA - 1;
+        for (uint32_t k = last; k > at; --k) {
+            scores[k] = scores[k - 1];
+            out[k] = out[k - 1];
+        }
+        scores[at] = score;
+        out[at] = i;
+        if (chosen < ARTF_SHADOW_EXTRA) ++chosen;
+    }
+    /* as many as there is room for: a spot takes one small map, a lamp six */
+    uint32_t room = ARTF_SHADOW_VIEWS - ARTF_SHADOW_BIG_VIEWS, kept = 0;
+    for (uint32_t k = 0; k < chosen; ++k) {
+        const ArtfLightData* L = &s->lights[out[k]];
+        const uint32_t need = L->direction[0] != 0 || L->direction[1] != 0 || L->direction[2] != 0 ? 1 : 6;
+        if (need > room) continue;
+        room -= need;
+        out[kept++] = out[k];
+    }
+    return kept;
+}
+
+uint32_t artfSceneExtraLights(const ArtfScene* s, const ArtfFrameData* frame, ArtfLightData* out) {
+    /* those with shadows first, in the order their maps are in */
+    uint32_t shadowed[ARTF_SHADOW_EXTRA];
+    const uint32_t first = shadowedExtras(s, frame, shadowed);
+    uint32_t seen = 0, count = 0;
+    for (uint32_t k = 0; k < first; ++k) out[count++] = s->lights[shadowed[k]];
+    for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) {
+        if (!s->lightOn[i]) continue;
+        if (seen++ < ARTF_FRAME_LIGHTS) continue;
+        bool done = false;
+        for (uint32_t k = 0; k < first && !done; ++k) done = shadowed[k] == i;
+        if (!done) out[count++] = s->lights[i];
     }
     return count;
 }
@@ -1015,8 +1083,8 @@ void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc) {
         g->origin[k] = low[k];
         g->spacing[k] = artfMaxf(high[k] - low[k], 1e-3f) / (float)(g->dims[k] - 1);
     }
-    g->probes = artfCalloc((size_t)artfIndirectCount(g) * 16, 4);
-    g->next = artfCalloc((size_t)artfIndirectCount(g) * 16, 4);
+    g->probes = artfCalloc((size_t)artfIndirectCount(g) * ARTF_PROBE_FLOATS, 4);
+    g->next = artfCalloc((size_t)artfIndirectCount(g) * ARTF_PROBE_FLOATS, 4);
     g->on = true;
 }
 
@@ -1066,6 +1134,7 @@ static void lampView(ArtfShadowView* v, ArtfVec3 position, ArtfVec3 forward, flo
     m[11] = -o[2] * a + b;
     v->info[2] = 2.f * tanHalf / (float)side;
     v->info[3] = 1e-4f;
+    v->size[0] = (float)side;
     v->place[0] = position.x;
     v->place[1] = position.y;
     v->place[2] = position.z;
@@ -1150,6 +1219,7 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
             m[15] = 1.f;
             v->info[2] = texel;
             v->info[3] = 2.f * texel / range;
+            v->size[0] = (float)side;
             memcpy(v->place, &toward, 12);
             from = to;
         }
@@ -1164,7 +1234,7 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
         const ArtfVec3 position = artfVec3(L->position[0], L->position[1], L->position[2]);
         const bool spot = L->direction[0] != 0 || L->direction[1] != 0 || L->direction[2] != 0;
         const uint32_t need = spot ? 1 : 6;
-        if (views + need > ARTF_SHADOW_VIEWS) {
+        if (views + need > ARTF_SHADOW_BIG_VIEWS) {
             artfLog("artful: no room for the shadows of light %u", i + 1);
             continue;
         }
@@ -1181,6 +1251,34 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
         out->views[i].info[0] = (float)((i % ARTF_SHADOW_ATLAS_COLUMNS) * (uint32_t)side);
         out->views[i].info[1] = (float)((i / ARTF_SHADOW_ATLAS_COLUMNS) * (uint32_t)side);
     }
+    uint32_t height = (views + ARTF_SHADOW_ATLAS_COLUMNS - 1) / ARTF_SHADOW_ATLAS_COLUMNS * (uint32_t)side;
+
+    /* lights past the frame's own, in maps a quarter as wide, in rows below */
+    uint32_t shadowed[ARTF_SHADOW_EXTRA];
+    const uint32_t extras = shadowedExtras(s, frame, shadowed);
+    const int small = artfMaxi(side / 4, 16), columns = side * ARTF_SHADOW_ATLAS_COLUMNS / small;
+    const uint32_t firstSmall = views;
+    for (uint32_t k = 0; k < extras; ++k) {
+        const ArtfLightData* L = &s->lights[shadowed[k]];
+        const ArtfVec3 position = artfVec3(L->position[0], L->position[1], L->position[2]);
+        const bool spot = L->direction[0] != 0 || L->direction[1] != 0 || L->direction[2] != 0;
+        const uint32_t need = spot ? 1 : 6;
+        out->extra[k][0] = (views + 1) | need << 8;
+        if (spot) {
+            const float cut = artfClampf(L->spotCut, .05f, .999f);
+            lampView(&out->views[views++], position, artfVec3(L->direction[0], L->direction[1], L->direction[2]), sqrtf(1.f - cut * cut) / cut * 1.02f, L->radius, small);
+        } else {
+            static const float faces[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+            for (int f = 0; f < 6; ++f) lampView(&out->views[views++], position, artfVec3(faces[f][0], faces[f][1], faces[f][2]), 1.01f, L->radius, small);
+        }
+    }
+    for (uint32_t i = firstSmall; i < views; ++i) {
+        const uint32_t k = i - firstSmall;
+        out->views[i].info[0] = (float)((k % (uint32_t)columns) * (uint32_t)small);
+        out->views[i].info[1] = (float)(height + k / (uint32_t)columns * (uint32_t)small);
+    }
+    if (views > firstSmall) height += ((views - firstSmall + (uint32_t)columns - 1) / (uint32_t)columns) * (uint32_t)small;
+    out->sun[3] = height;
     return views;
 }
 

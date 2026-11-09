@@ -30,7 +30,7 @@ typedef struct ModelPart { ArtfInstance instance; uint32_t node; int32_t skin; }
 
 /* A light of KHR_lights_punctual, where its node is: 0 for the sun. */
 typedef struct ModelLight { ArtfLight light; uint32_t node; bool sun, spot; ArtfVec3 color; float radius, inner, outer; } ModelLight;
-typedef struct ModelCamera { uint32_t node; float fovY, near_; } ModelCamera;
+typedef struct ModelCamera { uint32_t node; float fovY, near_, ortho; } ModelCamera; /* ortho: half its height; 0: perspective */
 
 enum { PATH_T, PATH_R, PATH_S, PATH_W };
 enum { BLEND_LINEAR, BLEND_STEP, BLEND_CUBIC };
@@ -194,6 +194,8 @@ typedef struct Loader {
     uint32_t instances;
     ModelData* model;
     const Json *root, *accessors, *views, *meshes, *nodes, *textures, *imageList;
+    uint8_t** decoded;      /* of each view kept with EXT_meshopt_compression, its bytes; NULL: none */
+    size_t* decodedSizes;
 } Loader;
 
 static const Json* nodeAt(const Loader* l, uint32_t index) { return index ? &l->json.nodes.items[index - 1] : NULL; }
@@ -331,6 +333,13 @@ static bool loadBuffers(Loader* l) {
 static const uint8_t* viewBytes(const Loader* l, int64_t view, size_t offset, size_t need, size_t* stride) {
     const Json* v = element(l, l->views, view < 0 ? UINT32_MAX : (uint32_t)view);
     if (!v) return NULL;
+    if (l->decoded && l->decoded[view]) {
+        /* (decoded: its own bytes, whatever its buffer holds) */
+        const size_t length = l->decodedSizes[view];
+        if (offset > length || need > length - offset) return NULL;
+        if (stride) *stride = (size_t)numberOf(l, v, "byteStride", 0);
+        return l->decoded[view] + offset;
+    }
     const int64_t buffer = indexOf(l, v, "buffer");
     if (buffer < 0 || buffer >= l->bufferCount || !l->buffers[buffer]) return NULL;
     const size_t start = (size_t)numberOf(l, v, "byteOffset", 0), length = (size_t)numberOf(l, v, "byteLength", 0);
@@ -344,6 +353,43 @@ static uint8_t* ownedCopy(const Loader* l, size_t size) {
     uint8_t* copy = artfCalloc(1, size ? size : 1);
     artfVecPush(&((Loader*)l)->owned, copy);
     return copy;
+}
+
+/* Views kept with EXT_meshopt_compression: decoded once, before anything reads them (and before workers do). */
+static bool decodeViews(Loader* l) {
+    const uint32_t count = l->views && l->views->kind == J_ARRAY ? l->views->count : 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const Json* e = member(l, member(l, element(l, l->views, i), "extensions"), "EXT_meshopt_compression");
+        if (!e) continue;
+        if (!l->decoded) {
+            l->decoded = artfCalloc(count, sizeof *l->decoded);
+            l->decodedSizes = artfCalloc(count, sizeof *l->decodedSizes);
+        }
+        const int64_t buffer = indexOf(l, e, "buffer");
+        const size_t start = (size_t)numberOf(l, e, "byteOffset", 0), length = (size_t)numberOf(l, e, "byteLength", 0);
+        const size_t stride = (size_t)numberOf(l, e, "byteStride", 0), items = (size_t)numberOf(l, e, "count", 0);
+        if (buffer < 0 || buffer >= l->bufferCount || !l->buffers[buffer] || start > l->bufferSizes[buffer] || length > l->bufferSizes[buffer] - start || !stride || !items) {
+            artfLog("artful: glTF: a compressed view (%u) with nothing to decode", i);
+            return false;
+        }
+        const uint8_t* from = l->buffers[buffer] + start;
+        uint8_t* out = ownedCopy(l, items * stride);
+        const Json* mode = member(l, e, "mode");
+        int result;
+        if (stringIs(mode, "ATTRIBUTES")) result = artfMeshoptDecodeVertices(out, items, stride, from, length);
+        else if (stringIs(mode, "TRIANGLES")) result = artfMeshoptDecodeTriangles(out, items, stride, from, length);
+        else if (stringIs(mode, "INDICES")) result = artfMeshoptDecodeIndices(out, items, stride, from, length);
+        else result = -1;
+        if (result) {
+            artfLog("artful: glTF: compressed view %u cannot be decoded (%d)", i, result);
+            return false;
+        }
+        const Json* filter = member(l, e, "filter");
+        artfMeshoptFilter(out, items, stride, stringIs(filter, "OCTAHEDRAL") ? 1 : stringIs(filter, "QUATERNION") ? 2 : stringIs(filter, "EXPONENTIAL") ? 3 : 0);
+        l->decoded[i] = out;
+        l->decodedSizes[i] = items * stride;
+    }
+    return true;
 }
 
 typedef struct Accessor {
@@ -515,6 +561,23 @@ static ArtfMaterial materialOf(Loader* l, const Json* m) {
     } else if (stringIs(mode, "BLEND")) {
         d.alphaMode = ARTF_ALPHA_BLEND;
         d.transparency = 1.f - color[3];
+    }
+    const Json* extensions = member(l, m, "extensions");
+    /* lit by nothing: its color as it is */
+    if (member(l, extensions, "KHR_materials_unlit")) d.unlit = true;
+    /* how much a dielectric reflects head on, from its index: Artful's specular is that over glass's 4% */
+    const Json* ior = member(l, extensions, "KHR_materials_ior");
+    const float index = (float)numberOf(l, ior, "ior", 1.5);
+    if (ior && index >= 1.f) {
+        const float f = (index - 1.f) / (index + 1.f);
+        d.specular = artfClampf(f * f / .04f, 0, 1);
+    }
+    /* light that goes through: blended as glass is, and bent as it when traced */
+    const float through = (float)numberOf(l, member(l, extensions, "KHR_materials_transmission"), "transmissionFactor", 0);
+    if (through > 0) {
+        d.alphaMode = ARTF_ALPHA_BLEND;
+        d.transparency = artfMaxf(d.transparency, artfClampf(through, 0, 1));
+        d.ior = index >= 1.f ? index : 1.5f;
     }
     return artfSceneAddMaterial(l->scene, &d);
 }
@@ -825,12 +888,14 @@ static void cameraOf(Loader* l, const Json* node, uint32_t index) {
     if (which < 0) return;
     const Json* camera = element(l, member(l, l->root, "cameras"), (uint32_t)which);
     const Json* perspective = member(l, camera, "perspective");
-    if (!perspective) {
-        if (camera) artfLog("artful: glTF: an orthographic camera is left out");
-        return;
+    const Json* orthographic = member(l, camera, "orthographic");
+    if (perspective) {
+        const ModelCamera c = {index, (float)numberOf(l, perspective, "yfov", .8), (float)numberOf(l, perspective, "znear", .1), 0};
+        artfVecPush(&l->model->cameras, c);
+    } else if (orthographic) {
+        const ModelCamera c = {index, 0, (float)numberOf(l, orthographic, "znear", .01), artfMaxf((float)numberOf(l, orthographic, "ymag", 1), 1e-6f)};
+        artfVecPush(&l->model->cameras, c);
     }
-    const ModelCamera c = {index, (float)numberOf(l, perspective, "yfov", .8), (float)numberOf(l, perspective, "znear", .1)};
-    artfVecPush(&l->model->cameras, c);
 }
 
 static void placeNode(Loader* l, const Json* node, uint32_t index, int depth) {
@@ -1130,6 +1195,16 @@ bool artfModelCamera(const ArtfScene* s, ArtfModel m, uint32_t camera, ArtfCamer
     out->up = artfVec3Normalize(artfVec3(w->m[4], w->m[5], w->m[6]));
     out->fovY = c->fovY;
     out->near_ = c->near_;
+    if (c->ortho > 0) {
+        /* orthographic: as a perspective from far behind, through a field a hundredth of a radian high, whose view is
+         * as high where the camera is (200 is 1 / tan(.005), to the float) */
+        const ArtfVec3 forward = artfVec3Sub(out->target, out->position);
+        const float back = c->ortho * 199.99833f;
+        out->position = artfVec3Sub(out->position, artfVec3Scale(forward, back));
+        out->target = artfVec3Add(out->position, forward);
+        out->fovY = .01f;
+        out->near_ = back + c->near_;
+    }
     return true;
 }
 
@@ -1156,7 +1231,9 @@ static bool openJson(Loader* l, const char* text, size_t size) {
     const Json* required = member(l, l->root, "extensionsRequired");
     if (required && required->kind == J_ARRAY)
         for (const Json* e = nodeAt(l, required->first); e; e = nodeAt(l, e->next))
-            if (!stringIs(e, "KHR_mesh_quantization") && !stringIs(e, "KHR_texture_transform") && !stringIs(e, "KHR_materials_emissive_strength")) {
+            if (!stringIs(e, "KHR_mesh_quantization") && !stringIs(e, "KHR_texture_transform") && !stringIs(e, "KHR_materials_emissive_strength") &&
+                !stringIs(e, "EXT_meshopt_compression") && !stringIs(e, "KHR_materials_unlit") && !stringIs(e, "KHR_materials_ior") &&
+                !stringIs(e, "KHR_materials_transmission")) {
                 artfLog("artful: glTF: the file requires %.*s, which cannot be read here", e->kind == J_STRING ? (int)e->length : 0, e->text);
                 return 0;
             }
@@ -1168,6 +1245,7 @@ static bool openJson(Loader* l, const char* text, size_t size) {
     l->textures = member(l, l->root, "textures");
     l->imageList = member(l, l->root, "images");
     l->imageCount = l->imageList && l->imageList->kind == J_ARRAY ? l->imageList->count : 0;
+    if (!decodeViews(l)) return 0;
     const uint32_t meshCount = l->meshes && l->meshes->kind == J_ARRAY ? l->meshes->count : 0;
     l->primitiveStart = artfCalloc(meshCount + 1, 4);
     uint32_t total = 0, i = 0;
@@ -1262,6 +1340,8 @@ static void loaderClose(Loader* l) {
     artfVecFree(&l->json.nodes);
     artfFree(l->buffers);
     artfFree(l->bufferSizes);
+    artfFree(l->decoded);
+    artfFree(l->decodedSizes);
     artfFree(l->images);
     artfFree(l->materials);
     artfFree(l->primitives);

@@ -43,12 +43,13 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneAddCube`, `AddSphere`, `AddTorus`, `AddPlane` | Shapes. |
 | `artfSceneAddTerrain` | A mesh from heights. |
 | `artfSceneAddEmitter`, `artfEmitterStep`, `artfEmitterSet`, `artfSceneRemoveEmitter` | Particles: fire, smoke, sparks. |
+| `artfSceneAddDecal`, `artfDecalSet`, `artfSceneRemoveDecal` | A picture laid over what is drawn, through a box. |
 | `artfSceneAddTexture`, `artfImageDecode` | Pixels, and PNG or JPEG to pixels. |
 | `artfSceneAddTextureKtx2` | A KTX2 file, compressed as it is. |
 | `artfPrepareMesh`, `artfPrepareTexture`, `artfSceneAddPreparedMesh`, `artfSceneAddPreparedTexture` | The slow part on your own thread. |
 | `artfSceneRemoveMesh`, `artfSceneRemoveTexture`, `artfSceneMemory` | Giving memory back, and how much is used. |
 | `artfSceneSetResidency`, `artfTextureSetResidentMip` | Who decides what stays on the GPU: you, you with help, or Artful. |
-| `artfSceneAddMaterial`, `artfMaterialSet` | Color, metal, roughness, emission, alpha, two sides, refraction, normal maps. |
+| `artfSceneAddMaterial`, `artfMaterialSet` | Color, metal, roughness, emission, alpha, two sides, refraction, normal maps, unlit. |
 | `artfGraphNew`, `artfExprMul` and the rest, `artfSceneAddGraph`, `artfMaterialSetParam` | Materials written in C. |
 | `artfSceneAddInstance`, `artfSceneRemoveInstance` | A mesh placed in the world. |
 | `artfInstanceSetTransform`, `SetMaterial`, `SetOpacity` | Changing one. |
@@ -62,8 +63,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneSetSun`, `artfSceneSetSunSize` | Light from far away; soft shadows, when traced. |
 | `artfSceneSetAmbient` | Light from all around: a sky and a ground. |
 | `artfSceneSetEnvironment`, `artfSceneSetEnvironmentLight`, `artfImageDecodeHdr` | Light from all around, from a picture of it, and that picture behind the scene. |
-| `artfSceneAddLight`, `artfLightSet`, `artfLightSetSpot`, `artfSceneRemoveLight` | Point lights and spots, up to 1024; the first 16 may cast shadows. |
-| `artfSceneSetIndirect` | Light that bounced, from probes, every frame. |
+| `artfSceneAddLight`, `artfLightSet`, `artfLightSetSpot`, `artfSceneRemoveLight` | Point lights and spots, up to 1024; the first 16 may cast shadows, and 32 more each frame. |
+| `artfSceneSetIndirect` | Light that bounced, from probes, every frame; walls stop it unless `throughWalls`. |
 | `artfSceneSetPost` | With `ArtfRendererOptions.hdr`: bloom, ambient occlusion, reflections, fog that light goes through, temporal antialiasing, depth of field. |
 | `artfSceneSetExposure` | Film: bright light rolls off to white. |
 | `artfSceneSetFog` | Air. |
@@ -73,7 +74,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 
 | | |
 | --- | --- |
-| `ArtfRendererOptions.antialias` | Four samples a pixel. |
+| `ArtfRendererOptions.antialias` | Four samples a pixel, with `hdr` too. |
 | `ArtfRendererOptions.pipelineCache` | A file that makes the next start faster. |
 | `ArtfRendererOptions.compressTextures` | Plain textures compressed as they go up. |
 | `artfSceneSetFeature`, `artfSceneSetLodError` | Levels of detail, occlusion, cones. |

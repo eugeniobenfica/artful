@@ -8,7 +8,9 @@
 #define ARTF_MESHLET_VERTICES 64
 #define ARTF_MESHLET_TRIANGLES 124
 #define ARTF_MAX_LODS 3
-#define ARTF_SHADOW_VIEWS 16
+#define ARTF_SHADOW_BIG_VIEWS 16  /* the sun's and the frame's lights': a map's side each */
+#define ARTF_SHADOW_VIEWS 64      /* and, below them, smaller ones for lights past the frame's own */
+#define ARTF_SHADOW_EXTRA 32      /* lights past the frame's own that can have shadows at once */
 #define ARTF_SHADOW_CASCADES 3
 #define ARTF_SHADOW_ATLAS_COLUMNS 4
 #define ARTF_HIZ_LEVELS 15
@@ -124,7 +126,8 @@ typedef struct ArtfInstanceData {
 
 enum {
     ARTF_INSTANCE_UNIFORM = 1, /* its scale is the same on the three axes: cones can be used */
-    ARTF_INSTANCE_CUTOUT = 2   /* its material has holes, or a back: it cannot go with the plain ones */
+    ARTF_INSTANCE_CUTOUT = 2,  /* its material has holes, or a back: it cannot go with the plain ones */
+    ARTF_INSTANCE_PARTICLE = 4 /* an emitter's: not traced, casts nothing, and turns to face the eye */
 };
 
 /* The GPU's material: 144 bytes. */
@@ -140,7 +143,7 @@ typedef struct ArtfMaterialData {
     float params[4][4];
 } ArtfMaterialData;
 
-enum { ARTF_MATERIAL_MASK = 1, ARTF_MATERIAL_BLEND = 2, ARTF_MATERIAL_DOUBLE = 4 };
+enum { ARTF_MATERIAL_MASK = 1, ARTF_MATERIAL_BLEND = 2, ARTF_MATERIAL_DOUBLE = 4, ARTF_MATERIAL_UNLIT = 8 };
 
 /* A material of the program's own: steps on four floats, each reading those before it (graph.c). */
 #define ARTF_GRAPH_NODES 256
@@ -186,14 +189,34 @@ typedef struct ArtfLightData {
     float direction[3], spotCut; /* where it goes to; the cosine of the outside */
 } ArtfLightData;
 
-/* Light that bounced (trace.c): a grid of probes, each four vec4s: the light from all around, then of red, green and
- * blue how it changes with the normal; what a surface facing n takes, over pi, is c0 + (r . n, g . n, b . n). */
+/* Light that bounced (trace.c): a grid of probes. First, of each, four vec4s: the light from all around, then of red,
+ * green and blue how it changes with the normal (what a surface facing n takes, over pi, is c0 + (r . n, g . n,
+ * b . n)); after all of those, of each, how far it sees, in a map of ARTF_PROBE_SIDE x ARTF_PROBE_SIDE directions
+ * folded onto an octahedron around +z, as artfProbeFold: the mean and the mean of the square of each, two floats a
+ * texel, by rows. (Apart, so that what every pixel reads of eight probes stays together.) A point the probe cannot see
+ * is told by them (Chebyshev, as Majercik et al.'s probes do), so that light does not go through walls. */
+#define ARTF_PROBE_SIDE 8
+#define ARTF_PROBE_MAP (ARTF_PROBE_SIDE * ARTF_PROBE_SIDE * 2)
+#define ARTF_PROBE_FLOATS (16 + ARTF_PROBE_MAP) /* all of a probe's, in both places */
+
+/* A direction of length 1 onto the octahedron around +z: where it falls in the probe's map, from 0 to 1 each way. */
+ARTF_INLINE void artfProbeFold(const float* d, float* u, float* v) {
+    const float sum = fabsf(d[0]) + fabsf(d[1]) + fabsf(d[2]) + 1e-20f; /* (none: the middle) */
+    float a = d[0] / sum, b = d[1] / sum;
+    if (d[2] < 0) {
+        const float fa = (1.f - fabsf(b)) * (a >= 0 ? 1.f : -1.f);
+        b = (1.f - fabsf(a)) * (b >= 0 ? 1.f : -1.f);
+        a = fa;
+    }
+    *u = a * .5f + .5f;
+    *v = b * .5f + .5f;
+}
 typedef struct ArtfIndirect {
     bool on;
     ArtfIndirectDesc desc;
     int dims[3];
     float origin[3], spacing[3];
-    float* probes;      /* dims product x 16 */
+    float* probes;      /* dims product x ARTF_PROBE_FLOATS */
     float* next;        /* what this step makes */
     uint32_t frames;
     uint64_t version;   /* a step changed them */
@@ -243,7 +266,7 @@ typedef struct ArtfPool ArtfPool;
 void artfSceneIndirectStep(ArtfScene* s, const ArtfFrameData* frame, ArtfPool* pool);
 
 /* Lights past the frame's own, in handle order: how many, into out (ARTF_MAX_LIGHTS of room). */
-uint32_t artfSceneExtraLights(const ArtfScene* s, ArtfLightData* out);
+uint32_t artfSceneExtraLights(const ArtfScene* s, const ArtfFrameData* frame, ArtfLightData* out);
 /* Of each square of the frame (ARTF_LIGHT_TILE a side, by rows), which of those lights reach it: a count, then up to
  * ARTF_TILE_LIGHTS of their places in what artfSceneExtraLights gave. lists: squares x (1 + ARTF_TILE_LIGHTS). */
 void artfSceneLightTiles(const ArtfFrameData* frame, int width, int height, const ArtfLightData* lights, uint32_t count, uint32_t* lists);
@@ -258,14 +281,16 @@ typedef struct ArtfShadowView {
     float info[4];   /* its corner in the atlas, in texels; how wide a texel is (per unit of distance, for a
                       * lamp); how much depth is forgiven */
     float place[4];  /* a lamp's position and reach; for the sun, where it is, and reach 0 */
+    float size[4];   /* its side, in texels */
 } ArtfShadowView;
 
 /* All the shadows of a frame: the GPU's uniform block. */
 typedef struct ArtfShadowFrame {
     float splits[4];    /* where each of the sun's maps ends, from the eye */
-    uint32_t sun[4];    /* its first view + 1 (0: it casts none), how many, a map's side */
+    uint32_t sun[4];    /* its first view + 1 (0: it casts none), how many, a big map's side, the atlas's height */
     uint32_t lights[ARTF_FRAME_LIGHTS][4]; /* by the frame's lights: first view + 1, and views << 8; 0: none */
     ArtfShadowView views[ARTF_SHADOW_VIEWS];
+    uint32_t extra[ARTF_SHADOW_EXTRA][4];  /* the same, by the first of the lights past them (artfSceneExtraLights) */
 } ArtfShadowFrame;
 
 /* Says when a map would come out as it was: this view, and all that is not an instance, are the same. */
@@ -378,6 +403,7 @@ typedef struct ArtfTrace {
     uint64_t motionVersion;
     bool motionLive;                        /* something moved: next frame, if nothing does, it stands still again */
     uint64_t instanceVersion, structureVersion, materialVersion;
+    bool particles;             /* the top holds particles: the frame is all traced */
     uint64_t meshVersion, topVersion;       /* for backends that keep a copy */
     uint64_t meshRemovals;
 } ArtfTrace;
@@ -405,6 +431,7 @@ struct ArtfScene {
     uint32_t freeHandle;                    /* the free list's head; 0: none */
     /* What changed, for backends that keep a copy. */
     uint64_t instanceVersion;   /* a transform or a material */
+    uint64_t tracedVersion;     /* the same, of what is not a particle: what tracing and shadows see */
     float shadowChanges[ARTF_SHADOW_CHANGES][4]; /* where an instance was or went, the last ones: a ball */
     uint64_t shadowChangeCount;
     uint64_t structureVersion;  /* instances came or went */
@@ -434,10 +461,14 @@ struct ArtfScene {
     ArtfHole hole;
     ArtfTrace trace;
     ArtfPostDesc post;
+    ArtfDecalDesc decals[ARTF_MAX_DECALS];
+    bool decalOn[ARTF_MAX_DECALS];
     void* emitters;                         /* extras.c's, and how to free them */
     void (*emittersFree)(void* emitters);
     ArtfMesh particleQuad;
     ArtfTexture particlePuff;
+    ArtfCamera particleCamera;              /* what particles last turned to face */
+    bool particlesMoved;                    /* stepped since */
     ArtfIndirect indirect;
     float* environment;         /* ARTF_ENV_FLOATS, or NULL: sky and ground */
     float environmentLight;     /* what it is multiplied by */
@@ -549,6 +580,38 @@ typedef struct ArtfLayer {
 /* The layers in view, the farthest first: both backends draw them in this order, after the rest. out:
  * room for s->translucentCount. */
 uint32_t artfSceneLayers(const ArtfScene* s, const ArtfFrameData* frame, ArtfLayer* out);
+
+/* glTF's EXT_meshopt_compression (meshopt.c): 0 when the bytes decoded, less when they did not. Filters: 1
+ * octahedral, 2 quaternion, 3 exponential. */
+int artfMeshoptDecodeVertices(uint8_t* out, size_t count, size_t stride, const uint8_t* data, size_t size);
+int artfMeshoptDecodeTriangles(uint8_t* out, size_t count, size_t indexSize, const uint8_t* data, size_t size);
+int artfMeshoptDecodeIndices(uint8_t* out, size_t count, size_t indexSize, const uint8_t* data, size_t size);
+void artfMeshoptFilter(uint8_t* data, size_t count, size_t stride, int filter);
+
+/* Fog that light goes through: a grid along the view, of cells ARTF_FROXEL_TILE pixels square, in slices that end at
+ * far * ((k + 1) / ARTF_FROXEL_SLICES)^2 along it, far being 4 / density. Each cell holds the light the air adds from
+ * the eye to the slice's end, and what it leaves of what is behind; both backends build it and read it alike. A
+ * column's slices are one after another: cell (x, y, k) is at ((y * columns + x) * ARTF_FROXEL_SLICES + k). */
+#define ARTF_FROXEL_TILE 16
+#define ARTF_FROXEL_SLICES 64
+
+/* A decal as both backends read it: 80 bytes, five vec4s. From the world into its box, by rows; its color and opacity;
+ * its texture, roughness (0: the surface's), and the mipmap to read, from the largest and from what the GPU holds. */
+typedef struct ArtfDecalData {
+    float toBox[12];
+    float color[3], opacity;
+    uint32_t texture;
+    float roughness, level, gpuLevel;
+} ArtfDecalData;
+
+/* The decals that may show in this frame, with their mipmaps for it: the count, into out (room for ARTF_MAX_DECALS). */
+uint32_t artfSceneDecals(const ArtfScene* s, const ArtfFrameData* frame, int height, ArtfDecalData* out);
+
+/* Turns particles to face the camera as it is, if it moved or they did since: what each backend does as it draws. */
+void artfSceneFaceParticles(ArtfScene* s);
+
+/* Makes an instance an emitter's particle (ARTF_INSTANCE_PARTICLE). */
+void artfInstanceMarkParticle(ArtfScene* s, ArtfInstance i);
 
 /* The disc's gas as a fluid (fluid.c). New: warmed up, at that moment. Advance: to that moment, in fixed
  * steps; true when the field changed. The field: ARTF_FLUID_WIDTH * ARTF_FLUID_HEIGHT floats, rows even in

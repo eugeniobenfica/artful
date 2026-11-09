@@ -193,6 +193,7 @@ typedef struct ArtfMaterialDesc {
     ArtfTexture occlusionMap;  /* red: how much light from all around reaches a place; 0: none */
     float occlusionStrength;   /* 0: 1 */
     uint32_t graph;            /* what artfSceneAddGraph gave: see below; 0: none */
+    bool unlit;                /* its color as it is, lit by nothing (glTF's KHR_materials_unlit): with emissive added */
 } ArtfMaterialDesc;
 
 /* White, not metal, half rough: fields set by name on this stay right when the struct grows. */
@@ -377,6 +378,25 @@ void artfSceneRemoveEmitter(ArtfScene* s, ArtfEmitter e);
  * texture coordinates repeating uvRepeat times across. Its lighter versions are made as any mesh's. */
 ArtfMesh artfSceneAddTerrain(ArtfScene* s, const float* heights, int width, int depth, float cell, float height, float uvRepeat);
 
+/* Decals: a picture laid over what is drawn, through a box. The transform takes the unit box (-.5 to .5 each way) to
+ * the world; what is inside it takes the picture from above, down the box's y: u along its x, v along its z. The
+ * picture times color goes over the surface's own color by the picture's alpha times opacity, fading toward the box's
+ * top and bottom and on what does not face up the box; so does roughness, when given. Both backends; not on what
+ * blends (particles, glass). Up to ARTF_MAX_DECALS. */
+#define ARTF_MAX_DECALS 256
+typedef struct ArtfDecalDesc {
+    ArtfTransform transform;
+    ArtfTexture texture;  /* 0: none, the color alone */
+    ArtfVec3 color;       /* 0, 0, 0 is black: (1, 1, 1) for the picture as it is */
+    float opacity;        /* 0 to 1 */
+    float roughness;      /* where it covers; 0: the surface's own */
+} ArtfDecalDesc;
+typedef uint32_t ArtfDecal;
+
+ArtfDecal artfSceneAddDecal(ArtfScene* s, const ArtfDecalDesc* desc); /* 0: no room */
+void artfDecalSet(ArtfScene* s, ArtfDecal d, const ArtfDecalDesc* desc);
+void artfSceneRemoveDecal(ArtfScene* s, ArtfDecal d);
+
 /* ---- after the frame: what a renderer made with ArtfRendererOptions.hdr does to it ----
  * Each is off at 0. Lengths are the world's; what a scene asks of a renderer without hdr is not done. */
 typedef struct ArtfPostDesc {
@@ -401,14 +421,16 @@ void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc);
  * A grid of probes over a box (the scene's bounds, as they are when this is called, unless given): each frame each probe follows a few
  * rays through the scene (as tracing does, on the calling thread's cores, for both backends), and keeps what light
  * reaches it from each way, mixed with what it had. Surfaces take light from all around from the probes near them, in
- * place of sky and ground or a picture: so light bounces from one surface to the next, once more each frame. Light
- * can leak through a wall thinner than the probes are apart. */
+ * place of sky and ground or a picture: so light bounces from one surface to the next, once more each frame. Each
+ * probe knows how far it sees each way, and a point it cannot see takes next to nothing from it: walls stop light. */
 typedef struct ArtfIndirectDesc {
     int probes[3];      /* across the bounds; 0: 8, 4, 8 */
     int rays;           /* each probe follows each frame; 0: 64 */
     float hysteresis;   /* how much of what it had a probe keeps each frame: more is steadier, and slower; 0: .9 */
     float strength;     /* 0: 1 */
     ArtfVec3 low, high; /* the box the probes fill; both zero: the scene's bounds */
+    bool throughWalls;  /* leave out what each probe sees: lighter (about 5 ms less at 1920 x 1080 on a Vega 8, the
+                         * pixel shader reading a third as much), and light leaks through walls thinner than a cell */
 } ArtfIndirectDesc;
 
 /* NULL: none. */

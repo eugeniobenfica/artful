@@ -2,13 +2,11 @@
  * arithmetic. Part of shaders.c.
  *
  * Bindings: 50 light (four floats a pixel, premultiplied), 51 depth (1 / w), 52 surface (packSurface's word),
- * 53 a second light, 54 the frame before's, 55 occlusion, 56 fog at a quarter (light it adds, and what it leaves),
+ * 53 a second light, 54 the frame before's, 55 occlusion, 56 the grid of froxels (light the air adds, what it leaves),
  * 57 bloom's levels, one after the other; 58 and 59 what the scene drew, light and surface, as images. The push
  * constant says a pass's level. Each invocation is a pixel, 64 at a time. */
 
 #define POST_BLOOM_LEVELS 6 /* as ARTF_POST_BLOOM_LEVELS */
-#define POST_FOG_SCALE 4
-#define POST_FOG_STEPS 16
 
 typedef struct Post {
     Resources r;
@@ -156,13 +154,21 @@ static SpvId postHash(Spv* s, SpvId x) {
         return finish(s, size);                                              \
     }
 
-/* ---- what the scene drew, into the buffers ---- */
-POST_MAIN(artfShaderPostGather)
+/* ---- what the scene drew, into the buffers: with several samples a pixel, the light as they resolved to, and the
+ * first sample's depth and surface, as on the CPU ---- */
+uint32_t* artfShaderPostGather(size_t* size, int samples) {
+    Spv b, *s = &b;
+    spvInit(s);
+    Post post, *p = &post;
+    postDeclare(s, p);
+    const bool many = samples > 1;
     SpvId floatImage, floatSampled = spvTypeSampledImage2D(s, &floatImage);
-    SpvId uintImage, uintSampled = spvTypeSampledImage2DOf(s, s->uintType, &uintImage);
+    SpvId uintImage, uintSampled = many ? spvTypeSampledImage2DMSOf(s, s->uintType, &uintImage) : spvTypeSampledImage2DOf(s, s->uintType, &uintImage);
+    SpvId depthType, depthSampled = many ? spvTypeSampledImage2DMS(s, &depthType) : floatSampled;
+    if (!many) depthType = floatImage;
     SpvId color = spvResource(s, floatSampled, SPV_STORAGE_UniformConstant, 58);
     SpvId surfaceImage = spvResource(s, uintSampled, SPV_STORAGE_UniformConstant, 59);
-    SpvId depthImage = spvResource(s, floatSampled, SPV_STORAGE_UniformConstant, 8);
+    SpvId depthImage = spvResource(s, depthSampled, SPV_STORAGE_UniformConstant, 8);
     SpvId ivec2 = spvTypeVector(s, s->intType, 2), uvec4 = spvTypeVector(s, s->uintType, 4);
     SpvId main = spvBeginMain(s);
     postSizes(s, p);
@@ -174,11 +180,12 @@ POST_MAIN(artfShaderPostGather)
     SpvId depthAlone = spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0)), rest, depthOnly;
     spvIfBegin(s, P_NOT(depthAlone), &rest);
     spvStore(s, postPtr(s, p, p->light, s->vec4, i), spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, color), at));
-    spvStore(s, postPtr(s, p, p->surface, s->uintType, i), spvExtract(s, s->uintType, spvImageFetchAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at), 0));
+    SpvId word = many ? spvImageFetchSampleAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at, spvConstInt(s, 0)) : spvImageFetchAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at);
+    spvStore(s, postPtr(s, p, p->surface, s->uintType, i), spvExtract(s, s->uintType, word, 0));
     spvIfEnd(s, rest);
     spvIfBegin(s, depthAlone, &depthOnly);
     /* (reversed depth is near / distance: 1 / w is depth over near) */
-    SpvId z = X(spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, depthImage), at));
+    SpvId z = X(many ? spvImageFetchSampleAs(s, s->vec4, depthType, spvLoad(s, depthSampled, depthImage), at, spvConstInt(s, 0)) : spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, depthImage), at));
     spvStore(s, postPtr(s, p, p->depth, s->floatType, i), DIV_F(z, Z(frameVec(s, &p->r, F_PROJECTION))));
     spvIfEnd(s, depthOnly);
 POST_FINISH()
@@ -304,16 +311,23 @@ POST_MAIN(artfShaderPostReflection)
     SpvId edge = MIN_F(MIN_F(hx, SUB_F(SUB_F(p->widthF, FLOAT(1.f)), hx)), MIN_F(hy, SUB_F(SUB_F(p->heightF, FLOAT(1.f)), hy)));
     SpvId fade = P_CLAMP(DIV_F(edge, MUL_F(p->widthF, FLOAT(.08f))), FLOAT(0.f), FLOAT(1.f));
     SpvId smooth = SUB_F(FLOAT(1.f), DIV_F(rough, FLOAT(.6f)));
-    SpvId c1 = ADD_F(FLOAT(1.f), vn), c2 = MUL_F(c1, c1), fresnel = MUL_F(MUL_F(c2, c2), c1);
+    /* as the surface was lit from all around in the mirror direction: what the march found takes its place */
     SpvId f0 = ADD_F(FLOAT(.04f), MUL_F(FLOAT(.96f), metal));
-    SpvId mirror = MUL_F(MUL_F(MUL_F(ADD_F(f0, MUL_F(SUB_F(FLOAT(1.f), f0), fresnel)), MUL_F(smooth, smooth)), fade), X(frameVec(s, &p->r, F_POST + 1)));
+    SpvId c1 = SUB_F(FLOAT(1.f), MAX_F(spvOp1(s, SPV_OP_FNegate, s->floatType, vn), FLOAT(1e-4f))), c2 = MUL_F(c1, c1), fresnel = MUL_F(MUL_F(c2, c2), c1);
+    SpvId mirror = ADD_F(f0, MUL_F(SUB_F(MAX_F(SUB_F(FLOAT(1.f), rough), f0), f0), fresnel));
+    SpvId sure = MUL_F(MUL_F(MUL_F(smooth, smooth), fade), X(frameVec(s, &p->r, F_POST + 1)));
+    SpvId skyRow = frameVec(s, &p->r, F_SKY), ground = spvShuffle3(s, frameVec(s, &p->r, F_GROUND));
+    SpvId up = ADD_F(MUL_F(Y(r), FLOAT(.5f)), FLOAT(.5f));
+    SpvId plain = ADD_V3(ground, SCALE_V3(SUB_V3(spvShuffle3(s, skyRow), ground), up));
+    SpvId pictured = SCALE_V3(envReflected(s, &p->r, rough, r), W(skyRow));
+    SpvId around = pick3(s, P_MORE(W(skyRow), FLOAT(0.f)), pictured, plain);
     SpvId sum = ADD_F(ADD_F(X(mine), Y(mine)), Z(mine));
     SpvId tint = ADD_V3(same3(s, 1.f), SCALE_V3(SUB_V3(SCALE_V3(spvShuffle3(s, mine), DIV_F(FLOAT(3.f), MAX_F(sum, FLOAT(1e-6f)))), same3(s, 1.f)), PICK_F(P_MORE(sum, FLOAT(1e-6f)), metal, FLOAT(0.f))));
     SpvId seen = spvShuffle3(s, postTap(s, p, p->light, UINT(0), p->width, p->height, hx, hy));
-    SpvId reflected = SCALE_V3(MUL_V3(seen, tint), mirror);
+    SpvId reflected = SCALE_V3(MUL_V3(SUB_V3(seen, around), tint), MUL_F(mirror, sure));
     SpvId use = P_AND(P_AND(found, P_MORE(d, FLOAT(0.f))), P_AND(spvOp2(s, SPV_OP_INotEqual, s->boolType, word, UINT(0)), spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, rough, FLOAT(.6f))));
     use = P_AND(use, spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, away, FLOAT(-.2f)));
-    spvStore(s, postPtr(s, p, p->bloom, s->vec4, half), vec4Of(s, pick3(s, use, reflected, same3(s, 0.f)), PICK_F(use, mirror, FLOAT(0.f))));
+    spvStore(s, postPtr(s, p, p->bloom, s->vec4, half), vec4Of(s, pick3(s, use, reflected, same3(s, 0.f)), FLOAT(0.f)));
     spvIfEnd(s, marching);
 POST_FINISH()
 
@@ -325,11 +339,11 @@ POST_MAIN(artfShaderPostReflectionApply)
     SpvId hw = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(1)), UINT(2)), hh = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(1)), UINT(2));
     SpvId got = postTap(s, p, p->bloom, UINT(0), hw, hh, SUB_F(MUL_F(ADD_F(TO_F(x), FLOAT(.5f)), FLOAT(.5f)), FLOAT(.5f)), SUB_F(MUL_F(ADD_F(TO_F(y), FLOAT(.5f)), FLOAT(.5f)), FLOAT(.5f)));
     SpvId here = postPtr(s, p, p->light, s->vec4, i), light = spvLoad(s, s->vec4, here);
-    spvStore(s, here, vec4Of(s, ADD_V3(SCALE_V3(spvShuffle3(s, light), SUB_F(FLOAT(1.f), W(got))), spvShuffle3(s, got)), W(light)));
+    spvStore(s, here, vec4Of(s, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, ADD_V3(spvShuffle3(s, light), spvShuffle3(s, got)), same3(s, 0.f)), W(light)));
 POST_FINISH()
 
-/* ---- fog that light goes through: as fogRow, at a quarter, then fogApplyRow ---- */
-POST_MAIN(artfShaderPostFog)
+/* ---- fog that light goes through: the grid of froxels, as froxelRow, before the frame is drawn ---- */
+POST_MAIN(artfShaderPostFroxels)
     Shadows shadows;
     SpvId shadowImage, shadowSampled = spvTypeSampledImage2D(s, &shadowImage);
     shadows.block = spvResource(s, blockOf(s, spvTypeArray(s, s->vec4, S_ROWS, 16), true), SPV_STORAGE_Uniform, 24);
@@ -339,21 +353,17 @@ POST_MAIN(artfShaderPostFog)
     shadows.ivec2 = spvTypeVector(s, s->intType, 2);
     shadows.r = &p->r;
     SpvId main = spvBeginMain(s);
+    SpvId ptrFn3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3), ptrFnF = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptrFnU = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
+    SpvId lightVar = spvVariable(s, ptrFn3, SPV_STORAGE_Function), leftVar = spvVariable(s, ptrFnF, SPV_STORAGE_Function), counter = spvVariable(s, ptrFnU, SPV_STORAGE_Function);
     postSizes(s, p);
-    SpvId fw = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(POST_FOG_SCALE - 1)), UINT(POST_FOG_SCALE));
-    SpvId fh = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(POST_FOG_SCALE - 1)), UINT(POST_FOG_SCALE));
+    SpvId gx = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(ARTF_FROXEL_TILE - 1)), UINT(ARTF_FROXEL_TILE));
+    SpvId gy = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(ARTF_FROXEL_TILE - 1)), UINT(ARTF_FROXEL_TILE));
     SpvId i, x, y, merge;
-    postBegin(s, p, &i, &x, &y, &merge, fw, fh);
+    postBegin(s, p, &i, &x, &y, &merge, gx, gy);
     SpvId look = frameVec(s, &p->r, F_LOOK), postRow = frameVec(s, &p->r, F_POST + 1);
     SpvId density = Y(look), amount = Y(postRow), g = Z(postRow);
-    SpvId d = FLOAT(3e38f);
-    for (int dy = 0; dy < POST_FOG_SCALE; ++dy)
-        for (int dx = 0; dx < POST_FOG_SCALE; ++dx) {
-            SpvId there = postDistance(s, p, ADD_F(MUL_F(TO_F(x), FLOAT((float)POST_FOG_SCALE)), FLOAT((float)dx)), ADD_F(MUL_F(TO_F(y), FLOAT((float)POST_FOG_SCALE)), FLOAT((float)dy)));
-            d = MIN_F(d, PICK_F(P_MORE(there, FLOAT(0.f)), there, FLOAT(3e38f)));
-        }
-    SpvId far = MIN_F(d, DIV_F(FLOAT(4.f), MAX_F(density, FLOAT(1e-6f))));
-    SpvId cx = SUB_F(ADD_F(MUL_F(TO_F(x), FLOAT((float)POST_FOG_SCALE)), FLOAT(POST_FOG_SCALE * .5f)), FLOAT(.5f)), cy = SUB_F(ADD_F(MUL_F(TO_F(y), FLOAT((float)POST_FOG_SCALE)), FLOAT(POST_FOG_SCALE * .5f)), FLOAT(.5f));
+    SpvId far = DIV_F(FLOAT(4.f), MAX_F(density, FLOAT(1e-6f)));
+    SpvId cx = ADD_F(MUL_F(TO_F(x), FLOAT((float)ARTF_FROXEL_TILE)), FLOAT(ARTF_FROXEL_TILE * .5f - .5f)), cy = ADD_F(MUL_F(TO_F(y), FLOAT((float)ARTF_FROXEL_TILE)), FLOAT(ARTF_FROXEL_TILE * .5f - .5f));
     SpvId eye = spvShuffle3(s, frameVec(s, &p->r, F_CAMERA));
     SpvId dir = SUB_V3(postWorld(s, p, cx, cy, FLOAT(1.f)), eye);
     SpvId along = spvGlsl1(s, SPV_GLSL_Length, s->floatType, dir);
@@ -361,18 +371,26 @@ POST_MAIN(artfShaderPostFog)
     SpvId mu = DIV_F(DOT3(dir, toSun), along);
     SpvId hg = SUB_F(ADD_F(FLOAT(1.f), MUL_F(g, g)), MUL_F(MUL_F(FLOAT(2.f), g), mu));
     SpvId phase = DIV_F(SUB_F(FLOAT(1.f), MUL_F(g, g)), MUL_F(MUL_F(FLOAT(12.566371f), hg), SQRT_F(hg)));
-    SpvId step = DIV_F(far, FLOAT((float)POST_FOG_STEPS));
-    SpvId jitter = DIV_F(TO_F(spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, postHash(s, MUL_U(ADD_U(MUL_U(y, fw), x), UINT(2654435761u))), UINT(255))), FLOAT(256.f));
-    SpvId xx = MUL_F(MUL_F(density, step), along);
-    SpvId stepThrough = DIV_F(FLOAT(1.f), ADD_F(ADD_F(FLOAT(1.f), xx), MUL_F(MUL_F(xx, xx), FLOAT(.5f))));
     SpvId fogColor = spvShuffle3(s, frameVec(s, &p->r, F_FOG));
     SpvId sunRow = shadowRow(s, &shadows, UINT(S_SUN)), splits = shadowRow(s, &shadows, UINT(S_SPLITS));
     SpvId casts = spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(X(sunRow)), UINT(0));
     SpvId count = AS_UINT(Y(sunRow));
     SpvId lastSplit = PICK_F(spvOp2(s, 170, s->boolType, count, UINT(1)), X(splits), PICK_F(spvOp2(s, 170, s->boolType, count, UINT(2)), Y(splits), Z(splits)));
-    SpvId light = same3(s, 0.f), left = FLOAT(1.f);
-    for (int k = 0; k < POST_FOG_STEPS; ++k) {
-        SpvId t = MUL_F(ADD_F(FLOAT((float)k), jitter), step);
+    spvStore(s, lightVar, same3(s, 0.f));
+    spvStore(s, leftVar, FLOAT(1.f));
+    spvStore(s, counter, UINT(0));
+    SpvId header = spvNewId(s), test = spvNewId(s), body = spvNewId(s), next = spvNewId(s), done = spvNewId(s);
+    spvBranch(s, header);
+    spvLabel(s, header);
+    spvLoopMerge(s, done, next);
+    spvBranch(s, test);
+    spvLabel(s, test);
+    SpvId k = spvLoad(s, s->uintType, counter);
+    spvBranchIf(s, P_LESS_U(k, UINT(ARTF_FROXEL_SLICES)), body, done);
+    spvLabel(s, body);
+    {
+        SpvId a = DIV_F(TO_F(k), FLOAT((float)ARTF_FROXEL_SLICES)), b = DIV_F(TO_F(ADD_U(k, UINT(1))), FLOAT((float)ARTF_FROXEL_SLICES));
+        SpvId d0 = MUL_F(far, MUL_F(a, a)), d1 = MUL_F(far, MUL_F(b, b)), t = MUL_F(ADD_F(d0, d1), FLOAT(.5f));
         SpvId q = ADD_V3(eye, SCALE_V3(dir, t));
         /* as artfShadowOfSun, with the normal toward the sun */
         SpvId distance = spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(q, eye));
@@ -385,24 +403,21 @@ POST_MAIN(artfShaderPostFog)
         SpvId lift = DIV_F(MUL_F(Z(shadowRow(s, &shadows, ADD_U(base, UINT(S_INFO)))), FLOAT(2.f)), facing);
         SpvId seen = shadowLookup(s, &shadows, view, ADD_V3(q, SCALE_V3(toSun, lift)));
         SpvId sun = PICK_F(P_AND(casts, P_LESS(distance, lastSplit)), seen, FLOAT(1.f));
+        SpvId xx = MUL_F(MUL_F(density, SUB_F(d1, d0)), along);
+        SpvId stepThrough = DIV_F(FLOAT(1.f), ADD_F(ADD_F(FLOAT(1.f), xx), MUL_F(MUL_F(xx, xx), FLOAT(.5f))));
+        SpvId left = spvLoad(s, s->floatType, leftVar);
         SpvId taken = MUL_F(left, SUB_F(FLOAT(1.f), stepThrough));
-        light = ADD_V3(light, SCALE_V3(ADD_V3(SCALE_V3(sunColor, MUL_F(MUL_F(sun, phase), FLOAT(12.566371f))), fogColor), taken));
+        SpvId light = ADD_V3(spvLoad(s, s->vec3, lightVar), SCALE_V3(ADD_V3(SCALE_V3(sunColor, MUL_F(MUL_F(sun, phase), FLOAT(12.566371f))), fogColor), taken));
         left = MUL_F(left, stepThrough);
+        spvStore(s, lightVar, light);
+        spvStore(s, leftVar, left);
+        spvStore(s, postPtr(s, p, p->fog, s->vec4, ADD_U(MUL_U(i, UINT(ARTF_FROXEL_SLICES)), k)), vec4Of(s, SCALE_V3(light, amount), SUB_F(FLOAT(1.f), MUL_F(SUB_F(FLOAT(1.f), left), amount))));
     }
-    spvStore(s, postPtr(s, p, p->fog, s->vec4, i), vec4Of(s, SCALE_V3(light, amount), SUB_F(FLOAT(1.f), MUL_F(SUB_F(FLOAT(1.f), left), amount))));
-POST_FINISH()
-
-POST_MAIN(artfShaderPostFogApply)
-    SpvId main = spvBeginMain(s);
-    postSizes(s, p);
-    SpvId fw = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(POST_FOG_SCALE - 1)), UINT(POST_FOG_SCALE));
-    SpvId fh = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(POST_FOG_SCALE - 1)), UINT(POST_FOG_SCALE));
-    SpvId i, x, y, merge;
-    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
-    SpvId fx = SUB_F(DIV_F(ADD_F(TO_F(x), FLOAT(.5f)), FLOAT((float)POST_FOG_SCALE)), FLOAT(.5f)), fy = SUB_F(DIV_F(ADD_F(TO_F(y), FLOAT(.5f)), FLOAT((float)POST_FOG_SCALE)), FLOAT(.5f));
-    SpvId fog = postTap(s, p, p->fog, UINT(0), fw, fh, fx, fy);
-    SpvId here = postPtr(s, p, p->light, s->vec4, i), light = spvLoad(s, s->vec4, here);
-    spvStore(s, here, vec4Of(s, ADD_V3(SCALE_V3(spvShuffle3(s, light), W(fog)), SCALE_V3(spvShuffle3(s, fog), W(light))), W(light)));
+    spvBranch(s, next);
+    spvLabel(s, next);
+    spvStore(s, counter, ADD_U(spvLoad(s, s->uintType, counter), UINT(1)));
+    spvBranch(s, header);
+    spvLabel(s, done);
 POST_FINISH()
 
 /* ---- temporal antialiasing: as temporalRow, into the second light ---- */

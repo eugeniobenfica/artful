@@ -117,7 +117,9 @@ typedef struct ArtfSoftFrame {
     float* bloom[3];
     /* a frame in floats (ArtfRendererOptions.hdr): what the tiles leave for post.c */
     bool post;
-    bool postFog;        /* fog is post.c's, not the tiles' */
+    bool postFog;        /* fog that light goes through: from the grid of froxels (artfSoftFroxels), not as it is drawn */
+    const float* froxels; /* that grid: ARTF_FROXEL_SLICES slices of froxelsX x froxelsY, four floats a cell */
+    int froxelsX, froxelsY;
     float* postLight[4]; /* premultiplied light, and alpha */
     float* postDepth;    /* 1 / w; 0 where nothing is */
     uint32_t* postSurface;
@@ -125,6 +127,9 @@ typedef struct ArtfSoftFrame {
     ArtfLightData* extra;
     uint32_t extraCount;
     uint32_t* tileLights;
+    /* the decals that may show (artfSceneDecals) */
+    ArtfDecalData* decals;
+    uint32_t decalCount;
 } ArtfSoftFrame;
 
 /* ---- post.c ---- */
@@ -141,8 +146,8 @@ typedef struct ArtfSoftPost {
     float* history[3];
     bool historyValid;
     float* occlusion;
-    float* fog[4];       /* light the air adds, and what it leaves, at a quarter */
-    int fogWidth, fogHeight;
+    float* froxels;      /* light the air adds up to each cell, and what it leaves of what is behind */
+    int froxelsX, froxelsY;
     float* bloom[3];
     int bloomW[ARTF_POST_BLOOM_LEVELS], bloomH[ARTF_POST_BLOOM_LEVELS];
     size_t bloomAt[ARTF_POST_BLOOM_LEVELS];
@@ -152,6 +157,10 @@ typedef struct ArtfSoftPost {
 void artfSoftPostSize(ArtfSoftPost* p, int width, int height);
 void artfSoftPostFree(ArtfSoftPost* p);
 void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels);
+/* Fog that light goes through, before the tiles: into p->froxels, and f's pointer to it. */
+void artfSoftFroxels(ArtfSoftPost* p, ArtfSoftFrame* f);
+/* What the grid says at a pixel (sx, sy: its center at whole numbers) and w along the view: light, and what is left. */
+void artfFroxelAt(const ArtfSoftFrame* f, float sx, float sy, float w, float* out);
 
 typedef struct ArtfKernels {
     const char* name;

@@ -18,7 +18,7 @@ extern "C" {
 
 /* The version of these headers (CMakeLists.txt's project()). */
 #define ARTF_VERSION_MAJOR 0
-#define ARTF_VERSION_MINOR 3
+#define ARTF_VERSION_MINOR 4
 #define ARTF_VERSION_PATCH 0
 
 #define ARTF_INLINE static inline

@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.0
+
+- **Fog that light goes through, as a grid**: froxels 16 pixels square in 64 slices along the view, built before the
+  frame from the sun's shadow maps (on the CPU's workers; in a compute pass on the GPU), and read by every surface as
+  it is lit, by layers too, and by what is behind the scene. Smoke and glass in front of the sky are fogged at their
+  own depth, where they used to fade into it; and the march at a quarter of the pixels after the frame is gone.
+  At 1920 x 1080, with the sun's shadows, it costs about what the march did: 3.5 ms on a Vega 8, 32 ms on its CPU.
+- **Reflections take the place of what they hide**: where the march finds something, it replaces the light from all
+  around that the surface was lit with in the mirror direction (the picture, or the sky's two colors), instead of
+  going over it; where it finds nothing, that light stays, as it was.
+- **Light that bounced does not go through walls**: each probe keeps how far it sees, in an 8 x 8 map of directions
+  on an octahedron (the mean and the mean of the square), and a point it cannot see takes next to nothing from it
+  (Chebyshev, as Majercik et al.'s probes do); probes behind a surface count less. By the wall inside a closed box
+  under a bright sky: 0.1% of the light just outside, where 11% came through. It costs: 5 ms more at 1920 x 1080 on
+  a Vega 8, 40 ms more on its CPU, which now reads the probes eight pixels at a time; `ArtfIndirectDesc.throughWalls`
+  leaves it out, for what 0.3 cost.
+- **Decals**: `artfSceneAddDecal`, `artfDecalSet`, `artfSceneRemoveDecal`. A picture laid over what is drawn, through
+  a box, its color (and roughness, if given) over the surface's, fading at the box's ends; on both backends, up to 256.
+- **Shadows for lights past the sixteen**: of those that ask (`artfLightSetShadow`), the 32 that matter most each
+  frame (wide and near the eye, in view) get maps a quarter as wide in the atlas, in rows below the others: 48 maps, a
+  spot taking one and a point light six. They go first in the list of lights past the sixteen, and both backends look
+  them up as they do the sixteen's.
+- **Four samples a pixel in a frame in floats, on the GPU**: `antialias` with `hdr`, as the CPU had it. The light is
+  resolved; what comes after reads the first sample's depth and surface, as on the CPU.
+- **Particles**: turned to the eye as each frame is drawn (`artfSceneFaceParticles`), not as the camera was when they
+  were stepped. They are left out of the trees tracing and probes use, and do not draw shadow maps again by moving,
+  unless the whole frame is traced. On the GPU those that follow each other are one draw; on the CPU a layer clears
+  and reads only the rows of the tile it reaches.
+- **glTF**: `EXT_meshopt_compression`, its three codecs (vertices, triangles, indices) and its three filters
+  (octahedral, quaternion, exponential); `KHR_materials_unlit`, with `ArtfMaterialDesc.unlit`; `KHR_materials_ior`,
+  as how much a dielectric reflects; `KHR_materials_transmission`, blended, and bent when traced; orthographic
+  cameras, as a narrow perspective from far behind.
+- **The GPU's pixel shaders hold only what a scene uses**: probes, their maps, the fog's grid. Code that is never
+  run still takes registers, and fewer pixels run at once: with all of it, a plain frame of `--scene spheres` took 10%
+  longer. Turning one of them on or off makes the shaders again, as new materials in C do.
+- Fixed: on the CPU, a material with nothing that needed the world (no light, no highlight) left the point in the
+  world unset, which decals and fog that light goes through read. The fragment shader's scene, cutout and layer
+  variants of a frame in floats are now put through `spirv-val` too.
+- Documents: the roadmap no longer says that Linux waits for WSL (CI runs it), and says what 0.3 and 0.4 did.
+
 ## 0.3.0
 
 - **A frame in floats, and what a lens and film do after it**: `ArtfRendererOptions.hdr` and `artfSceneSetPost`, on

@@ -47,11 +47,11 @@ same scene is drawn on the CPU.
 | **Vulkan** | A whole scene in one indirect draw, culled by a compute shader. The CPU's part of a frame does not grow with the scene: about 0.05 ms with 90,000 instances. |
 | **Software** | Works as a phone's GPU does: triangles are binned into tiles, and each tile is resolved in the cache, so every pixel is shaded once and the depth buffer never reaches main memory. All cores, with AVX2, SSE4.1 or NEON chosen at run time. |
 | **Meshes** | 16 bytes a vertex, ordered for the vertex cache and cut into meshlets when they are added. Levels of detail made on the way in. |
-| **Files** | glTF (`.gltf`, `.glb`) with nodes, PBR materials, normal maps, skins, clips, lights and cameras; PNG, JPEG, KTX2 and Radiance `.hdr`, read by its own decoders, on all cores. |
-| **Lighting** | Physically based materials, a sun, up to 1024 spots and point lights (16 with shadow maps), exposure and fog; light from all around from a picture of it, reflected as rough as each surface is, and shown behind the scene. |
-| **Light that bounced** | A grid of probes traced every frame, on any GPU or the CPU: light bounces once more each frame. |
-| **After the frame** | With the frame in floats: bloom, ambient occlusion, screen-space reflections, fog that light goes through (lit through the sun's shadows), temporal antialiasing and depth of field. |
-| **Particles and terrain** | Emitters of soft particles that fade as they age; terrain from heights, with levels of detail. |
+| **Files** | glTF (`.gltf`, `.glb`) with nodes, PBR materials, normal maps, skins, clips, lights and cameras, meshopt compression, unlit, ior and transmission; PNG, JPEG, KTX2 and Radiance `.hdr`, read by its own decoders, on all cores. |
+| **Lighting** | Physically based materials, a sun, up to 1024 spots and point lights (16 with shadow maps, and 32 more chosen each frame), exposure and fog; light from all around from a picture of it, reflected as rough as each surface is, and shown behind the scene. |
+| **Light that bounced** | A grid of probes traced every frame, on any GPU or the CPU: light bounces once more each frame, and walls stop it. |
+| **After the frame** | With the frame in floats: bloom, ambient occlusion, screen-space reflections, temporal antialiasing, depth of field, four samples a pixel; and fog that light goes through, lit through the sun's shadows, as a grid that every surface reads, smoke and glass too. |
+| **Particles, terrain, decals** | Emitters of soft particles that fade as they age, drawn together; terrain from heights, with levels of detail; pictures laid over surfaces through a box. |
 | **Layers** | Colors on vertices, opacity, holes and two sided surfaces, frames with alpha and four samples a pixel: a model can go over something else, with smooth edges, on both backends. |
 | **Rays and paths** | Real shadows and reflections, or all light however often it bounced, in place of triangles: on the CPU, or on any GPU by a compute shader, with no ray tracing hardware. A denoiser for what moves. |
 | **Animation** | Skeletons, morph targets and glTF's clips: `artfAnimationSet`, with blending left to the program. |
@@ -119,8 +119,9 @@ build/artful-render --model ship.glb --trace paths --trace-samples 256 --out shi
 ```
 
 A `.gltf` or a `.glb`, with its nodes, physically based materials, normal maps, PNG or JPEG textures,
-lights and cameras (`artfModelCamera`). Its reader is this library's own, and so are the decoders; images and
-meshes are made on all cores. `artfSetLog` says what a file holds that was left out.
+lights and cameras (`artfModelCamera`), meshes compressed with `EXT_meshopt_compression`, and unlit, ior and
+transmission materials. Its reader is this library's own, and so are the decoders; images and meshes are made on all
+cores. `artfSetLog` says what a file holds that was left out.
 </details>
 
 <details>
@@ -140,8 +141,9 @@ build/artful-render --scene outdoors --hdr --shadows 2048 --scene-exposure 1 --g
   --temporal --indirect --fog .006 .62 .7 .82 --out outdoors.png
 ```
 
-The same passes on both backends, with the same arithmetic. Without `hdr` nothing of it is there, and a frame is
-made as it always was.
+The same passes on both backends, with the same arithmetic. Fog that light goes through is a grid along the view,
+built before the frame and read by each surface as it is lit, so smoke against the sky is fogged at its own depth.
+`.antialias` adds four samples a pixel. Without `hdr` nothing of it is there, and a frame is made as it always was.
 
 <div align="center">
 <img src="docs/assets/screens/outdoors.jpg" width="820" alt="Green hills from a terrain of heights, a campfire of glowing particles with a plume of smoke, and a stone half sunk in the grass">
@@ -159,12 +161,13 @@ artfSceneSetIndirect(scene, &probes);
 for (int i = 0; i < 500; ++i) artfSceneAddLight(scene, places[i], colors[i], 2.f);
 ```
 
-Probes follow a few rays each frame and keep what reaches them; surfaces take light from all around from the probes
-near them. Lights past the first 16 are listed by the 64 x 64 squares of the frame they reach.
+Probes follow a few rays each frame and keep what reaches them, and how far they see each way; surfaces take light
+from all around from the probes near them that can see them, so it does not come through walls (`.throughWalls`
+leaves that out, for less work). Lights past the first 16 are listed by the 64 x 64 squares of the frame they reach.
 </details>
 
 <details>
-<summary><b>Particles and terrain</b></summary>
+<summary><b>Particles, terrain and decals</b></summary>
 <br>
 
 ```c
@@ -173,7 +176,14 @@ ArtfEmitterDesc fire = {.velocity = {0, 1.6f, 0}, .spread = .25f, .rate = 120, .
 ArtfEmitter e = artfSceneAddEmitter(scene, &fire);
 artfEmitterStep(scene, e, seconds);                                        /* each frame, after the camera */
 ArtfMesh hills = artfSceneAddTerrain(scene, heights, 129, 129, .5f, 3.f, 8.f);
+
+ArtfDecalDesc puddle = {.transform = artfTransformTrs(place, artfQuatIdentity(), artfVec3(2, .5f, 2)),
+                        .texture = puddleTexture, .color = {1, 1, 1}, .opacity = 1, .roughness = .05f};
+artfSceneAddDecal(scene, &puddle);                                          /* down the box's y, onto what is there */
 ```
+
+Particles face the eye as each frame is drawn; on the GPU those next to each other in depth are one draw. A decal
+puts its picture over what is solid inside its box, and its roughness too, on both backends.
 </details>
 
 <details>
@@ -205,6 +215,9 @@ ArtfShadowDesc shadows = {.resolution = 1024};
 artfSceneSetShadows(scene, &shadows);              /* the sun, in three maps around the eye */
 artfLightSetShadow(scene, lamp, true);             /* a spot takes one map, a point light six */
 ```
+
+The sixteen first lights cast shadows when asked. Past them, the 32 that matter most each frame, near the eye and
+wide, get smaller maps of their own.
 
 ```bash
 build/artful-render --scene spheres --shadows 2048 --out picture.png

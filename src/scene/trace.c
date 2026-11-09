@@ -218,7 +218,8 @@ static void buildTop(ArtfScene* s) {
         const ArtfInstanceData* d = &s->instances.items[i];
         ArtfTraceInstance o;
         memset(&o, 0, sizeof o);
-        if (!d->opacity || !invert(d->m, o.toObject)) continue;
+        /* (particles are left to what draws, but for a frame that is all traced) */
+        if (!d->opacity || (d->flags & ARTF_INSTANCE_PARTICLE && !t->particles) || !invert(d->m, o.toObject)) continue;
         o.root = t->roots.items[d->mesh];
         o.material = d->material;
         o.opacity = (float)d->opacity * (1.f / 65535.f);
@@ -317,8 +318,14 @@ void artfSceneTraceSync(ArtfScene* s) {
         changed = true;
     }
     if (changed) ++t->meshVersion;
-    if (changed || !t->top.len || t->instanceVersion != s->instanceVersion || t->structureVersion != s->structureVersion || t->materialVersion != s->materialVersion) {
-        t->instanceVersion = s->instanceVersion;
+    const bool particles = t->desc.mode != ARTF_TRACE_NONE;
+    const uint64_t instances = particles ? s->instanceVersion : s->tracedVersion;
+    if (particles != t->particles) {
+        t->particles = particles;
+        changed = true;
+    }
+    if (changed || !t->top.len || t->instanceVersion != instances || t->structureVersion != s->structureVersion || t->materialVersion != s->materialVersion) {
+        t->instanceVersion = instances;
         t->structureVersion = s->structureVersion;
         t->materialVersion = s->materialVersion;
         buildTop(s);
@@ -605,10 +612,18 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         metal = result.metallic;
         graphAlpha = result.alpha;
     }
+    if (m->flags & ARTF_MATERIAL_UNLIT) {
+        /* its color is light of its own, and it takes none */
+        for (int i = 0; i < 3; ++i) {
+            emissive[i] += albedo[i];
+            albedo[i] = 0;
+        }
+        metal = 0;
+    }
     memcpy(out->emissive, emissive, 12);
     const float notMetal = 1.f - metal;
     out->open = 1.f + (occlusion[2] - 1.f) * m->occlusion;
-    out->shiny = m->specular > 0 || m->metallic > 0;
+    out->shiny = (m->specular > 0 || m->metallic > 0) && !(m->flags & ARTF_MATERIAL_UNLIT);
     const float alphaRough = out->rough * out->rough, plusOne = out->rough + 1.f;
     out->a2 = alphaRough * alphaRough;
     out->k = plusOne * plusOne * .125f;
@@ -860,22 +875,57 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
  * first-order spherical harmonic: the mean, and how it leans. What a surface facing n takes from all around is, over
  * pi, the mean plus 2/3 of its lean along n (Ramamoorthi and Hanrahan), and the probes keep that directly. */
 
+/* How far a probe sees toward dir (of any length): the mean and the mean of the square, from its map. */
+static inline void probeReach(const float* map, const float* dir, float* mean, float* square) {
+    /* (the nearest texel: the probes' own weights blend what is between them) */
+    float u, v;
+    artfProbeFold(dir, &u, &v);
+    const int x = artfMini((int)(u * ARTF_PROBE_SIDE), ARTF_PROBE_SIDE - 1), y = artfMini((int)(v * ARTF_PROBE_SIDE), ARTF_PROBE_SIDE - 1);
+    const float* texel = map + (y * ARTF_PROBE_SIDE + x) * 2;
+    *mean = texel[0];
+    *square = texel[1];
+}
+
 void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float* out) {
-    float at[3], w[3];
+    float at[3], w[3], q[3];
     int i0[3];
     for (int k = 0; k < 3; ++k) {
         /* (a little out along the normal: a probe on the surface's own side counts more) */
-        at[k] = artfClampf((p[k] + n[k] * g->spacing[k] * .25f - g->origin[k]) / g->spacing[k], 0, (float)(g->dims[k] - 1));
+        q[k] = p[k] + n[k] * g->spacing[k] * .25f;
+        at[k] = artfClampf((q[k] - g->origin[k]) / g->spacing[k], 0, (float)(g->dims[k] - 1));
         i0[k] = artfMini((int)at[k], g->dims[k] - 2);
         w[k] = at[k] - (float)i0[k];
     }
-    out[0] = out[1] = out[2] = 0;
+    float sum[3] = {0, 0, 0}, weights = 0;
     for (int c = 0; c < 8; ++c) {
         const int x = i0[0] + (c & 1), y = i0[1] + (c >> 1 & 1), z = i0[2] + (c >> 2);
-        const float weight = (c & 1 ? w[0] : 1.f - w[0]) * (c & 2 ? w[1] : 1.f - w[1]) * (c & 4 ? w[2] : 1.f - w[2]);
-        const float* probe = g->probes + ((size_t)(z * g->dims[1] + y) * g->dims[0] + x) * 16;
-        for (int k = 0; k < 3; ++k) out[k] += weight * artfMaxf(probe[k] + probe[4 + 4 * k] * n[0] + probe[5 + 4 * k] * n[1] + probe[6 + 4 * k] * n[2], 0);
+        float weight = (c & 1 ? w[0] : 1.f - w[0]) * (c & 2 ? w[1] : 1.f - w[1]) * (c & 4 ? w[2] : 1.f - w[2]);
+        const size_t index = (size_t)(z * g->dims[1] + y) * g->dims[0] + x;
+        const float* probe = g->probes + index * 16;
+        if (g->desc.throughWalls) {
+            weights += weight;
+            for (int k = 0; k < 3; ++k) sum[k] += weight * artfMaxf(probe[k] + probe[4 + 4 * k] * n[0] + probe[5 + 4 * k] * n[1] + probe[6 + 4 * k] * n[2], 0);
+            continue;
+        }
+        /* from the probe to the point: one behind the surface counts less, and one that cannot see it hardly at all */
+        const float there[3] = {g->origin[0] + (float)x * g->spacing[0], g->origin[1] + (float)y * g->spacing[1], g->origin[2] + (float)z * g->spacing[2]};
+        const float dir[3] = {q[0] - there[0], q[1] - there[1], q[2] - there[2]};
+        const float distance = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        const float inv = distance > 1e-6f ? 1.f / distance : 0.f;
+        const float facing = (1.f - (dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2]) * inv) * .5f;
+        weight *= facing * facing + .2f;
+        float mean, square;
+        probeReach(g->probes + (size_t)artfIndirectCount(g) * 16 + index * ARTF_PROBE_MAP, dir, &mean, &square);
+        if (distance > mean) {
+            const float variance = artfMaxf(square - mean * mean, 1e-4f), past = distance - mean;
+            const float seen = variance / (variance + past * past);
+            weight *= artfMaxf(seen * seen * seen, .002f);
+        }
+        weights += weight;
+        for (int k = 0; k < 3; ++k) sum[k] += weight * artfMaxf(probe[k] + probe[4 + 4 * k] * n[0] + probe[5 + 4 * k] * n[1] + probe[6 + 4 * k] * n[2], 0);
     }
+    const float scale = weights > 1e-6f ? 1.f / weights : 0.f;
+    for (int k = 0; k < 3; ++k) out[k] = sum[k] * scale;
 }
 
 typedef struct ProbeJob { ArtfScene* s; const ArtfFrameData* f; } ProbeJob;
@@ -892,6 +942,25 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
     const float* env = f->sky[3] > 0 ? s->environment : NULL;
     uint32_t state = hashOf(index * 9781u + g->frames * 6271u + 1u);
     float mean[3] = {0, 0, 0}, lean[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    /* how far it sees, toward each of its map's directions: the mean and the mean of the square, of the rays near each */
+    enum { TEXELS = ARTF_PROBE_SIDE * ARTF_PROBE_SIDE };
+    float reach[TEXELS], reach2[TEXELS], reachWeight[TEXELS], toward[TEXELS][3];
+    for (int k = 0; k < TEXELS; ++k) {
+        /* (the direction at the texel's middle, unfolded) */
+        float a = ((float)(k % ARTF_PROBE_SIDE) + .5f) / ARTF_PROBE_SIDE * 2.f - 1.f, b = ((float)(k / ARTF_PROBE_SIDE) + .5f) / ARTF_PROBE_SIDE * 2.f - 1.f;
+        const float z = 1.f - fabsf(a) - fabsf(b);
+        if (z < 0) {
+            const float fa = (1.f - fabsf(b)) * (a >= 0 ? 1.f : -1.f);
+            b = (1.f - fabsf(a)) * (b >= 0 ? 1.f : -1.f);
+            a = fa;
+        }
+        const float length = sqrtf(a * a + b * b + z * z);
+        toward[k][0] = a / length;
+        toward[k][1] = b / length;
+        toward[k][2] = z / length;
+        reach[k] = reach2[k] = reachWeight[k] = 0;
+    }
+    const float most = sqrtf(g->spacing[0] * g->spacing[0] + g->spacing[1] * g->spacing[1] + g->spacing[2] * g->spacing[2]) * 1.5f;
     const float one[3] = {1, 1, 1};
     for (int r = 0; r < rays; ++r) {
         float d[3];
@@ -899,7 +968,23 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
         normalize3(d);
         float light[3] = {0, 0, 0};
         Hit h;
-        if (!closest(&s->trace, o, d, 3e37f, true, &h)) {
+        const bool hit = closest(&s->trace, o, d, 3e37f, true, &h);
+        {
+            const float far = hit ? artfMinf(h.t, most) : most;
+            for (int k = 0; k < TEXELS; ++k) {
+                /* (a narrow lobe each: the cosine to the 32nd) */
+                float w = artfMaxf(dot3(d, toward[k]), 0);
+                w *= w;
+                w *= w;
+                w *= w;
+                w *= w;
+                w *= w;
+                reach[k] += w * far;
+                reach2[k] += w * far * far;
+                reachWeight[k] += w;
+            }
+        }
+        if (!hit) {
             if (env) {
                 artfEnvSample(env, ARTF_ENV_DIFFUSE - 1, d[0], d[1], d[2], light);
                 for (int k = 0; k < 3; ++k) light[k] *= f->sky[3];
@@ -942,6 +1027,8 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
     }
     float* out = g->next + (size_t)index * 16;
     const float* was = g->probes + (size_t)index * 16;
+    float* outMap = g->next + (size_t)artfIndirectCount(g) * 16 + (size_t)index * ARTF_PROBE_MAP;
+    const float* wasMap = g->probes + (size_t)artfIndirectCount(g) * 16 + (size_t)index * ARTF_PROBE_MAP;
     const float keep = g->frames ? (g->desc.hysteresis > 0 ? artfClampf(g->desc.hysteresis, 0, .999f) : .9f) : 0.f;
     const float each = 1.f / (float)rays;
     for (int k = 0; k < 3; ++k) {
@@ -950,6 +1037,12 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
         out[7 + 4 * k] = 0;
     }
     out[3] = 0;
+    for (int k = 0; k < TEXELS; ++k) {
+        /* (a direction no ray went near: as far as a probe sees) */
+        const float m = reachWeight[k] > 1e-6f ? reach[k] / reachWeight[k] : most, m2 = reachWeight[k] > 1e-6f ? reach2[k] / reachWeight[k] : most * most;
+        outMap[k * 2] = g->frames ? wasMap[k * 2] * keep + m * (1.f - keep) : m;
+        outMap[k * 2 + 1] = g->frames ? wasMap[k * 2 + 1] * keep + m2 * (1.f - keep) : m2;
+    }
 }
 
 void artfSceneIndirectStep(ArtfScene* s, const ArtfFrameData* frame, ArtfPool* pool) {

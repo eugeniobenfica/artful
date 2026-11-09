@@ -1,12 +1,12 @@
-# What stands between 0.3 and a stable Artful
+# What stands between 0.4 and a stable Artful
 
-An account of version 0.3.0: what has been proven, what has not, and what 1.0 needs. "Stable" here
+An account of version 0.4.0: what has been proven, what has not, and what 1.0 needs. "Stable" here
 means what it means for cascade: a program written for 1.x compiles against every 1.x, and what the
 documents promise holds on the systems they name.
 
 ## What has been proven
 
-Run, not assumed. `artful-tests` has 177,400 checks.
+Run, not assumed. `artful-tests` has 177,811 checks.
 
 On GitHub, CI builds and tests every change: Linux with GCC and Clang, all tests under Vulkan's validation layers
 on a software Vulkan (Mesa's lavapipe), with one draw a mesh and with occlusion, then under AddressSanitizer and
@@ -88,9 +88,7 @@ Each of these could turn out to be a bug that users would meet. In the order to 
 | What | Why | Size |
 | --- | --- | --- |
 | Ray tracing hardware | Where a GPU has it, `VK_KHR_ray_query` would run the same paths several times as fast. It needs a second way through the shader, and a device to test it on. | Medium |
-| A frame in floats with four samples on the GPU | The GPU's float frame has one sample a pixel; the CPU's has four when asked. | Medium |
-| Decals | Not there. | Medium |
-| glTF's compressed files | `EXT_meshopt_compression` needs its decoder, checked against meshoptimizer's own encoder; `KHR_texture_basisu`'s Basis formats need transcoders of their own (ETC1S, UASTC) and Zstandard. | Medium |
+| glTF's compressed files | `EXT_meshopt_compression` is read, and checked against an encoder in the tests: it should be checked against files meshoptimizer made. `KHR_texture_basisu`'s Basis formats need transcoders of their own (ETC1S, UASTC) and Zstandard; Draco a decoder. | Medium |
 | Metal's gaps | Occlusion, black holes, materials in C, textures that stay compressed, bones on the GPU. They wait for a Mac: nothing of it can be run here. Materials need its shaders written as text, and compiled at run time. | Large |
 
 **Speed**, measured in [the study](performanceAndPlatforms.md):

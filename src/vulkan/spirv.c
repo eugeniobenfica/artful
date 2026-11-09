@@ -267,6 +267,18 @@ SpvId spvImageFetchAs(Spv* s, SpvId resultType, SpvId imageType, SpvId sampledIm
     return id;
 }
 
+SpvId spvTypeSampledImage2DMSOf(Spv* s, SpvId sampledType, SpvId* imageType) {
+    *imageType = typeOf(s, OP_TypeImage, SPV_WORDS(sampledType, 1, 0, 0, 1, 1, 0));
+    return typeOf(s, OP_TypeSampledImage, SPV_WORDS(*imageType));
+}
+
+SpvId spvImageFetchSampleAs(Spv* s, SpvId resultType, SpvId imageType, SpvId sampledImage, SpvId coords, SpvId sample) {
+    SpvId image = spvOp1(s, OP_Image, imageType, sampledImage);
+    SpvId id = spvNewId(s);
+    spvEmit(&s->code, OP_ImageFetch, SPV_WORDS(resultType, id, image, coords, 0x40 /* Sample */, sample));
+    return id;
+}
+
 SpvId spvTypeSampledImage2DOf(Spv* s, SpvId sampledType, SpvId* imageType) {
     *imageType = typeOf(s, OP_TypeImage, SPV_WORDS(sampledType, 1, 0, 0, 0, 1, 0));
     return typeOf(s, OP_TypeSampledImage, SPV_WORDS(*imageType));

@@ -40,7 +40,7 @@ struct ArtfShadowMaps {
 typedef struct Corner { float x, y, z, w, u, v; } Corner;
 
 static void emit(ArtfShadowMaps* m, Group* g, const Corner* c, const ArtfMaterialData* mask) {
-    const int size = (int)m->frame.sun[2];
+    const int size = (int)m->frame.views[m->view].size[0];
     ShadowTri t;
     for (int i = 0; i < 3; ++i) {
         const float iw = 1.f / c[i].w;
@@ -117,7 +117,7 @@ static void geometryJob(void* user, uint32_t index, uint32_t worker) {
         const float r = mesh->radius * inst->maxScale;
         /* out of its reach: a box for the sun, a ball for a lamp */
         if (ortho) {
-            const float half = view->info[2] * (float)m->frame.sun[2] * .5f;
+            const float half = view->info[2] * view->size[0] * .5f;
             const float x = vm[0] * wc[0] + vm[1] * wc[1] + vm[2] * wc[2] + vm[3], y = vm[4] * wc[0] + vm[5] * wc[1] + vm[6] * wc[2] + vm[7];
             if (fabsf(x) > 1.f + r / half || fabsf(y) > 1.f + r / half) continue;
         } else {
@@ -210,7 +210,7 @@ static void stripeJob(void* user, uint32_t stripe, uint32_t worker) {
     (void)worker;
     ArtfShadowMaps* m = user;
     const ArtfShadowView* view = &m->frame.views[m->view];
-    const int size = (int)m->frame.sun[2], width = m->source.width;
+    const int size = (int)view->size[0], width = m->source.width;
     float* tile = m->atlas + (size_t)view->info[1] * width + (size_t)view->info[0];
     const int firstRow = (int)stripe * STRIPE, lastRow = artfMini(firstRow + STRIPE, size) - 1;
     for (int y = firstRow; y <= lastRow; ++y)
@@ -254,7 +254,7 @@ const ArtfShadowSource* artfShadowMapsDraw(ArtfShadowMaps* m, const ArtfScene* s
     if (!views) return NULL;
     const int size = (int)m->frame.sun[2], stripes = (size + STRIPE - 1) / STRIPE;
     m->source.width = size * ARTF_SHADOW_ATLAS_COLUMNS;
-    const size_t floats = (size_t)m->source.width * size * ((views + ARTF_SHADOW_ATLAS_COLUMNS - 1) / ARTF_SHADOW_ATLAS_COLUMNS);
+    const size_t floats = (size_t)m->source.width * m->frame.sun[3];
     if (floats != m->atlasFloats) {
         artfFree(m->atlas);
         m->atlas = artfMalloc(floats * 4);
@@ -270,13 +270,14 @@ const ArtfShadowSource* artfShadowMapsDraw(ArtfShadowMaps* m, const ArtfScene* s
     m->drawn = 0;
     for (uint32_t v = 0; v < views; ++v) {
         /* what did not change is there already */
-        const uint64_t key = artfShadowViewKey(scene, &m->frame.views[v], m->frame.sun[2]);
-        if (key == m->keys[v] && !artfShadowViewTouched(scene, &m->frame.views[v], m->frame.sun[2], m->seen)) continue;
+        const uint32_t side = (uint32_t)m->frame.views[v].size[0];
+        const uint64_t key = artfShadowViewKey(scene, &m->frame.views[v], side);
+        if (key == m->keys[v] && !artfShadowViewTouched(scene, &m->frame.views[v], side, m->seen)) continue;
         m->keys[v] = key;
         ++m->drawn;
         m->view = v;
         artfPoolRun(m->pool, geometryJob, m, GROUPS);
-        artfPoolRun(m->pool, stripeJob, m, (uint32_t)stripes);
+        artfPoolRun(m->pool, stripeJob, m, (side + STRIPE - 1) / STRIPE);
     }
     m->seen = scene->shadowChangeCount;
     m->source.frame = &m->frame;
@@ -292,7 +293,7 @@ static float lookUp(const ArtfShadowSource* s, uint32_t index, const float* p) {
     const float* m = view->m;
     const float w = m[12] * p[0] + m[13] * p[1] + m[14] * p[2] + m[15];
     if (w <= 0) return 1.f;
-    const int size = (int)s->frame->sun[2];
+    const int size = (int)view->size[0];
     const float iw = 1.f / w;
     const float x = (m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3]) * iw, y = (m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7]) * iw;
     const float depth = (m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11]) * iw - view->info[3];
@@ -323,8 +324,8 @@ float artfShadowOfSun(const ArtfShadowSource* s, const float* eye, const float* 
     return lookUp(s, view, p);
 }
 
-float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world, const float* normal) {
-    const uint32_t word = s->frame->lights[light][0];
+/* A lamp's shadow, from its word: first view + 1, and views << 8. */
+static float lampShadow(const ArtfShadowSource* s, uint32_t word, const float* position, const float* world, const float* normal) {
     if (!word) return 1.f;
     uint32_t view = (word & 255) - 1;
     const float dx = world[0] - position[0], dy = world[1] - position[1], dz = world[2] - position[2];
@@ -337,4 +338,12 @@ float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* 
     const float lift = s->frame->views[view].info[2] * distance * 2.f / artfMaxf(facing, .15f);
     const float p[3] = {world[0] + normal[0] * lift, world[1] + normal[1] * lift, world[2] + normal[2] * lift};
     return lookUp(s, view, p);
+}
+
+float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world, const float* normal) {
+    return lampShadow(s, s->frame->lights[light][0], position, world, normal);
+}
+
+float artfShadowOfExtra(const ArtfShadowSource* s, uint32_t k, const float* position, const float* world, const float* normal) {
+    return k < ARTF_SHADOW_EXTRA ? lampShadow(s, s->frame->extra[k][0], position, world, normal) : 1.f;
 }

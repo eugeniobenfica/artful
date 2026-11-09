@@ -54,6 +54,8 @@ SpvId spvTypeStruct(Spv* s, const SpvId* members, uint32_t count);
 SpvId spvTypeFunction(Spv* s, SpvId result);
 SpvId spvTypeSampledImage2D(Spv* s, SpvId* imageType);
 SpvId spvTypeSampledImage2DMS(Spv* s, SpvId* imageType); /* of several samples a pixel */
+SpvId spvTypeSampledImage2DMSOf(Spv* s, SpvId sampledType, SpvId* imageType); /* of several samples, of uints, say */
+SpvId spvImageFetchSampleAs(Spv* s, SpvId resultType, SpvId imageType, SpvId sampledImage, SpvId coords, SpvId sample);
 SpvId spvConstFloat(Spv* s, float v);
 SpvId spvConstUint(Spv* s, uint32_t v);
 SpvId spvConstInt(Spv* s, int32_t v);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(artful VERSION 0.3.0 DESCRIPTION "A 3D renderer in plain C11, with no dependencies" LANGUAGES C)
+project(artful VERSION 0.4.0 DESCRIPTION "A 3D renderer in plain C11, with no dependencies" LANGUAGES C)
 
 # Plain C11: no third-party libraries, and no SDK: Vulkan is loaded at run time and its shaders are
 # built by the library itself.
@@ -37,7 +37,7 @@ endif()
 add_library(artful STATIC
   src/core/base.c src/core/threads.c
   src/scene/scene.c src/scene/blocks.c src/scene/meshBuild.c src/scene/simplify.c src/scene/hole.c src/scene/fluid.c src/scene/trace.c
-  src/scene/gltf.c src/scene/imageDecode.c src/scene/graph.c src/scene/texture.c src/scene/environment.c src/scene/extras.c
+  src/scene/gltf.c src/scene/imageDecode.c src/scene/graph.c src/scene/texture.c src/scene/environment.c src/scene/extras.c src/scene/meshopt.c
   src/render/renderer.c
   src/software/software.c src/software/post.c src/software/shadows.c src/software/denoise.c src/software/kernelsPortable.c)
 add_library(artful::artful ALIAS artful)

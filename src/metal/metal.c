@@ -49,7 +49,7 @@ enum {
 };
 
 #define MAX_TEXTURES 1024
-#define BINDINGS 63 /* (as many as Vulkan's set has: the shaders name them by binding) */
+#define BINDINGS 64 /* (as many as Vulkan's set has: the shaders name them by binding) */
 #define BLANK_BYTES 65536
 
 /* ---- the runtime ---- */
@@ -607,6 +607,7 @@ static bool syncScene(Metal* v, ArtfScene* scene) {
     v->fresh = false;
     /* what a pose moved */
     artfScenePosesApply(scene);
+    artfSceneFaceParticles(scene);
     for (size_t i = 0; i < scene->deforming.len; ++i) {
         const uint32_t index = scene->deforming.items[i];
         const ArtfMeshData* m = &scene->meshes.items[index];
@@ -813,11 +814,11 @@ static void drawShadows(Metal* v, id commands, const ArtfShadowFrame* shadows, u
     SET_U(e, "setFrontFacingWinding:", WINDING_COUNTER_CLOCKWISE);
     verticesUse(v, e);
     const uint32_t meshes = (uint32_t)v->meshes.len;
-    const double side = (double)shadows->sun[2];
     for (uint32_t i = 0; i < views; ++i) {
         const float* info = shadows->views[i].info;
+        const double side = (double)shadows->views[i].size[0];
         const MTLViewport viewport = {info[0], info[1], side, side, 0, 1};
-        const MTLScissorRect square = {(NSUInteger)info[0], (NSUInteger)info[1], shadows->sun[2], shadows->sun[2]};
+        const MTLScissorRect square = {(NSUInteger)info[0], (NSUInteger)info[1], (NSUInteger)side, (NSUInteger)side};
         SEND(void, e, "setViewport:", (id, SEL, MTLViewport), viewport);
         SEND(void, e, "setScissorRect:", (id, SEL, MTLScissorRect), square);
         /* (Vulkan's constant sits four bytes in: this has it in both places, wherever the shader looks) */
@@ -872,7 +873,7 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     const uint32_t shadowViews = tracing ? 0 : artfSceneShadowFrame(scene, &frame, &shadows);
     memcpy(v->shadowData.mapped, &shadows, sizeof shadows);
     if (shadowViews) {
-        const int side = (int)shadows.sun[2], width = side * ARTF_SHADOW_ATLAS_COLUMNS, height = side * (int)((shadowViews + ARTF_SHADOW_ATLAS_COLUMNS - 1) / ARTF_SHADOW_ATLAS_COLUMNS);
+        const int width = (int)shadows.sun[2] * ARTF_SHADOW_ATLAS_COLUMNS, height = (int)shadows.sun[3];
         if (width != v->shadowWidth || height > v->shadowHeight) {
             release(v->shadowAtlas);
             v->shadowAtlas = textureNew(v, PIXEL_DEPTH32, width, height, 1, 1, TEXTURE_TARGET | TEXTURE_READ, STORAGE_PRIVATE);
