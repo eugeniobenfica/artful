@@ -763,12 +763,21 @@ static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
     v8fStore(wx, world.x); v8fStore(wy, world.y); v8fStore(wz, world.z);
     v8fStore(nx, n.x); v8fStore(ny, n.y); v8fStore(nz, n.z);
     const bool soft = f->scene->shadows.soft;
+    /* (soft, with temporal antialiasing: fewer reads, turned by the pixel, which is where the place falls) */
+    const bool turning = soft && f->data.post[1][3] > 0;
+    const float* m = f->data.viewProj;
     for (int i = 0; i < 8; ++i) {
         const float p[3] = {wx[i], wy[i], wz[i]}, normal[3] = {nx[i], ny[i], nz[i]};
         float eye[3];
         artfEyeOf(&f->data, p, eye);
-        out[i] = light < 0 ? artfShadowOfSun(f->shadows, eye, p, normal, soft ? f->data.look[2] : 0.f)
-                           : artfShadowOfLight(f->shadows, (uint32_t)light, f->data.lights[light].position, p, normal, soft ? f->data.lightSizes[light] : 0.f);
+        int turn = -1;
+        if (turning) {
+            const float cx = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], cy = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], cw = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+            const float sx = (cx / cw * .5f + .5f) * (float)f->width, sy = (.5f - cy / cw * .5f) * (float)f->height;
+            turn = artfShadowTurn((int)sx, (int)sy, (uint32_t)f->data.output[3]);
+        }
+        out[i] = light < 0 ? artfShadowOfSun(f->shadows, eye, p, normal, soft ? f->data.look[2] : 0.f, turn)
+                           : artfShadowOfLight(f->shadows, (uint32_t)light, f->data.lights[light].position, p, normal, soft ? f->data.lightSizes[light] : 0.f, turn);
     }
     return v8fLoad(out);
 }
@@ -2166,6 +2175,49 @@ static void fogBackdrop(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, i
         }
 }
 
+/* Where what a pose bent was a frame ago, at a pixel of one of its triangles: its vertices where they were (their back),
+ * through its instance as it was and the view before, at the point of the triangle the pixel's center sees; as
+ * ARTF_MOTION_VECTOR's word. The GPU's vertex shader takes its vertices back as well, and its pixels interpolate. */
+static uint32_t pixelMotion(const ArtfSoftFrame* f, const ArtfRasterTri* t, const float* back, int px, int py) {
+    const ArtfVisible* v = &f->visible[t->instance];
+    const ArtfMeshData* mesh = v->mesh;
+    const ArtfMeshlet* l = &mesh->meshlets[(t->triangle & ~ARTF_TRI_BACK) >> 7];
+    const uint8_t* local = mesh->meshletTriangles + ((size_t)l->triangleOffset + (t->triangle & 127)) * 3;
+    const uint32_t stride = mesh->positionStride;
+    const float* m = v->instance->m;
+    const float* motion = f->motion + (size_t)v->index * 12;
+    const float* previous = f->data.previous;
+    float a[3][3], was[3][3];
+    for (int k = 0; k < 3; ++k) {
+        const uint32_t slot = l->vertexOffset + local[k];
+        const float p[3] = {mesh->positions[slot], mesh->positions[stride + slot], mesh->positions[(size_t)stride * 2 + slot]};
+        for (int r = 0; r < 3; ++r) a[k][r] = v->mvp[r * 4] * p[0] + v->mvp[r * 4 + 1] * p[1] + v->mvp[r * 4 + 2] * p[2] + v->mvp[r * 4 + 3];
+        float q[3], w[3];
+        for (int c = 0; c < 3; ++c) q[c] = p[c] + back[(size_t)slot * 3 + c];
+        for (int r = 0; r < 3; ++r) w[r] = m[r * 4] * q[0] + m[r * 4 + 1] * q[1] + m[r * 4 + 2] * q[2] + m[r * 4 + 3];
+        for (int r = 0; r < 3; ++r) q[r] = motion[r * 4] * w[0] + motion[r * 4 + 1] * w[1] + motion[r * 4 + 2] * w[2] + motion[r * 4 + 3];
+        /* (x, y and w through the view before, by columns) */
+        static const int rows[3] = {0, 1, 3};
+        for (int r = 0; r < 3; ++r) was[k][r] = previous[rows[r]] * q[0] + previous[4 + rows[r]] * q[1] + previous[8 + rows[r]] * q[2] + previous[12 + rows[r]];
+    }
+    /* (where on the triangle: from its corners in clip space, which needs none in front of the eye) */
+    const float nx = ((float)px + .5f) / (float)f->width * 2.f - 1.f, ny = 1.f - ((float)py + .5f) / (float)f->height * 2.f;
+    float weight[3], sum = 0;
+    for (int k = 0; k < 3; ++k) {
+        const float* b = a[(k + 1) % 3];
+        const float* c = a[(k + 2) % 3];
+        weight[k] = nx * (b[1] * c[2] - b[2] * c[1]) + ny * (b[2] * c[0] - b[0] * c[2]) + (b[0] * c[1] - b[1] * c[0]);
+        sum += weight[k];
+    }
+    if (sum == 0) return artfMotionPack(0, 0);
+    float clip[3] = {0, 0, 0};
+    for (int k = 0; k < 3; ++k)
+        for (int r = 0; r < 3; ++r) clip[r] += was[k][r] * (weight[k] / sum);
+    if (clip[2] <= 1e-5f) return artfMotionPack(1e5f, 1e5f);
+    const float sx = (clip[0] / clip[2] * .5f + .5f) * (float)f->width - .5f, sy = (.5f - clip[1] / clip[2] * .5f) * (float)f->height - .5f;
+    return artfMotionPack(sx - ((float)px - f->data.post[2][2]), sy - ((float)py + f->data.post[2][3]));
+}
+
 static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     ArtfWorker* w = &f->workers[workerIndex];
     const int ox = (int)(index % (uint32_t)f->tilesX) * ARTF_TILE, oy = (int)(index / (uint32_t)f->tilesX) * ARTF_TILE;
@@ -2257,13 +2309,23 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         if (f->motion) {
             /* (pixels side by side mostly show the same triangle: it is looked up once for them) */
             uint32_t last = ~0u, who = 0;
+            const ArtfRasterTri* bent = NULL; /* (what a pose moved goes by its vertices) */
+            const float* back = NULL;
             for (int i = 0; i < ARTF_TILE_PIXELS; ++i) {
                 const uint32_t id = drawn ? w->ids[i] : 0;
                 if (id != last) {
                     last = id;
                     who = id && id <= w->tris.len ? f->visible[w->tris.items[id - 1]->instance].index + 1 : 0;
+                    bent = NULL;
+                    if (who && f->motionBack && f->motionBack[who - 1]) {
+                        const ArtfVisible* v = &f->visible[w->tris.items[id - 1]->instance];
+                        if (v->mesh == &f->scene->meshes.items[v->instance->mesh]) {
+                            bent = w->tris.items[id - 1];
+                            back = f->motionBack[who - 1];
+                        }
+                    }
                 }
-                w->postInstance[i] = who;
+                w->postInstance[i] = bent ? pixelMotion(f, bent, back, ox + (i & (ARTF_TILE - 1)), oy + i / ARTF_TILE) : who;
             }
         }
     }

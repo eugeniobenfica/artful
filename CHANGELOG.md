@@ -83,6 +83,34 @@
   wanted; both backends draw the next level held in its place, and shadows too. Traced, all is held.
 - `artful-render`: `--scene forest`, `--hlod [cell]`, `--scene crowd` (2,500 figures that bend), `--particles n`,
   `--stream-meshes [MB]`.
+- **Upscaling**: `ArtfRendererOptions.renderScale`. With a frame in floats the scene is drawn at that share of the
+  frame's size (.5 to 1) and made whole after it, as Unreal's TSR and FSR 2 do: each frame's samples land elsewhere
+  within their pixels, and a pixel of the frame takes, from those of this frame within a pixel of its center, as much as
+  their nearness gives, over what it had, followed to where it was and kept within what the nearest sample's
+  neighbours show. Without temporal antialiasing it is read between pixels. Depth of field, motion blur, bloom, the
+  look, the overlay and what is read back are the frame's size. Both backends, the same picture (0.07% of pixels
+  apart). At 1920 x 1080 with temporal antialiasing, occlusion and reflections: `city` 2.9 ms on the GPU (Radeon RX
+  9060 XT) at the whole size, 2.0 at .75, 1.5 at .5; on the CPU (16 threads) 70, 50 and 30 ms. `ArtfPostDesc.sharpen`
+  brings edges back after it, or after temporal antialiasing, within each pixel's neighbours.
+- **What bones and targets bend is followed by its vertices**: on the CPU each instance that bends keeps where its
+  vertices were (`ArtfMotion`), and its pixels where they were a frame ago; on the GPU what the vertex buffer held is
+  copied before poses move it, and the vertex shader takes it through the instance and the view as they were. A pixel's
+  second word is then where it was (`ARTF_MOTION_VECTOR`). Temporal antialiasing on a striped strip that bones bend:
+  0.15% of pixels by more than 48 from it settled still, against 0.72%; and motion blur blurs it.
+- **Motion blur with depth**: McGuire et al.'s reconstruction (2012) in place of eight points along each pixel's way:
+  velocities, the largest of each tile of 16 and of its neighbours, and 12 points weighed by which is in front and which
+  moves over which. A still ball before a moving wall stays sharp and is not smeared over it (3.6 of 255 around it from
+  the wall alone, against 102 before).
+- **The surface target is two words only when motion is followed** (temporal antialiasing or motion blur); else one.
+  Its passes and pipelines are made again only when that changes. In floats with neither, a frame of soft shadows went
+  from 0.77-0.88 to 0.72 ms on the GPU.
+- **Cheaper soft shadows with temporal antialiasing**: 2 x 2 reads to find what is in the way and 3 x 3 to filter, on
+  few rows of the map, moved within their squares by a 4 x 4 pattern from pixel to pixel and frame to frame, which the
+  frames gather (as close to all the reads as temporal antialiasing itself is); without it the 50 reads, the same every
+  frame. What they cost over sharp shadows: 0.27 to 0.12 ms on the GPU, 8 to 4 ms on the CPU, in a scene of them.
+- What is off is the same bytes as before (a test holds a hash made before these came). The frame's block grows to 178
+  rows (`output`: the frame's size, sharpening, the frame's number); bindings 68 (what the vertices were) and 69 (motion
+  blur's velocities); the instances' motion is four rows each. `artful-render`: `--render-scale`, `--sharpen`.
 
 - **The ray tracing hardware**: `ArtfTraceDesc.hardware`. Where the GPU has acceleration structures and ray queries
   (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`), a ray goes through them in place of the trees the compute
@@ -111,8 +139,7 @@
   handle), and each pixel which instance it shows (on the GPU in the surface target, now two words a pixel). Temporal
   antialiasing follows a surface to where it was, so what moves no longer leaves a trail (a sphere going sideways
   under it: 0.54 of 255 from it drawn still, on average); and **motion blur** (`ArtfPostDesc.motionBlur`, the share of
-  a frame the shutter is open) spreads it along the way it went, eight points, at most 32 pixels. What bones bend
-  moves as its instance does.
+  a frame the shutter is open) spreads it along the way it went, at most 32 pixels.
 - **Clear coat and sheen**: `ArtfMaterialDesc.clearcoat`, `clearcoatRoughness`, `sheen` and `sheenRoughness`, their
   textures (`clearcoatMap`, `clearcoatRoughnessMap`, `clearcoatNormalMap`, `sheenMap`, `sheenRoughnessMap`), and glTF's
   `KHR_materials_clearcoat` and `KHR_materials_sheen` with theirs. The coat is a second lobe of no color, F0 .04, with

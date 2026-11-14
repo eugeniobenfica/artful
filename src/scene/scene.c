@@ -1569,6 +1569,9 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
         out->tracedCasts = 0;
     }
     if (p->tracedReflections && p->reflections > 0) out->traced |= ARTF_TRACED_REFLECTIONS;
+    out->output[0] = (float)width;
+    out->output[1] = (float)height;
+    out->output[2] = artfClampf(p->sharpen, 0, 1);
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;
     {

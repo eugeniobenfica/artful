@@ -68,6 +68,12 @@ typedef struct ArtfRendererOptions {
     bool compressTextures;
     /* Vulkan: a file to keep compiled shaders in between runs, so that a program starts faster. NULL: none. */
     const char* pipelineCache;
+    /* With hdr: the scene is drawn at this share of the frame's width and height (.5 to 1; at least .25), and made
+     * whole at the frame's size after it, as Unreal's TSR and FSR 2 do: the samples of each frame land elsewhere
+     * within their pixels, and temporal antialiasing (artfSceneSetPost) gathers them, following what moves. Without
+     * it the scene is read between its pixels. What comes after (depth of field, motion blur, bloom, the look, the
+     * overlay) and the pixels read back are the frame's size. 0 or 1: as large as the frame. */
+    float renderScale;
 } ArtfRendererOptions;
 
 /* What a renderer takes when nothing else is said: fields set by name on this stay right when the struct

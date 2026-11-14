@@ -91,7 +91,7 @@ static void testPacking(void) {
         CHECK(found);
     }
     artfSceneFree(s);
-    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 177 * 16);
+    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 178 * 16);
 }
 
 static void testMeshlets(void) {
@@ -5987,6 +5987,354 @@ static void testGltfMore(void) {
     artfSceneFree(s);
 }
 
+/* ---- temporal quality and speed ---- */
+
+#define TEMPORAL_BYTES 0x881775c1da02a664ull /* (what testTemporalBytes hashed before these came) */
+
+/* Some frames, the last read back. */
+static void drawFrames(ArtfRenderer* r, ArtfScene* s, int n, uint32_t* frame) {
+    for (int i = 0; i < n; ++i) CHECK(artfRendererDraw(r, s));
+    CHECK(artfRendererReadPixels(r, frame));
+}
+
+/* Upscaling: the scene drawn at half the size and made whole by temporal antialiasing is close to it drawn at the
+ * frame's size, and without temporal antialiasing too, a little softer; both backends alike. The overlay and what is
+ * read back are the frame's size. */
+static void testUpscale(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* half[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    uint32_t* corner = artfCalloc(W * H, 4);
+    for (int y = 0; y < 20; ++y)
+        for (int x = 0; x < 30; ++x) corner[y * W + x] = 0xFF2040A0u;
+    memset(half[1], 0, W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* whole = artfRendererNew(&o);
+        o.renderScale = .5f;
+        ArtfRenderer* scaled = artfRendererNew(&o);
+        if (!whole || !scaled) {
+            artfRendererFree(whole);
+            artfRendererFree(scaled);
+            continue;
+        }
+        ArtfScene* s = bleedScene();
+        const ArtfPostDesc temporal = {.temporal = true};
+        artfSceneSetPost(s, &temporal);
+        drawFrames(whole, s, 24, a);
+        drawFrames(scaled, s, 24, b);
+        const double apart = meanApart(a, b), far = differentShare(a, b, 48);
+        printf("%s, upscaled from half the size with temporal antialiasing: %.2f of 255 from the whole size, %.2f%% of pixels by more than 48\n", backend ? "GPU" : "CPU", apart,
+               far * 100);
+        CHECK(apart < 2.5 && far < .02);
+        memcpy(half[backend], b, W * H * 4);
+        /* without: read between its pixels */
+        artfSceneSetPost(s, NULL);
+        drawInto(whole, s, a);
+        drawInto(scaled, s, b);
+        const double plain = meanApart(a, b);
+        printf("%s, upscaled without: %.2f of 255 from the whole size\n", backend ? "GPU" : "CPU", plain);
+        CHECK(plain < 4);
+        /* the overlay goes over the frame shown */
+        const ArtfOverlay over = {corner, W, H, 0, false, NULL, 0};
+        artfRendererSetOverlay(scaled, &over);
+        drawInto(scaled, s, b);
+        CHECK(b[5 * W + 5] == 0xFF2040A0u && b[19 * W + 29] == 0xFF2040A0u && b[20 * W + 30] != 0xFF2040A0u);
+        artfSceneFree(s);
+        artfRendererFree(whole);
+        artfRendererFree(scaled);
+    }
+    if (half[1][0] || half[1][W * H / 2]) {
+        const double apart = differentShare(half[0], half[1], 24);
+        printf("upscaled, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .02);
+    }
+    /* a scale of 1 is no scale */
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    o.hdr = true;
+    ArtfRenderer* none = artfRendererNew(&o);
+    o.renderScale = 1;
+    ArtfRenderer* one = artfRendererNew(&o);
+    ArtfScene* s = bleedScene();
+    drawInto(none, s, a);
+    drawInto(one, s, b);
+    CHECK(differentShare(a, b, 0) == 0);
+    artfSceneFree(s);
+    artfRendererFree(none);
+    artfRendererFree(one);
+    artfFree(a);
+    artfFree(b);
+    artfFree(half[0]);
+    artfFree(half[1]);
+    artfFree(corner);
+}
+
+/* What bones bend is followed by its vertices: a strip bending is blurred where it moves, and temporal antialiasing
+ * leaves no trail behind it; both backends alike. */
+/* addStrip's, wider, with a picture of stripes across it: what is followed wrong smears them. */
+static ArtfInstance addStripedStrip(ArtfScene* s) {
+    enum { ROWS = 12 };
+    static ArtfVertex v[(ROWS + 1) * 2];
+    static ArtfVertexSkin k[(ROWS + 1) * 2];
+    static uint32_t idx[ROWS * 6];
+    static uint32_t stripes[8 * 64];
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 8; ++x) stripes[y * 8 + x] = (y / 4) & 1 ? 0xFFFFFFFFu : 0xFF202020u;
+    for (int r = 0; r <= ROWS; ++r)
+        for (int c = 0; c < 2; ++c) {
+            const float y = (float)r / ROWS * 2.f;
+            const ArtfVertex q = {c ? .5f : -.5f, y, 0, 0, 0, 1, (float)c, y * .5f, 0};
+            const float top = artfClampf((y - .8f) / .4f, 0, 1);
+            const ArtfVertexSkin w = {{0, 1, 0, 0}, {1.f - top, top, 0, 0}};
+            v[r * 2 + c] = q;
+            k[r * 2 + c] = w;
+        }
+    uint32_t n = 0;
+    for (uint32_t r = 0; r < ROWS; ++r) {
+        const uint32_t a = r * 2;
+        idx[n++] = a; idx[n++] = a + 1; idx[n++] = a + 3;
+        idx[n++] = a; idx[n++] = a + 3; idx[n++] = a + 2;
+    }
+    ArtfMaterialDesc d = {artfVec3(1, 1, 1), artfSceneAddTexture(s, stripes, 8, 64, 0), 0, 1, artfVec3(0, 0, 0)};
+    return addAt(s, artfSceneAddSkinnedMesh(s, v, (ROWS + 1) * 2, idx, n, k), artfSceneAddMaterial(s, &d), 0, -1, 0, 1);
+}
+
+static void testSkinnedMotion(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* blurred[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    memset(blurred[1], 0, W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = plainScene();
+        const ArtfInstance strip = addAt(s, addStrip(s), whiteMaterial(s), 0, -1, 0, 1);
+        /* blurred: only where it bends */
+        const ArtfPostDesc blur = {.motionBlur = .5f};
+        artfSceneSetPost(s, &blur);
+        bendStrip(s, strip, 0);
+        drawInto(r, s, a);
+        bendStrip(s, strip, .5f);
+        drawOnce(r, s, blurred[backend]);
+        artfSceneSetPost(s, NULL);
+        drawInto(r, s, b);
+        int moved = 0, below = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const bool differs = abs(CHANNEL(b[y * W + x], 16) - CHANNEL(blurred[backend][y * W + x], 16)) > 8;
+                moved += differs;
+                below += differs && y > H / 2 + 10; /* (the strip's foot, which the bone does not move) */
+            }
+        printf("%s, a strip that bones bend, blurred: %d pixels changed, %d where it does not move\n", backend ? "GPU" : "CPU", moved, below);
+        CHECK(moved > 150 && below == 0);
+        /* followed: no trail */
+        const ArtfPostDesc temporal = {.temporal = true};
+        artfSceneFree(s);
+        s = plainScene();
+        const ArtfInstance striped = addStripedStrip(s);
+        artfSceneSetPost(s, &temporal);
+        for (int k = 0; k < 16; ++k) {
+            bendStrip(s, striped, (float)k * .1f);
+            drawOnce(r, s, a);
+        }
+        /* (against the same, still, once temporal antialiasing has settled on it) */
+        drawFrames(r, s, 32, b);
+        const double trail = meanApart(a, b), far = differentShare(a, b, 48);
+        printf("%s, temporal antialiasing on a striped strip that bones bend: %.2f of 255 from it settled still, %.2f%% of pixels by more than 48\n", backend ? "GPU" : "CPU",
+               trail, far * 100);
+        CHECK(trail < .6 && far < .004);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (blurred[1][0] || blurred[1][W * H / 2]) {
+        const double apart = differentShare(blurred[0], blurred[1], 24);
+        printf("a bending strip blurred, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .005);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(blurred[0]);
+    artfFree(blurred[1]);
+}
+
+/* Motion blur keeps the edges of what is in front: a ball standing still before a wall that moves stays sharp, and
+ * none of it is smeared over the wall around it; both backends alike. */
+static ArtfScene* movingWallScene(ArtfInstance* wall, ArtfInstance* ball) {
+    ArtfScene* s = plainScene();
+    setCamera(s, 0, 0, 6, 0, 0, 0);
+    static uint32_t stripes[64 * 64];
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x) stripes[y * 64 + x] = (x / 4) & 1 ? 0xFF206020u : 0xFF102010u;
+    ArtfMaterialDesc d = {artfVec3(1, 1, 1), artfSceneAddTexture(s, stripes, 64, 64, 0), 0, 1, artfVec3(0, 0, 0)};
+    *wall = addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &d), 0, 0, -4, 6);
+    ArtfMaterialDesc white = {artfVec3(1, 1, 1), 0, 0, 1, artfVec3(0, 0, 0)};
+    *ball = addAt(s, artfSceneAddSphere(s, .8f, 32, 48), artfSceneAddMaterial(s, &white), 0, 0, 0, 1);
+    return s;
+}
+
+static void testBlurEdges(void) {
+    uint32_t* still = artfMalloc(W * H * 4);
+    uint32_t* bare = artfMalloc(W * H * 4);
+    uint32_t* blurred[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    uint32_t* wallOnly = artfMalloc(W * H * 4);
+    memset(blurred[1], 0, W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfInstance wall, ball;
+        ArtfScene* s = movingWallScene(&wall, &ball);
+        const ArtfPostDesc blur = {.motionBlur = 1};
+        const ArtfTransform from = artfTransformAt(0, 0, -4, 6), to = artfTransformAt(.6f, 0, -4, 6);
+        /* the ball still, and the wall moving behind it */
+        drawInto(r, s, still);
+        artfSceneSetPost(s, &blur);
+        artfInstanceSetTransform(s, wall, &from);
+        drawInto(r, s, bare);
+        artfInstanceSetTransform(s, wall, &to);
+        drawOnce(r, s, blurred[backend]);
+        /* the wall alone, as it moved */
+        const ArtfTransform away = artfTransformAt(0, 40, 0, 1);
+        artfInstanceSetTransform(s, ball, &away);
+        artfInstanceSetTransform(s, wall, &from);
+        drawInto(r, s, bare);
+        artfInstanceSetTransform(s, wall, &to);
+        drawOnce(r, s, wallOnly);
+        /* the ball is where the still frame is white; around it, a ring of 1 to 4 pixels */
+        int inside = 0, insideChanged = 0, ring = 0;
+        double ringApart = 0;
+        for (int y = 4; y < H - 4; ++y)
+            for (int x = 4; x < W - 4; ++x) {
+                const bool white = CHANNEL(still[y * W + x], 16) > 200;
+                bool near = false, deep = white;
+                for (int dy = -4; dy <= 4; ++dy)
+                    for (int dx = -4; dx <= 4; ++dx) {
+                        const bool there = CHANNEL(still[(y + dy) * W + x + dx], 16) > 200;
+                        near |= there;
+                        if (abs(dx) <= 2 && abs(dy) <= 2) deep &= there;
+                    }
+                const uint32_t p = blurred[backend][y * W + x];
+                if (deep) {
+                    ++inside;
+                    insideChanged += abs(CHANNEL(p, 16) - CHANNEL(still[y * W + x], 16)) > 2;
+                } else if (near && !white) {
+                    ++ring;
+                    ringApart += abs(CHANNEL(p, 8) - CHANNEL(wallOnly[y * W + x], 8)) + abs(CHANNEL(p, 16) - CHANNEL(wallOnly[y * W + x], 16));
+                }
+            }
+        ringApart /= ring > 0 ? ring : 1;
+        printf("%s, motion blur before a still ball: %d of %d pixels of it changed; around it, %.1f of 255 from the wall alone\n", backend ? "GPU" : "CPU", insideChanged, inside,
+               ringApart);
+        CHECK(inside > 500 && insideChanged == 0 && ringApart < 8);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (blurred[1][0] || blurred[1][W * H / 2]) {
+        const double apart = differentShare(blurred[0], blurred[1], 24);
+        printf("motion blur before a still ball, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+    }
+    artfFree(still);
+    artfFree(bare);
+    artfFree(wallOnly);
+    artfFree(blurred[0]);
+    artfFree(blurred[1]);
+}
+
+/* Soft shadows with temporal antialiasing take fewer reads a frame, turned from one frame to the next: what the frames
+ * gather comes to what all the reads give; both backends alike. */
+static void testSoftShadowsTurning(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* turned[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    memset(turned[1], 0, W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        for (int sun = 0; sun < 2; ++sun) {
+            ArtfScene* s = bulbScene(.5f);
+            if (sun) {
+                artfSceneRemoveLight(s, 1);
+                artfSceneSetSun(s, artfVec3(.3f, -1, .4f), artfVec3(1.5f, 1.5f, 1.5f));
+                artfSceneSetSunSize(s, .08f);
+            } else {
+                artfLightSetShadow(s, 1, true);
+            }
+            /* what temporal antialiasing itself changes, with sharp shadows: the edges it smooths */
+            const ArtfShadowDesc hard = {1024, 20, false}, soft = {1024, 20, true};
+            const ArtfPostDesc temporal = {.temporal = true};
+            artfSceneSetShadows(s, &hard);
+            drawInto(r, s, a);
+            artfSceneSetPost(s, &temporal);
+            drawFrames(r, s, 48, b);
+            const double smoothed = meanApart(a, b), smoothedFar = differentShare(a, b, 32);
+            /* all the reads, then turned and gathered over frames */
+            artfSceneSetPost(s, NULL);
+            artfSceneSetShadows(s, &soft);
+            drawInto(r, s, a);
+            artfSceneSetPost(s, &temporal);
+            drawFrames(r, s, 48, b);
+            const double apart = meanApart(a, b), far = differentShare(a, b, 32);
+            printf("%s, soft shadows from %s, turned over 48 frames: %.2f of 255 from all the reads, %.2f%% of pixels by more than 32 (sharp ones, %.2f and %.2f%%)\n",
+                   backend ? "GPU" : "CPU", sun ? "the sun" : "a light", apart, far * 100, smoothed, smoothedFar * 100);
+            CHECK(apart < smoothed + .5 && far < smoothedFar + .004);
+            if (!sun) memcpy(turned[backend], b, W * H * 4);
+            artfSceneFree(s);
+        }
+        artfRendererFree(r);
+    }
+    if (turned[1][0] || turned[1][W * H / 2]) {
+        const double apart = differentShare(turned[0], turned[1], 24);
+        printf("soft shadows turned, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(turned[0]);
+    artfFree(turned[1]);
+}
+
+/* What is off is as it was, to the byte: a frame in floats with soft shadows and no temporal antialiasing, and one
+ * with temporal antialiasing following a moving instance, on the CPU, hash as they did before upscaling, vertices'
+ * motion and turned shadows came. */
+static void testTemporalBytes(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 2, false);
+    o.hdr = true;
+    ArtfRenderer* r = artfRendererNew(&o);
+    ArtfScene* s = richScene();
+    const ArtfShadowDesc soft = {512, 20, true};
+    artfSceneSetShadows(s, &soft);
+    artfSceneSetSunSize(s, .05f);
+    artfLightSetShadow(s, 1, true);
+    artfLightSetSize(s, 1, .3f);
+    const ArtfPostDesc some = {.bloom = .2f, .occlusion = .5f};
+    artfSceneSetPost(s, &some);
+    drawInto(r, s, a);
+    uint64_t h = hashOf(a, (size_t)W * H);
+    const ArtfPostDesc temporal = {.temporal = true};
+    ArtfInstance ball;
+    ArtfScene* moving = movingScene(&ball);
+    artfSceneSetPost(moving, &temporal);
+    for (int k = 0; k < 6; ++k) {
+        placeBall(moving, ball, -.6f + (float)k * .2f);
+        drawOnce(r, moving, a);
+    }
+    h = h * 31 + hashOf(a, (size_t)W * H);
+    printf("what is off, to the byte: %016llx\n", (unsigned long long)h);
+    CHECK(h == TEMPORAL_BYTES);
+    artfSceneFree(s);
+    artfSceneFree(moving);
+    artfRendererFree(r);
+    artfFree(a);
+}
+
 /* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
  * next to nothing, though a probe outside is nearer to it than one inside. */
 static void testProbesWalls(void) {
@@ -7156,6 +7504,11 @@ int main(void) {
     testLookMore();
     testSizedLights();
     testMotion();
+    testUpscale();
+    testSkinnedMotion();
+    testBlurEdges();
+    testSoftShadowsTurning();
+    testTemporalBytes();
     testSoftShadows();
     testProbeReflections();
     testCullSize();

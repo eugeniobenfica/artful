@@ -28,7 +28,8 @@ int main(int argc, char** argv) {
     SAVE("cullLate", artfShaderCull(&size, ARTF_CULL_LATE));
     SAVE("hizFirst", artfShaderHiz(&size, true, 1));
     SAVE("hizNext", artfShaderHiz(&size, false, 1));
-    SAVE("sceneVertex", artfShaderSceneVertex(&size));
+    SAVE("sceneVertex", artfShaderSceneVertex(&size, false));
+    SAVE("sceneVertexMotion", artfShaderSceneVertex(&size, true));
     SAVE("sceneFragment", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, 0));
     SAVE("sceneCutout", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, 0));
     SAVE("sceneFragmentProbes", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_PROBES));
@@ -36,6 +37,7 @@ int main(int argc, char** argv) {
     SAVE("sceneCutoutFloats", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_WALLS | ARTF_SHADER_FROXELS));
     SAVE("sceneFragmentCoat", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_COAT));
     SAVE("sceneFragmentSoft", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_COAT | ARTF_SHADER_SOFT));
+    SAVE("sceneFragmentSoftPlain", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_SOFT));
     SAVE("sceneFragmentFloatsPlain", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS));
     SAVE("sceneFragmentView", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_VIEW));
     SAVE("sceneCutoutView", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_VIEW | ARTF_SHADER_MESHLETS));
@@ -121,5 +123,9 @@ int main(int argc, char** argv) {
     SAVE("postFinal", artfShaderPostFinal(&size));
     SAVE("postMeter", artfShaderPostMeter(&size));
     SAVE("postMotionBlur", artfShaderPostMotionBlur(&size));
+    SAVE("postVelocity", artfShaderPostVelocity(&size));
+    SAVE("postTileMost", artfShaderPostTileMost(&size));
+    SAVE("postUpscale", artfShaderPostUpscale(&size));
+    SAVE("postSharpen", artfShaderPostSharpen(&size));
     return failed;
 }

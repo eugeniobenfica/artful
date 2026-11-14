@@ -129,6 +129,7 @@ typedef struct ArtfSoftFrame {
     uint32_t* postSurface;
     uint32_t* postInstance; /* the scene's instance + 1 that shows, of what is solid; 0: none */
     const float* motion;    /* with motion followed: of each instance, from where it is to where it was (ArtfMotion) */
+    const float* const* motionBack; /* and of each that a pose bent, where its vertices were (ArtfMotion.back); else NULL */
     bool sizedLights;       /* of the frame's lights, one has a size, a shape or a profile (artfLightSetSize, artfLightSetShape) */
     /* lights past the frame's own, and of each tile, which of them reach it (artfSceneLightTiles) */
     ArtfLightData* extra;
@@ -150,10 +151,26 @@ typedef struct ArtfSoftPost {
     ArtfPool* pool;
     ArtfSoftFrame* f;
     uint32_t* pixels;
-    int width, height;
-    float* scratch[3];
+    int width, height;   /* of the light, as the pass that runs has it: the scene's size, then the frame's once upscaled */
+    /* With the scene drawn smaller than the frame (ArtfRendererOptions.renderScale): its size, which depth, surface
+     * and instance keep, and the frame's. mapped: the pass that runs is at the frame's size, and finds those at the
+     * scene's sample nearest each pixel's center. */
+    int sceneW, sceneH, frameW, frameH, halfW, halfH;
+    bool mapped;
+    float ratioX, ratioY; /* the scene's size over the frame's */
+    float viewBack[16];   /* where a pixel of the frame was, by the view alone (post.c's viewBackOf) */
+    float* scratch[4];
+    float* box[6];       /* upscaling: of each of the scene's pixels, the least and most of each color around it */
     float* history[3];
+    float* spare[3];     /* during a frame, what the history was before it took the light's place */
     bool historyValid;
+    float* velocity[2];  /* motion blur: of each pixel, and the largest of each tile, and of its neighbours */
+    float* tileMost[2];
+    float* nearMost[2];
+    int blurTilesX, blurTilesY;
+    /* the overlay, over the frame shown */
+    const uint32_t* overlay;
+    int overlayWidth, overlayHeight, overlayStride;
     float* occlusion;
     float* froxels;      /* light the air adds up to each cell, and what it leaves of what is behind */
     int froxelsX, froxelsY;
@@ -167,7 +184,8 @@ typedef struct ArtfSoftPost {
     bool exposureValid;  /* false: it goes straight to what the next frame meters */
 } ArtfSoftPost;
 
-void artfSoftPostSize(ArtfSoftPost* p, int width, int height);
+/* The scene's size, and the frame's (the same, unless it is upscaled). */
+void artfSoftPostSize(ArtfSoftPost* p, int width, int height, int frameWidth, int frameHeight);
 void artfSoftPostFree(ArtfSoftPost* p);
 void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels);
 /* Fog that light goes through, before the tiles: into p->froxels, and f's pointer to it. */
