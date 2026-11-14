@@ -16,8 +16,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - The ray tracing hardware (`ArtfTraceDesc.hardware`, and shadows and reflections from rays): what bones or targets
   move has its bottom level built again each frame it moves, alone, not refitted (the hardware's refit put shadows
   where nothing was on the one device it was run on); anything else that changes meshes builds every bottom level
-  again, and an instance that moves builds the top level again. Each of those, and the trees sent up when they change,
-  waits for the GPU to be idle. It was run on one device, a Radeon RX 9060 XT; CI's software Vulkan has no such
+  again, and an instance that moves builds the top level again. The top level, and the trees' top and table of
+  instances, are each slot's own, built and written with the frame; the bottom levels, and the trees' meshes, are
+  shared, and each change to them still waits for the GPU to be idle. It was run on one device, a Radeon RX 9060 XT; CI's software Vulkan has no such
   hardware, and so does not run it.
 - Shadows from rays (`ArtfShadowDesc.traced`) start off the surface by a thousandth of its distance from the eye: what
   touches its caster by less shows a gap there, and a mesh drawn at a level of detail lighter than the trees' (which
@@ -115,9 +116,13 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   counts as large.
 - A terrain's layers are a material in C, with one set of texture coordinates; what is scattered over it is placed
   once, and does not follow if the heights change.
-- On the GPU, turning probes, their walls, fog that light goes through, the first material past glTF's core or the
-  first light with a shape or a profile on or off makes the scene's pixel shaders again, and its tracing shader; and
-  turning temporal antialiasing or motion blur on or off its passes and pipelines: that frame waits for them.
+- On the GPU, turning probes, their walls, fog that light goes through, soft shadows, a view, the first material past
+  glTF's core or the first light with a shape or a profile on or off after the first frame makes the scene's pixel
+  shaders again on a thread of their own: frames go on with the shaders they had, without that feature (or still with
+  it, when it was turned off) for as long as making them takes, a few frames, and `artfRendererWarm` waits for them.
+  Shadows from rays, a program's new materials in C, and the tracing shader are made before the frame that asks, which
+  waits for the compiler (not for the GPU); so does turning temporal antialiasing or motion blur on or off, for its
+  passes and pipelines.
 - Decals are tested against each drawn pixel, all of those in view: dozens are cheap, hundreds cost. They go on what is
   solid, not on what blends, and read one mipmap, chosen for the box's distance.
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual
@@ -147,7 +152,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   things (`city`) 2% of pixels differ by a step. The meshlets view needs geometry shaders on Vulkan (`PrimitiveId`), and
   draws whole meshes while it is on; without them it shows instances. Light complexity counts the lights whose reach a
   point is in, not their cones or shadows. Motion is what instances and the eye did, not what bones bend. Metal shows
-  only the picture. Making a view's shaders, on the GPU, takes that frame a moment.
+  only the picture. On the GPU a view asked for after the first frame shows a few frames later, once its shaders are
+  made (`artfRendererWarm` waits for them).
 - What passes take on the GPU is between timestamps at the bottom of the pipe: where a GPU runs passes side by side,
   one's time can hold part of another's. They are of the last frame the GPU finished, two behind.
 - An orthographic camera (`ArtfCamera.orthoHeight`) sees the picture of all around, behind the scene, along one

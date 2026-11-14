@@ -147,6 +147,7 @@ typedef struct ArtfSoftFrame {
 typedef struct ArtfPool ArtfPool;
 typedef struct ArtfSoftPost {
     ArtfPool* pool;
+    const struct ArtfKernels* kernels; /* the software backend's: grading goes eight pixels at a time */
     ArtfSoftFrame* f;
     uint32_t* pixels;
     int width, height;   /* of the light, as the pass that runs has it: the scene's size, then the frame's once upscaled */
@@ -176,6 +177,10 @@ typedef struct ArtfSoftPost {
     int bloomW[ARTF_POST_BLOOM_LEVELS], bloomH[ARTF_POST_BLOOM_LEVELS];
     size_t bloomAt[ARTF_POST_BLOOM_LEVELS];
     int bloomLevel;
+    /* what the frame's last pass reads of bloom's first level, by column and by row (flareCuts and finalRow): of
+     * each, where it is between two texels, for bloom itself and for the lens flare's three ghosts */
+    struct ArtfPostCut* cutX;
+    struct ArtfPostCut* cutY;
     ArtfPassLog* log;    /* where each pass says what it took */
     float exposureLog;   /* auto exposure: where it has got to, in stops, */
     float exposureScale; /* and 2 to that */
@@ -197,6 +202,15 @@ typedef struct ArtfKernels {
     void (*geometry)(ArtfSoftFrame* f, uint32_t chunk);
     uint32_t (*tile)(ArtfSoftFrame* f, uint32_t tile, uint32_t worker); /* 1 when skipped */
     void (*depth)(ArtfSoftFrame* f, uint32_t tile, uint32_t worker);    /* a tile's depth alone, for occlusion */
+    /* post.c's grading of n colors in three planes (n a multiple of 8, 32-byte aligned); at: the grain's hash input of
+     * the first */
+    void (*grade)(const ArtfFrameData* f, const float* lut, float* const* c, int n, uint32_t at);
+    /* post.c's temporal antialiasing of row y, from from to to, eight pixels at a time where it can: done[g] is set for
+     * each group of eight it did */
+    void (*temporal)(ArtfSoftPost* p, int y, int from, int to, uint8_t* done);
+    /* and upscaling with temporal antialiasing, the same way */
+    void (*upscale)(ArtfSoftPost* p, int y, int from, int to, uint8_t* done);
+    void (*box)(ArtfSoftPost* p, int y); /* post.c's least and most around each of the scene's pixels, for upscaling */
 } ArtfKernels;
 
 extern const ArtfKernels artfKernelsPortable;

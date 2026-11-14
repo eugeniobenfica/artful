@@ -2503,4 +2503,373 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     return 0;
 }
 
-const ArtfKernels KERNELS = {KERNELS_NAME, KERNELS_SIMD, geometry, tile, depthTile};
+/* ---- the look, after the frame ---------------------------------------------------------------- */
+
+/* post.c's gradeShown, eight pixels at a time: the same arithmetic in the same order, each ternary a select, so that
+ * what comes out is the same bits as one pixel at a time. */
+V8_INLINE V8F gradeClamp(V8F v, V8F lo, V8F hi) { return v8fSelect(v8fLt(v, lo), v8fSelect(v8fGt(v, hi), v, hi), lo); }
+V8_INLINE V8F gradeLog2(V8F x) {
+    const V8I bits = v8fAsI(x);
+    const V8F e = v8fSub(v8iToF(v8iAnd(v8iShr(bits, 23), v8iSet(255))), v8fSet(127.f));
+    const V8F m = v8iAsF(v8iOr(v8iAnd(bits, v8iSet(0x7FFFFF)), v8iSet(0x3F800000)));
+    const V8F one = v8fSet(1.f), z = v8fDiv(v8fSub(m, one), v8fAdd(m, one)), z2 = v8fMul(z, z);
+    const V8F p = v8fAdd(one, v8fMul(z2, v8fAdd(v8fSet(.33333333f), v8fMul(z2, v8fAdd(v8fSet(.2f), v8fMul(z2, v8fSet(.14285714f)))))));
+    return v8fAdd(e, v8fMul(v8fMul(z, v8fSet(2.8853901f)), p));
+}
+V8_INLINE V8F gradeExp2(V8F x) {
+    x = gradeClamp(x, v8fSet(-100.f), v8fSet(100.f));
+    const V8I i = v8iSub(v8fToI(v8fAdd(x, v8fSet(128.f))), v8iSet(128));
+    const V8F u = v8fMul(v8fSub(x, v8iToF(i)), v8fSet(.69314718f));
+    V8F f = v8fAdd(v8fSet(.0083333333f), v8fMul(u, v8fSet(.0013888889f)));
+    f = v8fAdd(v8fSet(.041666668f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(.16666667f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(.5f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(1.f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(1.f), v8fMul(u, f));
+    return v8fMul(f, v8iAsF(v8iShl(v8iAdd(i, v8iSet(127)), 23)));
+}
+V8_INLINE V8I gradeHash(V8I x) {
+    x = v8iXor(x, v8iShr(x, 16));
+    x = v8iMul(x, v8iSet((int32_t)0x7FEB352Du));
+    x = v8iXor(x, v8iShr(x, 15));
+    x = v8iMul(x, v8iSet((int32_t)0x846CA68Bu));
+    return v8iXor(x, v8iShr(x, 16));
+}
+
+/* c: three planes of n colors as a screen shows them (n a multiple of 8, from 32-byte boundaries); at: the grain's
+ * hash input of the first, those after it one more each. */
+static void gradeLanes(const ArtfFrameData* f, const float* lut, float* const* c, int n, uint32_t at) {
+    const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
+    const bool curves = f->grade2[0][3] > 0;
+    const int size = (int)f->grade2[3][3];
+    const bool looked = size >= 2 && lut;
+    const float grain = f->grade2[1][3];
+    for (int x = 0; x < n; x += 8) {
+        V8F v[3] = {v8fLoad(c[0] + x), v8fLoad(c[1] + x), v8fLoad(c[2] + x)};
+        if (curves) {
+            for (int k = 0; k < 3; ++k) {
+                const V8F o = v8fMul(v8fSet(f->grade2[2][k]), v8fAdd(v[k], v8fMul(v8fSet(f->grade2[0][k]), v8fSub(one, v[k]))));
+                if (f->grade2[1][k] == 1) { v[k] = o; continue; }
+                v[k] = v8fSelect(v8fGt(o, zero), zero, gradeExp2(v8fMul(gradeLog2(o), v8fSet(f->grade2[1][k]))));
+            }
+            const V8F l = gradeClamp(v8fAdd(v8fAdd(v8fMul(v8fSet(.2126f), v[0]), v8fMul(v8fSet(.7152f), v[1])), v8fMul(v8fSet(.0722f), v[2])), zero, one);
+            const V8F rest = v8fSub(one, l);
+            const V8F dark = v8fMul(rest, rest), middle = v8fMul(v8fMul(v8fSet(2.f), l), rest), bright = v8fMul(l, l);
+            for (int k = 0; k < 3; ++k) {
+                const V8F wheel = v8fAdd(v8fAdd(v8fMul(dark, v8fSet(f->grade2[3][k])), v8fMul(middle, v8fSet(f->grade2[4][k]))), v8fMul(bright, v8fSet(f->grade2[5][k])));
+                v[k] = gradeClamp(v8fMul(v[k], wheel), zero, one);
+            }
+        }
+        if (looked) {
+            V8I index = v8iSet(0);
+            V8F t[3];
+            const V8F last = v8fSet((float)(size - 1));
+            for (int k = 2; k >= 0; --k) {
+                const V8F q = v8fMul(gradeClamp(v[k], zero, one), last);
+                V8I a = v8fToI(q);
+                a = v8iSelect(v8iGt(a, v8iSet(size - 2)), a, v8iSet(size - 2));
+                t[k] = v8fSub(q, v8iToF(a));
+                index = v8iAdd(v8iMul(index, v8iSet(k == 2 ? 0 : size)), a);
+            }
+            index = v8iMul(index, v8iSet(3));
+            const int dy = 3 * size, dz = 3 * size * size;
+            const uint32_t* table = (const uint32_t*)lut;
+            const V8F amount = v8fSet(f->grade2[4][3]);
+            for (int k = 0; k < 3; ++k) {
+                const V8I q = v8iAdd(index, v8iSet(k));
+#define LUT_AT(o) v8iAsF(v8iGather(table, v8iAdd(q, v8iSet(o))))
+                const V8F q0 = LUT_AT(0), q3 = LUT_AT(3), qy = LUT_AT(dy), qy3 = LUT_AT(dy + 3);
+                const V8F qz = LUT_AT(dz), qz3 = LUT_AT(dz + 3), qzy = LUT_AT(dz + dy), qzy3 = LUT_AT(dz + dy + 3);
+#undef LUT_AT
+                const V8F a = v8fAdd(q0, v8fMul(v8fSub(q3, q0), t[0])), b = v8fAdd(qy, v8fMul(v8fSub(qy3, qy), t[0]));
+                const V8F d = v8fAdd(qz, v8fMul(v8fSub(qz3, qz), t[0])), e = v8fAdd(qzy, v8fMul(v8fSub(qzy3, qzy), t[0]));
+                const V8F nearer = v8fAdd(a, v8fMul(v8fSub(b, a), t[1])), farther = v8fAdd(d, v8fMul(v8fSub(e, d), t[1]));
+                const V8F found = v8fAdd(nearer, v8fMul(v8fSub(farther, nearer), t[2]));
+                v[k] = gradeClamp(v8fAdd(v[k], v8fMul(v8fSub(found, v[k]), amount)), zero, one);
+            }
+        }
+        if (grain > 0) {
+            const V8I h = gradeHash(v8iAdd(v8iSet((int32_t)(at + (uint32_t)x)), v8iIota()));
+            const V8F noise = v8fSub(v8fMul(v8iToF(v8iShr(h, 8)), v8fSet(1.f / 16777216.f)), v8fSet(.5f));
+            const V8F scaled = v8fMul(noise, v8fSet(grain));
+            for (int k = 0; k < 3; ++k) {
+                const V8F mid = v8fAdd(v8fSet(.0625f), v8fMul(v8fMul(v8fSet(.75f), v[k]), v8fSub(one, v[k])));
+                v[k] = gradeClamp(v8fAdd(v[k], v8fMul(scaled, mid)), zero, one);
+            }
+        }
+        for (int k = 0; k < 3; ++k) v8fStore(c[k] + x, v[k]);
+    }
+}
+
+/* ---- temporal antialiasing, after the frame ----------------------------------------------------- */
+
+V8_INLINE V8F loadU(const float* p) { return v8iAsF(v8iLoadU(p)); }
+V8_INLINE V8F gatherF(const float* plane, V8I index) { return v8iAsF(v8iGather((const uint32_t*)plane, index)); }
+
+/* post.c's temporalRow for the pixels from from to to of row y, eight at a time: the same arithmetic in the same order as
+ * wasAt (perspective, at the scene's size), tap and the blend, each ternary a select. A group of eight is done here
+ * only when it is away from the frame's sides and none of its pixels went by its vertices (ARTF_MOTION_VECTOR); done[g]
+ * says so of group g (from from + 8 g), and post.c does the others a pixel at a time. */
+static void temporalLanes(ArtfSoftPost* p, int y, int from, int to, uint8_t* done) {
+    const ArtfSoftFrame* sf = p->f;
+    const ArtfFrameData* f = &sf->data;
+    const int w = p->width, h = p->height;
+    const float jx = f->post[2][2], jy = f->post[2][3];
+    const float py = 1.f - (((float)y + jy) + .5f) / (float)h * 2.f;
+    const size_t rows[3] = {(size_t)artfClampi(y - 1, 0, h - 1) * w, (size_t)y * w, (size_t)artfClampi(y + 1, 0, h - 1) * w};
+    const V8F zero = v8fSet(0.f), wF = v8fSet((float)w), hF = v8fSet((float)h), lastX = v8fSet((float)(w - 1)), lastY = v8fSet((float)(h - 1));
+    const V8I zeroI = v8iSet(0);
+    const float* m = f->previous;
+    for (int x = from, g = 0; x < to; x += 8, ++g) {
+        if (x < 1 || x + 8 > w - 1 || x + 8 > to) continue;
+        const size_t i = (size_t)y * w + x;
+        const V8F depth = loadU(sf->postDepth + i);
+        const V8I covered = v8fGt(depth, zero);
+        const V8F d = v8fSelect(covered, zero, v8fDiv(v8fSet(1.f), depth));
+        const V8I seen = v8fGt(d, zero);
+        V8I who = zeroI;
+        if (sf->motion) who = v8iSelect(seen, zeroI, v8iLoadU(sf->postInstance + i));
+        if (v8iSigns(v8iEq(v8iAnd(who, v8iSet((int32_t)ARTF_MOTION_VECTOR)), zeroI)) != 0xFF) continue;
+        /* worldAt */
+        const V8F xs = v8fSub(v8iToF(v8iAdd(v8iSet(x), v8iIota())), v8fSet(jx));
+        const V8F px = v8fSub(v8fMul(v8fDiv(v8fAdd(xs, v8fSet(.5f)), wF), v8fSet(2.f)), v8fSet(1.f));
+        const V8F along = v8fSelect(seen, v8fSet(1e4f), d);
+        V8F at[3];
+        for (int k = 0; k < 3; ++k) {
+            const V8F dir = v8fAdd(v8fAdd(v8fSet(f->eye[2][k]), v8fMul(px, v8fSet(f->eye[0][k]))), v8fMul(v8fSet(py), v8fSet(f->eye[1][k])));
+            at[k] = v8fAdd(v8fSet(f->cameraPos[k]), v8fMul(dir, along));
+        }
+        if (sf->motion) {
+            /* (how its instance moved: lanes of no instance read the first's, and keep their own) */
+            const V8I none = v8iEq(who, zeroI);
+            const V8I base = v8iSelect(none, v8iMul(v8iSub(who, v8iSet(1)), v8iSet(12)), zeroI);
+            V8F was[3];
+            for (int r = 0; r < 3; ++r) {
+                V8F sum = v8fMul(gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4))), at[0]);
+                sum = v8fAdd(sum, v8fMul(gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4 + 1))), at[1]));
+                sum = v8fAdd(sum, v8fMul(gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4 + 2))), at[2]));
+                was[r] = v8fAdd(sum, gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4 + 3))));
+            }
+            for (int r = 0; r < 3; ++r) at[r] = v8fSelect(none, was[r], at[r]);
+        }
+        /* project */
+#define ROW_OF(a, b, c, e) v8fAdd(v8fAdd(v8fAdd(v8fMul(v8fSet(m[a]), at[0]), v8fMul(v8fSet(m[b]), at[1])), v8fMul(v8fSet(m[c]), at[2])), v8fSet(m[e]))
+        const V8F cx = ROW_OF(0, 4, 8, 12), cy = ROW_OF(1, 5, 9, 13), cw = ROW_OF(3, 7, 11, 15);
+#undef ROW_OF
+        const V8F half = v8fSet(.5f);
+        const V8F sx = v8fSub(v8fMul(v8fAdd(v8fMul(v8fDiv(cx, cw), half), half), wF), half);
+        const V8F sy = v8fSub(v8fMul(v8fSub(half, v8fMul(v8fDiv(cy, cw), half)), hF), half);
+        V8I fresh = v8iSet(-1);
+        if (p->historyValid) {
+            fresh = v8iXor(v8fGt(cw, v8fSet(1e-5f)), v8iSet(-1)); /* (!(cw > 1e-5): as cw <= 1e-5 for what is a number) */
+            fresh = v8iOr(fresh, v8iOr(v8fLt(sx, zero), v8fLt(sy, zero)));
+            fresh = v8iOr(fresh, v8iOr(v8fGt(sx, lastX), v8fGt(sy, lastY)));
+        }
+        const V8F share = v8fSelect(fresh, v8fSet(.1f), v8fSet(1.f));
+        /* tap, where the history is read at all */
+        const V8F tx = gradeClamp(v8fSelect(fresh, sx, zero), zero, lastX), ty = gradeClamp(v8fSelect(fresh, sy, zero), zero, lastY);
+        const V8I x0 = v8fToI(tx), y0 = v8fToI(ty);
+        const V8I x1 = v8iSelect(v8iGt(v8iSet(w - 1), v8iAdd(x0, v8iSet(1))), v8iSet(w - 1), v8iAdd(x0, v8iSet(1)));
+        const V8I y1 = v8iSelect(v8iGt(v8iSet(h - 1), v8iAdd(y0, v8iSet(1))), v8iSet(h - 1), v8iAdd(y0, v8iSet(1)));
+        const V8F fx = v8fSub(tx, v8iToF(x0)), fy = v8fSub(ty, v8iToF(y0));
+        const V8I r0 = v8iMul(y0, v8iSet(w)), r1 = v8iMul(y1, v8iSet(w));
+        const V8I i00 = v8iAdd(r0, x0), i01 = v8iAdd(r0, x1), i10 = v8iAdd(r1, x0), i11 = v8iAdd(r1, x1);
+        for (int c = 0; c < 3; ++c) {
+            V8F lo = v8fSet(3e38f), hi = v8fSet(-3e38f);
+            for (int r = 0; r < 3; ++r)
+                for (int k = -1; k <= 1; ++k) {
+                    const V8F there = loadU(sf->postLight[c] + rows[r] + x + k);
+                    lo = v8fSelect(v8fLt(there, lo), lo, there);
+                    hi = v8fSelect(v8fLt(hi, there), hi, there);
+                }
+            const float* plane = p->history[c];
+            const V8F a = gatherF(plane, i00), b = gatherF(plane, i01), cc = gatherF(plane, i10), e = gatherF(plane, i11);
+            const V8F top = v8fAdd(a, v8fMul(v8fSub(b, a), fx)), bottom = v8fAdd(cc, v8fMul(v8fSub(e, cc), fx));
+            const V8F tapped = v8fAdd(top, v8fMul(v8fSub(bottom, top), fy));
+            const V8F now = loadU(sf->postLight[c] + i);
+            const V8F was = v8fSelect(fresh, gradeClamp(tapped, lo, hi), now);
+            v8iStoreU(p->scratch[c] + i, v8fAsI(v8fAdd(was, v8fMul(v8fSub(now, was), share))));
+        }
+        done[g] = 1;
+    }
+}
+
+/* ---- upscaling, after the frame ------------------------------------------------------------------ */
+
+V8_INLINE V8I clampLanes(V8I v, int lo, int hi) {
+    v = v8iSelect(v8iGt(v8iSet(lo), v), v, v8iSet(lo));
+    return v8iSelect(v8iGt(v, v8iSet(hi)), v, v8iSet(hi));
+}
+V8_INLINE V8I floorLanes(V8F v) {
+    const V8I i = v8fToI(v);
+    return v8iAdd(i, v8fLt(v, v8iToF(i)));
+}
+
+/* post.c's upscaleRow with temporal antialiasing, for the pixels from from to to of row y, eight at a time: wasAt at
+ * the frame's size (by the view alone where no instance shows, by the instance's motion where one does), the four
+ * samples, the least and most around the nearest, the history: the same arithmetic in the same order. done[g] as for
+ * temporalLanes; a group where a pixel went by its vertices is left to post.c. */
+static void upscaleLanes(ArtfSoftPost* p, int y, int from, int to, uint8_t* done) {
+    const ArtfSoftFrame* sf = p->f;
+    const ArtfFrameData* f = &sf->data;
+    const int w = p->width, h = p->height, sw = p->sceneW, sh = p->sceneH;
+    const float rx = p->ratioX, ry = p->ratioY, jx = f->post[2][2], jy = f->post[2][3];
+    const float gain = .1f / (rx * ry);
+    const float v = ((float)y + .5f) * ry - .5f - jy;
+    const int iv = (int)v, y0 = iv - (v < (float)iv);
+    const float fy = v - (float)y0;
+    const int row0 = artfClampi(y0, 0, sh - 1) * sw, row1 = artfClampi(y0 + 1, 0, sh - 1) * sw;
+    const float oy0 = fy / ry, oy1 = (1.f - fy) / ry, oy00 = oy0 * oy0, oy11 = oy1 * oy1;
+    /* (planeAt's row, and worldAt's) */
+    const float sv = ((float)y + .5f) * p->ratioY - f->post[2][3];
+    const int isv = (int)sv, planeRow = artfClampi(isv - (sv < (float)isv), 0, sh - 1) * sw;
+    const float py = 1.f - (((float)y + 0.f) + .5f) / (float)h * 2.f;
+    const V8F zero = v8fSet(0.f), one = v8fSet(1.f), half = v8fSet(.5f), wF = v8fSet((float)w), hF = v8fSet((float)h);
+    const V8F lastX = v8fSet((float)(w - 1)), lastY = v8fSet((float)(h - 1));
+    const V8I zeroI = v8iSet(0);
+    const float* m = f->previous;
+    const float* back = p->viewBack;
+    const V8F wy0 = v8fSet(1.f - fy), wy1 = v8fSet(fy);
+    for (int x = from, g = 0; x < to; x += 8, ++g) {
+        if (x + 8 > to) continue;
+        const V8F xs = v8iToF(v8iAdd(v8iSet(x), v8iIota()));
+        /* the four samples around the center */
+        const V8F u = v8fAdd(v8fSub(v8fMul(v8fAdd(xs, half), v8fSet(rx)), half), v8fSet(jx));
+        const V8I x0 = floorLanes(u);
+        const V8F fx = v8fSub(u, v8iToF(x0));
+        const V8I c0 = clampLanes(x0, 0, sw - 1), c1 = clampLanes(v8iAdd(x0, v8iSet(1)), 0, sw - 1);
+        const V8I q[4] = {v8iAdd(v8iSet(row0), c0), v8iAdd(v8iSet(row0), c1), v8iAdd(v8iSet(row1), c0), v8iAdd(v8iSet(row1), c1)};
+        const V8F rest = v8fSub(one, fx);
+        const V8F weights[4] = {v8fMul(rest, wy0), v8fMul(fx, wy0), v8fMul(rest, wy1), v8fMul(fx, wy1)};
+        /* wasAt: the scene's sample nearest the center */
+        const V8I psx = clampLanes(floorLanes(v8fAdd(v8fMul(v8fAdd(xs, half), v8fSet(p->ratioX)), v8fSet(f->post[2][2]))), 0, sw - 1);
+        const V8I at = v8iAdd(v8iSet(planeRow), psx);
+        const V8F depth = gatherF(sf->postDepth, at);
+        const V8F d = v8fSelect(v8fGt(depth, zero), zero, v8fDiv(one, depth));
+        const V8I seen = v8fGt(d, zero);
+        V8I who = zeroI;
+        if (sf->motion) who = v8iSelect(seen, zeroI, v8iGather(sf->postInstance, at));
+        if (v8iSigns(v8iEq(v8iAnd(who, v8iSet((int32_t)ARTF_MOTION_VECTOR)), zeroI)) != 0xFF) continue;
+        const V8I none = v8iEq(who, zeroI);
+        /* by the view alone */
+        const V8F z = v8fSelect(v8fGt(depth, zero), v8fSet(1e-4f), depth), yF = v8fSet((float)y);
+#define BACK_OF(a, b, c, e) v8fAdd(v8fAdd(v8fAdd(v8fMul(v8fSet(back[a]), z), v8fSet(back[b])), v8fMul(v8fSet(back[c]), xs)), v8fMul(v8fSet(back[e]), yF))
+        const V8F bx = BACK_OF(0, 4, 8, 12), by = BACK_OF(1, 5, 9, 13), bw = BACK_OF(3, 7, 11, 15);
+#undef BACK_OF
+        const V8I okBack = v8fGt(bw, v8fMul(v8fSet(1e-5f), z));
+        const V8F sxBack = v8fSub(v8fMul(v8fAdd(v8fMul(v8fDiv(bx, bw), half), half), wF), half);
+        const V8F syBack = v8fSub(v8fMul(v8fSub(half, v8fMul(v8fDiv(by, bw), half)), hF), half);
+        /* by the instance's motion: worldAt, then project */
+        V8F sx = sxBack, sy = syBack;
+        V8I ok = okBack;
+        if (v8iSigns(none) != 0xFF) {
+            const V8F px = v8fSub(v8fMul(v8fDiv(v8fAdd(v8fSub(xs, zero), half), wF), v8fSet(2.f)), one);
+            const V8F along = v8fSelect(seen, v8fSet(1e4f), d);
+            V8F place[3];
+            for (int k = 0; k < 3; ++k) {
+                const V8F dir = v8fAdd(v8fAdd(v8fSet(f->eye[2][k]), v8fMul(px, v8fSet(f->eye[0][k]))), v8fMul(v8fSet(py), v8fSet(f->eye[1][k])));
+                place[k] = v8fAdd(v8fSet(f->cameraPos[k]), v8fMul(dir, along));
+            }
+            const V8I base = v8iSelect(none, v8iMul(v8iSub(who, v8iSet(1)), v8iSet(12)), zeroI);
+            V8F was[3];
+            for (int r = 0; r < 3; ++r) {
+                V8F sum = v8fMul(gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4))), place[0]);
+                sum = v8fAdd(sum, v8fMul(gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4 + 1))), place[1]));
+                sum = v8fAdd(sum, v8fMul(gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4 + 2))), place[2]));
+                was[r] = v8fAdd(sum, gatherF(sf->motion, v8iAdd(base, v8iSet(r * 4 + 3))));
+            }
+#define ROW_OF(a, b, c, e) v8fAdd(v8fAdd(v8fAdd(v8fMul(v8fSet(m[a]), was[0]), v8fMul(v8fSet(m[b]), was[1])), v8fMul(v8fSet(m[c]), was[2])), v8fSet(m[e]))
+            const V8F cx = ROW_OF(0, 4, 8, 12), cy = ROW_OF(1, 5, 9, 13), cw = ROW_OF(3, 7, 11, 15);
+#undef ROW_OF
+            sx = v8fSelect(none, v8fSub(v8fMul(v8fAdd(v8fMul(v8fDiv(cx, cw), half), half), wF), half), sxBack);
+            sy = v8fSelect(none, v8fSub(v8fMul(v8fSub(half, v8fMul(v8fDiv(cy, cw), half)), hF), half), syBack);
+            ok = v8iSelect(none, v8fGt(cw, v8fSet(1e-5f)), okBack);
+        }
+        V8I fresh = v8iXor(ok, v8iSet(-1));
+        fresh = v8iOr(fresh, v8iOr(v8fLt(sx, zero), v8fLt(sy, zero)));
+        fresh = v8iOr(fresh, v8iOr(v8fGt(sx, lastX), v8fGt(sy, lastY)));
+        /* how near each sample is */
+        const V8F ox0 = v8fDiv(fx, v8fSet(rx)), ox1 = v8fDiv(rest, v8fSet(rx));
+        const V8F ox00 = v8fMul(ox0, ox0), ox11 = v8fMul(ox1, ox1);
+        const V8F d2[4] = {v8fAdd(ox00, v8fSet(oy00)), v8fAdd(ox11, v8fSet(oy00)), v8fAdd(ox00, v8fSet(oy11)), v8fAdd(ox11, v8fSet(oy11))};
+        V8F near[4], sum = zero;
+        for (int k = 0; k < 4; ++k) {
+            const V8F left = v8fSub(one, d2[k]);
+            near[k] = v8fSelect(v8fLt(d2[k], one), zero, v8fMul(left, left));
+            sum = v8fAdd(sum, near[k]);
+        }
+        const V8F scaled = v8fMul(sum, v8fSet(gain));
+        const V8F share = v8fSelect(v8fLt(one, scaled), scaled, one);
+        const V8F each = v8fSelect(v8fGt(sum, zero), zero, v8fDiv(one, sum));
+        /* (the least and most around the nearest sample: boxRow's) */
+        const V8I nearest = v8iAdd(v8iSet(fy < .5f ? row0 : row1), clampLanes(v8iSelect(v8fLt(fx, half), v8iAdd(x0, v8iSet(1)), x0), 0, sw - 1));
+        /* the history, where it is read */
+        const V8F tx = gradeClamp(v8fSelect(fresh, sx, zero), zero, lastX), ty = gradeClamp(v8fSelect(fresh, sy, zero), zero, lastY);
+        const V8I hx0 = v8fToI(tx), hy0 = v8fToI(ty);
+        const V8I hx1 = v8iSelect(v8iGt(v8iSet(w - 1), v8iAdd(hx0, v8iSet(1))), v8iSet(w - 1), v8iAdd(hx0, v8iSet(1)));
+        const V8I hy1 = v8iSelect(v8iGt(v8iSet(h - 1), v8iAdd(hy0, v8iSet(1))), v8iSet(h - 1), v8iAdd(hy0, v8iSet(1)));
+        const V8F hfx = v8fSub(tx, v8iToF(hx0)), hfy = v8fSub(ty, v8iToF(hy0));
+        const V8I r0 = v8iMul(hy0, v8iSet(w)), r1 = v8iMul(hy1, v8iSet(w));
+        const V8I i00 = v8iAdd(r0, hx0), i01 = v8iAdd(r0, hx1), i10 = v8iAdd(r1, hx0), i11 = v8iAdd(r1, hx1);
+        const size_t i = (size_t)y * w + x;
+        for (int c = 0; c < 4; ++c) {
+            const float* light = sf->postLight[c];
+            const V8F l0 = gatherF(light, q[0]), l1 = gatherF(light, q[1]), l2 = gatherF(light, q[2]), l3 = gatherF(light, q[3]);
+            const V8F between = v8fAdd(v8fAdd(v8fAdd(v8fMul(l0, weights[0]), v8fMul(l1, weights[1])), v8fMul(l2, weights[2])), v8fMul(l3, weights[3]));
+            if (c == 3) {
+                v8iStoreU(p->scratch[3] + i, v8fAsI(between));
+                continue;
+            }
+            const V8F lo = gatherF(p->box[c], nearest), hi = gatherF(p->box[3 + c], nearest);
+            const float* plane = p->history[c];
+            const V8F a = gatherF(plane, i00), b = gatherF(plane, i01), cc = gatherF(plane, i10), e = gatherF(plane, i11);
+            const V8F top = v8fAdd(a, v8fMul(v8fSub(b, a), hfx)), bottom = v8fAdd(cc, v8fMul(v8fSub(e, cc), hfx));
+            const V8F was = gradeClamp(v8fAdd(top, v8fMul(v8fSub(bottom, top), hfy)), lo, hi);
+            const V8F now = v8fMul(v8fAdd(v8fAdd(v8fAdd(v8fMul(l0, near[0]), v8fMul(l1, near[1])), v8fMul(l2, near[2])), v8fMul(l3, near[3])), each);
+            const V8F gathered = v8fAdd(was, v8fMul(v8fSub(now, was), share));
+            v8iStoreU(p->scratch[c] + i, v8fAsI(v8fSelect(fresh, gathered, between)));
+        }
+        done[g] = 1;
+    }
+}
+
+/* post.c's boxRow: of each of the scene's pixels in row y, the least and most of each color around it, three by three,
+ * in the same order; eight at a time away from the sides. */
+static void boxLanes(ArtfSoftPost* p, int y) {
+    const int sw = p->sceneW, sh = p->sceneH;
+    float* const* light = p->f->postLight;
+    const size_t rows[3] = {(size_t)artfMaxi(y - 1, 0) * sw, (size_t)y * sw, (size_t)artfMini(y + 1, sh - 1) * sw};
+    const size_t at = (size_t)y * sw;
+    for (int x = 0; x < sw;) {
+        if (x >= 1 && x + 8 <= sw - 1) {
+            for (int c = 0; c < 3; ++c) {
+                V8F lo = v8fSet(3e38f), hi = v8fSet(-3e38f);
+                for (int r = 0; r < 3; ++r)
+                    for (int k = -1; k <= 1; ++k) {
+                        const V8F there = loadU(light[c] + rows[r] + x + k);
+                        lo = v8fSelect(v8fLt(there, lo), lo, there);
+                        hi = v8fSelect(v8fLt(hi, there), hi, there);
+                    }
+                v8iStoreU(p->box[c] + at + x, v8fAsI(lo));
+                v8iStoreU(p->box[3 + c] + at + x, v8fAsI(hi));
+            }
+            x += 8;
+            continue;
+        }
+        const int xs[3] = {artfMaxi(x - 1, 0), x, artfMini(x + 1, sw - 1)};
+        for (int c = 0; c < 3; ++c) {
+            float lo = 3e38f, hi = -3e38f;
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) {
+                    const float there = light[c][rows[r] + xs[k]];
+                    lo = artfMinf(lo, there);
+                    hi = artfMaxf(hi, there);
+                }
+            p->box[c][at + x] = lo;
+            p->box[3 + c][at + x] = hi;
+        }
+        ++x;
+    }
+}
+
+const ArtfKernels KERNELS = {KERNELS_NAME, KERNELS_SIMD, geometry, tile, depthTile, gradeLanes, temporalLanes, upscaleLanes, boxLanes};

@@ -24,6 +24,31 @@
 - **Two fogs, measured**: plain fog stays where it is lit; putting it through the grid of fog that light goes
   through would have taken a frame in floats from 11.3 to 19.4 ms on the CPU and from 1.03 to 1.45 on the GPU
   (`docs/architecture.md`).
+- **The new features, cheaper**, with the same pictures: the same bytes on the CPU on every instruction set (a test holds
+  grading, temporal antialiasing and upscaling with something moving to one hash), and the same bytes as before on the
+  Radeon RX 9060 XT. Measured at 1920 x 1080, best of several runs, the CPU with AVX2 and 16 threads:
+  - The look on the CPU goes through the kernels, eight pixels at a time (`gradeLanes`), and where bloom and the flare
+    read bloom is worked out once for a size: over a frame in floats with none of it (4.6 ms), gamma, lift, gain and the
+    wheels cost 7.2 ms more and now 0.9; the look-up table 3.8 and now 1.5; grain 1.6 and now 0.1; bloom 5.4 and now
+    3.1, and the flare on top of it 4.9 and now 2.5.
+  - Temporal antialiasing and upscaling on the CPU go through the kernels too (`temporalLanes`, `upscaleLanes`,
+    `boxLanes`), where they can: the pass 5.8 to 2.6 ms, and upscaled from 0.67, 6.6 to 4.2; a frame 10.6 to 7.0 ms and
+    9.4 to 6.9.
+  - On the GPU no pass after the frame copies a buffer of the frame into another: light, the second light and the
+    history change parts by a descriptor set (set 1) instead. A frame with temporal antialiasing 1.60 to 1.13 ms;
+    upscaled, 1.20 to 0.76; with sharpening and motion blur too, 2.51 to 1.67.
+  - Vulkan makes a new variant of the scene's pixel shaders (probes, their walls, fog's grid, a coat, soft shadows,
+    shapes, a view) on a thread of its own after the first frame, and frames go on without the feature until it is
+    made; old pipelines are destroyed once their frames are done, never after waiting for the device. Turning one on in
+    a scene of 100 spheres took its frame 300 to 360 ms with the driver's cache cold, and 2 to 4 warm; now 0.7 (3 with
+    probes, which the CPU makes). `artfRendererWarm` waits for what is being made. Shadows from rays and a program's
+    materials in C are still made before their frame, which waits for the compiler but no longer for the device.
+  - Shadows and reflections from rays, with instances that move: each slot has its own top level, built in the frame's
+    commands, and its own copy of the trees' top and table of instances, written where the GPU reads them, with no
+    wait for the device. 100 of 400 spheres moving every frame: 3.05 ms a frame, 1.5 of it on the CPU, to 1.68, 0.08 on
+    the CPU; with reflections from rays too, 3.46 to 2.08.
+  - A frame that uses none of these takes what it took (CPU 2.0 and 4.6 ms, GPU 0.19 and 0.71, without and with floats).
+
 - **Views**, as Unreal's view modes: `artfRendererSetView` shows, in place of the picture, a surface's base color, its
   normal, roughness, metal, the light it has from all around, its own light, which level of detail is drawn, its
   meshlets, its instance, how many triangles cover each pixel, depth, how far each pixel moved since the frame before,

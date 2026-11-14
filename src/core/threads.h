@@ -2,6 +2,7 @@
 #ifndef ARTFUL_THREADS_H
 #define ARTFUL_THREADS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct ArtfPool ArtfPool;
@@ -15,5 +16,12 @@ void artfPoolFree(ArtfPool* p);
 int artfPoolSize(const ArtfPool* p);
 /* Runs fn over 0..count-1 and returns when all are done; the calling thread takes part. */
 void artfPoolRun(ArtfPool* p, ArtfJobFn fn, void* user, uint32_t count);
+
+/* A task: fn(user) on a thread of its own, for what the caller must not wait for (Vulkan's pipelines). Done says
+ * whether it has returned; join waits for that, and frees the task. */
+typedef struct ArtfTask ArtfTask;
+ArtfTask* artfTaskStart(void (*fn)(void* user), void* user);
+bool artfTaskDone(ArtfTask* t);
+void artfTaskJoin(ArtfTask* t);
 
 #endif

@@ -50,9 +50,14 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* options);
  * refuses. */
 extern int artfVulkanSubmitsLeft;
 extern bool artfVulkanRefuseSwapchain;
+/* For tests: every new variant of the scene's pixel shaders is made before the frame that asks for it, as on the
+ * first frame, never on a thread of its own while frames go on without it. */
+extern bool artfVulkanShadersWait;
 
 /* NULL when Vulkan cannot run here. */
 ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* options);
+/* artfRendererWarm's */
+void artfVulkanWarm(ArtfRenderer* r);
 /* NULL when Metal 3 is not here. */
 ArtfRenderer* artfMetalNew(const ArtfRendererOptions* options);
 
