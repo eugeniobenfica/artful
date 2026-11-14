@@ -30,7 +30,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   shader for plain materials reads what materials of the program's own make of alpha only when shadows from rays are
   on; then it holds their code too. Metal has neither shadows nor reflections from rays: with them asked, the sun and
   the sixteen lights cast nothing there, and reflections are marched.
-- Reflections from rays (`ArtfPostDesc.tracedReflections`) light what they find simply: its color under the sun and
+- Reflections from rays (`ArtfPostDesc.screen.tracedReflections`) light what they find simply: its color under the sun and
   the sixteen lights with no shadows, its own light, and light from all around (the picture, or the sky's two colors:
   not probes, not fog); what is less than half there is gone through. One ray for each 2 x 2 pixels, as the march.
 - Bones run on the GPU when Vulkan draws; targets, and bones on the CPU or Metal, go per instance on the CPU. What

@@ -3156,7 +3156,7 @@ static void lightThrough(const Tracer* t, SpvId from, SpvId to, SpvId limit) {
     loopClose(s, &steps);
 }
 
-/* ---- rays while drawing (ArtfShadowDesc.traced, ArtfPostDesc.tracedReflections): trace.c's artfTraced* ----
+/* ---- rays while drawing (ArtfShadowDesc.traced, ArtfPostDesc.screen.tracedReflections): trace.c's artfTraced* ----
  *
  * A pixel shader or a pass after the frame follows rays through the same trees (or the hardware) as tracing, with
  * the same code: what it needs is declared here. */

@@ -67,7 +67,7 @@ uint32_t* artfShaderPostOcclusion(size_t* size);
 uint32_t* artfShaderPostOcclusionBlur(size_t* size);
 uint32_t* artfShaderPostReflection(size_t* size);
 uint32_t* artfShaderPostReflectionApply(size_t* size);
-/* Reflections from rays (ArtfPostDesc.tracedReflections), through the trees or, with hardware, the top level. */
+/* Reflections from rays (ArtfPostDesc.screen.tracedReflections), through the trees or, with hardware, the top level. */
 uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware);
 uint32_t* artfShaderPostFroxels(size_t* size);
 /* Fog that light goes through, over what is behind the scene (with the overlay's vertices). */

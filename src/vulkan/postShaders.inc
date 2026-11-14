@@ -412,7 +412,7 @@ POST_MAIN(artfShaderPostReflection)
     spvIfEnd(s, marching);
 POST_FINISH()
 
-/* ---- reflections from rays (ArtfPostDesc.tracedReflections): as reflectionRow's, with artfTracedReflection in place
+/* ---- reflections from rays (ArtfPostDesc.screen.tracedReflections): as reflectionRow's, with artfTracedReflection in place
  * of the march ---- */
 uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware) {
     Spv b, *s = &b;

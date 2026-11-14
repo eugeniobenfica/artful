@@ -527,41 +527,41 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--shadows") && i + 1 < argc) shadowSide = atoi(argv[++i]);
         else if (!strcmp(a, "--soft-shadows")) softShadows = true;
         else if (!strcmp(a, "--traced-shadows")) tracedShadows = true;
-        else if (!strcmp(a, "--traced-reflections")) post.tracedReflections = true;
+        else if (!strcmp(a, "--traced-reflections")) post.screen.tracedReflections = true;
         else if (!strcmp(a, "--sun-size") && i + 1 < argc) sunSize = (float)atof(argv[++i]);
         else if (!strcmp(a, "--environment") && i + 1 < argc) environment = argv[++i];
         else if (!strcmp(a, "--environment-light") && i + 1 < argc) environmentLight = (float)atof(argv[++i]);
         else if (!strcmp(a, "--show-environment")) showEnvironment = true;
         else if (!strcmp(a, "--hdr")) o.hdr = true;
-        else if (!strcmp(a, "--glow") && i + 1 < argc) post.bloom = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--glow-threshold") && i + 1 < argc) post.bloomThreshold = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--occlusion") && i + 1 < argc) post.occlusion = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--occlusion-radius") && i + 1 < argc) post.occlusionRadius = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--reflections") && i + 1 < argc) post.reflections = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--volumetric") && i + 1 < argc) post.volumetric = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--scattering") && i + 1 < argc) post.scattering = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--temporal")) post.temporal = true;
+        else if (!strcmp(a, "--glow") && i + 1 < argc) post.lens.bloom = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--glow-threshold") && i + 1 < argc) post.lens.bloomThreshold = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--occlusion") && i + 1 < argc) post.screen.occlusion = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--occlusion-radius") && i + 1 < argc) post.screen.occlusionRadius = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--reflections") && i + 1 < argc) post.screen.reflections = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--volumetric") && i + 1 < argc) post.screen.volumetric = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--scattering") && i + 1 < argc) post.screen.scattering = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--temporal")) post.screen.temporal = true;
         else if (!strcmp(a, "--render-scale") && i + 1 < argc) o.renderScale = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--sharpen") && i + 1 < argc) post.sharpen = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--sharpen") && i + 1 < argc) post.screen.sharpen = (float)atof(argv[++i]);
         else if (!strcmp(a, "--tone") && i + 1 < argc) {
             const char* curve = argv[++i];
-            post.toneMap = !strcmp(curve, "neutral") ? ARTF_TONE_NEUTRAL : !strcmp(curve, "reinhard") ? ARTF_TONE_REINHARD : !strcmp(curve, "none") ? ARTF_TONE_NONE : ARTF_TONE_ACES;
+            post.look.toneMap = !strcmp(curve, "neutral") ? ARTF_TONE_NEUTRAL : !strcmp(curve, "reinhard") ? ARTF_TONE_REINHARD : !strcmp(curve, "none") ? ARTF_TONE_NONE : ARTF_TONE_ACES;
         }
-        else if (!strcmp(a, "--auto-exposure")) post.autoExposure = true;
-        else if (!strcmp(a, "--temperature") && i + 1 < argc) post.temperature = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--tint") && i + 1 < argc) post.tint = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--saturation") && i + 1 < argc) post.saturation = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--contrast") && i + 1 < argc) post.contrast = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--vignette") && i + 1 < argc) post.vignette = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--chromatic") && i + 1 < argc) post.chromatic = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--motion-blur") && i + 1 < argc) post.motionBlur = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--auto-exposure")) post.exposure.automatic = true;
+        else if (!strcmp(a, "--temperature") && i + 1 < argc) post.look.temperature = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--tint") && i + 1 < argc) post.look.tint = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--saturation") && i + 1 < argc) post.look.saturation = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--contrast") && i + 1 < argc) post.look.contrast = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--vignette") && i + 1 < argc) post.lens.vignette = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--chromatic") && i + 1 < argc) post.lens.chromatic = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--motion-blur") && i + 1 < argc) post.lens.motionBlur = (float)atof(argv[++i]);
         else if (!strcmp(a, "--indirect")) indirect = true;
         else if (!strcmp(a, "--through-walls")) throughWalls = true;
         else if (!strcmp(a, "--hlod")) hlodCell = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 64.f;
         else if (!strcmp(a, "--particles") && i + 1 < argc) particles = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(a, "--stream-meshes")) streamBudget = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 0.f;
-        else if (!strcmp(a, "--focus") && i + 1 < argc) post.focus = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--aperture") && i + 1 < argc) post.aperture = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--focus") && i + 1 < argc) post.lens.focus = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--aperture") && i + 1 < argc) post.lens.aperture = (float)atof(argv[++i]);
         else if (!strcmp(a, "--fog") && i + 4 < argc) { for (int k = 0; k < 4; ++k) fog[k] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--scene-exposure") && i + 1 < argc) sceneExposure = (float)atof(argv[++i]);
         else if (!strcmp(a, "--sky")) skyHaze = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 0.f;
@@ -574,22 +574,22 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--cloud-shadow")) skyMore.clouds.shadow = true;
         else if (!strcmp(a, "--cloud-density") && i + 1 < argc) skyMore.clouds.density = (float)atof(argv[++i]);
         else if (!strcmp(a, "--wind") && i + 3 < argc) { skyMore.clouds.wind.x = (float)atof(argv[++i]); skyMore.clouds.wind.y = (float)atof(argv[++i]); skyMore.clouds.wind.z = (float)atof(argv[++i]); }
-        else if (!strcmp(a, "--exposure-low") && i + 1 < argc) post.exposureLow = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--exposure-high") && i + 1 < argc) post.exposureHigh = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--exposure-speed") && i + 1 < argc) post.exposureSpeed = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--exposure-speed-down") && i + 1 < argc) post.exposureSpeedDown = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--exposure-low") && i + 1 < argc) post.exposure.low = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--exposure-high") && i + 1 < argc) post.exposure.high = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--exposure-speed") && i + 1 < argc) post.exposure.speed = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--exposure-speed-down") && i + 1 < argc) post.exposure.speedDown = (float)atof(argv[++i]);
         else if ((!strcmp(a, "--lift") || !strcmp(a, "--gamma") || !strcmp(a, "--gain") || !strcmp(a, "--grade-shadows") || !strcmp(a, "--grade-midtones") ||
                   !strcmp(a, "--grade-highlights")) && i + 3 < argc) {
-            ArtfVec3* to = !strcmp(a, "--lift") ? &post.lift : !strcmp(a, "--gamma") ? &post.gamma : !strcmp(a, "--gain") ? &post.gain
-                         : !strcmp(a, "--grade-shadows") ? &post.shadows : !strcmp(a, "--grade-midtones") ? &post.midtones : &post.highlights;
+            ArtfVec3* to = !strcmp(a, "--lift") ? &post.look.lift : !strcmp(a, "--gamma") ? &post.look.gamma : !strcmp(a, "--gain") ? &post.look.gain
+                         : !strcmp(a, "--grade-shadows") ? &post.look.shadows : !strcmp(a, "--grade-midtones") ? &post.look.midtones : &post.look.highlights;
             to->x = (float)atof(argv[++i]);
             to->y = (float)atof(argv[++i]);
             to->z = (float)atof(argv[++i]);
         }
         else if (!strcmp(a, "--lut") && i + 1 < argc) lutFile = argv[++i];
-        else if (!strcmp(a, "--lut-amount") && i + 1 < argc) post.lutAmount = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--grain") && i + 1 < argc) post.grain = (float)atof(argv[++i]);
-        else if (!strcmp(a, "--flare") && i + 1 < argc) post.flare = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--lut-amount") && i + 1 < argc) post.look.lutAmount = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--grain") && i + 1 < argc) post.lens.grain = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--flare") && i + 1 < argc) post.lens.flare = (float)atof(argv[++i]);
         else if (!strcmp(a, "--sun") && i + 3 < argc) { for (int k = 0; k < 3; ++k) sunAt[k] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--fog-height") && i + 2 < argc) { fogHeight[0] = (float)atof(argv[++i]); fogHeight[1] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--model") && i + 1 < argc) model = argv[++i];
@@ -655,10 +655,10 @@ int main(int argc, char** argv) {
         char* bytes = malloc((size_t)length + 1);
         const size_t got = fread(bytes, 1, (size_t)length, file);
         fclose(file);
-        lut = artfLutDecodeCube(bytes, got, &post.lutSize);
+        lut = artfLutDecodeCube(bytes, got, &post.look.lutSize);
         free(bytes);
         if (!lut) { fprintf(stderr, "%s is not a .cube file\n", lutFile); return 1; }
-        post.lut = lut;
+        post.look.lut = lut;
     }
     artfSceneSetPost(s, &post);
     artfFree(lut);
@@ -777,7 +777,7 @@ int main(int argc, char** argv) {
     }
     if (!artfRendererDraw(r, s)) { fputs("the device was lost\n", stderr); return 1; }
     /* (temporal antialiasing gathers over frames: a still picture gets sixteen) */
-    for (int k = 1; k < 16 && (((post.temporal || post.autoExposure) && o.hdr) || indirect); ++k) artfRendererDraw(r, s);
+    for (int k = 1; k < 16 && (((post.screen.temporal || post.exposure.automatic) && o.hdr) || indirect); ++k) artfRendererDraw(r, s);
     if (trace.mode && !frames) {
         const double start = artfNowMs();
         for (int i = 1; i < traceSamples; ++i)

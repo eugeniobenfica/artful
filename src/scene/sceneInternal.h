@@ -299,7 +299,7 @@ typedef struct ArtfFrameData {
     /* How many materials there are: on the GPU, where their ArtfMaterialMore begin, in rows. Fog by height: where it
      * is as dense as artfSceneSetFog says, and how fast it thins above that (0: it does not). */
     uint32_t materialCount;
-    float fogBase, fogFalloff, motionBlur; /* motionBlur: ArtfPostDesc's, the share of a frame */
+    float fogBase, fogFalloff, motionBlur; /* motionBlur: ArtfPostDesc.lens's, the share of a frame */
     float lightSizes[ARTF_FRAME_LIGHTS]; /* of each light the frame holds, the radius of its ball (artfLightSetSize) */
     /* What is too small is not drawn (artfSceneSetCullSize): a ball of radius r at distance d is, when r * cullScale < d.
      * 0: all of it is. */
@@ -325,7 +325,7 @@ typedef struct ArtfFrameData {
      * + 1 if it has one (0: none); where horizontal ones start. */
     float lightShapes[ARTF_FRAME_LIGHTS][4][4];
     /* The frame shown, when the scene is drawn smaller (ArtfRendererOptions.renderScale): its width and height (the
-     * scene's own when it is not), how much to sharpen it (ArtfPostDesc.sharpen), and the number of this frame, for
+     * scene's own when it is not), how much to sharpen it (ArtfPostDesc.screen.sharpen), and the number of this frame, for
      * patterns that turn from one frame to the next (soft shadows, with temporal antialiasing). */
     float output[4];
 } ArtfFrameData;
@@ -807,7 +807,7 @@ struct ArtfScene {
     float environmentLight;     /* what it is multiplied by */
     bool environmentShown;      /* behind the scene */
     uint64_t environmentVersion;
-    float* lut;                 /* ArtfPostDesc.lut's copy, lutSize^3 RGB, or NULL */
+    float* lut;                 /* ArtfPostDesc.look.lut's copy, lutSize^3 RGB, or NULL */
     size_t lutFloats;
     uint64_t lutVersion;        /* a new one */
     struct ArtfScale* scale;    /* scale.c's: merged meshes, levels of what bends, meshes' residency; NULL: none of it */
@@ -964,7 +964,7 @@ uint64_t artfSceneTraceKey(const ArtfScene* s, const ArtfFrameData* frame);
 /* Adds one sample of a pixel to out: the light of what was covered, and 1 in out[3] if it was. */
 void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTraceFrame* c, uint32_t x, uint32_t y, uint32_t sample, float* out, ArtfTraceGuide* guide);
 
-/* Rays while drawing (ArtfShadowDesc.traced, ArtfPostDesc.tracedReflections): ArtfFrameData.traced holds these. The
+/* Rays while drawing (ArtfShadowDesc.traced, ArtfPostDesc.screen.tracedReflections): ArtfFrameData.traced holds these. The
  * trees are tracing's, kept up to date by artfSceneTraceSync, without particles. */
 enum { ARTF_TRACED_SHADOWS = 1, ARTF_TRACED_REFLECTIONS = 2 };
 #define ARTF_TRACED_SUN (1u << 16) /* in tracedCasts: the sun casts; bits 0 to 15, the frame's lights */

@@ -674,7 +674,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         memcpy(s->previous, now, sizeof now);
         s->hasPrevious = true;
         f->data.output[3] = (float)s->postFrames;
-        if (scene->post.temporal && !view) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
+        if (scene->post.screen.temporal && !view) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
         f->data.grade2[2][3] = (float)(s->grainFrames++ & 0xFFFFFu);
         f->data.output[0] = (float)s->frameW;
         f->data.output[1] = (float)s->frameH;
@@ -682,7 +682,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
          * view of it */
         f->motion = NULL;
         f->motionBack = NULL;
-        if (scene->post.temporal || scene->post.motionBlur > 0 || view == ARTF_VIEW_MOTION) {
+        if (scene->post.screen.temporal || scene->post.lens.motionBlur > 0 || view == ARTF_VIEW_MOTION) {
             artfMotionStep(&s->motion, scene, true);
             /* (nothing moved: the view alone says where each pixel was) */
             f->motion = s->motion.moving ? s->motion.motion : NULL;

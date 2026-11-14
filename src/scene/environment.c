@@ -293,7 +293,7 @@ float* artfImageDecodeHdr(const void* data, size_t size, int* width, int* height
     return out;
 }
 
-/* ---- a .cube file: a look-up table of colors for ArtfPostDesc.lut ---- */
+/* ---- a .cube file: a look-up table of colors for ArtfPostDesc.look.lut ---- */
 
 float* artfLutDecodeCube(const void* data, size_t size, int* lutSize) {
     const char* p = data;

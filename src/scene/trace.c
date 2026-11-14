@@ -1106,7 +1106,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
     out[3] += covered ? 1.f : 0.f;
 }
 
-/* ---- rays while drawing: shadows and reflections (ArtfShadowDesc.traced, ArtfPostDesc.tracedReflections) ----
+/* ---- rays while drawing: shadows and reflections (ArtfShadowDesc.traced, ArtfPostDesc.screen.tracedReflections) ----
  *
  * The rasterizer's pixel asks the trees what is toward a light, or along its mirror: the same arithmetic as the GPU's
  * (tracedShadowSpv and artfShaderPostReflectionTraced in shaders.c), so that both draw the same. */

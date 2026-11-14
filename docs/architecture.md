@@ -679,7 +679,7 @@ sixteen; with temporal antialiasing the four turn each frame, and the history mi
 this is made only for a scene that asks (`ARTF_SHADER_TRACED`, with `ARTF_SHADER_RAY_QUERY` for the hardware); the
 sixteen take no maps, and the sun keeps its maps only for fog that light goes through.
 
-**Reflections** (`ArtfPostDesc.tracedReflections`): in place of the march, at the same half resolution, a ray from the
+**Reflections** (`ArtfPostDesc.screen.tracedReflections`): in place of the march, at the same half resolution, a ray from the
 surface the frame shows, along its mirror, strayed by a point of the same ball times the square of its roughness, finds
 what is there, off the frame or behind something too. What is mostly not there (alpha under one half) is gone through.
 What it finds is lit simply, as Unreal's reflections are: its color, and what it reflects head on, under light from all

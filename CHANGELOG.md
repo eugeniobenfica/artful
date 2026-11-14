@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **`ArtfPostDesc` by purpose** (breaks the API): its 39 fields are now in four parts, in the order they are done:
+  `screen` (`ArtfScreenDesc`: what is worked out over the frame's pixels), `lens` (`ArtfLensDesc`: what a camera's
+  glass and shutter do), `exposure` (`ArtfExposureDesc`: auto exposure) and `look` (`ArtfLookDesc`: the tone curve
+  and grading). 0 is still off, or the default, everywhere; `{.lens.bloom = .05f, .look.toneMap = ARTF_TONE_NEUTRAL}`
+  or `{.lens = {.bloom = .05f, .focus = 6}}` initialize it. `artfSceneSetExposure` stays as it was: the exposure
+  without auto exposure, and its compensation with it. The same settings give the same bytes as before, on both
+  backends. What moved:
+
+  | Was | Is |
+  | --- | --- |
+  | `occlusion`, `occlusionRadius` | `screen.occlusion`, `screen.occlusionRadius` |
+  | `reflections`, `tracedReflections` | `screen.reflections`, `screen.tracedReflections` |
+  | `volumetric`, `scattering` | `screen.volumetric`, `screen.scattering` |
+  | `temporal`, `sharpen` | `screen.temporal`, `screen.sharpen` |
+  | `bloom`, `bloomThreshold`, `flare` | `lens.bloom`, `lens.bloomThreshold`, `lens.flare` |
+  | `focus`, `aperture`, `motionBlur` | `lens.focus`, `lens.aperture`, `lens.motionBlur` |
+  | `vignette`, `chromatic`, `grain` | `lens.vignette`, `lens.chromatic`, `lens.grain` |
+  | `autoExposure` | `exposure.automatic` |
+  | `exposureKey`, `exposureSpeed`, `exposureSpeedDown` | `exposure.key`, `exposure.speed`, `exposure.speedDown` |
+  | `exposureMin`, `exposureMax` | `exposure.least`, `exposure.most` |
+  | `exposureLow`, `exposureHigh` | `exposure.low`, `exposure.high` |
+  | `toneMap` | `look.toneMap` |
+  | `temperature`, `tint`, `saturation`, `contrast` | `look.temperature`, `look.tint`, `look.saturation`, `look.contrast` |
+  | `lift`, `gamma`, `gain` | `look.lift`, `look.gamma`, `look.gain` |
+  | `shadows`, `midtones`, `highlights` | `look.shadows`, `look.midtones`, `look.highlights` |
+  | `lut`, `lutSize`, `lutAmount` | `look.lut`, `look.lutSize`, `look.lutAmount` |
+- **The tests by area**: `tests/tests.c` was one file of 7,700 lines; it is now a file for each area under `tests/`
+  (`core.c`, `backends.c`, `layers.c`, `materials.c`, `files.c`, `streaming.c`, `shadows.c`, `post.c`, `tracing.c`,
+  `sky.c`, `motion.c`, `scale.c`, `views.c`, `blackhole.c`), with what they share in `tests/tests.h` and `common.c`;
+  still one program, `artful-tests`, running all of them in the same order with the same 184,320 checks. Each test
+  has a name, its area first (`shadows/softShadows`, `post/look/vulkan`): `artful-tests word...` runs only the tests
+  whose names hold one of the words, and `artful-tests --list` names them all. The tests build and run without
+  Vulkan (`-DARTFUL_VULKAN=OFF`, now in CI): what sets Vulkan's own switches is left out, and the GPU's frames that
+  are compared start as zeros, so that a GPU that drew nothing is not compared.
 - **The black hole is an extension** (breaks the API): `artfSceneSetBlackHole`, `ArtfBlackHoleDesc`,
   `artfBlackHoleDefaults` and `artfBlackHoleOrbitSpeed` moved from `artful/scene.h` to `artful/blackhole.h`, in a
   library of its own, `artful-blackhole` (`artful::blackhole` once installed; `extensions/blackhole`, option
@@ -85,7 +119,7 @@
   the sun and the sixteen lights take their shadows from rays through tracing's trees, or the GPU's ray tracing
   hardware where it has some (ray queries in the pixel shader), in place of maps: exact, through what shows through as
   much as it is not there (`lightThrough`, the tracer's own), soft by the sun's size and the lights' with four rays a
-  pixel over a pattern of 2 x 2 pixels that turns each frame with temporal antialiasing. `ArtfPostDesc.tracedReflections`:
+  pixel over a pattern of 2 x 2 pixels that turns each frame with temporal antialiasing. `ArtfPostDesc.screen.tracedReflections`:
   a ray along each mirror in place of the march across the frame, so what is off the frame or behind something shows,
   lit simply (its color and what it reflects under light from all around, the sun and the sixteen lights, with no
   shadows, and its own light), straying with roughness. The same picture on both backends, and on a GPU without ray
@@ -137,7 +171,7 @@
   neighbours show. Without temporal antialiasing it is read between pixels. Depth of field, motion blur, bloom, the
   look, the overlay and what is read back are the frame's size. Both backends, the same picture (0.07% of pixels
   apart). At 1920 x 1080 with temporal antialiasing, occlusion and reflections: `city` 2.9 ms on the GPU (Radeon RX
-  9060 XT) at the whole size, 2.0 at .75, 1.5 at .5; on the CPU (16 threads) 70, 50 and 30 ms. `ArtfPostDesc.sharpen`
+  9060 XT) at the whole size, 2.0 at .75, 1.5 at .5; on the CPU (16 threads) 70, 50 and 30 ms. `ArtfPostDesc.screen.sharpen`
   brings edges back after it, or after temporal antialiasing, within each pixel's neighbours.
 - **What bones and targets bend is followed by its vertices**: on the CPU each instance that bends keeps where its
   vertices were (`ArtfMotion`), and its pixels where they were a frame ago; on the GPU what the vertex buffer held is
@@ -167,25 +201,25 @@
   `city` (40,201 instances) traced at 1280 x 720 went from 7.1 ms a frame to 1.1. Elsewhere, and on the CPU, it is as
   without (`ARTFUL_NO_RAY_QUERY`: as a device without).
 - **The look**, in `ArtfPostDesc`, last before the frame is bytes, on both backends: **auto exposure**
-  (`autoExposure`), the frame metered on 32 x 18 points in stops (log2 by bits and a polynomial, the same everywhere),
+  (`exposure.automatic`), the frame metered on 32 x 18 points in stops (log2 by bits and a polynomial, the same everywhere),
   the middle weighed twice the corners, brought to a key at a speed, within bounds, in a pass of its own on the GPU;
-  a choice of **tone curve** (`toneMap`: ACES's fit as before, Khronos's PBR Neutral, Reinhard's, none); **white
-  balance** (`temperature`, `tint`), **saturation**, **contrast**, a **vignette** and **chromatic aberration**. With
+  a choice of **tone curve** (`look.toneMap`: ACES's fit as before, Khronos's PBR Neutral, Reinhard's, none); **white
+  balance** (`look.temperature`, `look.tint`), **saturation**, **contrast**, a **vignette** and **chromatic aberration**. With
   none of it asked, a frame is the same bytes as before.
 - **More of the look**, in `ArtfPostDesc`, on both backends with the same arithmetic: auto exposure by a **histogram**
-  (`exposureLow`, `exposureHigh`: as Unreal's, the darkest and brightest shares left out; 64 x 36 points into 64 bins
+  (`exposure.low`, `exposure.high`: as Unreal's, the darkest and brightest shares left out; 64 x 36 points into 64 bins
   of whole numbers, which the GPU's 64 invocations add to at once and the CPU in turn, to the same sums), with a speed
-  of its own **down** (`exposureSpeedDown`); **lift, gamma and gain**, and **color wheels** for the shadows, midtones and
-  highlights; a **3D look-up table** (`lut`, `lutSize` from 2 to 65, `lutAmount`; `artfLutDecodeCube` reads .cube
+  of its own **down** (`exposure.speedDown`); **lift, gamma and gain**, and **color wheels** for the shadows, midtones and
+  highlights; a **3D look-up table** (`look.lut`, `look.lutSize` from 2 to 65, `look.lutAmount`; `artfLutDecodeCube` reads .cube
   files), between its points, after the tone curve, in bloom's buffer past auto exposure's state on the GPU; **film
-  grain** (`grain`), a hash of the pixel and the frame's number; and a **lens flare** (`flare`): what blooms, again as
+  grain** (`lens.grain`), a hash of the pixel and the frame's number; and a **lens flare** (`lens.flare`): what blooms, again as
   three ghosts mirrored across the middle. A small bright lamp that moves the mean's exposure by 3.7 of 255 moves the
   histogram's by none; the GPU and the CPU are 0.00% of pixels apart with all of it. With none of it asked, a frame is
   the same bytes as before (checked against 0.4's build, both backends).
 - **Motion followed**: each renderer keeps how each instance moved since the frame before (`artfMotionStep`, by
   handle), and each pixel which instance it shows (on the GPU in the surface target, now two words a pixel). Temporal
   antialiasing follows a surface to where it was, so what moves no longer leaves a trail (a sphere going sideways
-  under it: 0.54 of 255 from it drawn still, on average); and **motion blur** (`ArtfPostDesc.motionBlur`, the share of
+  under it: 0.54 of 255 from it drawn still, on average); and **motion blur** (`ArtfPostDesc.lens.motionBlur`, the share of
   a frame the shutter is open) spreads it along the way it went, at most 32 pixels.
 - **Clear coat and sheen**: `ArtfMaterialDesc.clearcoat`, `clearcoatRoughness`, `sheen` and `sheenRoughness`, their
   textures (`clearcoatMap`, `clearcoatRoughnessMap`, `clearcoatNormalMap`, `sheenMap`, `sheenRoughnessMap`), and glTF's

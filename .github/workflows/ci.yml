@@ -34,6 +34,11 @@ jobs:
           ARTFUL_SINGLE_DRAW=1 build/artful-tests
           ARTFUL_FEATURES=+occlusion build/artful-tests
           ARTFUL_FEATURES=-lod,-cones build/artful-tests
+      - name: Without Vulkan (what needs it is left out)
+        run: |
+          cmake -S . -B build-novulkan -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DARTFUL_VULKAN=OFF
+          cmake --build build-novulkan
+          build-novulkan/artful-tests
       - name: The shaders are valid SPIR-V
         run: |
           mkdir shaders && build/artful-shaders shaders

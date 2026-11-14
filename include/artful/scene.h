@@ -465,7 +465,7 @@ void artfSceneSetExposure(ArtfScene* s, float exposure);
 /* Air that is not clear: a surface fades into color with distance, by about e^(-density x distance). The
  * background is not touched: set it to the same color. density 0: none. */
 void artfSceneSetFog(ArtfScene* s, ArtfVec3 color, float density);
-/* Fog that thins with height, for fog that light goes through (ArtfPostDesc.volumetric): its density is
+/* Fog that thins with height, for fog that light goes through (ArtfPostDesc.screen.volumetric): its density is
  * artfSceneSetFog's at height base, and falls by e every 1 / falloff above it (and grows below, up to 16 times).
  * falloff 0: the same at every height. */
 void artfSceneSetFogHeight(ArtfScene* s, float base, float falloff);
@@ -616,49 +616,68 @@ typedef enum ArtfToneMap {
     ARTF_TONE_REINHARD = 2, /* x / (1 + x), each channel */
     ARTF_TONE_NONE = 3      /* cut at 1 */
 } ArtfToneMap;
-typedef struct ArtfPostDesc {
-    float bloom;            /* light past the threshold spreads around it: .05 is a camera's lens */
-    float bloomThreshold;   /* what is bright enough to spread, after exposure; 0: 1 */
+/* What is worked out over the frame's pixels, before the lens: */
+typedef struct ArtfScreenDesc {
     float occlusion;        /* ambient occlusion: how much light from all around corners and creases lose, 0 to 1 */
     float occlusionRadius;  /* how far it looks; 0: .5 */
     float reflections;      /* screen-space reflections: how much of what the frame shows smooth surfaces mirror, 0 to 1 */
+    /* Reflections from rays in place of the march across the frame, as Unreal's ray traced reflections: what smooth
+     * surfaces mirror is what a ray finds in the scene, off the frame too, lit simply (its color under the sun and
+     * the sixteen lights with no shadows, its own light, and light from all around); rougher, the ray strays as far.
+     * It takes `reflections` as how much. */
+    bool tracedReflections;
     float volumetric;       /* fog that light goes through, lit by the sun through its shadows: how much, 0 to 1. It takes
                              * artfSceneSetFog's color and density, and replaces that fog */
     float scattering;       /* where that fog sends light: 0 all ways, toward .9 mostly onward (Henyey-Greenstein's g) */
     bool temporal;          /* temporal antialiasing: the eye moves within a pixel from frame to frame, and frames are
                              * mixed, as far as each pixel's history can be followed */
+    /* After temporal antialiasing or upscaling (ArtfRendererOptions.renderScale): edges brought back, 0 to 1, each
+     * pixel away from its neighbours, never past them. */
+    float sharpen;
+} ArtfScreenDesc;
+
+/* What a camera's glass and shutter do: */
+typedef struct ArtfLensDesc {
+    float bloom;            /* light past the threshold spreads around it: .05 is a camera's lens */
+    float bloomThreshold;   /* what is bright enough to spread, after exposure; 0: 1 */
+    float flare;            /* lens flare: what blooms, again as ghosts mirrored across the middle; with bloom */
     float focus;            /* depth of field: the distance in focus */
     float aperture;         /* how much what is out of focus spreads, in pixels, for something twice as far: 0 none */
-
-    /* The look: what is done to the light last, before it is bytes. */
-    ArtfToneMap toneMap;    /* the curve from light to what a screen shows, when there is an exposure */
-    bool autoExposure;      /* the exposure follows what the frame shows: artfSceneSetExposure's (or 1) then
-                             * multiplies it, as a camera's compensation does. The frame is metered on a grid of
-                             * 32 x 18 points, the middle weighed twice the corners, and its mean in stops is aimed at */
-    float exposureKey;      /* the grey the mean is brought to; 0: .18 */
-    float exposureSpeed;    /* the share of the way there taken each frame, in stops; 0: .05; 1: at once */
-    float exposureMin;      /* the least auto exposure multiplies by; 0: 1 / 64 */
-    float exposureMax;      /* the most; 0: 64 */
-    float temperature;      /* white balance: -1 cool (bluer) to 1 warm (redder); 0 as it is */
-    float tint;             /* -1 toward green to 1 toward magenta; 0 as it is */
-    float saturation;       /* -1 grey, 0 as it is, 1 twice as far from grey */
-    float contrast;         /* around the middle of what is shown: -1 flat, 0 as it is, 1 twice as steep */
-    float vignette;         /* light falls toward the corners: at 1 a corner keeps a quarter */
-    float chromatic;        /* red and blue part toward the edges, as a cheap lens's: how far, in pixels, at a corner */
     /* Motion blur: what moved since the frame before is spread along the way it went, the eye's own motion too, as a
      * film's shutter does. This is the share of a frame the shutter is open: .5 is a film camera's. Temporal
      * antialiasing follows what moves by the same measure: instances, and what bones and targets bend, by its
      * vertices. What is still and in front stays sharp over what moves behind it (McGuire et al.'s reconstruction). */
     float motionBlur;
+    float vignette;         /* light falls toward the corners: at 1 a corner keeps a quarter */
+    float chromatic;        /* red and blue part toward the edges, as a cheap lens's: how far, in pixels, at a corner */
+    float grain;            /* film grain, new each frame, the same on both backends: 0 to 1 (.3 is plain to see) */
+} ArtfLensDesc;
 
-    /* Auto exposure by a histogram, as Unreal's: with either of these, the frame is metered on 64 x 36 points into a
-     * histogram of stops, the darkest and the brightest shares are left out, and the mean of what is left is aimed
-     * at; so a small bright light, or a black corner, does not move the exposure. 0 and 0: the mean of all. */
-    float exposureLow;      /* the share of the darkest left out, 0 to 1 (Unreal's is .1) */
-    float exposureHigh;     /* the share of the brightest left out (Unreal's is .1) */
-    float exposureSpeedDown;/* the share of the way taken each frame when the exposure falls (the frame got brighter):
-                             * eyes go dark fast and light slowly; 0: exposureSpeed */
+/* Auto exposure: the exposure follows what the frame shows, and artfSceneSetExposure's (or 1) then multiplies it, as
+ * a camera's compensation does. Without automatic, the exposure is artfSceneSetExposure's alone. */
+typedef struct ArtfExposureDesc {
+    bool automatic;         /* the frame is metered on a grid of 32 x 18 points, the middle weighed twice the corners,
+                             * and its mean in stops is aimed at */
+    float key;              /* the grey the mean is brought to; 0: .18 */
+    float speed;            /* the share of the way there taken each frame, in stops; 0: .05; 1: at once */
+    float speedDown;        /* the share taken each frame when the exposure falls (the frame got brighter): eyes go
+                             * dark fast and light slowly; 0: speed */
+    float least;            /* the least it multiplies by; 0: 1 / 64 */
+    float most;             /* the most; 0: 64 */
+    /* By a histogram, as Unreal's: with either of these, the frame is metered on 64 x 36 points into a histogram of
+     * stops, the darkest and the brightest shares are left out, and the mean of what is left is aimed at; so a small
+     * bright light, or a black corner, does not move the exposure. 0 and 0: the mean of all. */
+    float low;              /* the share of the darkest left out, 0 to 1 (Unreal's is .1) */
+    float high;             /* the share of the brightest left out (Unreal's is .1) */
+} ArtfExposureDesc;
 
+/* The look: what is done to the light last, before it is bytes. */
+typedef struct ArtfLookDesc {
+    ArtfToneMap toneMap;    /* the curve from light to what a screen shows, when there is an exposure */
+    float temperature;      /* white balance: -1 cool (bluer) to 1 warm (redder); 0 as it is */
+    float tint;             /* -1 toward green to 1 toward magenta; 0 as it is */
+    float saturation;       /* -1 grey, 0 as it is, 1 twice as far from grey */
+    float contrast;         /* around the middle of what is shown: -1 flat, 0 as it is, 1 twice as steep */
     /* Grading, in what a screen shows (after the tone curve and contrast), each channel from 0 to 1: */
     ArtfVec3 lift;          /* added to the dark, nothing to white: out = gain (in + lift (1 - in)); 0: none */
     ArtfVec3 gamma;         /* then out^(1 / gamma): above 1 the middle is lighter; 0, 0, 0: 1, 1, 1 */
@@ -672,20 +691,18 @@ typedef struct ArtfPostDesc {
     const float* lut;
     int lutSize;
     float lutAmount;        /* how much of it: 0: all */
-    float grain;            /* film grain, new each frame, the same on both backends: 0 to 1 (.3 is plain to see) */
-    float flare;            /* lens flare: what blooms, again as ghosts mirrored across the middle; with bloom */
-    /* Reflections from rays in place of the march across the frame, as Unreal's ray traced reflections: what smooth
-     * surfaces mirror is what a ray finds in the scene, off the frame too, lit simply (its color under the sun and
-     * the sixteen lights with no shadows, its own light, and light from all around); rougher, the ray strays as far.
-     * It takes `reflections` as how much. */
-    bool tracedReflections;
-    /* After temporal antialiasing or upscaling (ArtfRendererOptions.renderScale): edges brought back, 0 to 1, each
-     * pixel away from its neighbours, never past them. */
-    float sharpen;
+} ArtfLookDesc;
+
+/* All of it, by purpose, in the order it is done: {.lens.bloom = .05f, .look.toneMap = ARTF_TONE_NEUTRAL}. */
+typedef struct ArtfPostDesc {
+    ArtfScreenDesc screen;
+    ArtfLensDesc lens;
+    ArtfExposureDesc exposure;
+    ArtfLookDesc look;
 } ArtfPostDesc;
 
 /* Decodes a .cube file (Adobe's and Resolve's 3D look-up tables) into lutSize^3 RGB triples, red the fastest, for
- * ArtfPostDesc.lut. The caller owns them (artfFree). NULL: it is not one, or it is damaged. */
+ * ArtfPostDesc.look.lut. The caller owns them (artfFree). NULL: it is not one, or it is damaged. */
 float* artfLutDecodeCube(const void* data, size_t size, int* lutSize);
 
 /* NULL: none. */

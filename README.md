@@ -132,8 +132,8 @@ cores. `artfSetLog` says what a file holds that was left out.
 
 ```c
 ArtfRendererOptions options = {.width = 1920, .height = 1080, .hdr = true};   /* the frame in floats */
-ArtfPostDesc post = {.bloom = .05f, .occlusion = .8f, .reflections = 1, .temporal = true,
-                     .volumetric = .5f, .scattering = .7f, .focus = 6, .aperture = 8};
+ArtfPostDesc post = {.screen = {.occlusion = .8f, .reflections = 1, .temporal = true, .volumetric = .5f, .scattering = .7f},
+                     .lens = {.bloom = .05f, .focus = 6, .aperture = 8}};
 artfSceneSetPost(scene, &post);
 artfSceneSetExposure(scene, 1);
 ```
@@ -221,7 +221,7 @@ artfLightSetShadow(scene, lamp, true);             /* a spot takes one map, a po
 The sixteen first lights cast shadows when asked. Past them, the 32 that matter most each frame, near the eye and
 wide, get smaller maps of their own. With `.traced = true` the sun and the sixteen take theirs from rays, as Unreal's
 ray traced shadows: exact, as soft as their light is wide, through glass as much as it lets light through, and through
-the GPU's ray tracing hardware where it has some (`--traced-shadows`). `ArtfPostDesc.tracedReflections` does the same
+the GPU's ray tracing hardware where it has some (`--traced-shadows`). `ArtfPostDesc.screen.tracedReflections` does the same
 for reflections, which then show what is off the frame (`--traced-reflections`).
 
 ```bash
@@ -426,6 +426,8 @@ build/artful-tests
 build/artful-render --out picture.png
 ```
 
+`build/artful-tests shadows post/look` runs only the tests whose names hold one of the words, and `--list` names them.
+
 A C11 compiler and CMake 3.16: GCC or Clang (MinGW-w64 on Windows). Nothing else, not even the Vulkan
 SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful)`.
 
@@ -459,7 +461,7 @@ src/metal/        the GPU backend for Apple's systems, never run and built only 
                   which is generated
 extensions/       built apart, on the public API: blackhole/ (artful-blackhole, include/artful/blackhole.h)
 tools/            artful-render, artful-blackhole, artful-shaders, mkmetal.py; androidTest.sh for a device
-tests/            tests.c
+tests/            a file for each area (core.c, post.c, tracing.c...), what they share in tests.h, main.c runs them
 integrations/     bridges to other libraries, each a target of its own and named by nothing above
   cascade/        artful::cascade: include/artful/cascade.h, its example, its window tests, its APK
 ```

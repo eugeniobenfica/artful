@@ -137,9 +137,15 @@ endif()
 
 if(ARTFUL_BUILD_TESTS)
   enable_testing()
-  add_executable(artful-tests tests/tests.c)
+  # one program, a file for each area: artful-tests [word...] runs the tests whose names hold a word; --list names them
+  add_executable(artful-tests tests/main.c tests/common.c
+    tests/core.c tests/backends.c tests/layers.c tests/materials.c tests/files.c tests/streaming.c tests/shadows.c
+    tests/post.c tests/tracing.c tests/sky.c tests/motion.c tests/scale.c tests/views.c tests/blackhole.c)
   target_link_libraries(artful-tests PRIVATE artful artful-blackhole)
   target_include_directories(artful-tests PRIVATE src extensions/blackhole)
+  if(ARTFUL_VULKAN)
+    target_compile_definitions(artful-tests PRIVATE ARTFUL_VULKAN) # (without it, what sets Vulkan's own switches is left out)
+  endif()
   if(MINGW)
     target_link_options(artful-tests PRIVATE -static)
   endif()

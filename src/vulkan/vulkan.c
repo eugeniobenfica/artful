@@ -251,7 +251,7 @@ typedef struct Vulkan {
     GpuBuffer meshletIds;
     uint64_t meshletIdsKey;
     bool tracedShadows, tracedHardware; /* and shadows from rays (ArtfShadowDesc.traced), through the trees or the hardware */
-    VkPipeline reflectionTraced;        /* reflections from rays (ArtfPostDesc.tracedReflections): made when first asked */
+    VkPipeline reflectionTraced;        /* reflections from rays (ArtfPostDesc.screen.tracedReflections): made when first asked */
     bool reflectionTracedHardware;
     /* shadow maps: all in one atlas of depth */
     VkRenderPass shadowPass;
@@ -343,7 +343,7 @@ typedef struct Vulkan {
     VkDescriptorSet roleSets[27];
     uint8_t role[3];
     uint32_t postBloomSizes[6][3];  /* of each level: where it starts, its width, its height */
-    /* The look-up table (ArtfPostDesc.lut), in bloom's buffer past auto exposure's state: room for so many vec4s, which
+    /* The look-up table (ArtfPostDesc.look.lut), in bloom's buffer past auto exposure's state: room for so many vec4s, which
      * scene and version it holds, and a copy of it to make from the staging buffer at the next frame. */
     VkDeviceSize lutRoom;
     uint64_t lutScene, lutVersion;
@@ -3507,7 +3507,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     if (v->floats && !syncLut(v, scene)) return false;
     /* probes that come or go: the scene's pixel shaders, with or without what reads them */
     const bool probes = scene->indirect.on && scene->indirect.probes, walls = probes && !scene->indirect.desc.throughWalls;
-    const bool fogGrid = v->floats && scene->post.volumetric > 0 && scene->fogDensity > 0;
+    const bool fogGrid = v->floats && scene->post.screen.volumetric > 0 && scene->fogDensity > 0;
     const bool coats = scene->layeredMaterials > 0, softShadows = scene->shadows.soft && scene->shadows.resolution > 0;
     /* a view: shaders that have them, for as long as one is asked */
     const ArtfView view = v->base.view;
@@ -3515,7 +3515,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !view; /* (a view is of triangles) */
     /* shadows and reflections from rays while drawing: the trees, or the hardware */
     const bool tracedShadows = !tracing && scene->shadows.traced, tracedHardware = tracedShadows && v->rayQuery;
-    const bool tracedReflections = !tracing && v->floats && scene->post.tracedReflections && scene->post.reflections > 0;
+    const bool tracedReflections = !tracing && v->floats && scene->post.screen.tracedReflections && scene->post.screen.reflections > 0;
     const bool shapes = artfSceneShapedLights(scene);
     /* (what was being made, if it is done: see shaderJobStart) */
     if (v->shaderJob && (!v->shaderTask || artfTaskDone(v->shaderTask))) shaderJobEnd(v, scene, true);
@@ -3545,7 +3545,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     v->graphScene = scene->id;
     /* the surface's second word only where motion is followed: its passes and pipelines made again when that changes */
-    const bool wide = v->floats && (scene->post.temporal || scene->post.motionBlur > 0);
+    const bool wide = v->floats && (scene->post.screen.temporal || scene->post.lens.motionBlur > 0);
     if (wide != v->surfaceWide) {
         v->vkDeviceWaitIdle(v->device);
         v->surfaceWide = wide;
@@ -3610,11 +3610,11 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         if (v->hasPrevious) memcpy(frame.previous, v->previous, sizeof v->previous);
         memcpy(v->previous, now, sizeof now);
         v->hasPrevious = true;
-        if (scene->post.temporal && !view) artfFrameJitter(&frame, v->postFrames++, v->sceneWidth, v->sceneHeight);
+        if (scene->post.screen.temporal && !view) artfFrameJitter(&frame, v->postFrames++, v->sceneWidth, v->sceneHeight);
         frame.grade2[2][3] = (float)(v->grainFrames++ & 0xFFFFFu);
         if (tracing) frame.post[1][1] = 0; /* (fog that light goes through is drawn, not traced) */
         /* how each instance moved, after the instances in this slot's buffer: for temporal antialiasing and motion blur, and the view of it */
-        if (scene->post.temporal || scene->post.motionBlur > 0 || view == ARTF_VIEW_MOTION) {
+        if (scene->post.screen.temporal || scene->post.lens.motionBlur > 0 || view == ARTF_VIEW_MOTION) {
             artfMotionStep(&v->motion, scene, false);
             frame.moving = v->motion.moving ? 1.f : 0.f;
             if (s->motionStep != v->motion.version || s->motionCount != v->motion.count || s->instanceVersion != scene->instanceVersion) {

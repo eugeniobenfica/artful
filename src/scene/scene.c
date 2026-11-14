@@ -1202,21 +1202,21 @@ void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc) {
     if (desc) s->post = *desc;
     else memset(&s->post, 0, sizeof s->post);
     /* the look-up table, copied: a new version only when it is another */
-    const int side = s->post.lut && s->post.lutSize >= 2 && s->post.lutSize <= ARTF_LUT_MAX ? s->post.lutSize : 0;
+    const int side = s->post.look.lut && s->post.look.lutSize >= 2 && s->post.look.lutSize <= ARTF_LUT_MAX ? s->post.look.lutSize : 0;
     const size_t floats = (size_t)side * side * side * 3;
-    const bool same = side ? s->lut && s->lutFloats == floats && !memcmp(s->lut, s->post.lut, floats * 4) : !s->lut;
+    const bool same = side ? s->lut && s->lutFloats == floats && !memcmp(s->lut, s->post.look.lut, floats * 4) : !s->lut;
     if (!same) {
         artfFree(s->lut);
         s->lut = NULL;
         if (side) {
             s->lut = artfMalloc(floats * 4);
-            memcpy(s->lut, s->post.lut, floats * 4);
+            memcpy(s->lut, s->post.look.lut, floats * 4);
         }
         s->lutFloats = side ? floats : 0;
         ++s->lutVersion;
     }
-    s->post.lut = s->lut;
-    s->post.lutSize = side;
+    s->post.look.lut = s->lut;
+    s->post.look.lutSize = side;
 }
 void artfSceneSetShadows(ArtfScene* s, const ArtfShadowDesc* desc) {
     memset(&s->shadows, 0, sizeof s->shadows);
@@ -1309,7 +1309,7 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
 
     /* (shadows from rays: the sun keeps its maps only for fog that light goes through, and the frame's lights take none) */
     const bool traced = s->shadows.traced;
-    if ((s->sunColor.x > 0 || s->sunColor.y > 0 || s->sunColor.z > 0) && (!traced || s->post.volumetric > 0)) {
+    if ((s->sunColor.x > 0 || s->sunColor.y > 0 || s->sunColor.z > 0) && (!traced || s->post.screen.volumetric > 0)) {
         /* Each map holds a ball around a stretch of the view, and moves by whole texels, so that shadows do not
          * shimmer as the eye moves. Depth reaches all that can cast into it. */
         ArtfVec3 middle;
@@ -1518,34 +1518,34 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     const ArtfVec3 up = artfVec3Cross(right, forward);
     const float wide = 1.f / artfMaxf(proj.m[0], 1e-6f), tall = 1.f / artfMaxf(proj.m[5], 1e-6f);
     const ArtfPostDesc* p = &s->post;
-    const float post[3][4] = {{p->bloom, p->bloomThreshold > 0 ? p->bloomThreshold : 1.f, p->occlusion, p->occlusionRadius > 0 ? p->occlusionRadius : .5f},
-                              {p->reflections, p->volumetric, artfClampf(p->scattering, -.95f, .95f), p->temporal ? 1.f : 0.f},
-                              {p->focus, p->aperture, 0, 0}};
+    const float post[3][4] = {{p->lens.bloom, p->lens.bloomThreshold > 0 ? p->lens.bloomThreshold : 1.f, p->screen.occlusion, p->screen.occlusionRadius > 0 ? p->screen.occlusionRadius : .5f},
+                              {p->screen.reflections, p->screen.volumetric, artfClampf(p->screen.scattering, -.95f, .95f), p->screen.temporal ? 1.f : 0.f},
+                              {p->lens.focus, p->lens.aperture, 0, 0}};
     memcpy(out->post, post, sizeof post);
     {
-        const float key = p->exposureKey > 0 ? p->exposureKey : .18f;
-        const float least = p->exposureMin > 0 ? p->exposureMin : 1.f / 64.f, most = p->exposureMax > 0 ? p->exposureMax : 64.f;
-        const float grade[3][4] = {{(float)artfClampi((int)p->toneMap, 0, 3), p->autoExposure ? 1.f : 0.f, artfLog2Fast(key), p->exposureSpeed > 0 ? artfMinf(p->exposureSpeed, 1) : .05f},
-                                   {artfLog2Fast(least), artfLog2Fast(artfMaxf(most, least)), artfClampf(p->saturation, -1, 4), artfClampf(p->contrast, -1, 4)},
-                                   {artfClampf(p->temperature, -1, 1), artfClampf(p->tint, -1, 1), artfMaxf(p->vignette, 0), artfMaxf(p->chromatic, 0)}};
+        const float key = p->exposure.key > 0 ? p->exposure.key : .18f;
+        const float least = p->exposure.least > 0 ? p->exposure.least : 1.f / 64.f, most = p->exposure.most > 0 ? p->exposure.most : 64.f;
+        const float grade[3][4] = {{(float)artfClampi((int)p->look.toneMap, 0, 3), p->exposure.automatic ? 1.f : 0.f, artfLog2Fast(key), p->exposure.speed > 0 ? artfMinf(p->exposure.speed, 1) : .05f},
+                                   {artfLog2Fast(least), artfLog2Fast(artfMaxf(most, least)), artfClampf(p->look.saturation, -1, 4), artfClampf(p->look.contrast, -1, 4)},
+                                   {artfClampf(p->look.temperature, -1, 1), artfClampf(p->look.tint, -1, 1), artfMaxf(p->lens.vignette, 0), artfMaxf(p->lens.chromatic, 0)}};
         memcpy(out->grade, grade, sizeof grade);
         /* (0, 0, 0: as if not given) */
 #define OR_ONE(v) (artfVec3Dot(v, v) > 0 ? (v) : artfVec3(1, 1, 1))
-        const ArtfVec3 lift = p->lift, gamma = OR_ONE(p->gamma), gain = OR_ONE(p->gain);
-        const ArtfVec3 shadows = OR_ONE(p->shadows), midtones = OR_ONE(p->midtones), highlights = OR_ONE(p->highlights);
+        const ArtfVec3 lift = p->look.lift, gamma = OR_ONE(p->look.gamma), gain = OR_ONE(p->look.gain);
+        const ArtfVec3 shadows = OR_ONE(p->look.shadows), midtones = OR_ONE(p->look.midtones), highlights = OR_ONE(p->look.highlights);
 #undef OR_ONE
         const bool graded = artfVec3Dot(lift, lift) > 0 || gamma.x != 1 || gamma.y != 1 || gamma.z != 1 || gain.x != 1 || gain.y != 1 || gain.z != 1 ||
                             shadows.x != 1 || shadows.y != 1 || shadows.z != 1 || midtones.x != 1 || midtones.y != 1 || midtones.z != 1 ||
                             highlights.x != 1 || highlights.y != 1 || highlights.z != 1;
-        const bool histogram = p->exposureLow > 0 || p->exposureHigh > 0;
-        const float low = artfClampf(p->exposureLow, 0, .99f), high = artfClampf(p->exposureHigh, 0, .99f - low);
+        const bool histogram = p->exposure.low > 0 || p->exposure.high > 0;
+        const float low = artfClampf(p->exposure.low, 0, .99f), high = artfClampf(p->exposure.high, 0, .99f - low);
         const float grade2[7][4] = {{lift.x, lift.y, lift.z, graded ? 1.f : 0.f},
-                                    {1.f / artfMaxf(gamma.x, .01f), 1.f / artfMaxf(gamma.y, .01f), 1.f / artfMaxf(gamma.z, .01f), artfClampf(p->grain, 0, 1)},
+                                    {1.f / artfMaxf(gamma.x, .01f), 1.f / artfMaxf(gamma.y, .01f), 1.f / artfMaxf(gamma.z, .01f), artfClampf(p->lens.grain, 0, 1)},
                                     {gain.x, gain.y, gain.z, 0},
-                                    {shadows.x, shadows.y, shadows.z, s->lut ? (float)p->lutSize : 0.f},
-                                    {midtones.x, midtones.y, midtones.z, p->lutAmount > 0 ? artfMinf(p->lutAmount, 1) : 1.f},
-                                    {highlights.x, highlights.y, highlights.z, p->bloom > 0 ? artfMaxf(p->flare, 0) : 0.f},
-                                    {histogram ? low : 0.f, histogram ? high : 0.f, p->exposureSpeedDown > 0 ? artfMinf(p->exposureSpeedDown, 1) : grade[0][3], histogram ? 1.f : 0.f}};
+                                    {shadows.x, shadows.y, shadows.z, s->lut ? (float)p->look.lutSize : 0.f},
+                                    {midtones.x, midtones.y, midtones.z, p->look.lutAmount > 0 ? artfMinf(p->look.lutAmount, 1) : 1.f},
+                                    {highlights.x, highlights.y, highlights.z, p->lens.bloom > 0 ? artfMaxf(p->lens.flare, 0) : 0.f},
+                                    {histogram ? low : 0.f, histogram ? high : 0.f, p->exposure.speedDown > 0 ? artfMinf(p->exposure.speedDown, 1) : grade[0][3], histogram ? 1.f : 0.f}};
         memcpy(out->grade2, grade2, sizeof grade2);
     }
     if (s->indirect.on && s->indirect.probes) {
@@ -1559,7 +1559,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->materialCount = (uint32_t)s->materials.len;
     out->fogBase = s->fogBase;
     out->fogFalloff = s->fogFalloff;
-    out->motionBlur = artfClampf(p->motionBlur, 0, 1);
+    out->motionBlur = artfClampf(p->lens.motionBlur, 0, 1);
     if (s->shadows.traced) {
         out->traced |= ARTF_TRACED_SHADOWS;
         out->tracedRays = ARTF_TRACED_RAYS;
@@ -1567,10 +1567,10 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     } else {
         out->tracedCasts = 0;
     }
-    if (p->tracedReflections && p->reflections > 0) out->traced |= ARTF_TRACED_REFLECTIONS;
+    if (p->screen.tracedReflections && p->screen.reflections > 0) out->traced |= ARTF_TRACED_REFLECTIONS;
     out->output[0] = (float)width;
     out->output[1] = (float)height;
-    out->output[2] = artfClampf(p->sharpen, 0, 1);
+    out->output[2] = artfClampf(p->screen.sharpen, 0, 1);
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;
     {
