@@ -206,7 +206,7 @@ static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) {
 
     v->instance = inst;
     const float dx = wx - eye[0], dy = wy - eye[1], dz = wz - eye[2];
-    const float distance = artfMaxf(sqrtf(dx * dx + dy * dy + dz * dz) - r, f->nearW);
+    const float distance = artfSeenDistance(&f->data, artfMaxf(sqrtf(dx * dx + dy * dy + dz * dz) - r, f->nearW));
     if (artfTooSmall(&f->data, r, distance)) return false;
     v->mesh = &scene->meshes.items[artfMeshLevel(scene, base, f->data.lodScale, inst->maxScale, distance)];
     uint32_t from;
@@ -226,6 +226,8 @@ static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) {
         const float a = vp[row], b = vp[4 + row], d = vp[8 + row], e = vp[12 + row];
         for (int col = 0; col < 4; ++col) v->mvp[k * 4 + col] = a * m[col] + b * m[4 + col] + d * m[8 + col] + (col == 3 ? e : 0.f);
     }
+    if (artfOrtho(&f->data))
+        for (int col = 0; col < 4; ++col) v->depthRow[col] = vp[2] * m[col] + vp[6] * m[4 + col] + vp[10] * m[8 + col] + (col == 3 ? vp[14] : 0.f);
     const ArtfVec3 c0 = artfVec3(m[0], m[4], m[8]), c1 = artfVec3(m[1], m[5], m[9]), c2 = artfVec3(m[2], m[6], m[10]);
     const ArtfVec3 k[3] = {artfVec3Cross(c1, c2), artfVec3Cross(c2, c0), artfVec3Cross(c0, c1)};
     memcpy(v->normal, k, sizeof v->normal);
@@ -234,7 +236,16 @@ static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) {
     v->masked = material & ARTF_MATERIAL_MASK || fade || (material & ARTF_MATERIAL_BLEND && scene->materials.items[inst->material].texture);
     v->twoSided = material & ARTF_MATERIAL_DOUBLE;
     v->useCone = inst->flags & ARTF_INSTANCE_UNIFORM && !v->twoSided && scene->features[ARTF_FEATURE_CONES];
-    if (v->useCone) {
+    if (v->useCone && artfOrtho(&f->data)) {
+        /* (all rays go one way: the way the view looks, in the object, of length 1) */
+        const float* ahead = f->data.eye[2];
+        float l = 0;
+        for (int k = 0; k < 3; ++k) {
+            v->camera[k] = m[k] * ahead[0] + m[4 + k] * ahead[1] + m[8 + k] * ahead[2];
+            l += v->camera[k] * v->camera[k];
+        }
+        for (int k = 0; k < 3; ++k) v->camera[k] /= sqrtf(l);
+    } else if (v->useCone) {
         const float dx = eye[0] - m[3], dy = eye[1] - m[7], dz = eye[2] - m[11], inv = 1.f / (inst->maxScale * inst->maxScale);
         for (int k = 0; k < 3; ++k) v->camera[k] = (m[k] * dx + m[4 + k] * dy + m[8 + k] * dz) * inv;
     }
@@ -261,17 +272,20 @@ static bool sphereHidden(const ArtfSoftFrame* f, const ArtfVisible* v) {
     const float* m = f->data.viewProj;
     const float x = v->center[0], y = v->center[1], z = v->center[2], r = v->radius;
     const float cx = m[0] * x + m[4] * y + m[8] * z + m[12], cy = m[1] * x + m[5] * y + m[9] * z + m[13], cw = m[3] * x + m[7] * y + m[11] * z + m[15];
-    const float nearest = cw - r, farthest = cw + r;
-    if (nearest <= f->nearW) return false;
-    const float px = r * f->data.focalX, py = r * f->data.focalY;
-    const float xlo = artfMinf((cx - px) / nearest, (cx - px) / farthest), xhi = artfMaxf((cx + px) / nearest, (cx + px) / farthest);
-    const float ylo = artfMinf((cy - py) / nearest, (cy - py) / farthest), yhi = artfMaxf((cy + py) / nearest, (cy + py) / farthest);
+    const bool ortho = artfOrtho(&f->data);
+    /* (orthographic: w is 1, and the sphere's nearest point is r nearer along the view than its center) */
+    const float along = ortho ? (x - f->data.cameraPos[0]) * f->data.eye[2][0] + (y - f->data.cameraPos[1]) * f->data.eye[2][1] + (z - f->data.cameraPos[2]) * f->data.eye[2][2] : cw;
+    const float nearest = along - r, farthest = ortho ? 1.f : cw + r;
+    if (nearest <= (ortho ? f->data.ortho[1] - f->data.ortho[0] : f->nearW)) return false;
+    const float px = r * f->data.focalX, py = r * f->data.focalY, low = ortho ? 1.f : nearest;
+    const float xlo = artfMinf((cx - px) / low, (cx - px) / farthest), xhi = artfMaxf((cx + px) / low, (cx + px) / farthest);
+    const float ylo = artfMinf((cy - py) / low, (cy - py) / farthest), yhi = artfMaxf((cy + py) / low, (cy + py) / farthest);
     const int x0 = artfMaxi((int)floorf(artfClampf(xlo * .5f + .5f, 0, 1) * (float)f->width), 0);
     const int x1 = artfMini((int)ceilf(artfClampf(xhi * .5f + .5f, 0, 1) * (float)f->width), f->width - 1);
     const int y0 = artfMaxi((int)floorf(artfClampf(.5f - yhi * .5f, 0, 1) * (float)f->height), 0);
     const int y1 = artfMini((int)ceilf(artfClampf(.5f - ylo * .5f, 0, 1) * (float)f->height), f->height - 1);
     if (x1 < x0 || y1 < y0) return false;
-    const float depth = 1.f / nearest;
+    const float depth = ortho ? (f->data.ortho[1] - nearest) / f->data.ortho[0] : 1.f / nearest;
     const int cx0 = x0 / ARTF_HIZ_CELL, cx1 = x1 / ARTF_HIZ_CELL, cy0 = y0 / ARTF_HIZ_CELL, cy1 = y1 / ARTF_HIZ_CELL;
     if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) <= 64) {
         for (int cy2 = cy0; cy2 <= cy1; ++cy2)
@@ -618,7 +632,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         f->tileLights = artfMalloc((size_t)f->tilesX * f->tilesY * (1 + ARTF_TILE_LIGHTS) * 4);
         artfSceneLightTiles(&f->data, f->width, f->height, f->extra, f->extraCount, f->tileLights);
     }
-    f->nearW = scene->camera.near_;
+    f->nearW = artfOrtho(&f->data) ? .5f : scene->camera.near_; /* (orthographic: w is 1, and depth is cut instead) */
     f->sizedLights = false;
     for (uint32_t i = 0; i < f->data.lightCount; ++i) f->sizedLights |= f->data.lightSizes[i] > 0;
     f->lightsApart = f->sizedLights || view != ARTF_VIEW_LIT;

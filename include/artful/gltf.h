@@ -6,7 +6,7 @@
  * KHR_materials_emissive_strength, KHR_texture_transform and KHR_mesh_quantization. KHR_texture_basisu is read when
  * its KTX2 file holds a plain format, not Basis's own.
  *
- * What is not read: orthographic cameras, Draco and meshopt compression, Basis's formats. What that leaves out goes
+ * What is not read: Draco and meshopt compression, Basis's formats. What that leaves out goes
  * to artfSetLog; a file that requires an extension other than those read is not read at all. */
 #ifndef ARTFUL_GLTF_H
 #define ARTFUL_GLTF_H
@@ -39,8 +39,8 @@ ArtfModel artfSceneAddPreparedModel(ArtfScene* s, ArtfPreparedModel* prepared, c
 
 void artfModelSetTransform(ArtfScene* s, ArtfModel m, const ArtfTransform* transform);
 uint32_t artfModelInstanceCount(const ArtfScene* s, ArtfModel m);
-/* The file's cameras, where their nodes are now: for artfSceneSetCamera. false: there is none. An orthographic one
- * comes out as a perspective one from far behind, through a narrow field: as near to it as a perspective can be. */
+/* The file's cameras, where their nodes are now: for artfSceneSetCamera. false: there is none. An orthographic one is
+ * one (ArtfCamera.orthoHeight, twice its ymag; its width goes by the frame's shape, not by xmag). */
 uint32_t artfModelCameraCount(const ArtfScene* s, ArtfModel m);
 bool artfModelCamera(const ArtfScene* s, ArtfModel m, uint32_t camera, ArtfCamera* out);
 uint32_t artfModelClipCount(const ArtfScene* s, ArtfModel m);

@@ -371,6 +371,11 @@ typedef struct ArtfCamera {
     ArtfVec3 up;
     float fovY;  /* radians */
     float near_; /* no far plane: see artfMat4Perspective */
+    /* Orthographic, when above 0: the view is this tall in the world, its width by the frame's shape, and all its rays
+     * go the same way, along position to target (a plan, an elevation, an isometric game). fovY does not count then.
+     * What is nearer than near_ along the view is cut, and so is what is farther than far_. 0: perspective. */
+    float orthoHeight;
+    float far_;  /* orthographic only: where depth ends, along the view; 0: just past the scene's bounds */
 } ArtfCamera;
 
 void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera);
@@ -631,6 +636,27 @@ typedef struct ArtfTraceDesc {
 /* NULL: drawing as ever. Meshes get what rays need the first time they are traced, on the calling thread:
  * about as long as their levels of detail. */
 void artfSceneSetTrace(ArtfScene* s, const ArtfTraceDesc* desc);
+
+/* ---- picking ----
+ * What is under the mouse, or along any ray: through the trees tracing uses, so on any renderer or none. The first
+ * call makes them for the meshes there are (as long as their levels of detail take), and they are made again only
+ * for what changed: a pick costs a ray. A ray sees the fronts of what has one side, as the frame does, and bones as
+ * they are posed. It goes through holes, through what is less than half there (faded, or more transparent than not)
+ * and through particles. */
+typedef struct ArtfPickHit {
+    ArtfInstance instance;
+    uint32_t triangle;  /* of its mesh, in the order Artful keeps it in (not the order given) */
+    ArtfVec3 position;  /* in the world */
+    ArtfVec3 normal;    /* the triangle's own, of length 1, toward where the ray came from */
+    float distance;     /* along the ray: from its origin; for a pick, from the eye (orthographic: from its plane) */
+    float u, v;         /* texture coordinates there */
+} ArtfPickHit;
+
+/* The first surface along a ray, at most maxDistance away (0: any). direction need not be of length 1. false: none. */
+bool artfSceneRaycast(ArtfScene* s, ArtfVec3 origin, ArtfVec3 direction, float maxDistance, ArtfPickHit* out);
+/* The first surface at a point of a frame of width x height, in pixels from its top left corner (a pixel's center is
+ * at + .5), as a camera sees it (NULL: the scene's), from near on, as the frame shows it. */
+bool artfScenePick(ArtfScene* s, const ArtfCamera* camera, float x, float y, int width, int height, ArtfPickHit* out);
 
 /* ---- a black hole ----
  * Behind everything else in the scene: its light is traced along the paths Kerr's metric gives it,

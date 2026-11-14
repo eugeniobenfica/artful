@@ -291,6 +291,11 @@ typedef struct ArtfFrameData {
      * look-up table's side (0: none), how much of it, and the flare; the histogram's darkest and brightest shares
      * left out, the speed down, and 1 when the histogram is on. */
     float grade2[7][4];
+    /* An orthographic camera: how deep its depth goes (far - near), and where it ends, along the view; 0: perspective.
+     * Its depth is (far - t) / (far - near) of t along the view, where a perspective's is near / t: 1 at near, 0 at far,
+     * even across a triangle as w is 1. The eye's rows (eye) then hold the view's half width and half height, in the
+     * world, and all rays go along eye[2], each from cameraPos + x eye[0] + y eye[1]. */
+    float orthoPad[2], ortho[2];
 } ArtfFrameData;
 
 /* What a view other than the lit one does to a frame, on both backends: nothing after the frame (no bloom, exposure,
@@ -319,8 +324,23 @@ ARTF_INLINE void artfViewHeat(uint32_t count, float out[3]) {
 #define ARTF_VIEW_MOTION_STILL (128.f / 255.f)
 #define ARTF_VIEW_MOTION_SCALE (1.f / 32.f)
 
+ARTF_INLINE bool artfOrtho(const ArtfFrameData* f) { return f->ortho[0] > 0; }
+/* How far a thing is, for its size on screen: in an orthographic view, all are as at 1 (focalY is then 2 / height). */
+ARTF_INLINE float artfSeenDistance(const ArtfFrameData* f, float distance) { return f->ortho[0] > 0 ? 1.f : distance; }
+/* Distance along the view from depth as the frame's planes keep it: 1 / w, or the orthographic depth. */
+ARTF_INLINE float artfDepthAlong(const ArtfFrameData* f, float depth) { return f->ortho[0] > 0 ? f->ortho[1] - depth * f->ortho[0] : 1.f / depth; }
+/* Where the eye is for a point of the world: the camera, or in an orthographic view the place on its plane behind it. */
+ARTF_INLINE void artfEyeOf(const ArtfFrameData* f, const float* p, float* eye) {
+    if (f->ortho[0] > 0) {
+        const float along = (p[0] - f->cameraPos[0]) * f->eye[2][0] + (p[1] - f->cameraPos[1]) * f->eye[2][1] + (p[2] - f->cameraPos[2]) * f->eye[2][2];
+        for (int k = 0; k < 3; ++k) eye[k] = p[k] - f->eye[2][k] * along;
+    } else {
+        for (int k = 0; k < 3; ++k) eye[k] = f->cameraPos[k];
+    }
+}
+
 /* A ball of this radius, this far from the eye, is too small to draw (ArtfFrameData.cullScale). */
-ARTF_INLINE bool artfTooSmall(const ArtfFrameData* f, float radius, float distance) { return f->cullScale > 0 && radius * f->cullScale < distance; }
+ARTF_INLINE bool artfTooSmall(const ArtfFrameData* f, float radius, float distance) { return f->cullScale > 0 && radius * f->cullScale < artfSeenDistance(f, distance); }
 
 
 /* log2 and 2^x by bits and polynomials, the same on every processor and in the shaders: for metering, where a few
@@ -474,7 +494,7 @@ typedef struct ArtfTraceVertex {
     float back[3];      /* from where it is to where it was a pose ago */
 } ArtfTraceVertex;
 
-typedef struct ArtfTraceTriangle { uint32_t v[3], pad; } ArtfTraceTriangle;
+typedef struct ArtfTraceTriangle { uint32_t v[3], pad; } ArtfTraceTriangle; /* pad: which of its mesh's triangles */
 
 typedef struct ArtfTraceInstance {
     float toObject[12]; /* the rows of its inverse */
@@ -489,6 +509,7 @@ typedef struct ArtfTraceSeen { float at[12]; bool there; } ArtfTraceSeen;
 /* What a frame's rays start from: the GPU's uniform block. */
 typedef struct ArtfTraceFrame {
     float eye[4], right[4], up[4], forward[4]; /* a pixel's ray: forward + x right + y up, x and y in -1..1 */
+                                               /* eye[3] 1: orthographic, from eye + x right + y up, forward */
     uint32_t width, height, done, samples;     /* done: what is gathered so far */
     uint32_t bounces, paths, pad[2];           /* pad[0], on the GPU: done, with this frame's samples; pad[1]: the first of a filter's frames */
     float previous[16];                        /* the frame before's view and projection, for the filter */
@@ -521,6 +542,8 @@ typedef struct ArtfTrace {
     ARTF_VEC(ArtfTraceInstance) instances;
     ARTF_VEC(uint32_t) instanceMeshes;      /* of each of those, its mesh, */
     ARTF_VEC(float) instanceWorlds;         /* and the rows of where it is: for the ray tracing hardware */
+    ARTF_VEC(uint32_t) instanceHandles;     /* and its handle as the program has it, 0 for a particle's: for picking */
+    bool held;                              /* a pick made the trees anew: the next frame keeps what moved */
     ARTF_VEC(float) motion;                 /* of each of those, twelve floats: from where a point of it is to where it was */
     ARTF_VEC(ArtfTraceSeen) seen;
     uint64_t motionVersion;

@@ -51,27 +51,32 @@ static void rows(ArtfSoftPost* p, int count, RowFn fn) {
 
 /* ---- where a pixel is ---- */
 
-/* Distance along the view, from what the tiles keep (1 / w); 0 where nothing is. */
+/* Distance along the view, from what the tiles keep (1 / w, or an orthographic view's depth); 0 where nothing is. */
 static inline float distanceAt(const ArtfSoftPost* p, int x, int y) {
     const float d = p->f->postDepth[(size_t)y * p->width + x];
-    return d > 0 ? 1.f / d : 0.f;
+    return d > 0 ? artfDepthAlong(&p->f->data, d) : 0.f;
 }
 
-/* The world at a pixel's center, d along the view. */
+/* The world at a pixel's center, d along the view: on the ray from the eye, or in an orthographic view, from its
+ * place on the view's plane. */
 static inline void worldAt(const ArtfFrameData* f, int width, int height, float x, float y, float d, float* out) {
     const float px = (x + .5f) / (float)width * 2.f - 1.f, py = 1.f - (y + .5f) / (float)height * 2.f;
-    for (int k = 0; k < 3; ++k) out[k] = f->cameraPos[k] + (f->eye[2][k] + px * f->eye[0][k] + py * f->eye[1][k]) * d;
+    if (artfOrtho(f))
+        for (int k = 0; k < 3; ++k) out[k] = f->cameraPos[k] + px * f->eye[0][k] + py * f->eye[1][k] + f->eye[2][k] * d;
+    else
+        for (int k = 0; k < 3; ++k) out[k] = f->cameraPos[k] + (f->eye[2][k] + px * f->eye[0][k] + py * f->eye[1][k]) * d;
 }
 
-/* Where a point of the world falls, in pixels, through viewProj (by columns); false behind the eye. */
-static inline bool project(const float* m, const float* p, int width, int height, float* sx, float* sy, float* w) {
+/* Where a point of the world falls, in pixels, through viewProj (by columns), and w, how far it is along the view;
+ * false behind the eye. (Orthographic: w is 1, and how far comes from the depth.) */
+static inline bool project(const ArtfFrameData* f, const float* m, const float* p, int width, int height, float* sx, float* sy, float* w) {
     const float cx = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
     const float cy = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
     const float cw = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
     if (cw <= 1e-5f) return false;
     *sx = (cx / cw * .5f + .5f) * (float)width - .5f;
     *sy = (.5f - cy / cw * .5f) * (float)height - .5f;
-    *w = cw;
+    *w = artfOrtho(f) ? f->ortho[1] - (m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]) * f->ortho[0] : cw;
     return true;
 }
 
@@ -148,7 +153,7 @@ static void occlusionRow(ArtfSoftPost* p, int y) {
             float q[3];
             for (int j = 0; j < 3; ++j) q[j] = at[j] + (t[j] * kx + b[j] * ky + n[j] * kz) * radius;
             float sx, sy, w;
-            if (!project(f->viewProj, q, p->width, p->height, &sx, &sy, &w)) continue;
+            if (!project(f, f->viewProj, q, p->width, p->height, &sx, &sy, &w)) continue;
             const int qx = (int)(sx + .5f), qy = (int)(sy + .5f);
             if (qx < 0 || qy < 0 || qx >= p->width || qy >= p->height) continue;
             const float there = distanceAt(p, qx, qy);
@@ -204,7 +209,9 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
         float n[3], at[3], v[3];
         normalOf(s, n);
         worldAt(f, p->width, p->height, (float)x, (float)y, d, at);
-        for (int k = 0; k < 3; ++k) v[k] = at[k] - f->cameraPos[k];
+        float eye[3];
+        artfEyeOf(f, at, eye);
+        for (int k = 0; k < 3; ++k) v[k] = at[k] - eye[k];
         const float vl = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
         for (int k = 0; k < 3; ++k) v[k] /= vl;
         const float vn = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
@@ -216,11 +223,13 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
         const float stride = d * .04f + .02f, thickness = d * .03f + .05f;
         /* the ray from here to as far as 24 steps reach, across the frame: a line, along which 1 / w goes evenly */
         float sx0, sy0, w0, sx1, sy1, w1, reach = stride * 70.f, end[3];
-        if (!project(f->viewProj, at, p->width, p->height, &sx0, &sy0, &w0)) continue;
+        if (!project(f, f->viewProj, at, p->width, p->height, &sx0, &sy0, &w0)) continue;
         const float wDrop = -(r[0] * f->eye[2][0] + r[1] * f->eye[2][1] + r[2] * f->eye[2][2]);
-        if (wDrop > 0) reach = artfMinf(reach, w0 * .9f / wDrop); /* (not past the eye) */
+        /* (not past the eye; orthographic: not past near) */
+        const bool ortho = artfOrtho(f);
+        if (wDrop > 0) reach = artfMinf(reach, (ortho ? w0 - (f->ortho[1] - f->ortho[0]) : w0) * .9f / wDrop);
         for (int k = 0; k < 3; ++k) end[k] = at[k] + r[k] * reach;
-        if (!project(f->viewProj, end, p->width, p->height, &sx1, &sy1, &w1)) continue;
+        if (!project(f, f->viewProj, end, p->width, p->height, &sx1, &sy1, &w1)) continue;
         float hx2 = 0, hy2 = 0, found = 0;
         bool before = true; /* the last step was in front of what the frame shows */
         const float jitter = (float)(hash((uint32_t)(y * p->width + x)) & 255) / 256.f;
@@ -228,7 +237,8 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
             /* (closer together near the start) */
             const float share = ((float)step + jitter) / 25.f, t = share * share;
             const float sx = sx0 + (sx1 - sx0) * t, sy = sy0 + (sy1 - sy0) * t;
-            const float w = 1.f / (1.f / w0 + (1.f / w1 - 1.f / w0) * t);
+            /* (orthographic: w itself goes evenly) */
+            const float w = ortho ? w0 + (w1 - w0) * t : 1.f / (1.f / w0 + (1.f / w1 - 1.f / w0) * t);
             const int qx = (int)(sx + .5f), qy = (int)(sy + .5f);
             if (qx < 0 || qy < 0 || qx >= p->width || qy >= p->height) break;
             const float there = distanceAt(p, qx, qy);
@@ -289,10 +299,13 @@ static void froxelRow(ArtfSoftPost* p, int j) {
     const ArtfFrameData* f = &p->f->data;
     const float density = f->look[1], amount = f->post[1][1], g = f->post[1][2], far = 4.f / artfMaxf(density, 1e-6f);
     for (int i = 0; i < p->froxelsX; ++i) {
-        float dir[3];
+        float dir[3], eye[3];
         const float cx = (float)(i * ARTF_FROXEL_TILE) + ARTF_FROXEL_TILE * .5f - .5f, cy = (float)(j * ARTF_FROXEL_TILE) + ARTF_FROXEL_TILE * .5f - .5f;
+        /* (orthographic: each column starts from its place on the view's plane, and goes the way the view looks) */
+        worldAt(f, p->width, p->height, cx, cy, 0.f, eye);
+        if (!artfOrtho(f)) memcpy(eye, f->cameraPos, 12);
         worldAt(f, p->width, p->height, cx, cy, 1.f, dir);
-        for (int k = 0; k < 3; ++k) dir[k] -= f->cameraPos[k];
+        for (int k = 0; k < 3; ++k) dir[k] -= eye[k];
         const float along = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
         /* Henyey-Greenstein, toward the sun */
         const float mu = (dir[0] * f->toSun[0] + dir[1] * f->toSun[1] + dir[2] * f->toSun[2]) / along;
@@ -303,8 +316,8 @@ static void froxelRow(ArtfSoftPost* p, int j) {
             const float a = (float)k / ARTF_FROXEL_SLICES, b = (float)(k + 1) / ARTF_FROXEL_SLICES;
             const float d0 = far * a * a, d1 = far * b * b, t = (d0 + d1) * .5f;
             float q[3];
-            for (int c = 0; c < 3; ++c) q[c] = f->cameraPos[c] + dir[c] * t;
-            const float sun = p->f->shadows ? artfShadowOfSun(p->f->shadows, f->cameraPos, q, f->toSun, 0) : 1.f;
+            for (int c = 0; c < 3; ++c) q[c] = eye[c] + dir[c] * t;
+            const float sun = p->f->shadows ? artfShadowOfSun(p->f->shadows, eye, q, f->toSun, 0) : 1.f;
             const float stepThrough = through(density * artfFogHeight(f, q[1]) * (d1 - d0) * along), taken = left * (1.f - stepThrough);
             for (int c = 0; c < 3; ++c) light[c] += taken * (f->sunColor[c] * sun * phase * 12.566371f + f->fog[c]);
             left *= stepThrough;
@@ -368,7 +381,7 @@ POST_INLINE bool wasAt(const ArtfSoftPost* p, int x, int y, float* sx, float* sy
         for (int r = 0; r < 3; ++r) was[r] = m[r * 4] * at[0] + m[r * 4 + 1] * at[1] + m[r * 4 + 2] * at[2] + m[r * 4 + 3];
         memcpy(at, was, sizeof was);
     }
-    return project(f->previous, at, p->width, p->height, sx, sy, &w);
+    return project(f, f->previous, at, p->width, p->height, sx, sy, &w);
 }
 
 static void temporalRow(ArtfSoftPost* p, int y) {

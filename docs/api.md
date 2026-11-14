@@ -61,7 +61,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
 
 | | |
 | --- | --- |
-| `artfSceneSetCamera` | Where the eye is. |
+| `artfSceneSetCamera` | Where the eye is; `orthoHeight` makes its view orthographic, as tall as that in the world. |
+| `artfScenePick`, `artfSceneRaycast` | What is under the mouse, or along any ray: the instance, the triangle, where, its normal, how far. |
 | `artfSceneSetSun`, `artfSceneSetSunSize` | Light from far away; soft shadows, when traced. |
 | `artfSceneSetAmbient` | Light from all around: a sky and a ground. |
 | `artfSceneSetEnvironment`, `artfSceneSetEnvironmentLight`, `artfImageDecodeHdr` | Light from all around, from a picture of it, and that picture behind the scene. |

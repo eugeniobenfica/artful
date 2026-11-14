@@ -30,7 +30,7 @@ typedef struct ModelPart { ArtfInstance instance; uint32_t node; int32_t skin; }
 
 /* A light of KHR_lights_punctual, where its node is: 0 for the sun. */
 typedef struct ModelLight { ArtfLight light; uint32_t node; bool sun, spot; ArtfVec3 color; float radius, inner, outer; } ModelLight;
-typedef struct ModelCamera { uint32_t node; float fovY, near_, ortho; } ModelCamera; /* ortho: half its height; 0: perspective */
+typedef struct ModelCamera { uint32_t node; float fovY, near_, ortho, far_; } ModelCamera; /* ortho: half its height; 0: perspective */
 
 enum { PATH_T, PATH_R, PATH_S, PATH_W };
 enum { BLEND_LINEAR, BLEND_STEP, BLEND_CUBIC };
@@ -901,10 +901,10 @@ static void cameraOf(Loader* l, const Json* node, uint32_t index) {
     const Json* perspective = member(l, camera, "perspective");
     const Json* orthographic = member(l, camera, "orthographic");
     if (perspective) {
-        const ModelCamera c = {index, (float)numberOf(l, perspective, "yfov", .8), (float)numberOf(l, perspective, "znear", .1), 0};
+        const ModelCamera c = {index, (float)numberOf(l, perspective, "yfov", .8), (float)numberOf(l, perspective, "znear", .1), 0, 0};
         artfVecPush(&l->model->cameras, c);
     } else if (orthographic) {
-        const ModelCamera c = {index, 0, (float)numberOf(l, orthographic, "znear", .01), artfMaxf((float)numberOf(l, orthographic, "ymag", 1), 1e-6f)};
+        const ModelCamera c = {index, 0, (float)numberOf(l, orthographic, "znear", .01), artfMaxf((float)numberOf(l, orthographic, "ymag", 1), 1e-6f), (float)numberOf(l, orthographic, "zfar", 0)};
         artfVecPush(&l->model->cameras, c);
     }
 }
@@ -1206,16 +1206,10 @@ bool artfModelCamera(const ArtfScene* s, ArtfModel m, uint32_t camera, ArtfCamer
     out->up = artfVec3Normalize(artfVec3(w->m[4], w->m[5], w->m[6]));
     out->fovY = c->fovY;
     out->near_ = c->near_;
-    if (c->ortho > 0) {
-        /* orthographic: as a perspective from far behind, through a field a hundredth of a radian high, whose view is
-         * as high where the camera is (200 is 1 / tan(.005), to the float) */
-        const ArtfVec3 forward = artfVec3Sub(out->target, out->position);
-        const float back = c->ortho * 199.99833f;
-        out->position = artfVec3Sub(out->position, artfVec3Scale(forward, back));
-        out->target = artfVec3Add(out->position, forward);
-        out->fovY = .01f;
-        out->near_ = back + c->near_;
-    }
+    /* orthographic: ymag is half its height; its width goes by the frame's shape, not xmag */
+    out->orthoHeight = c->ortho * 2.f;
+    out->far_ = c->ortho > 0 && c->far_ > c->near_ ? c->far_ : 0.f;
+    if (c->ortho > 0) out->fovY = 1.f;
     return true;
 }
 

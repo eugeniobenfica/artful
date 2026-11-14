@@ -3,6 +3,7 @@
  *   artful-render [--backend vulkan|software] [--simd portable|128|256] [--threads n] [--size w h]
  *                 [--scene spheres|field|heavy|city|layers|lights|outdoors|blackhole] [--frames n] [--out file.png]
  *                 [--antialias]: four samples a pixel  [--clear]: no background, and a PNG with alpha
+ *                 [--ortho height]: the camera is orthographic, its view this tall in the world
  *                 [--shadows side]: the sun casts shadows, in maps of that side; [--soft-shadows]: as wide as the
  *                 sun is, [--sun-size radians]
  *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room
@@ -67,6 +68,13 @@ static void chunk(FILE* f, const char* type, const uint8_t* data, uint32_t size)
     fwrite(head, 1, 4, f);
 }
 static bool pngAlpha; /* with its alpha, straight, as PNG wants it; the frame's is premultiplied */
+static float orthoHeight; /* --ortho: the scene's camera is orthographic, this tall in the world */
+
+/* The scene's camera, made orthographic when asked. */
+static void setCamera(ArtfScene* s, ArtfCamera* c) {
+    c->orthoHeight = orthoHeight;
+    artfSceneSetCamera(s, c);
+}
 
 static bool savePng(const char* path, const uint32_t* pixels, int w, int h) {
     for (uint32_t i = 0; i < 256; ++i) {
@@ -142,7 +150,7 @@ static ArtfTexture checker(ArtfScene* s) {
 
 static void camera(ArtfScene* s, float x, float y, float z) {
     ArtfCamera c = {artfVec3(x, y, z), artfVec3(0, 0, 0), artfVec3(0, 1, 0), 1.0f, .1f};
-    artfSceneSetCamera(s, &c);
+    setCamera(s, &c);
 }
 
 /* A panel of colors, fading shapes in front of it and a floor: all that vertices and opacity can do. */
@@ -332,7 +340,7 @@ static void sceneCity(ArtfScene* s) {
         artfSceneAddInstance(s, ball, paint, &t);
     }
     ArtfCamera c = {artfVec3(0, 0, 16), artfVec3(0, 0, 0), artfVec3(0, 1, 0), 1.0f, .1f};
-    artfSceneSetCamera(s, &c);
+    setCamera(s, &c);
 }
 
 static void sceneHeavy(ArtfScene* s) {
@@ -372,7 +380,7 @@ static void sceneBlackHole(ArtfScene* s, const HoleOptions* h) {
     const float beta = artfVec3Length(d.velocity);
     const ArtfVec3 aim = artfVec3Scale(d.velocity, h->distance / sqrtf(1.f - beta * beta));
     ArtfCamera c = {eye, aim, up, h->fov * 3.14159265f / 180.f, .1f};
-    artfSceneSetCamera(s, &c);
+    setCamera(s, &c);
 }
 
 static void printLog(void* user, const char* message) {
@@ -388,7 +396,7 @@ static void sceneModel(ArtfScene* s, const char* path) {
     ArtfVec3 middle = artfVec3(0, 0, 0);
     artfSceneBounds(s, &middle, &radius);
     ArtfCamera c = {artfVec3Add(middle, artfVec3(radius * 1.2f, radius * .9f, radius * 2.2f)), middle, artfVec3(0, 1, 0), .8f, radius * .01f};
-    artfSceneSetCamera(s, &c);
+    setCamera(s, &c);
 }
 
 int main(int argc, char** argv) {
@@ -429,6 +437,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--side") && i + 1 < argc) fieldSide = atoi(argv[++i]);
         else if (!strcmp(a, "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(a, "--antialias")) o.antialias = true;
+        else if (!strcmp(a, "--ortho") && i + 1 < argc) orthoHeight = (float)atof(argv[++i]);
         else if (!strcmp(a, "--denoise")) trace.denoise = true;
         else if (!strcmp(a, "--hardware")) trace.hardware = true;
         else if (!strcmp(a, "--shadows") && i + 1 < argc) shadowSide = atoi(argv[++i]);

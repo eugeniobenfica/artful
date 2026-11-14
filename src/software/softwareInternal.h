@@ -45,8 +45,9 @@ typedef struct ArtfVisible {
     const ArtfInstanceData* instance;
     const ArtfMeshData* mesh;
     float mvp[12];       /* object to clip space, rows x, y and w */
+    float depthRow[4];   /* orthographic: object to depth, the clip's z */
     float normal[9];     /* its cofactors, by columns: normals stay right on stretched objects */
-    float camera[3];     /* in object space, for the cones */
+    float camera[3];     /* in object space, for the cones; orthographic: the way the view looks, there */
     float center[3], radius; /* in the world */
     uint32_t index;      /* in the scene's instances */
     bool useCone;

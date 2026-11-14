@@ -143,7 +143,7 @@ static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
     artfVecReserve(&t->triangles, firstTriangle + triangles);
     for (uint32_t i = 0; i < triangles; ++i) {
         const uint32_t* c = &m->indices[order[i] * 3];
-        const ArtfTraceTriangle o = {{firstVertex + c[0], firstVertex + c[1], firstVertex + c[2]}, 0};
+        const ArtfTraceTriangle o = {{firstVertex + c[0], firstVertex + c[1], firstVertex + c[2]}, order[i]};
         t->triangles.items[t->triangles.len++] = o;
     }
     artfVecPush(&t->roots, root);
@@ -215,6 +215,7 @@ static void buildTop(ArtfScene* s) {
     float* moved = artfMalloc((count + 1) * 48);
     float* worlds = artfMalloc((count + 1) * 48);
     uint32_t* meshes = artfMalloc((count + 1) * 4);
+    uint32_t* handles = artfMalloc((count + 1) * 4);
     uint32_t n = 0;
     for (size_t i = 0; i < count; ++i) {
         const ArtfInstanceData* d = &s->instances.items[i];
@@ -254,6 +255,7 @@ static void buildTop(ArtfScene* s) {
         seen->there = true;
         memcpy(worlds + (size_t)n * 12, d->m, 48);
         meshes[n] = d->mesh;
+        handles[n] = d->flags & ARTF_INSTANCE_PARTICLE ? 0 : (uint32_t)s->handleGenerations.items[handle - 1] << 24 | handle;
         boxes[n] = b;
         order[n] = n;
         made[n++] = o;
@@ -279,12 +281,16 @@ static void buildTop(ArtfScene* s) {
     t->instanceMeshes.len = n;
     artfVecReserve(&t->instanceWorlds, (size_t)n * 12 + 1);
     t->instanceWorlds.len = (size_t)n * 12;
+    artfVecReserve(&t->instanceHandles, n + 1);
+    t->instanceHandles.len = n;
     for (uint32_t i = 0; i < n; ++i) {
         t->instances.items[i] = made[order[i]];
         memcpy(t->motion.items + (size_t)i * 12, moved + (size_t)order[i] * 12, 48);
         t->instanceMeshes.items[i] = meshes[order[i]];
         memcpy(t->instanceWorlds.items + (size_t)i * 12, worlds + (size_t)order[i] * 12, 48);
+        t->instanceHandles.items[i] = handles[order[i]];
     }
+    artfFree(handles);
     artfFree(moved);
     artfFree(worlds);
     artfFree(meshes);
@@ -293,10 +299,13 @@ static void buildTop(ArtfScene* s) {
     artfFree(made);
 }
 
-void artfSceneTraceSync(ArtfScene* s) {
+/* forPick: a pick asks between frames. What moved since the frame before must then stay for the next frame to see, as if
+ * it had made the trees itself. */
+static void traceSync(ArtfScene* s, bool forPick) {
     ArtfTrace* t = &s->trace;
     artfScenePosesApply(s);
-    bool changed = false;
+    bool changed = false, made = false;
+    const bool keep = forPick || t->held;
     /* a mesh went: the arrays start over, with what is left */
     if (t->meshRemovals != s->meshRemovals) {
         t->meshRemovals = s->meshRemovals;
@@ -318,7 +327,7 @@ void artfSceneTraceSync(ArtfScene* s) {
         ArtfTraceRange* range = &t->ranges.items[mesh];
         if (range->deformVersion == s->meshes.items[mesh].deformVersion) {
             /* (a pose that stays: nothing moved since the frame before) */
-            if (range->moved) {
+            if (range->moved && !keep) {
                 for (uint32_t k = 0; k < s->meshes.items[mesh].vertexCount; ++k) memset(t->vertices.items[range->firstVertex + k].back, 0, 12);
                 range->moved = false;
                 changed = true;
@@ -327,7 +336,7 @@ void artfSceneTraceSync(ArtfScene* s) {
         }
         refit(t, &s->meshes.items[mesh], range);
         range->moved = true;
-        changed = true;
+        changed = made = true;
     }
     if (changed) ++t->meshVersion;
     const bool particles = t->desc.mode != ARTF_TRACE_NONE;
@@ -344,13 +353,17 @@ void artfSceneTraceSync(ArtfScene* s) {
         ++t->topVersion;
         t->motionLive = true;
         ++t->motionVersion;
-    } else if (t->motionLive) {
+        made = true;
+    } else if (t->motionLive && !keep) {
         static const float still[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
         for (size_t i = 0; i < t->motion.len; i += 12) memcpy(t->motion.items + i, still, sizeof still);
         t->motionLive = false;
         ++t->motionVersion;
     }
+    t->held = forPick ? t->held || made : false;
 }
+
+void artfSceneTraceSync(ArtfScene* s) { traceSync(s, false); }
 
 void artfTraceFini(ArtfTrace* t) {
     artfVecFree(&t->nodes);
@@ -363,6 +376,7 @@ void artfTraceFini(ArtfTrace* t) {
     artfVecFree(&t->motion);
     artfVecFree(&t->instanceMeshes);
     artfVecFree(&t->instanceWorlds);
+    artfVecFree(&t->instanceHandles);
     artfVecFree(&t->seen);
 }
 
@@ -386,6 +400,8 @@ void artfSceneTraceFrame(const ArtfScene* s, const ArtfFrameData* frame, int wid
     memcpy(out->right, &right, 12);
     memcpy(out->up, &up, 12);
     memcpy(out->forward, &f, 12);
+    /* (orthographic: right and up are half the view's width and height, in the world, and all rays go forward) */
+    out->eye[3] = artfOrtho(frame) ? 1.f : 0.f;
     out->width = (uint32_t)width;
     out->height = (uint32_t)height;
     out->done = done;
@@ -774,10 +790,16 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
     uint32_t state = hashOf(hashOf(x + y * c->width) + sample);
     const float px = ((float)x + randomOf(&state)) / (float)c->width * 2.f - 1.f, py = 1.f - ((float)y + randomOf(&state)) / (float)c->height * 2.f;
     float o[3], d[3], path[3] = {1, 1, 1}, light[3] = {0, 0, 0}, travelled = 0, keep = 1.f;
-    for (int k = 0; k < 3; ++k) {
-        o[k] = c->eye[k];
-        d[k] = c->forward[k] + c->right[k] * px + c->up[k] * py;
-    }
+    if (c->eye[3] > 0)
+        for (int k = 0; k < 3; ++k) {
+            o[k] = c->eye[k] + c->right[k] * px + c->up[k] * py;
+            d[k] = c->forward[k];
+        }
+    else
+        for (int k = 0; k < 3; ++k) {
+            o[k] = c->eye[k];
+            d[k] = c->forward[k] + c->right[k] * px + c->up[k] * py;
+        }
     normalize3(d);
     bool covered = false;
     uint32_t bounces = 0;
@@ -1105,4 +1127,94 @@ void artfSceneIndirectStep(ArtfScene* s, const ArtfFrameData* frame, ArtfPool* p
     g->next = t;
     ++g->frames;
     ++g->version;
+}
+
+/* ---- picking ---- */
+
+/* The nearest surface along a ray that is at least half there: what holes leave out, what has faded or shows through
+ * more than it shows, and particles, are gone through. d of length 1. */
+static bool pickAlong(ArtfScene* s, const float* origin, const float* d, float limit, ArtfPickHit* out) {
+    traceSync(s, true);
+    const ArtfTrace* t = &s->trace;
+    float o[3] = {origin[0], origin[1], origin[2]}, travelled = 0;
+    for (int step = 0; step < MAX_STEPS; ++step) {
+        Hit h;
+        if (!closest(t, o, d, limit - travelled, false, &h)) return false;
+        float p[3];
+        for (int k = 0; k < 3; ++k) p[k] = o[k] + d[k] * h.t;
+        const uint32_t handle = t->instanceHandles.items[h.instance];
+        bool there = handle != 0;
+        if (there) {
+            Surface m;
+            surfaceAt(s, &h, o, d, &m);
+            there = m.alpha >= .5f;
+        }
+        if (there) {
+            const ArtfTraceTriangle* tri = &t->triangles.items[h.triangle];
+            const ArtfTraceVertex *a = &t->vertices.items[tri->v[0]], *b = &t->vertices.items[tri->v[1]], *c = &t->vertices.items[tri->v[2]];
+            const float wa = 1.f - h.u - h.v;
+            /* the triangle's own normal, into the world by the inverse's transpose, toward where the ray came from */
+            const float e1[3] = {b->p[0] - a->p[0], b->p[1] - a->p[1], b->p[2] - a->p[2]}, e2[3] = {c->p[0] - a->p[0], c->p[1] - a->p[1], c->p[2] - a->p[2]};
+            const float on[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+            const float* k = t->instances.items[h.instance].toObject;
+            const float n[3] = {k[0] * on[0] + k[4] * on[1] + k[8] * on[2], k[1] * on[0] + k[5] * on[1] + k[9] * on[2], k[2] * on[0] + k[6] * on[1] + k[10] * on[2]};
+            const float length = sqrtf(artfMaxf(dot3(n, n), 1e-30f)), side = dot3(n, d) > 0 ? -1.f / length : 1.f / length;
+            memset(out, 0, sizeof *out);
+            out->instance = handle;
+            out->triangle = tri->pad;
+            out->position = artfVec3(p[0], p[1], p[2]);
+            out->normal = artfVec3(n[0] * side, n[1] * side, n[2] * side);
+            out->distance = travelled + h.t;
+            out->u = a->u * wa + b->u * h.u + c->u * h.v;
+            out->v = a->v * wa + b->v * h.u + c->v * h.v;
+            return true;
+        }
+        /* (on, past what is not there) */
+        const float past = h.t + reachOf(p);
+        travelled += past;
+        for (int k = 0; k < 3; ++k) o[k] += d[k] * past;
+        if (travelled >= limit) return false;
+    }
+    return false;
+}
+
+bool artfSceneRaycast(ArtfScene* s, ArtfVec3 origin, ArtfVec3 direction, float maxDistance, ArtfPickHit* out) {
+    const float length = artfVec3Length(direction);
+    if (!s || !out || !(length > 0)) return false;
+    const float o[3] = {origin.x, origin.y, origin.z}, d[3] = {direction.x / length, direction.y / length, direction.z / length};
+    return pickAlong(s, o, d, maxDistance > 0 ? artfMinf(maxDistance, 3e37f) : 3e37f, out);
+}
+
+bool artfScenePick(ArtfScene* s, const ArtfCamera* camera, float x, float y, int width, int height, ArtfPickHit* out) {
+    if (!s || !out || width <= 0 || height <= 0) return false;
+    const ArtfCamera* c = camera ? camera : &s->camera;
+    const ArtfVec3 f = artfVec3Normalize(artfVec3Sub(c->target, c->position));
+    const ArtfVec3 r = artfVec3Normalize(artfVec3Cross(f, c->up)), u = artfVec3Cross(r, f);
+    const float aspect = (float)width / (float)height, px = x / (float)width * 2.f - 1.f, py = 1.f - y / (float)height * 2.f;
+    float o[3], d[3], start, limit = 3e37f;
+    if (c->orthoHeight > 0) {
+        /* from the view's plane at near, straight ahead: what is drawn there, as far as far */
+        const float half = c->orthoHeight * .5f;
+        for (int k = 0; k < 3; ++k) {
+            o[k] = (&c->position.x)[k] + (&r.x)[k] * px * half * aspect + (&u.x)[k] * py * half + (&f.x)[k] * c->near_;
+            d[k] = (&f.x)[k];
+        }
+        start = c->near_;
+        if (c->far_ > c->near_) limit = c->far_ - c->near_;
+    } else {
+        /* from the eye, through the pixel, starting at near as the frame does */
+        const float tanY = tanf(c->fovY * .5f);
+        float l = 0;
+        for (int k = 0; k < 3; ++k) {
+            d[k] = (&f.x)[k] + (&r.x)[k] * px * tanY * aspect + (&u.x)[k] * py * tanY;
+            l += d[k] * d[k];
+        }
+        l = sqrtf(l);
+        for (int k = 0; k < 3; ++k) d[k] /= l;
+        start = c->near_ * l;
+        for (int k = 0; k < 3; ++k) o[k] = (&c->position.x)[k] + d[k] * start;
+    }
+    if (!pickAlong(s, o, d, limit, out)) return false;
+    out->distance += start;
+    return true;
 }
