@@ -285,6 +285,11 @@ typedef struct ArtfFrameData {
     float cullScale;
     float moving;       /* 1: something moved since the frame before, and the GPU has how (ArtfMotion); 0: the view alone */
     float cullPad[2];
+    /* More of the look (ArtfPostDesc): lift, and 1 when there is grading (lift, gamma, gain or a wheel); 1 / gamma, the
+     * grain; gain, the frame's number (for the grain); the shadows', midtones' and highlights' colors, after them the
+     * look-up table's side (0: none), how much of it, and the flare; the histogram's darkest and brightest shares
+     * left out, the speed down, and 1 when the histogram is on. */
+    float grade2[7][4];
 } ArtfFrameData;
 
 /* A ball of this radius, this far from the eye, is too small to draw (ArtfFrameData.cullScale). */
@@ -344,6 +349,10 @@ ARTF_INLINE float artfCosFast(float x) { return artfSinFast(x + 1.57079633f); }
 
 #define ARTF_METER_X 32 /* auto exposure's grid */
 #define ARTF_METER_Y 18
+#define ARTF_HISTOGRAM_X 64 /* with a histogram: a grid twice as dense, */
+#define ARTF_HISTOGRAM_Y 36
+#define ARTF_HISTOGRAM_BINS 64 /* into bins of stops from -12 to 12 */
+#define ARTF_LUT_MAX 65 /* the largest side of a look-up table */
 
 /* A step of the probes: their rays, from what a frame says of light (needs artfSceneTraceSync). */
 typedef struct ArtfPool ArtfPool;
@@ -566,6 +575,9 @@ struct ArtfScene {
     float environmentLight;     /* what it is multiplied by */
     bool environmentShown;      /* behind the scene */
     uint64_t environmentVersion;
+    float* lut;                 /* ArtfPostDesc.lut's copy, lutSize^3 RGB, or NULL */
+    size_t lutFloats;
+    uint64_t lutVersion;        /* a new one */
 };
 
 /* ---- light from all around, from a picture (environment.c) ----

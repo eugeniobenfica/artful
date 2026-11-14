@@ -90,7 +90,7 @@ static void testPacking(void) {
         CHECK(found);
     }
     artfSceneFree(s);
-    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 104 * 16);
+    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 111 * 16);
 }
 
 static void testMeshlets(void) {
@@ -4159,6 +4159,280 @@ static void testTraceHardware(void) {
     artfRendererFree(gpu);
 }
 
+/* The sky, as Unreal's: light scattered more than once makes twilight and the horizon brighter; the sun drawn is bright
+ * where it is and nowhere else, and gives no light of its own; clouds are there, the same bytes each time, and the
+ * wind moves them; their shadow, when asked, dims the sun. */
+static float skyMean(const ArtfScene* s, float y, int channel) {
+    float sum = 0;
+    for (int k = 0; k < 64; ++k) {
+        const float a = (float)k * 6.2831853f / 64.f, across = sqrtf(1.f - y * y);
+        float c[3];
+        artfEnvSample(s->environment, 0, across * artfSinFast(a), y, across * artfCosFast(a), c);
+        sum += c[channel];
+    }
+    return sum / 64.f;
+}
+
+static void testSkyMore(void) {
+    ArtfScene* s = artfSceneNew();
+    ArtfSkyDesc d;
+    memset(&d, 0, sizeof d);
+    d.width = 128;
+    /* twilight: the sun under the horizon */
+    artfSceneSetSun(s, artfVec3(0, .05f, 1), artfVec3(3, 3, 3));
+    CHECK(artfSceneSetSky(s, &d));
+    const float once = skyMean(s, .3f, 2), onceLow = skyMean(s, .05f, 2);
+    d.multiple = 1;
+    double start = artfNowMs();
+    CHECK(artfSceneSetSky(s, &d));
+    const double took = artfNowMs() - start;
+    const float many = skyMean(s, .3f, 2), manyLow = skyMean(s, .05f, 2);
+    printf("twilight's blue, scattered once %.5f (at the horizon %.5f), more than once %.5f (%.5f); made in %.1f ms\n", once, onceLow, many, manyLow, took);
+    CHECK(many > once * 1.3f && manyLow > onceLow * 1.2f);
+    /* by day too, a little */
+    artfSceneSetSun(s, artfVec3(-.3f, -.6f, -1), artfVec3(3, 3, 3));
+    d.multiple = 0;
+    CHECK(artfSceneSetSky(s, &d));
+    const float day = skyMean(s, .1f, 1);
+    const ArtfVec3 sunOnce = s->sunColor;
+    d.multiple = 1;
+    CHECK(artfSceneSetSky(s, &d));
+    printf("the horizon by day, green: %.4f once, %.4f more than once\n", day, skyMean(s, .1f, 1));
+    CHECK(skyMean(s, .1f, 1) > day * 1.05f);
+    /* the sun's color, from the table, is what the air leaves of it (by a march of 20000 steps: 2.664, 2.275, 1.770);
+     * the 8 steps of light scattered once miss some of the haze near the ground */
+    printf("the sun through the air: %.3f %.3f %.3f from the table, %.3f %.3f %.3f in 8 steps\n", s->sunColor.x, s->sunColor.y, s->sunColor.z, sunOnce.x, sunOnce.y, sunOnce.z);
+    CHECK(fabsf(s->sunColor.x - 2.664f) < .01f && fabsf(s->sunColor.y - 2.275f) < .01f && fabsf(s->sunColor.z - 1.770f) < .01f);
+    /* the sun drawn: bright toward it, nowhere else, and the sun's light the same */
+    const ArtfVec3 sunPlain = s->sunColor;
+    float toward[3], beside[3], besidePlain[3];
+    const ArtfVec3 to = artfVec3Normalize(artfVec3(.3f, .6f, 1));
+    const ArtfVec3 off = artfVec3Normalize(artfVec3(.5f, .6f, 1));
+    artfEnvSample(s->environment, 0, off.x, off.y, off.z, besidePlain);
+    d.sunDisc = 4;
+    CHECK(artfSceneSetSky(s, &d));
+    artfEnvSample(s->environment, 0, to.x, to.y, to.z, toward);
+    artfEnvSample(s->environment, 0, off.x, off.y, off.z, beside);
+    printf("the sun drawn: %.2f toward it, %.4f beside it (%.4f without)\n", toward[0], beside[0], besidePlain[0]);
+    CHECK(toward[0] > 8 && fabsf(beside[0] - besidePlain[0]) < .01f * besidePlain[0] + 1e-4f);
+    CHECK(s->sunColor.x == sunPlain.x && s->sunColor.y == sunPlain.y && s->sunColor.z == sunPlain.z);
+    /* clouds: white and grey where they are, the same bytes made again; the wind moves them */
+    d.sunDisc = 0;
+    CHECK(artfSceneSetSky(s, &d));
+    const size_t size = ARTF_ENV_FLOATS * sizeof(float);
+    float* clear = artfMalloc(size);
+    float* first = artfMalloc(size);
+    memcpy(clear, s->environment, size);
+    d.clouds.coverage = .6f;
+    start = artfNowMs();
+    CHECK(artfSceneSetSky(s, &d));
+    printf("a sky with clouds made in %.1f ms\n", artfNowMs() - start);
+    memcpy(first, s->environment, size);
+    int cloudy = 0, looked = 0;
+    for (int k = 0; k < 256; ++k) {
+        const float a = (float)k * .37f, y = .15f + .8f * (float)(k % 16) / 16.f, across = sqrtf(1.f - y * y);
+        float c[3], was[3];
+        artfEnvSample(first, 0, across * artfSinFast(a), y, across * artfCosFast(a), c);
+        artfEnvSample(clear, 0, across * artfSinFast(a), y, across * artfCosFast(a), was);
+        /* (a cloud: less blue than red and green than the sky was, or brighter) */
+        cloudy += c[2] / (c[0] + 1e-6f) < was[2] / (was[0] + 1e-6f) * .8f;
+        ++looked;
+    }
+    printf("clouds over %d of %d places in the sky\n", cloudy, looked);
+    CHECK(cloudy > looked / 8 && cloudy < looked);
+    CHECK(artfSceneSetSky(s, &d));
+    CHECK(memcmp(first, s->environment, size) == 0);
+    d.clouds.wind = artfVec3(3000, 0, 0);
+    CHECK(artfSceneSetSky(s, &d));
+    CHECK(memcmp(first, s->environment, size) != 0);
+    /* their shadow: the sun under thick cloud is dimmer; without it, as it was */
+    const ArtfVec3 unshaded = s->sunColor;
+    d.clouds.coverage = 1;
+    d.clouds.density = 4;
+    d.clouds.shadow = true;
+    CHECK(artfSceneSetSky(s, &d));
+    printf("the sun under clouds: %.3f, %.3f without their shadow\n", s->sunColor.y, unshaded.y);
+    CHECK(s->sunColor.y < unshaded.y * .5f && unshaded.y == sunPlain.y);
+    artfFree(clear);
+    artfFree(first);
+    artfSceneFree(s);
+}
+
+/* The look, as Unreal's: a histogram leaves out a small bright light that the mean follows; the exposure falls at its
+ * own speed; a look-up table that changes nothing changes nothing, and one that swaps red and blue swaps them; lift,
+ * gamma, gain, the wheels, grain and flare each change the picture; grain is new each frame; .cube files are read; the
+ * backends agree; and none of it asked is the same bytes as before. */
+static ArtfScene* lampScene(bool lamp) {
+    ArtfScene* s = bleedScene();
+    artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(2, 2, 2));
+    artfSceneSetAmbient(s, artfVec3(.1f, .1f, .1f), artfVec3(.1f, .1f, .1f));
+    artfSceneSetExposure(s, 1);
+    if (lamp) {
+        ArtfMaterialDesc m = artfMaterialDefaults();
+        m.baseColor = artfVec3(0, 0, 0);
+        m.emissive = artfVec3(3000, 3000, 3000);
+        addAt(s, artfSceneAddSphere(s, 1.f, 16, 24), artfSceneAddMaterial(s, &m), 0, 1.2f, 0, 1);
+    }
+    return s;
+}
+
+/* The mean of the left quarter of a frame: away from the lamp. */
+static double leftMean(const uint32_t* f) {
+    double sum = 0;
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W / 4; ++x) sum += CHANNEL(f[y * W + x], 8);
+    return sum / (H * (W / 4));
+}
+
+static float* swapLut(int n, bool swap) {
+    float* lut = artfMalloc((size_t)n * n * n * 12);
+    for (int b = 0; b < n; ++b)
+        for (int g = 0; g < n; ++g)
+            for (int r = 0; r < n; ++r) {
+                float* o = lut + 3 * (((size_t)b * n + g) * n + r);
+                o[0] = (float)(swap ? b : r) / (float)(n - 1);
+                o[1] = (float)g / (float)(n - 1);
+                o[2] = (float)(swap ? r : b) / (float)(n - 1);
+            }
+    return lut;
+}
+
+static void testLookMore(void) {
+    /* .cube files */
+    static const char cube[] = "# a table\nTITLE \"swap\"\nLUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n"
+                               "0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n";
+    int side = 0;
+    float* read = artfLutDecodeCube(cube, sizeof cube - 1, &side);
+    float* known = swapLut(2, true);
+    CHECK(read && side == 2 && !memcmp(read, known, 8 * 12));
+    artfFree(read);
+    artfFree(known);
+    CHECK(!artfLutDecodeCube("LUT_3D_SIZE 2\n0 0 0\n", 20, &side));
+    CHECK(!artfLutDecodeCube("LUT_1D_SIZE 2\n0 0 0\n1 1 1\n", 26, &side));
+
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* c = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        const char* name = backend ? "GPU" : "CPU";
+        /* a histogram: a lamp in the middle moves the mean, not what is left between the shares */
+        ArtfScene* dark = lampScene(false);
+        ArtfScene* lit = lampScene(true);
+        const ArtfPostDesc mean = {.autoExposure = true, .exposureSpeed = 1};
+        ArtfPostDesc histogram = mean;
+        histogram.exposureLow = .1f;
+        histogram.exposureHigh = .1f;
+        artfSceneSetPost(dark, &mean);
+        artfSceneSetPost(lit, &mean);
+        drawInto(r, dark, a);
+        drawInto(r, lit, b);
+        const double byMean = leftMean(a) - leftMean(b);
+        artfSceneSetPost(dark, &histogram);
+        artfSceneSetPost(lit, &histogram);
+        drawInto(r, dark, a);
+        drawInto(r, lit, b);
+        const double byHistogram = fabs(leftMean(a) - leftMean(b));
+        printf("%s, a bright lamp darkens the rest by %.1f metered by the mean, %.1f by a histogram\n", name, byMean, byHistogram);
+        CHECK(byMean > 2 && byHistogram < byMean * .3);
+        /* down at its own speed: from dark to bright at once, back up slowly */
+        ArtfPostDesc speeds = histogram;
+        speeds.exposureSpeed = .05f;
+        speeds.exposureSpeedDown = 1;
+        artfSceneSetPost(dark, &speeds);
+        artfSceneSetSun(dark, artfVec3(-.6f, -1, -.3f), artfVec3(.2f, .2f, .2f));
+        drawInto(r, dark, a);
+        for (int k = 0; k < 20; ++k) drawInto(r, dark, a);
+        artfSceneSetSun(dark, artfVec3(-.6f, -1, -.3f), artfVec3(2, 2, 2));
+        CHECK(artfRendererDraw(r, dark));
+        CHECK(artfRendererReadPixels(r, b));
+        artfSceneSetPost(dark, &histogram);
+        drawInto(r, dark, c);
+        printf("%s, the exposure falls at once: %.1f, as metered %.1f\n", name, leftMean(b), leftMean(c));
+        CHECK(fabs(leftMean(b) - leftMean(c)) < 3);
+        artfSceneFree(dark);
+        artfSceneFree(lit);
+        /* the look-up tables */
+        ArtfScene* s = lampScene(false);
+        artfSceneSetPost(s, NULL);
+        drawInto(r, s, a);
+        float* identity = swapLut(17, false);
+        float* swapped = swapLut(17, true);
+        ArtfPostDesc look = {.lut = identity, .lutSize = 17};
+        artfSceneSetPost(s, &look);
+        drawInto(r, s, b);
+        printf("%s, a look-up table that changes nothing: %.4f%% of pixels apart\n", name, differentShare(a, b, 1) * 100);
+        CHECK(differentShare(a, b, 1) == 0);
+        look.lut = swapped;
+        artfSceneSetPost(s, &look);
+        drawInto(r, s, b);
+        int worst = 0;
+        for (int i = 0; i < W * H; ++i) {
+            worst = artfMaxi(worst, abs(CHANNEL(a[i], 16) - CHANNEL(b[i], 0)));
+            worst = artfMaxi(worst, abs(CHANNEL(a[i], 0) - CHANNEL(b[i], 16)));
+            worst = artfMaxi(worst, abs(CHANNEL(a[i], 8) - CHANNEL(b[i], 8)));
+        }
+        printf("%s, a look-up table that swaps red and blue: within %d\n", name, worst);
+        CHECK(worst <= 1);
+        artfFree(identity);
+        artfFree(swapped);
+        /* each of the rest changes the picture, the same way each time (grain: each frame) */
+        const ArtfPostDesc each[8] = {{.lift = {.1f, 0, 0}}, {.gamma = {1.5f, 1.5f, 1.5f}}, {.gain = {1, .7f, 1}}, {.shadows = {1, 1, 1.6f}},
+                                      {.midtones = {1.3f, 1, 1}}, {.highlights = {.6f, .8f, 1}}, {.bloom = .1f, .flare = 1}, {.grain = .5f}};
+        for (int e = 0; e < 8; ++e) {
+            ArtfPostDesc plain = {0};
+            plain.bloom = each[e].bloom;
+            artfSceneSetPost(s, &plain);
+            drawInto(r, s, a);
+            artfSceneSetPost(s, &each[e]);
+            drawInto(r, s, b);
+            const double changed = differentShare(a, b, 2);
+            if (changed <= .01) printf("%s, look %d changed %.4f of the pixels\n", name, e, changed);
+            CHECK(changed > .01);
+            drawInto(r, s, c);
+            CHECK((differentShare(b, c, 0) == 0) == (e != 7));
+        }
+        /* none of it: the same bytes */
+        artfSceneSetPost(s, NULL);
+        drawInto(r, s, a);
+        const ArtfPostDesc none = {.lutAmount = .5f, .lutSize = 17};
+        artfSceneSetPost(s, &none);
+        drawInto(r, s, b);
+        CHECK(differentShare(a, b, 0) == 0);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    /* the backends agree, all of it at once */
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    o.hdr = true;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        o.backend = ARTF_BACKEND_SOFTWARE;
+        ArtfRenderer* cpu = artfRendererNew(&o);
+        float* swapped = swapLut(9, true);
+        ArtfScene* s = lampScene(true);
+        const ArtfPostDesc all = {.bloom = .1f, .autoExposure = true, .exposureSpeed = .5f, .exposureSpeedDown = 1, .exposureLow = .1f, .exposureHigh = .05f,
+                                  .lift = {.03f, 0, .02f}, .gamma = {1.2f, 1.1f, 1}, .gain = {1, .95f, .9f}, .shadows = {.9f, 1, 1.2f}, .highlights = {1.1f, 1, .9f},
+                                  .lut = swapped, .lutSize = 9, .lutAmount = .7f, .grain = .3f, .flare = .5f};
+        artfSceneSetPost(s, &all);
+        drawInto(cpu, s, a);
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 16);
+        printf("the look's histogram, grading, table, grain and flare, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .02);
+        artfSceneFree(s);
+        artfFree(swapped);
+        artfRendererFree(cpu);
+        artfRendererFree(gpu);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+}
+
 /* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
  * next to nothing, though a probe outside is nearer to it than one inside. */
 static void testProbesWalls(void) {
@@ -5320,6 +5594,8 @@ int main(void) {
     testGrading();
     testCoat();
     testSky();
+    testSkyMore();
+    testLookMore();
     testSizedLights();
     testMotion();
     testSoftShadows();

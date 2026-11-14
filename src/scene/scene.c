@@ -76,6 +76,7 @@ void artfSceneFree(ArtfScene* s) {
     artfTraceFini(&s->trace);
     artfFree(s->hole.map);
     artfFree(s->environment);
+    artfFree(s->lut);
     artfFree(s->indirect.probes);
     artfFree(s->indirect.next);
     artfFluidFree(s->hole.fluid);
@@ -1115,6 +1116,22 @@ void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc) {
 void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc) {
     if (desc) s->post = *desc;
     else memset(&s->post, 0, sizeof s->post);
+    /* the look-up table, copied: a new version only when it is another */
+    const int side = s->post.lut && s->post.lutSize >= 2 && s->post.lutSize <= ARTF_LUT_MAX ? s->post.lutSize : 0;
+    const size_t floats = (size_t)side * side * side * 3;
+    const bool same = side ? s->lut && s->lutFloats == floats && !memcmp(s->lut, s->post.lut, floats * 4) : !s->lut;
+    if (!same) {
+        artfFree(s->lut);
+        s->lut = NULL;
+        if (side) {
+            s->lut = artfMalloc(floats * 4);
+            memcpy(s->lut, s->post.lut, floats * 4);
+        }
+        s->lutFloats = side ? floats : 0;
+        ++s->lutVersion;
+    }
+    s->post.lut = s->lut;
+    s->post.lutSize = side;
 }
 void artfSceneSetShadows(ArtfScene* s, const ArtfShadowDesc* desc) {
     memset(&s->shadows, 0, sizeof s->shadows);
@@ -1391,6 +1408,24 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
                                    {artfLog2Fast(least), artfLog2Fast(artfMaxf(most, least)), artfClampf(p->saturation, -1, 4), artfClampf(p->contrast, -1, 4)},
                                    {artfClampf(p->temperature, -1, 1), artfClampf(p->tint, -1, 1), artfMaxf(p->vignette, 0), artfMaxf(p->chromatic, 0)}};
         memcpy(out->grade, grade, sizeof grade);
+        /* (0, 0, 0: as if not given) */
+#define OR_ONE(v) (artfVec3Dot(v, v) > 0 ? (v) : artfVec3(1, 1, 1))
+        const ArtfVec3 lift = p->lift, gamma = OR_ONE(p->gamma), gain = OR_ONE(p->gain);
+        const ArtfVec3 shadows = OR_ONE(p->shadows), midtones = OR_ONE(p->midtones), highlights = OR_ONE(p->highlights);
+#undef OR_ONE
+        const bool graded = artfVec3Dot(lift, lift) > 0 || gamma.x != 1 || gamma.y != 1 || gamma.z != 1 || gain.x != 1 || gain.y != 1 || gain.z != 1 ||
+                            shadows.x != 1 || shadows.y != 1 || shadows.z != 1 || midtones.x != 1 || midtones.y != 1 || midtones.z != 1 ||
+                            highlights.x != 1 || highlights.y != 1 || highlights.z != 1;
+        const bool histogram = p->exposureLow > 0 || p->exposureHigh > 0;
+        const float low = artfClampf(p->exposureLow, 0, .99f), high = artfClampf(p->exposureHigh, 0, .99f - low);
+        const float grade2[7][4] = {{lift.x, lift.y, lift.z, graded ? 1.f : 0.f},
+                                    {1.f / artfMaxf(gamma.x, .01f), 1.f / artfMaxf(gamma.y, .01f), 1.f / artfMaxf(gamma.z, .01f), artfClampf(p->grain, 0, 1)},
+                                    {gain.x, gain.y, gain.z, 0},
+                                    {shadows.x, shadows.y, shadows.z, s->lut ? (float)p->lutSize : 0.f},
+                                    {midtones.x, midtones.y, midtones.z, p->lutAmount > 0 ? artfMinf(p->lutAmount, 1) : 1.f},
+                                    {highlights.x, highlights.y, highlights.z, p->bloom > 0 ? artfMaxf(p->flare, 0) : 0.f},
+                                    {histogram ? low : 0.f, histogram ? high : 0.f, p->exposureSpeedDown > 0 ? artfMinf(p->exposureSpeedDown, 1) : grade[0][3], histogram ? 1.f : 0.f}};
+        memcpy(out->grade2, grade2, sizeof grade2);
     }
     if (s->indirect.on && s->indirect.probes) {
         const ArtfIndirect* g = &s->indirect;

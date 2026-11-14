@@ -313,7 +313,21 @@ void artfSceneSetEnvironmentLight(ArtfScene* s, float light, bool shown);
  * scatter the sun's light once, and ozone takes some, along each direction from a point above the ground. It is blue
  * by day, red and orange where the sun is low, and dark past the horizon; the ground below takes the sun through the
  * air. Call it after artfSceneSetSun, and again when the sun moves: it takes tens of milliseconds, on all cores.
- * The sun's color is then what of desc.sun reaches the ground. NULL: none. */
+ * The sun's color is then what of desc.sun reaches the ground (and, with clouds' shadow, what they leave of it where
+ * the eye is). NULL: none. */
+/* A layer of clouds in that sky (as Unreal's Volumetric Clouds, made into the picture): followed through in steps,
+ * each lit by the sun through the cloud above it and the air (Beer's law, with the powder of their edges and what
+ * light scattered many times inside adds), and by the sky. They are the picture's, so both backends show, light and
+ * trace them alike. The noise they are made of is the same everywhere. coverage 0: none. */
+typedef struct ArtfCloudDesc {
+    float coverage;   /* how much of the sky they cover, 0 to 1 */
+    float base;       /* how high their bottom is, in meters; 0: 1500 */
+    float thickness;  /* from bottom to top, in meters; 0: 2500 */
+    float density;    /* how dense they are, against a cumulus's; 0: 1 */
+    ArtfVec3 wind;    /* how far they have moved, in meters (x and z; y moves their shapes within): for an animation */
+    bool shadow;      /* the scene's sun is dimmed by what they take of it over the eye (softly, from a few points
+                       * around it): the eye in their shade, or not (with keepSun, it is not) */
+} ArtfCloudDesc;
 typedef struct ArtfSkyDesc {
     ArtfVec3 sun;     /* the sun's light above the air; 0: 3, 3, 3 */
     float haze;       /* how much haze, against a clear day's; 0: 1 */
@@ -322,6 +336,16 @@ typedef struct ArtfSkyDesc {
     int width;        /* of the picture it makes, twice its height; 0: 256 */
     bool hidden;      /* it lights and is reflected, but the frame's background stays */
     bool keepSun;     /* the scene's sun keeps its color */
+    /* Light scattered more than once (Hillaire, 2020): it makes the horizon and twilight as bright as they are, which
+     * light scattered once leaves dark. 1 as the air has it; 0: none, as before. With it (or the sun drawn, or clouds),
+     * what the air leaves of the sun is read from a table made once, so the sky takes less time, not more. */
+    float multiple;
+    /* The sun drawn in the sky, this many degrees across (the sun's own is .53; a texel of the picture is 360 / width
+     * degrees, so a wider picture shows it sharper), darker toward its edge as the sun is. Its light is the sun's as it
+     * reaches the eye, times 10: enough to bloom, and not so much that a traced path that meets it is a firefly. The
+     * light it gives is still the scene's sun's. 0: not drawn. */
+    float sunDisc;
+    ArtfCloudDesc clouds;
 } ArtfSkyDesc;
 bool artfSceneSetSky(ArtfScene* s, const ArtfSkyDesc* desc);
 /* Decodes a Radiance .hdr (RGBE) into linear RGB, three floats a pixel, for artfSceneSetEnvironment. The caller owns
@@ -527,7 +551,35 @@ typedef struct ArtfPostDesc {
      * film's shutter does. This is the share of a frame the shutter is open: .5 is a film camera's. Temporal
      * antialiasing follows what moves by the same measure. Instances are followed; what bones bend is not. */
     float motionBlur;
+
+    /* Auto exposure by a histogram, as Unreal's: with either of these, the frame is metered on 64 x 36 points into a
+     * histogram of stops, the darkest and the brightest shares are left out, and the mean of what is left is aimed
+     * at; so a small bright light, or a black corner, does not move the exposure. 0 and 0: the mean of all. */
+    float exposureLow;      /* the share of the darkest left out, 0 to 1 (Unreal's is .1) */
+    float exposureHigh;     /* the share of the brightest left out (Unreal's is .1) */
+    float exposureSpeedDown;/* the share of the way taken each frame when the exposure falls (the frame got brighter):
+                             * eyes go dark fast and light slowly; 0: exposureSpeed */
+
+    /* Grading, in what a screen shows (after the tone curve and contrast), each channel from 0 to 1: */
+    ArtfVec3 lift;          /* added to the dark, nothing to white: out = gain (in + lift (1 - in)); 0: none */
+    ArtfVec3 gamma;         /* then out^(1 / gamma): above 1 the middle is lighter; 0, 0, 0: 1, 1, 1 */
+    ArtfVec3 gain;          /* 0, 0, 0: 1, 1, 1 */
+    ArtfVec3 shadows;       /* color wheels: what the dark, the middle and the bright are multiplied by, each as much as */
+    ArtfVec3 midtones;      /* a pixel is of it (by its luminance: (1 - l)^2, 2 l (1 - l), l^2); 0, 0, 0: white */
+    ArtfVec3 highlights;
+    /* A look-up table of colors, as a .cube file has (artfLutDecodeCube): lutSize^3 RGB triples, red the fastest,
+     * applied last, between its points. What it takes is what a screen shows (each channel the square root of light,
+     * near enough to sRGB's). Copied by artfSceneSetPost. lutSize from 2 to 65; NULL: none. */
+    const float* lut;
+    int lutSize;
+    float lutAmount;        /* how much of it: 0: all */
+    float grain;            /* film grain, new each frame, the same on both backends: 0 to 1 (.3 is plain to see) */
+    float flare;            /* lens flare: what blooms, again as ghosts mirrored across the middle; with bloom */
 } ArtfPostDesc;
+
+/* Decodes a .cube file (Adobe's and Resolve's 3D look-up tables) into lutSize^3 RGB triples, red the fastest, for
+ * ArtfPostDesc.lut. The caller owns them (artfFree). NULL: it is not one, or it is damaged. */
+float* artfLutDecodeCube(const void* data, size_t size, int* lutSize);
 
 /* NULL: none. */
 void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc);

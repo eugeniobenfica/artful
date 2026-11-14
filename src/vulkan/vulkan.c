@@ -293,9 +293,16 @@ typedef struct Vulkan {
     VkPipeline fogPipeline;         /* fog that light goes through, over what is behind the scene */
     GpuBuffer postLight, postDepth, postSurface, postScratch, postHistory, postOcclusion, postFog, postBloom;
     uint32_t postBloomSizes[6][3];  /* of each level: where it starts, its width, its height */
+    /* The look-up table (ArtfPostDesc.lut), in bloom's buffer past auto exposure's state: room for so many vec4s, which
+     * scene and version it holds, and a copy of it to make from the staging buffer at the next frame. */
+    VkDeviceSize lutRoom;
+    uint64_t lutScene, lutVersion;
+    bool lutPending;
+    GpuBuffer lutStaging;
     float previous[16];             /* the frame before's viewProj */
     bool hasPrevious, historyValid;
     uint32_t postFrames;
+    uint32_t grainFrames;           /* for film grain */
     ArtfPool* pool;                 /* workers for what the CPU does for the GPU: the probes */
     ArtfLightData* lightScratch;    /* lights past the frame's own, and their lists, before they go up */
     uint32_t* listScratch;
@@ -506,7 +513,7 @@ static bool postTargetsMake(Vulkan* v) {
     GpuBuffer* const buffers[8] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom};
     /* (bloom's levels, and past them auto exposure's state) */
     /* (the surface's words, then the instance that shows at each pixel) */
-    const VkDeviceSize sizes[8] = {pixels * 16, pixels * 4, pixels * 8, pixels * 16, pixels * 16, pixels * 4, fog * 16, (bloom + 1) * 16};
+    const VkDeviceSize sizes[8] = {pixels * 16, pixels * 4, pixels * 8, pixels * 16, pixels * 16, pixels * 4, fog * 16, (bloom + 1 + v->lutRoom) * 16};
     for (int i = 0; i < 8; ++i)
         if (!bufferNew(v, buffers[i], sizes[i], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
     for (int k = 0; k < SLOTS; ++k) {
@@ -528,6 +535,40 @@ static bool postTargetsMake(Vulkan* v) {
     v->historyValid = false;
     v->exposureValid = false;
     v->hasPrevious = false;
+    v->lutVersion = 0; /* (copied again) */
+    return true;
+}
+
+/* The scene's look-up table, into the staging buffer, and bloom's buffer made larger when it has no room for it: the
+ * copy is made as the frame's commands begin (postRecord). Rare: it waits for the GPU. */
+static bool syncLut(Vulkan* v, const ArtfScene* scene) {
+    if (!scene->lut || (v->lutScene == scene->id && v->lutVersion == scene->lutVersion)) return true;
+    const VkDeviceSize entries = (VkDeviceSize)(scene->lutFloats / 3);
+    v->vkDeviceWaitIdle(v->device);
+    if (entries > v->lutRoom) {
+        v->lutRoom = entries;
+        const VkDeviceSize bloom = (VkDeviceSize)v->postBloomSizes[5][0] + v->postBloomSizes[5][1] * v->postBloomSizes[5][2];
+        bufferFree(v, &v->postBloom);
+        if (!bufferNew(v, &v->postBloom, (bloom + 1 + v->lutRoom) * 16, BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
+        const DescriptorBufferInfo info = {v->postBloom.buffer, 0, ~(VkDeviceSize)0};
+        for (int k = 0; k < SLOTS; ++k) {
+            const WriteDescriptorSet write = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 57, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
+            v->vkUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
+        }
+        v->exposureValid = false; /* (its state was there) */
+    }
+    if (v->lutStaging.size < entries * 16) {
+        bufferFree(v, &v->lutStaging);
+        if (!bufferNew(v, &v->lutStaging, entries * 16, BUFFER_TRANSFER_SRC, true)) return false;
+    }
+    float* to = v->lutStaging.mapped;
+    for (VkDeviceSize i = 0; i < entries; ++i) {
+        memcpy(to + i * 4, scene->lut + i * 3, 12);
+        to[i * 4 + 3] = 0;
+    }
+    v->lutScene = scene->id;
+    v->lutVersion = scene->lutVersion;
+    v->lutPending = true;
     return true;
 }
 
@@ -2613,6 +2654,14 @@ enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_F
 
 static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* frame, uint32_t image, const Viewport* viewport, const Rect2D* area) {
     const uint32_t pixels = (uint32_t)v->width * (uint32_t)v->height;
+    if (v->lutPending) {
+        /* (past bloom's levels and auto exposure's state) */
+        const VkDeviceSize at = ((VkDeviceSize)v->postBloomSizes[5][0] + v->postBloomSizes[5][1] * v->postBloomSizes[5][2] + 1) * 16;
+        const BufferCopy copy = {0, at, v->lutStaging.size < v->lutRoom * 16 ? v->lutStaging.size : v->lutRoom * 16};
+        v->vkCmdCopyBuffer(c, v->lutStaging.buffer, v->postBloom.buffer, 1, &copy);
+        memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
+        v->lutPending = false;
+    }
     v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
     postStep(v, c, POST_GATHER, 0, pixels);
     if (frame->post[0][2] > 0) {
@@ -2673,6 +2722,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     if (!v->framebuffers[0]) return true; /* a window with no size */
     if (!syncScene(v, scene)) return false;
     if (!syncEnvironment(v, scene)) return false;
+    if (v->floats && !syncLut(v, scene)) return false;
     /* probes that come or go: the scene's pixel shaders, with or without what reads them */
     const bool probes = scene->indirect.on && scene->indirect.probes, walls = probes && !scene->indirect.desc.throughWalls;
     const bool fogGrid = v->floats && scene->post.volumetric > 0 && scene->fogDensity > 0;
@@ -2739,6 +2789,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         memcpy(v->previous, now, sizeof now);
         v->hasPrevious = true;
         if (scene->post.temporal) artfFrameJitter(&frame, v->postFrames++, v->width, v->height);
+        frame.grade2[2][3] = (float)(v->grainFrames++ & 0xFFFFFu);
         if (tracing) frame.post[1][1] = 0; /* (fog that light goes through is drawn, not traced) */
         /* how each instance moved, after the instances in this slot's buffer: for temporal antialiasing and motion blur */
         if (scene->post.temporal || scene->post.motionBlur > 0) {
@@ -3184,6 +3235,7 @@ static void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->bloom);
         bufferFree(v, &v->holeMap);
         bufferFree(v, &v->environment);
+        bufferFree(v, &v->lutStaging);
         if (v->environmentPipeline) v->vkDestroyPipeline(v->device, v->environmentPipeline, NULL);
         for (int i = 0; i < 12; ++i)
             if (v->postPipelines[i]) v->vkDestroyPipeline(v->device, v->postPipelines[i], NULL);

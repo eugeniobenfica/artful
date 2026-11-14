@@ -428,6 +428,19 @@ the corners and each by what covers it. log2 and 2^x are worked out from a float
 of the way to the key each frame, and the state lives past bloom's levels in its buffer on the GPU, where one
 invocation meters before bloom reads it.
 
+With a histogram (`exposureLow`, `exposureHigh`) the grid is 64 x 36, and each point's weight, and weight times stops,
+go into one of 64 bins as whole numbers (of 1 / 65536 and 1 / 4096), so that a sum does not hang on the order it is
+made in: on the GPU, the 64 invocations of one group each take a column and add to bins in shared memory at once; on
+the CPU, one thread in turn; the same sums. Then one walks the bins, and the mean of what is left between the shares
+left out is what is aimed at, as Unreal's is. The exposure goes down at a speed of its own.
+
+After the tone curve and contrast, in what a screen shows: lift, gamma (2^x and log2 as above) and gain; three color
+wheels, each as much as a pixel's luminance l makes it shadow, middle or highlight ((1 - l)^2, 2 l (1 - l), l^2); a
+3D look-up table, between its eight nearest points; then grain, a hash of the pixel and the frame's number. On the
+GPU the table lives past auto exposure's state in bloom's buffer, copied there from a buffer the CPU writes when it
+is another, so no binding is spent on it. The lens flare reads bloom's last level again at three places mirrored
+across the middle, each its own color, gone at the frame's edges.
+
 ## What moves
 
 Each renderer keeps, by instance handle, where each instance was at its last frame (`motion.c`): from that, for each,
@@ -452,6 +465,28 @@ height of 8 km), haze (Mie's, 1.2 km, Cornette and Shanks's phase) and ozone (a 
 steps toward the sun for what reaches it. That is light scattered once, in Artful's units: the sun's color times pi
 times what the air sends toward the eye. Below the horizon the ground, lit through the air, is seen through it. The
 picture becomes the scene's environment, so nothing of it is a backend's.
+
+Asked for more, it goes as Hillaire's (2020) does, with two tables made first, on all cores. What the air leaves of
+the sun, by height and angle, in 256 x 64 (Bruneton's mapping: across, how far the top of the air is, so that the
+horizon keeps its texels), each texel a march of 40 steps: read in place of the 8 steps toward the sun at each step,
+and nearer the truth than they were. And light scattered more than once, in 32 x 32, by height and the sun's angle:
+from each texel 64 ways, light scattered once with a phase the same all ways, and how much of what comes goes on
+scattering, f; every further order is taken to scatter as the second, so all of them are the second over 1 - f. Each
+step toward the eye then adds what the air there scatters of that. In twilight, where most of the light has scattered
+more than once, the sky's blue is 1.7 times what it was, and the earth's shadow shows. The sun drawn is ten times its
+light as it reaches the eye, darker toward its edge (Neckel and Labs's, by channel): bright enough to bloom, not so
+bright that a traced path meeting it is a firefly; its light on the scene is still the sun's.
+
+Clouds are a layer between two spheres, followed from where a direction enters it, in 64 steps over at most 30 km,
+each texel's first step a little apart by a hash so that steps do not band. What is there comes of two tiled noises,
+made each time from a hash, value noise in octaves, the finer ones billowed (1 - |2n - 1|): where (a map 60 km
+across, which coverage moves up and down) and what shape (a volume of 64^3 over 12 km, rounded below and thinner at
+the top, worn at its edges by itself again at a fifth the size). Each step looks six times toward the sun, in steps
+that grow, for what the cloud above it takes; the sun's light then comes through by Beer's law, in three octaves for
+what scatters many times (Wrenninge's: each half as taken and half as forward), with powder at the edges that face
+away from the eye, and the sky's light, more toward the top. What they leave of the sky behind is seen through the
+air up to where they mostly are, and past 90 km they fade into it. All of it is the picture's, so tracing meets them
+as it meets the sky.
 
 ## Lights with a size, and soft shadows
 

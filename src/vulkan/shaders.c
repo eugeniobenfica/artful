@@ -21,7 +21,7 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_SIZE = 104 };
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_GRADE2 = 104, F_SIZE = 111 };
 
 typedef struct Resources {
     SpvId frame, instances, visible, meshes, materials, indirect, hiz, flags, environment;

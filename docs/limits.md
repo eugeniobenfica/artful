@@ -28,8 +28,12 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   things and their backs are guessed. Temporal antialiasing and motion blur follow instances, not what bones bend,
   which leaves a trail where its history does not fit. Motion blur takes eight points over at most 32 pixels, and
   spreads what is behind a moving thing over its edge, as it spreads the thing.
-- Auto exposure meters 576 points of the frame, not all of it, and has no histogram to leave out its brightest and
-  darkest: a small, very bright light in the middle of a dark frame darkens it more than a camera would. The black hole keeps its own exposure and tone mapping. Fog that
+- Auto exposure meters 576 points of the frame (2304 with a histogram), not all of it: a light smaller than the space
+  between them can be missed, or counted for more than it covers. Its histogram has 64 bins of three eighths of a stop,
+  from 1 / 4096 to 4096. Grading (lift, gamma, gain, the wheels, the look-up table, grain) is done in what a screen
+  shows, the square root of light, not in a log space as Unreal's is; a look-up table is read between its points, not
+  by a tetrahedron, and a .cube file's domain is taken to be 0 to 1. The flare is three ghosts of what blooms, with no
+  dirt on the lens. The black hole keeps its own exposure and tone mapping. Fog that
   light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is
   wide, and it reaches 4 / density along the view. It is not traced. Metal leaves all of it out.
 - Lights past the first 16 are listed up to 64 for each 64 x 64 square of the frame, and are left out of tracing and of
@@ -43,9 +47,12 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   They bounce on a flat ground only, not on what the scene holds, and their wind is noise, not a fluid.
 - A clear coat and sheen are their factors: their textures, and sheen's roughness, are not read. Sheen is Burley's
   rim, not the Charlie lobe glTF's sample viewer draws. The coat has the surface's own normal.
-- A sky (`artfSceneSetSky`) scatters light once: twilight, which comes of light scattered more than once, is darker
-  than a real one. It is a picture of all around, so its sun is not a disc in it, and it is made again, in tens of
-  milliseconds, when the sun moves. Fog by height thins fog that light goes through, not the plain fog.
+- A sky (`artfSceneSetSky`) scatters light once unless `multiple` asks for more, and then every order is taken to
+  scatter alike, as Hillaire's table has it. It is a picture of all around, made again, in tens of milliseconds, when
+  the sun or the clouds move: the sun drawn in it is as sharp as the picture's texels, and its clouds are as fine as
+  they are (256 across: 1.4 degrees each); they are not drawn in front of the scene, nor in fog that light goes through.
+  Their shadow is one for the whole scene, what they take of the sun over the eye, not a map over the ground. Below the
+  horizon the ground is lit by the sun alone. Fog by height thins fog that light goes through, not the plain fog.
 - Lights' sizes count for the sixteen lights the frame holds. Soft shadows (`ArtfShadowDesc.soft`) take 50 reads a
   pixel and light; their penumbra is at most 12 texels wide, and lights past the sixteen and fog that light goes
   through keep sharp ones.

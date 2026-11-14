@@ -15,6 +15,9 @@
  *   focus         a disc of 24 samples, as wide as each pixel's circle of confusion.
  *   bloom         light past the threshold, down a pyramid of halves and back up: a wide, soft glow.
  *
+ * Then auto exposure (by the mean, or a histogram), and the frame: exposure, the lens flare, the tone curve, and in what
+ * a screen shows, grading, the look-up table and grain.
+ *
  * Fog that light goes through comes before them all, and before the tiles: a grid of froxels (artfSoftFroxels) that
  * each surface reads as it is lit, layers too, and the background.
  *
@@ -472,26 +475,67 @@ static inline float exposureOf(const ArtfSoftPost* p) {
     return f->look[0];
 }
 
-/* The frame's mean in stops, on a grid of points, the middle weighed twice the corners and each by what covers it;
- * the exposure goes that share of the way to bringing it to the key. One thread: 576 points. */
+/* What the meter reads at a point of the frame (u, v from 0 to 1): its luminance in stops, and how much it counts, the
+ * middle weighed twice the corners and each by what covers it (0: nothing does). */
+static inline float meterPoint(const ArtfSoftPost* p, float u, float v, float* stops) {
+    const size_t i = (size_t)(int)(v * (float)p->height) * p->width + (size_t)(int)(u * (float)p->width);
+    const float alpha = artfClampf(p->f->postLight[3][i], 0, 1);
+    if (!(alpha > 0)) return 0.f;
+    const float luminance = (.2126f * p->f->postLight[0][i] + .7152f * p->f->postLight[1][i] + .0722f * p->f->postLight[2][i]) / alpha;
+    const float du = u * 2.f - 1.f, dv = v * 2.f - 1.f;
+    *stops = artfLog2Fast(artfClampf(luminance, 1.f / 4096.f, 4096.f));
+    return alpha * (1.f - .25f * (du * du + dv * dv));
+}
+
+/* The frame's mean in stops, on a grid of points; the exposure goes a share of the way to bringing it to the key (one
+ * share up, another down). With a histogram, the grid is denser, and its darkest and brightest shares are left out of
+ * the mean, as Unreal's is. One thread: 576 points, or 2304. */
 static void meter(ArtfSoftPost* p) {
     const ArtfFrameData* f = &p->f->data;
     float sum = 0, weights = 0;
-    for (int gy = 0; gy < ARTF_METER_Y; ++gy)
-        for (int gx = 0; gx < ARTF_METER_X; ++gx) {
-            const float u = ((float)gx + .5f) / (float)ARTF_METER_X, v = ((float)gy + .5f) / (float)ARTF_METER_Y;
-            const size_t i = (size_t)(int)(v * (float)p->height) * p->width + (size_t)(int)(u * (float)p->width);
-            const float alpha = artfClampf(p->f->postLight[3][i], 0, 1);
-            if (!(alpha > 0)) continue;
-            const float luminance = (.2126f * p->f->postLight[0][i] + .7152f * p->f->postLight[1][i] + .0722f * p->f->postLight[2][i]) / alpha;
-            const float du = u * 2.f - 1.f, dv = v * 2.f - 1.f;
-            const float weight = alpha * (1.f - .25f * (du * du + dv * dv));
-            sum += weight * artfLog2Fast(artfClampf(luminance, 1.f / 4096.f, 4096.f));
-            weights += weight;
+    if (!(f->grade2[6][3] > 0)) {
+        for (int gy = 0; gy < ARTF_METER_Y; ++gy)
+            for (int gx = 0; gx < ARTF_METER_X; ++gx) {
+                const float u = ((float)gx + .5f) / (float)ARTF_METER_X, v = ((float)gy + .5f) / (float)ARTF_METER_Y;
+                float stops = 0;
+                const float weight = meterPoint(p, u, v, &stops);
+                if (!(weight > 0)) continue;
+                sum += weight * stops;
+                weights += weight;
+            }
+    } else {
+        /* (each bin keeps its weight, and its weight times stops, as whole numbers of 1 / 65536 and 1 / 4096: sums that
+         * do not hang on their order, as the GPU's 64 invocations add them at once; what is left in a bin is then its
+         * own mean) */
+        uint32_t binWeight[ARTF_HISTOGRAM_BINS], binStops[ARTF_HISTOGRAM_BINS], total = 0;
+        for (int b = 0; b < ARTF_HISTOGRAM_BINS; ++b) binWeight[b] = binStops[b] = 0;
+        for (int gy = 0; gy < ARTF_HISTOGRAM_Y; ++gy)
+            for (int gx = 0; gx < ARTF_HISTOGRAM_X; ++gx) {
+                const float u = ((float)gx + .5f) / (float)ARTF_HISTOGRAM_X, v = ((float)gy + .5f) / (float)ARTF_HISTOGRAM_Y;
+                float stops = 0;
+                const float weight = meterPoint(p, u, v, &stops);
+                const int b = artfMini((int)(artfMaxf(stops + 12.f, 0) * ((float)ARTF_HISTOGRAM_BINS / 24.f)), ARTF_HISTOGRAM_BINS - 1);
+                binWeight[b] += (uint32_t)(weight * 65536.f + .5f);
+                binStops[b] += (uint32_t)(int32_t)floorf(weight * stops * 4096.f + .5f);
+            }
+        for (int b = 0; b < ARTF_HISTOGRAM_BINS; ++b) total += binWeight[b];
+        const float all = (float)total * (1.f / 65536.f);
+        const float from = all * f->grade2[6][0], to = all * (1.f - f->grade2[6][1]);
+        float before = 0;
+        for (int b = 0; b < ARTF_HISTOGRAM_BINS; ++b) {
+            const float w = (float)binWeight[b] * (1.f / 65536.f), st = (float)(int32_t)binStops[b] * (1.f / 4096.f);
+            const float kept = artfMinf(before + w, to) - artfMaxf(before, from);
+            if (kept > 0 && w > 0) {
+                sum += st * (kept / w);
+                weights += kept;
+            }
+            before += w;
         }
+    }
     float target = weights > 0 ? f->grade[0][2] - sum / weights : p->exposureValid ? p->exposureLog : 0.f;
     target = artfClampf(target, f->grade[1][0], f->grade[1][1]);
-    p->exposureLog = p->exposureValid ? p->exposureLog + (target - p->exposureLog) * f->grade[0][3] : target;
+    const float speed = target < p->exposureLog ? f->grade2[6][2] : f->grade[0][3];
+    p->exposureLog = p->exposureValid ? p->exposureLog + (target - p->exposureLog) * speed : target;
     p->exposureScale = artfExp2Fast(p->exposureLog);
     p->exposureValid = true;
 }
@@ -547,6 +591,74 @@ static inline void toneNeutral(float* c) {
     }
 }
 
+/* Lens flare: what blooms, again at three places mirrored across the middle, each its own color, fading as it goes from
+ * the middle to the frame's edges (and gone past them). dx, dy: from the middle to the pixel's center. */
+static const float flareScale[3] = {1.f, .5f, 1.8f};
+static const float flareTint[3][3] = {{1.f, .7f, .4f}, {.4f, .7f, 1.f}, {.7f, 1.f, .6f}};
+
+static inline void flareAt(const ArtfSoftPost* p, float dx, float dy, float* out) {
+    const float cx = (float)p->width * .5f, cy = (float)p->height * .5f;
+    for (int c = 0; c < 3; ++c) out[c] = 0;
+    for (int g = 0; g < 3; ++g) {
+        const float k = flareScale[g];
+        const float ax = dx * k / cx, ay = dy * k / cy;
+        const float fade = artfMaxf(1.f - ax * ax, 0) * artfMaxf(1.f - ay * ay, 0);
+        const float gx = (cx - dx * k) * .5f - .5f, gy = (cy - dy * k) * .5f - .5f;
+        /* (tap's arithmetic, for the three planes at once) */
+        const int w = p->bloomW[0], h = p->bloomH[0];
+        const float x = artfClampf(gx, 0, (float)(w - 1)), y = artfClampf(gy, 0, (float)(h - 1));
+        const int x0 = (int)x, y0 = (int)y, x1 = artfMini(x0 + 1, w - 1), y1 = artfMini(y0 + 1, h - 1);
+        const float fx = x - (float)x0, fy = y - (float)y0;
+        const size_t i00 = (size_t)y0 * w + x0, i01 = (size_t)y0 * w + x1, i10 = (size_t)y1 * w + x0, i11 = (size_t)y1 * w + x1;
+        for (int c = 0; c < 3; ++c) {
+            const float* plane = p->bloom[c];
+            const float top = plane[i00] + (plane[i01] - plane[i00]) * fx, bottom = plane[i10] + (plane[i11] - plane[i10]) * fx;
+            const float tinted = flareTint[g][c] * fade;
+            out[c] += tinted * (top + (bottom - top) * fy);
+        }
+    }
+}
+
+/* What is done in what a screen shows, last: lift, gamma and gain, the color wheels, the look-up table, the grain. */
+static inline void gradeShown(const ArtfSoftPost* p, const ArtfFrameData* f, float* c, int x, int y) {
+    if (f->grade2[0][3] > 0) {
+        for (int k = 0; k < 3; ++k) {
+            const float o = f->grade2[2][k] * (c[k] + f->grade2[0][k] * (1.f - c[k]));
+            c[k] = f->grade2[1][k] == 1 ? o : o > 0 ? artfExp2Fast(artfLog2Fast(o) * f->grade2[1][k]) : 0.f;
+        }
+        const float l = artfClampf(.2126f * c[0] + .7152f * c[1] + .0722f * c[2], 0, 1);
+        const float dark = (1.f - l) * (1.f - l), middle = 2.f * l * (1.f - l), bright = l * l;
+        for (int k = 0; k < 3; ++k) c[k] = artfClampf(c[k] * (dark * f->grade2[3][k] + middle * f->grade2[4][k] + bright * f->grade2[5][k]), 0, 1);
+    }
+    const int n = (int)f->grade2[3][3];
+    if (n >= 2 && p->f->scene->lut) {
+        const float* lut = p->f->scene->lut;
+        int at[3];
+        float t[3];
+        for (int k = 0; k < 3; ++k) {
+            const float q = artfClampf(c[k], 0, 1) * (float)(n - 1);
+            at[k] = artfMini((int)q, n - 2);
+            t[k] = q - (float)at[k];
+        }
+        const size_t i000 = (size_t)3 * (((size_t)at[2] * n + at[1]) * n + at[0]), dy = (size_t)3 * n, dz = (size_t)3 * n * n;
+        const float amount = f->grade2[4][3];
+        for (int k = 0; k < 3; ++k) {
+            const float* q = lut + i000 + k;
+            const float a = q[0] + (q[3] - q[0]) * t[0], b = q[dy] + (q[dy + 3] - q[dy]) * t[0];
+            const float d = q[dz] + (q[dz + 3] - q[dz]) * t[0], e = q[dz + dy] + (q[dz + dy + 3] - q[dz + dy]) * t[0];
+            const float near_ = a + (b - a) * t[1], far = d + (e - d) * t[1];
+            const float looked = near_ + (far - near_) * t[2];
+            c[k] = artfClampf(c[k] + (looked - c[k]) * amount, 0, 1);
+        }
+    }
+    const float grain = f->grade2[1][3];
+    if (grain > 0) {
+        const uint32_t h = hash((uint32_t)y * (uint32_t)p->width + (uint32_t)x + hash((uint32_t)f->grade2[2][3]));
+        const float noise = (float)(h >> 8) * (1.f / 16777216.f) - .5f;
+        for (int k = 0; k < 3; ++k) c[k] = artfClampf(c[k] + noise * grain * (.0625f + .75f * c[k] * (1.f - c[k])), 0, 1);
+    }
+}
+
 static void finalRow(ArtfSoftPost* p, int y) {
     const ArtfSoftFrame* sf = p->f;
     const ArtfFrameData* f = &sf->data;
@@ -557,6 +669,8 @@ static void finalRow(ArtfSoftPost* p, int y) {
     const float temperature = f->grade[2][0], tint = f->grade[2][1], vignette = f->grade[2][2], chromatic = f->grade[2][3];
     const float balance[3] = {1.f + .2f * temperature, 1.f - .2f * tint, 1.f - .2f * temperature};
     const bool balanced = temperature != 0 || tint != 0;
+    const bool graded = f->grade2[0][3] > 0 || f->grade2[3][3] > 0 || f->grade2[1][3] > 0;
+    const float flare = f->grade2[5][3];
     /* (from the middle, as a share of the way to a corner) */
     const float cx = (float)p->width * .5f, cy = (float)p->height * .5f, corner = 1.f / (cx * cx + cy * cy);
     const float apart = chromatic * sqrtf(corner), dy = (float)y + .5f - cy;
@@ -576,6 +690,11 @@ static void finalRow(ArtfSoftPost* p, int y) {
             if (exposure > 0) v[c] *= exposure;
             if (bloom > 0) v[c] += tap(p->bloom[c], bw, bh, ((float)x + .5f) * .5f - .5f, ((float)y + .5f) * .5f - .5f) * bloom / artfMaxf(alpha, 1e-3f);
         }
+        if (flare > 0) {
+            float ghosts[3];
+            flareAt(p, dx, dy, ghosts);
+            for (int c = 0; c < 3; ++c) v[c] += ghosts[c] * flare / artfMaxf(alpha, 1e-3f);
+        }
         if (balanced)
             for (int c = 0; c < 3; ++c) v[c] *= balance[c];
         if (saturation != 0) {
@@ -594,11 +713,13 @@ static void finalRow(ArtfSoftPost* p, int y) {
                 else if (curve == ARTF_TONE_REINHARD) v[c] = v[c] / (1.f + v[c]);
             }
         }
+        float shown[3];
         for (int c = 0; c < 3; ++c) {
-            float shown = sqrtf(artfClampf(v[c], 0, 1));
-            if (contrast != 0) shown = artfClampf(.5f + (shown - .5f) * (1.f + contrast), 0, 1);
-            out |= (uint32_t)(shown * alpha * 255.f + .5f) << (16 - 8 * c);
+            shown[c] = sqrtf(artfClampf(v[c], 0, 1));
+            if (contrast != 0) shown[c] = artfClampf(.5f + (shown[c] - .5f) * (1.f + contrast), 0, 1);
         }
+        if (graded) gradeShown(p, f, shown, x, y);
+        for (int c = 0; c < 3; ++c) out |= (uint32_t)(shown[c] * alpha * 255.f + .5f) << (16 - 8 * c);
         if (sf->overlay && x < sf->overlayWidth && y < sf->overlayHeight) {
             const uint32_t s = sf->overlay[(size_t)y * sf->overlayStride + x];
             if (s) {

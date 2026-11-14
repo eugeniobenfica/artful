@@ -41,6 +41,7 @@ typedef struct Software {
     size_t hdrPixels, bloomPixels;
     ArtfSoftPost post;
     uint32_t postFrames;  /* for the jitter */
+    uint32_t grainFrames; /* for film grain */
     float previous[16];   /* the frame before's viewProj */
     ArtfMotion motion;    /* how each instance moved */
     bool hasPrevious;
@@ -587,6 +588,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         memcpy(s->previous, now, sizeof now);
         s->hasPrevious = true;
         if (scene->post.temporal) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
+        f->data.grade2[2][3] = (float)(s->grainFrames++ & 0xFFFFFu);
         /* how each instance moved: for temporal antialiasing and motion blur */
         f->motion = NULL;
         if (scene->post.temporal || scene->post.motionBlur > 0) {

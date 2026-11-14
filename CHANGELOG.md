@@ -15,6 +15,16 @@
   a choice of **tone curve** (`toneMap`: ACES's fit as before, Khronos's PBR Neutral, Reinhard's, none); **white
   balance** (`temperature`, `tint`), **saturation**, **contrast**, a **vignette** and **chromatic aberration**. With
   none of it asked, a frame is the same bytes as before.
+- **More of the look**, in `ArtfPostDesc`, on both backends with the same arithmetic: auto exposure by a **histogram**
+  (`exposureLow`, `exposureHigh`: as Unreal's, the darkest and brightest shares left out; 64 x 36 points into 64 bins
+  of whole numbers, which the GPU's 64 invocations add to at once and the CPU in turn, to the same sums), with a speed
+  of its own **down** (`exposureSpeedDown`); **lift, gamma and gain**, and **color wheels** for the shadows, midtones and
+  highlights; a **3D look-up table** (`lut`, `lutSize` from 2 to 65, `lutAmount`; `artfLutDecodeCube` reads .cube
+  files), between its points, after the tone curve, in bloom's buffer past auto exposure's state on the GPU; **film
+  grain** (`grain`), a hash of the pixel and the frame's number; and a **lens flare** (`flare`): what blooms, again as
+  three ghosts mirrored across the middle. A small bright lamp that moves the mean's exposure by 3.7 of 255 moves the
+  histogram's by none; the GPU and the CPU are 0.00% of pixels apart with all of it. With none of it asked, a frame is
+  the same bytes as before (checked against 0.4's build, both backends).
 - **Motion followed**: each renderer keeps how each instance moved since the frame before (`artfMotionStep`, by
   handle), and each pixel which instance it shows (on the GPU in the surface target, now two words a pixel). Temporal
   antialiasing follows a surface to where it was, so what moves no longer leaves a trail (a sphere going sideways
@@ -33,6 +43,20 @@
   day, orange and red toward a low sun, and the ground below lit through the air. It becomes the scene's light from all
   around, so both backends light by it, reflect it, show it and trace it; and the sun's color becomes what reaches the
   ground. Tens of milliseconds, on all cores.
+- **The sky, closer to Unreal's Sky Atmosphere**: `ArtfSkyDesc.multiple`, light scattered more than once (Hillaire's
+  2020 table: what a point takes from all around, as if every order scattered alike), so that the horizon and twilight
+  are as bright as they are (in twilight, the sky's blue 1.7 times what scattering once gave, and the earth's shadow
+  shows); what the air leaves of the sun read from a table by Bruneton's mapping, made once per sky (the sun's color
+  from it within 0.3% of a march of 20,000 steps, where the 8 steps of light scattered once were 2 to 5% too bright);
+  and `sunDisc`, the sun drawn, darker toward its edge, at ten times its light as it reaches the eye: enough to bloom,
+  little enough that a traced path meeting it is no firefly, and none of the scene's light. Off, the sky is the same
+  bytes as before.
+- **Clouds**, as Unreal's Volumetric Clouds, into the sky's picture: `ArtfSkyDesc.clouds` (coverage, base, thickness,
+  density, wind). A layer followed in 64 steps through tiled noise made from a hash (the same bytes everywhere), each
+  step lit by the sun through the cloud above it (Beer's law, powder at the edges, three octaves of light scattered
+  many times) and by the sky, seen through the air between, fading into it far off. As they are the picture's, both
+  backends show, light, reflect and trace them alike. With `clouds.shadow`, the scene's sun dims by what they take of
+  it over the eye. A sky with clouds, of 256 x 128: 30 to 40 ms on 16 threads.
 - **Fog by height**: `artfSceneSetFogHeight`. Fog that light goes through thins above a height, and thickens below it.
 - **Lights with a size**: `artfLightSetSize`. Their highlights come from the point of the ball nearest the mirror ray,
   spread as wide as it looks with their light kept (Karis's): on a smooth floor, 2.6 times as wide. Traced, each path
@@ -50,7 +74,11 @@
   leaning at random, kept off what is steep, the same for the same seed.
 - `artful-render`: `--tone`, `--auto-exposure`, `--temperature`, `--tint`, `--saturation`, `--contrast`, `--vignette`,
   `--chromatic`, `--motion-blur`, `--sun`, `--sky`, `--fog-height`, `--soft-shadows`, `--sun-size`, `--hardware`.
-- The frame's block grows to 104 rows. Metal's shaders were not made again (SPIRV-Cross was not at hand): they read
+  And `--sky-multiple`, `--sun-disc`, `--sky-width`, `--clouds`, `--cloud-base`, `--cloud-thickness`, `--cloud-density`,
+  `--wind`, `--cloud-shadow`, `--exposure-low`, `--exposure-high`, `--exposure-speed`, `--exposure-speed-down`, `--lift`,
+  `--gamma`, `--gain`, `--grade-shadows`, `--grade-midtones`, `--grade-highlights`, `--lut`, `--lut-amount`, `--grain`,
+  `--flare`; it prints what the sky took.
+- The frame's block grows to 111 rows. Metal's shaders were not made again (SPIRV-Cross was not at hand): they read
   the records they did, and leave all of the above out.
 - Cost, where none of it is used, measured against 0.4 on a Ryzen with a Radeon RX 9060 XT, best of several runs at
   1920 x 1080: the CPU within 2% (`spheres`, `heavy`, `city`, `outdoors` in floats with temporal antialiasing); the

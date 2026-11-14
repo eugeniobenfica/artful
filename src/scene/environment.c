@@ -292,3 +292,55 @@ float* artfImageDecodeHdr(const void* data, size_t size, int* width, int* height
     *height = h;
     return out;
 }
+
+/* ---- a .cube file: a look-up table of colors for ArtfPostDesc.lut ---- */
+
+float* artfLutDecodeCube(const void* data, size_t size, int* lutSize) {
+    const char* p = data;
+    const char* end = p + size;
+    int side = 0;
+    size_t count = 0, need = 0;
+    float* out = NULL;
+    while (p < end) {
+        /* a line, copied (cut at 255 characters), to read numbers from */
+        char line[256];
+        size_t n = 0;
+        while (p < end && *p != '\n' && *p != '\r') {
+            if (n + 1 < sizeof line) line[n++] = *p;
+            ++p;
+        }
+        while (p < end && (*p == '\n' || *p == '\r')) ++p;
+        line[n] = 0;
+        const char* at = line;
+        while (*at == ' ' || *at == '\t') ++at;
+        if (!*at || *at == '#') continue;
+        if (!strncmp(at, "LUT_3D_SIZE", 11)) {
+            if (side) goto damaged;
+            side = atoi(at + 11);
+            if (side < 2 || side > ARTF_LUT_MAX) goto damaged;
+            need = (size_t)side * side * side;
+            out = artfMalloc(need * 12);
+            continue;
+        }
+        if ((*at >= 'A' && *at <= 'Z') || *at == '_') {
+            /* TITLE, DOMAIN_MIN, DOMAIN_MAX, LUT_3D_INPUT_RANGE: taken as 0 to 1; a 1D table is not this */
+            if (!strncmp(at, "LUT_1D_SIZE", 11)) goto damaged;
+            continue;
+        }
+        if (!out || count >= need) goto damaged;
+        for (int c = 0; c < 3; ++c) {
+            char* next = NULL;
+            const double v = strtod(at, &next);
+            if (next == at) goto damaged;
+            out[count * 3 + c] = (float)v;
+            at = next;
+        }
+        ++count;
+    }
+    if (!out || count != need) goto damaged;
+    *lutSize = side;
+    return out;
+damaged:
+    artfFree(out);
+    return NULL;
+}

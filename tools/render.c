@@ -16,7 +16,14 @@
  *                 [--focus distance --aperture pixels] [--fog density r g b]
  *                 [--tone aces|neutral|reinhard|none] [--auto-exposure] [--temperature x] [--tint x]
  *                 [--saturation x] [--contrast x] [--vignette x] [--chromatic pixels] [--motion-blur shutter]
- *                 [--sun x y z]: where the sun shines, as a direction; [--sky [haze]]: a sky from the sun
+ *                 [--sun x y z]: where the sun shines, as a direction; [--sky [haze]]: a sky from the sun, and
+ *                 [--sky-multiple x]: light scattered more than once; [--sun-disc degrees]; [--sky-width n];
+ *                 [--clouds coverage] [--cloud-base m] [--cloud-thickness m] [--cloud-density x] [--wind x y z]
+ *                 [--cloud-shadow]
+ *                 [--exposure-low share] [--exposure-high share]: auto exposure by a histogram;
+ *                 [--exposure-speed x] [--exposure-speed-down x]
+ *                 [--lift r g b] [--gamma r g b] [--gain r g b] [--grade-shadows r g b] [--grade-midtones r g b]
+ *                 [--grade-highlights r g b] [--lut file.cube] [--lut-amount x] [--grain x] [--flare x]
  *                 [--fog-height base falloff]: fog that light goes through thins with height
  *                 [--indirect]: light that bounces, from probes, every frame; [--through-walls]: lighter, and it leaks
  *
@@ -390,6 +397,9 @@ int main(int argc, char** argv) {
     float sunSize = -1;
     float environmentLight = 1.f, sceneExposure = 0, skyHaze = -1, fogHeight[2] = {0, 0}, sunAt[3] = {0, 0, 0};
     bool showEnvironment = false;
+    ArtfSkyDesc skyMore; /* (what the sky has past haze) */
+    memset(&skyMore, 0, sizeof skyMore);
+    const char* lutFile = NULL;
     ArtfPostDesc post;
     memset(&post, 0, sizeof post);
     float fog[4] = {0, 0, 0, 0};
@@ -450,6 +460,31 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--fog") && i + 4 < argc) { for (int k = 0; k < 4; ++k) fog[k] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--scene-exposure") && i + 1 < argc) sceneExposure = (float)atof(argv[++i]);
         else if (!strcmp(a, "--sky")) skyHaze = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 0.f;
+        else if (!strcmp(a, "--sky-multiple") && i + 1 < argc) skyMore.multiple = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--sun-disc") && i + 1 < argc) skyMore.sunDisc = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--sky-width") && i + 1 < argc) skyMore.width = atoi(argv[++i]);
+        else if (!strcmp(a, "--clouds") && i + 1 < argc) skyMore.clouds.coverage = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--cloud-base") && i + 1 < argc) skyMore.clouds.base = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--cloud-thickness") && i + 1 < argc) skyMore.clouds.thickness = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--cloud-shadow")) skyMore.clouds.shadow = true;
+        else if (!strcmp(a, "--cloud-density") && i + 1 < argc) skyMore.clouds.density = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--wind") && i + 3 < argc) { skyMore.clouds.wind.x = (float)atof(argv[++i]); skyMore.clouds.wind.y = (float)atof(argv[++i]); skyMore.clouds.wind.z = (float)atof(argv[++i]); }
+        else if (!strcmp(a, "--exposure-low") && i + 1 < argc) post.exposureLow = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--exposure-high") && i + 1 < argc) post.exposureHigh = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--exposure-speed") && i + 1 < argc) post.exposureSpeed = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--exposure-speed-down") && i + 1 < argc) post.exposureSpeedDown = (float)atof(argv[++i]);
+        else if ((!strcmp(a, "--lift") || !strcmp(a, "--gamma") || !strcmp(a, "--gain") || !strcmp(a, "--grade-shadows") || !strcmp(a, "--grade-midtones") ||
+                  !strcmp(a, "--grade-highlights")) && i + 3 < argc) {
+            ArtfVec3* to = !strcmp(a, "--lift") ? &post.lift : !strcmp(a, "--gamma") ? &post.gamma : !strcmp(a, "--gain") ? &post.gain
+                         : !strcmp(a, "--grade-shadows") ? &post.shadows : !strcmp(a, "--grade-midtones") ? &post.midtones : &post.highlights;
+            to->x = (float)atof(argv[++i]);
+            to->y = (float)atof(argv[++i]);
+            to->z = (float)atof(argv[++i]);
+        }
+        else if (!strcmp(a, "--lut") && i + 1 < argc) lutFile = argv[++i];
+        else if (!strcmp(a, "--lut-amount") && i + 1 < argc) post.lutAmount = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--grain") && i + 1 < argc) post.grain = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--flare") && i + 1 < argc) post.flare = (float)atof(argv[++i]);
         else if (!strcmp(a, "--sun") && i + 3 < argc) { for (int k = 0; k < 3; ++k) sunAt[k] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--fog-height") && i + 2 < argc) { fogHeight[0] = (float)atof(argv[++i]); fogHeight[1] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--model") && i + 1 < argc) model = argv[++i];
@@ -498,16 +533,33 @@ int main(int argc, char** argv) {
     else sceneSpheres(s);
     if (pngAlpha) artfSceneSetBackgroundAlpha(s, 0);
     if (sceneExposure > 0) artfSceneSetExposure(s, sceneExposure);
+    float* lut = NULL;
+    if (lutFile) {
+        FILE* file = fopen(lutFile, "rb");
+        if (!file) { fprintf(stderr, "cannot read %s\n", lutFile); return 1; }
+        fseek(file, 0, SEEK_END);
+        const long length = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        char* bytes = malloc((size_t)length + 1);
+        const size_t got = fread(bytes, 1, (size_t)length, file);
+        fclose(file);
+        lut = artfLutDecodeCube(bytes, got, &post.lutSize);
+        free(bytes);
+        if (!lut) { fprintf(stderr, "%s is not a .cube file\n", lutFile); return 1; }
+        post.lut = lut;
+    }
     artfSceneSetPost(s, &post);
+    artfFree(lut);
     if (fog[0] > 0) artfSceneSetFog(s, artfVec3(fog[1], fog[2], fog[3]), fog[0]);
     if (fogHeight[1] > 0) artfSceneSetFogHeight(s, fogHeight[0], fogHeight[1]);
     if (sunSize >= 0) artfSceneSetSunSize(s, sunSize);
     if (sunAt[0] != 0 || sunAt[1] != 0 || sunAt[2] != 0) artfSceneSetSun(s, artfVec3(sunAt[0], sunAt[1], sunAt[2]), artfVec3(3, 3, 3));
     if (skyHaze >= 0) {
-        ArtfSkyDesc sky;
-        memset(&sky, 0, sizeof sky);
+        ArtfSkyDesc sky = skyMore;
         sky.haze = skyHaze;
+        const double skyStart = artfNowMs();
         artfSceneSetSky(s, &sky);
+        printf("sky: %.1f ms\n", artfNowMs() - skyStart);
     }
     if (indirect) {
         ArtfIndirectDesc probes;
