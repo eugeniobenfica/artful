@@ -79,6 +79,7 @@ void artfSceneFree(ArtfScene* s) {
     artfFree(s->indirect.probes);
     artfFree(s->indirect.next);
     artfFluidFree(s->hole.fluid);
+    artfScaleFree(s->scale);
     artfFree(s);
 }
 
@@ -121,6 +122,9 @@ static uint32_t meshPlace(ArtfScene* s, const ArtfMeshData* m) {
     ++s->meshRemovals;
     return index;
 }
+
+uint32_t artfSceneMakeLevels(const ArtfMeshData* m, ArtfMeshData* made, float* errors) { return makeLevels(m, made, errors); }
+uint32_t artfSceneMeshPlace(ArtfScene* s, const ArtfMeshData* m) { return meshPlace(s, m); }
 
 /* What was made goes into the scene, after its mesh. */
 static void takeLevels(ArtfScene* s, uint32_t index, const ArtfMeshData* made, const float* errors, uint32_t count) {
@@ -173,12 +177,13 @@ ArtfMesh artfSceneAddPreparedMesh(ArtfScene* s, ArtfPreparedMesh* p) {
     return index + 1;
 }
 
-/* Is a mesh, or a copy of its skin, still drawn? */
+/* Is a mesh, or a copy of its skin, still drawn? (An instance of what bends may take one of its levels.) */
 static bool meshInUse(const ArtfScene* s, uint32_t index) {
     const ArtfMeshData* m = &s->meshes.items[index];
     for (size_t i = 0; i < s->instances.len; ++i) {
         const ArtfMeshData* used = &s->meshes.items[s->instances.items[i].mesh];
-        if (s->instances.items[i].mesh == index || (m->skin && used->skin == m->skin)) return true;
+        const ArtfMeshData* home = used->home ? &s->meshes.items[used->home - 1] : used;
+        if (s->instances.items[i].mesh == index || (m->skin && (used->skin == m->skin || home->skin == m->skin))) return true;
     }
     return false;
 }
@@ -204,10 +209,12 @@ bool artfSceneRemoveMesh(ArtfScene* s, ArtfMesh mesh) {
         return false;
     }
     const ArtfMeshData* m = &s->meshes.items[mesh - 1];
-    uint32_t lods[ARTF_MAX_LODS];
-    const uint32_t count = m->lodCount;
+    uint32_t lods[ARTF_MAX_LODS], skinLods[ARTF_MAX_LODS];
+    const uint32_t count = m->lodCount, skinCount = m->skinLodCount;
     memcpy(lods, m->lods, sizeof lods);
+    memcpy(skinLods, m->skinLods, sizeof skinLods);
     for (uint32_t i = 0; i < count; ++i) forgetMesh(s, lods[i]);
+    for (uint32_t i = 0; i < skinCount; ++i) forgetMesh(s, skinLods[i]);
     forgetMesh(s, mesh - 1);
     return true;
 }
@@ -223,13 +230,17 @@ ArtfMesh artfSceneAddMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_t ver
 ArtfMesh artfSceneAddSkinnedMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const ArtfVertexSkin* skin) {
     ArtfMeshData m;
     if (!artfMeshBuild(&m, vertices, vertexCount, indices, indexCount, skin, NULL, 0)) return 0;
-    return meshPlace(s, &m) + 1;
+    const uint32_t index = meshPlace(s, &m);
+    artfSceneSkinLevels(s, index);
+    return index + 1;
 }
 
 ArtfMesh artfSceneAddMorphMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const ArtfVertexSkin* skin, const ArtfMorphTarget* targets, uint32_t targetCount) {
     ArtfMeshData m;
     if (!artfMeshBuild(&m, vertices, vertexCount, indices, indexCount, skin, targets, targetCount)) return 0;
-    return meshPlace(s, &m) + 1;
+    const uint32_t index = meshPlace(s, &m);
+    artfSceneSkinLevels(s, index);
+    return index + 1;
 }
 
 void artfSceneSetFeature(ArtfScene* s, ArtfFeature feature, bool on) {
@@ -466,7 +477,9 @@ void artfSceneMemory(const ArtfScene* s, ArtfSceneMemory* out) {
     memset(out, 0, sizeof *out);
     for (size_t i = 0; i < s->meshes.len; ++i) {
         const ArtfMeshData* m = &s->meshes.items[i];
-        out->meshes += (size_t)m->vertexCount * sizeof(ArtfPackedVertex) + (size_t)m->indexCount * 4 + (size_t)m->positionStride * 16 + (m->colors ? (size_t)m->vertexCount * 4 : 0);
+        const size_t bytes = (size_t)m->vertexCount * sizeof(ArtfPackedVertex) + (size_t)m->indexCount * 4 + (size_t)m->positionStride * 16 + (m->colors ? (size_t)m->vertexCount * 4 : 0);
+        out->meshes += bytes;
+        if (!m->evicted) out->residentMeshes += bytes;
     }
     for (size_t i = 1; i < s->textures.len; ++i) {
         const ArtfTextureData* t = &s->textures.items[i];
@@ -687,6 +700,12 @@ static ArtfInstanceData* instanceOf(ArtfScene* s, ArtfInstance i) {
     return NULL;
 }
 
+ArtfInstanceData* artfSceneInstance(ArtfScene* s, ArtfInstance i) {
+    const uint32_t number = HANDLE_NUMBER(i);
+    if (number && number <= s->handleSlots.len && s->handleGenerations.items[number - 1] == HANDLE_GENERATION(i)) return &s->instances.items[s->handleSlots.items[number - 1]];
+    return NULL;
+}
+
 /* Where an instance is, for maps to know what they can keep. */
 static void noteChange(ArtfScene* s, const ArtfInstanceData* d) {
     if (d->flags & ARTF_INSTANCE_PARTICLE) return; /* (it casts nothing) */
@@ -702,6 +721,11 @@ static void noteChange(ArtfScene* s, const ArtfInstanceData* d) {
 static void changed(ArtfScene* s, const ArtfInstanceData* d) {
     ++s->instanceVersion;
     if (!(d->flags & ARTF_INSTANCE_PARTICLE)) ++s->tracedVersion;
+}
+
+void artfSceneInstanceChanged(ArtfScene* s, ArtfInstanceData* d) {
+    noteChange(s, d);
+    changed(s, d);
 }
 
 void artfInstanceMarkParticle(ArtfScene* s, ArtfInstance i) {
@@ -731,8 +755,10 @@ ArtfInstance artfSceneAddInstance(ArtfScene* s, ArtfMesh mesh, ArtfMaterial mate
         /* each instance bends alone: it has a copy of its own, that all that draws sees as any other mesh */
         ArtfMeshData copy;
         artfMeshCopy(&copy, &s->meshes.items[d.mesh]);
+        const uint32_t source = d.mesh;
         d.mesh = meshPlace(s, &copy);
         artfVecPush(&s->deforming, d.mesh);
+        artfSceneCopySkinLevels(s, source, d.mesh);
     }
     d.material = material < s->materials.len ? material : 0;
     d.opacity = 65535;
@@ -765,12 +791,18 @@ void artfSceneRemoveInstance(ArtfScene* s, ArtfInstance i) {
     s->translucentCount -= s->instances.items[slot].translucent;
     s->cutoutCount -= (s->instances.items[slot].flags & ARTF_INSTANCE_CUTOUT) != 0;
     noteChange(s, &s->instances.items[slot]);
-    /* (a mesh that bends is this instance's own) */
+    /* (a mesh that bends is this instance's own, with its copies of the levels) */
     const uint32_t own = s->instances.items[slot].mesh;
     if (s->meshes.items[own].skin && !s->meshes.items[own].ownsSkin) {
-        forgetMesh(s, own);
-        for (size_t k = 0; k < s->deforming.len; ++k)
-            if (s->deforming.items[k] == own) s->deforming.items[k] = s->deforming.items[--s->deforming.len];
+        const uint32_t home = s->meshes.items[own].home ? s->meshes.items[own].home - 1 : own;
+        uint32_t copies[1 + ARTF_MAX_LODS], n = 0;
+        copies[n++] = home;
+        for (uint32_t k = 0; k < s->meshes.items[home].skinLodCount; ++k) copies[n++] = s->meshes.items[home].skinLods[k];
+        for (uint32_t c = 0; c < n; ++c) {
+            forgetMesh(s, copies[c]);
+            for (size_t k = 0; k < s->deforming.len; ++k)
+                if (s->deforming.items[k] == copies[c]) s->deforming.items[k] = s->deforming.items[--s->deforming.len];
+        }
     }
     s->instances.items[slot] = s->instances.items[last];
     s->instanceHandles.items[slot] = s->instanceHandles.items[last];

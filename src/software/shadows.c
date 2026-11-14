@@ -110,7 +110,7 @@ static void geometryJob(void* user, uint32_t index, uint32_t worker) {
     for (size_t i = first; i < end; ++i) {
         const ArtfInstanceData* inst = &scene->instances.items[i];
         if (inst->translucent) continue;
-        const ArtfMeshData* mesh = &scene->meshes.items[inst->mesh];
+        const ArtfMeshData* mesh = &scene->meshes.items[artfMeshHeld(scene, inst->mesh)];
         const float* w = inst->m;
         const float* c = mesh->center;
         const float wc[3] = {w[0] * c[0] + w[1] * c[1] + w[2] * c[2] + w[3], w[4] * c[0] + w[5] * c[1] + w[6] * c[2] + w[7], w[8] * c[0] + w[9] * c[1] + w[10] * c[2] + w[11]};

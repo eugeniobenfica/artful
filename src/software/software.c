@@ -44,6 +44,8 @@ typedef struct Software {
     float previous[16];   /* the frame before's viewProj */
     ArtfMotion motion;    /* how each instance moved */
     bool hasPrevious;
+    ARTF_VEC(ArtfInstanceData) swarmInstances; /* particles of emitters of many, as instances, for this frame */
+    ARTF_VEC(ArtfSwarm*) swarms;
 } Software;
 
 #ifdef ARTFUL_HAVE_AVX2
@@ -180,12 +182,11 @@ static void softSetOverlay(ArtfRenderer* r, const ArtfOverlay* o) {
 
 /* ---- a frame ---- */
 
-/* What a frame needs of an instance; false when it is out of view. */
-static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) {
+/* What a frame needs of an instance (i: its place in the scene's); false when it is out of view. */
+static bool placeData(const ArtfSoftFrame* f, const ArtfInstanceData* inst, size_t i, ArtfVisible* v) {
     const ArtfScene* scene = f->scene;
     const float* vp = f->data.viewProj;
     const float* eye = f->data.cameraPos;
-    const ArtfInstanceData* inst = &scene->instances.items[i];
     const ArtfMeshData* mesh = &scene->meshes.items[inst->mesh];
     const float* m = inst->m;
     const float* c = mesh->center;
@@ -238,6 +239,8 @@ static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) {
     }
     return true;
 }
+
+static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) { return placeData(f, &f->scene->instances.items[i], i, v); }
 
 /* Which of a group of instances are in view. Layers come later, in their own order. */
 static void cullGroup(void* user, uint32_t group, uint32_t worker) {
@@ -551,16 +554,46 @@ static void drawTraced(Software* s, ArtfScene* scene) {
     }
 }
 
+typedef struct SwarmFace { Software* s; ArtfSwarm* w; const float* particles; float rows[ARTF_SWARM_ROWS * 4]; uint32_t at; } SwarmFace;
+
+static void swarmFaceJob(void* user, uint32_t index, uint32_t worker) {
+    (void)worker;
+    const SwarmFace* j = user;
+    const uint32_t places = artfSwarmPlaces(j->w), first = (uint32_t)((uint64_t)places * index / ARTF_CHUNKS), end = (uint32_t)((uint64_t)places * (index + 1) / ARTF_CHUNKS);
+    artfSwarmFace(j->particles, j->rows, first, end, j->s->swarmInstances.items + j->at + first);
+}
+
+/* The particles of emitters of many: moved on the workers, then each an instance of the quad, after the layers, in
+ * the order of their places, as the GPU draws them. */
+static void addSwarms(Software* s, ArtfScene* scene) {
+    ArtfSoftFrame* f = &s->f;
+    uint32_t at = 0;
+    for (size_t k = 0; k < s->swarms.len; ++k) {
+        SwarmFace j = {s, s->swarms.items[k], artfSwarmCpu(s->swarms.items[k], s->pool), {0}, at};
+        artfSwarmFaceRows(scene, j.w, j.rows);
+        artfPoolRun(s->pool, swarmFaceJob, &j, ARTF_CHUNKS);
+        at += artfSwarmPlaces(j.w);
+    }
+    f->swarmFirst = f->visibleCount;
+    for (uint32_t i = 0; i < at; ++i) {
+        const ArtfInstanceData* d = &s->swarmInstances.items[i];
+        if (d->maxScale > 0 && placeData(f, d, 0, &f->visible[f->visibleCount])) ++f->visibleCount;
+    }
+}
+
 /* What shows what is behind it goes after all that is solid, the farthest first, in a pass of its own:
  * so that, reading the chunks in order, a tile meets the layers in order. */
-static void addLayers(Software* s, const ArtfScene* scene) {
+static void addLayers(Software* s, ArtfScene* scene) {
     ArtfSoftFrame* f = &s->f;
     f->solidCount = f->visibleCount;
-    if (!scene->translucentCount) return;
-    artfVecReserve(&s->layers, scene->translucentCount);
-    const uint32_t count = artfSceneLayers(scene, &f->data, s->layers.items);
-    for (uint32_t i = 0; i < count; ++i)
-        if (placeInstance(f, s->layers.items[i].instance, &f->visible[f->visibleCount])) ++f->visibleCount;
+    f->swarmFirst = UINT32_MAX;
+    if (scene->translucentCount) {
+        artfVecReserve(&s->layers, scene->translucentCount);
+        const uint32_t count = artfSceneLayers(scene, &f->data, s->layers.items);
+        for (uint32_t i = 0; i < count; ++i)
+            if (placeInstance(f, s->layers.items[i].instance, &f->visible[f->visibleCount])) ++f->visibleCount;
+    }
+    if (s->swarms.len) addSwarms(s, scene);
     if (f->visibleCount == f->solidCount) return;
     f->firstVisible = f->solidCount;
     f->geometryAppend = true;
@@ -575,6 +608,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     ArtfSoftFrame* f = &s->f;
     const double t0 = artfNowMs();
     f->scene = scene;
+    artfSceneScaleStep(scene, f->width, f->height);
     artfSceneDecodeTextures(scene);
     artfScenePosesApply(scene);
     artfSceneFaceParticles(scene);
@@ -617,10 +651,19 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     f->background = (uint32_t)(artfClampf(bg[3], 0, 1) * 255.f + .5f) << 24 | (uint32_t)(artfClampf(bg[0], 0, 1) * 255.f + .5f) << 16 | (uint32_t)(artfClampf(bg[1], 0, 1) * 255.f + .5f) << 8 | (uint32_t)(artfClampf(bg[2], 0, 1) * 255.f + .5f);
     f->solidCount = UINT32_MAX;
 
-    /* room for every instance, by groups, then packed into one list */
+    /* room for every instance, by groups, then packed into one list; and for particles of emitters of many */
     const uint32_t count = (uint32_t)scene->instances.len;
-    if (count * 2 + ARTF_CHUNKS > s->visibleCapacity) {
-        s->visibleCapacity = (count + ARTF_CHUNKS) * 2; /* (what fades goes in twice) */
+    uint32_t places = 0;
+    s->swarms.len = 0;
+    const uint32_t swarms = artfSceneSwarms(scene, NULL, 0);
+    if (swarms) {
+        artfVecReserve(&s->swarms, swarms);
+        s->swarms.len = artfSceneSwarms(scene, s->swarms.items, swarms);
+        for (size_t k = 0; k < s->swarms.len; ++k) places += artfSwarmPlaces(s->swarms.items[k]);
+        artfVecReserve(&s->swarmInstances, places);
+    }
+    if (count * 2 + ARTF_CHUNKS + places > s->visibleCapacity) {
+        s->visibleCapacity = (count + ARTF_CHUNKS) * 2 + places; /* (what fades goes in twice) */
         artfFree(f->visible);
         artfFree(f->meshletStarts);
         artfFree(s->candidates);
@@ -756,6 +799,8 @@ static void softFree(ArtfRenderer* r) {
     artfFree(s->hidden);
     artfFree(s->wasVisible);
     artfVecFree(&s->layers);
+    artfVecFree(&s->swarmInstances);
+    artfVecFree(&s->swarms);
     artfFree(f->traceSum);
     for (int c = 0; c < 3; ++c) {
         artfAlignedFree(f->hdr[c]);

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Many as one, far away** (Unreal's HLOD): `artfSceneBuildHlod` gathers the instances that stay into cubes of the
+  world, merges each cube's of a material into one mesh (from each one's first lighter level, through its transform),
+  makes it lighter with `simplify.c` on all cores, and draws it in their place past a distance: by default where what
+  that moved stays under `artfSceneSetLodError`'s pixels, as levels are chosen. `artfSceneAddHlod` does it for
+  instances given, `artfSceneClearHlod` undoes it, `artfSceneHlodShown` counts. The choice is made once a frame,
+  before any backend draws, as opacities: so both draw the same, shadows follow, and near, the frame is the same bytes
+  as without it. `--scene forest --hlod` (80,001 instances): 392 merged meshes in 1.4 s, and the CPU draws 31,000
+  instances where it drew 62,000, 15.5 ms a frame at 1920 x 1080 where it took 19.1 (Vulkan: 0.73, 0.75).
+- **Levels of detail for what bends**: a skinned or morphed mesh of 128 triangles or more gets three lighter versions,
+  as other meshes do, each with the joints, weights and targets of the vertices it keeps (a collapse keeps the vertex
+  it moves onto; one between vertices that bones or targets move apart costs more, so they go last). Each instance has
+  a copy of each, takes the one its distance calls for, and only that one is bent: on the GPU by the `skin` shader, on
+  the CPU by `artfMeshDeform`. A test holds a level's vertices to within 0.003 of where their bones put them, and the
+  backends to the same picture. `--scene crowd` (2,500 figures bent every frame), at 1920 x 1080: 20 ms a frame on the
+  CPU where it took 107, 0.41 ms on Vulkan where it took 0.76.
+- **Emitters of many** (Niagara's GPU emitters): `ArtfEmitterDesc.parallel`. Particles are a buffer, not instances:
+  the scene says where each step's births go (free places, one after another, around the buffer) and keeps the steps;
+  where it is drawn, each particle is moved alone, by a compute shader (`swarm`) when Vulkan draws and on the CPU's
+  workers otherwise, with the same arithmetic, random numbers from a hash of each birth's number, and the same
+  features: gravity, drag, turbulence, the ground, spin, bursts, color, size and opacity over a life. Then each is an
+  instance of the quad facing the eye, written by the GPU itself: one draw for all of them, after the other layers.
+  A test holds the backends to 0.06% of pixels apart, and draws 100,000 at once on both. `--particles 200000` at
+  1920 x 1080: 0.72 ms a frame on Vulkan, 40 on the CPU; a million, 2.3 ms on Vulkan.
+  The small emitters are as they were.
+- **Meshes that come and go**: `ArtfResidencyDesc.meshes` and `meshBudget`, `artfMeshSetResidentLevel`,
+  `artfSceneAddMeshStreamed`. As textures' mipmaps: of each mesh with levels, those its instances need at their
+  distance (with room to come nearer), within a budget, are held; the lightest always is. A level not held leaves the
+  GPU, and memory too for a mesh the program can read again, which is read and made again, the same bytes, when it is
+  wanted; both backends draw the next level held in its place, and shadows too. Traced, all is held.
+- `artful-render`: `--scene forest`, `--hlod [cell]`, `--scene crowd` (2,500 figures that bend), `--particles n`,
+  `--stream-meshes [MB]`.
+
 - **The ray tracing hardware**: `ArtfTraceDesc.hardware`. Where the GPU has acceleration structures and ray queries
   (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`), a ray goes through them in place of the trees the compute
   shader walks: a bottom level for each mesh traced, from the same triangles, and the top over the traced instances,

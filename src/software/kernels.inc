@@ -1868,8 +1868,21 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         }
     }
     if (w->layers.len) {
-        if (f->scene->features[ARTF_FEATURE_LAYERS_SORTED] && !f->post) drawLayersSorted(f, w, ox, oy, tw, th);
-        else drawLayers(f, w, ox, oy, tw, th);
+        if (f->scene->features[ARTF_FEATURE_LAYERS_SORTED] && !f->post) {
+            /* (particles of emitters of many come after the lists, each over what is there, as on the GPU) */
+            const size_t all = w->layers.len;
+            size_t split = 0;
+            while (split < all && w->layers.items[split]->instance < f->swarmFirst) ++split;
+            w->layers.len = split;
+            if (split) drawLayersSorted(f, w, ox, oy, tw, th);
+            w->layers.items += split;
+            w->layers.len = all - split;
+            drawLayers(f, w, ox, oy, tw, th);
+            w->layers.items -= split;
+            w->layers.len = all;
+        } else {
+            drawLayers(f, w, ox, oy, tw, th);
+        }
     }
     if (f->tracing) {
         /* what rays gathered goes over the background, as a layer does */

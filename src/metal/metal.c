@@ -474,7 +474,7 @@ static bool syncMeshes(Metal* v, ArtfScene* scene) {
     for (size_t i = 0; i < scene->meshes.len; ++i) {
         const ArtfMeshData* m = &scene->meshes.items[i];
         MeshRange range = {0, 0, 0, 0, m->skin ? m->pose.applied : m->deformVersion};
-        if (m->vertexCount && !m->removed) {
+        if (m->vertexCount && !m->removed && !m->evicted) {
             memcpy((char*)v->vertices.mapped + (size_t)atVertex * sizeof(ArtfPackedVertex), m->vertices, (size_t)m->vertexCount * sizeof(ArtfPackedVertex));
             memcpy((uint32_t*)v->indices.mapped + atIndex, m->indices, (size_t)m->indexCount * 4);
             range.firstIndex = atIndex;
@@ -535,7 +535,7 @@ static bool syncScene(Metal* v, ArtfScene* scene) {
             for (uint32_t k = 0; k < ARTF_MAX_LODS; ++k) {
                 const uint32_t mesh = k < m->lodCount ? m->lods[k] : 0;
                 memcpy(&row[12 + k], &mesh, 4);
-                row[16 + k] = k < m->lodCount ? m->lodErrors[k] : -1.f;
+                row[16 + k] = k < m->lodCount ? artfMeshLevelError(m, k) : -1.f;
             }
             memcpy(out, row, sizeof row);
         }
@@ -630,7 +630,7 @@ static bool syncShadowList(Metal* v, const ArtfScene* scene) {
 #define KIND(d) (scene->materials.items[(d)->material].flags & ARTF_MATERIAL_MASK ? meshes : 0)
     for (size_t i = 0; i < scene->instances.len; ++i) {
         const ArtfInstanceData* d = &scene->instances.items[i];
-        if (!d->translucent) ++counts[KIND(d) + d->mesh];
+        if (!d->translucent) ++counts[KIND(d) + artfMeshHeld(scene, d->mesh)];
     }
     uint32_t* commands = v->shadowCommands.mapped;
     uint32_t at = 0;
@@ -646,9 +646,10 @@ static bool syncShadowList(Metal* v, const ArtfScene* scene) {
     for (size_t i = 0; i < scene->instances.len; ++i) {
         const ArtfInstanceData* d = &scene->instances.items[i];
         if (d->translucent) continue;
-        const uint32_t slot = counts[KIND(d) + d->mesh]++;
+        const uint32_t held = artfMeshHeld(scene, d->mesh);
+        const uint32_t slot = counts[KIND(d) + held]++;
         list[slot * 2] = (uint32_t)i;
-        list[slot * 2 + 1] = d->mesh;
+        list[slot * 2 + 1] = held;
     }
 #undef KIND
     v->shadowInstances = scene->instanceVersion;
@@ -1028,6 +1029,7 @@ static bool metalDraw(ArtfRenderer* r, ArtfScene* scene) {
     Metal* v = (Metal*)r;
     const double start = artfNowMs();
     void* pool = poolPush();
+    artfSceneScaleStep(scene, v->width, v->height);
     const bool ok = frameDraw(v, scene);
     poolPop(pool);
     v->cpuMs = artfNowMs() - start;

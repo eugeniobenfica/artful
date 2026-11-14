@@ -98,8 +98,9 @@ ArtfTexture artfSceneAddPreparedTexture(ArtfScene* s, ArtfPreparedTexture* prepa
 bool artfSceneRemoveMesh(ArtfScene* s, ArtfMesh mesh);
 bool artfSceneRemoveTexture(ArtfScene* s, ArtfTexture texture);
 
-/* What a scene holds, in bytes. Resident: of textures, at the mipmaps they have now. */
-typedef struct ArtfSceneMemory { size_t meshes, textures, residentTextures; } ArtfSceneMemory;
+/* What a scene holds, in bytes. Resident: of textures, at the mipmaps they have now; of meshes, the levels held
+ * (see ArtfResidencyDesc.meshes). */
+typedef struct ArtfSceneMemory { size_t meshes, textures, residentTextures, residentMeshes; } ArtfSceneMemory;
 void artfSceneMemory(const ArtfScene* s, ArtfSceneMemory* out);
 
 /* Who decides how much of each texture a GPU holds. Artful works out what each one needs, from how large what
@@ -113,6 +114,8 @@ typedef enum ArtfResidency {
 
 /* What Artful would do with a texture: its largest mipmap to keep. */
 typedef void (*ArtfResidencyFn)(void* user, ArtfTexture texture, int mip);
+/* And with a mesh: its heaviest level to keep (0 the whole, k its k-th lighter version). */
+typedef void (*ArtfMeshResidencyFn)(void* user, ArtfMesh mesh, int level);
 
 typedef struct ArtfResidencyDesc {
     ArtfResidency mode;
@@ -120,9 +123,26 @@ typedef struct ArtfResidencyDesc {
     int interval;       /* frames between looks; 0: 30 */
     ArtfResidencyFn report; /* assisted */
     void* user;
+    /* Meshes too, as Unreal streams them: of each that has lighter versions, the levels that what uses it needs, by
+     * its distance (with room to come nearer), and what fits meshBudget; its lightest level always stays. A level
+     * that is not held leaves the GPU, and memory too for a mesh that can be read again (artfSceneAddMeshStreamed);
+     * what would have drawn it draws the next level held, on every backend alike. Nothing of it while traced. */
+    bool meshes;
+    size_t meshBudget;  /* bytes of meshes' levels; 0: as much as they need */
+    ArtfMeshResidencyFn reportMesh; /* assisted */
 } ArtfResidencyDesc;
 
 void artfSceneSetResidency(ArtfScene* s, const ArtfResidencyDesc* desc);
+
+/* A mesh whose triangles the program gives again when they are wanted: read fills vertexCount vertices and indexCount
+ * indices, on the thread that makes the mesh resident, the same each time. It is read once here, for its lighter
+ * versions (the lod feature must be on), and only its lightest stays in memory until more is wanted. false: it could
+ * not be read, and what was there stays. 0: it has no triangles. */
+typedef bool (*ArtfMeshReadFn)(void* user, ArtfVertex* vertices, uint32_t* indices);
+ArtfMesh artfSceneAddMeshStreamed(ArtfScene* s, uint32_t vertexCount, uint32_t indexCount, ArtfMeshReadFn read, void* user);
+/* The heaviest level of a mesh held: 0 is all of it; each step up gives up a level, down to its lightest. */
+void artfMeshSetResidentLevel(ArtfScene* s, ArtfMesh mesh, int level);
+int artfMeshResidentLevel(const ArtfScene* s, ArtfMesh mesh);
 
 /* A texture whose larger mipmaps stay out of memory until they are resident: Artful asks for each when it needs it,
  * on the thread that makes it resident (for files, assisted residency lets the program choose when). pixels: BGRA, of
@@ -140,7 +160,9 @@ typedef struct ArtfVertexSkin {
 } ArtfVertexSkin;
 
 /* skin: one for each vertex. Each instance of such a mesh is its own copy, moved by artfInstanceSetJoints. Such a mesh
- * has no levels of detail and is not culled by parts. */
+ * is not culled by parts. With the lod feature on, one of 128 triangles or more gets lighter versions, each with the
+ * joints, weights and targets of the vertices it keeps; each instance takes the one its distance calls for, as a
+ * mesh that does not bend would, and only that one is bent. */
 ArtfMesh artfSceneAddSkinnedMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const ArtfVertexSkin* skin);
 
 /* What a mesh can turn into: for each vertex, what is added to its position and normal, three floats each. NULL: nothing. */
@@ -410,6 +432,12 @@ typedef struct ArtfEmitterDesc {
     float bounce;         /* what they keep of their speed into the ground: 0 they stop, 1 all of it */
     float friction;       /* what they lose of their speed along it, at each bounce: 0 to 1 */
     float spin;           /* how they turn, facing the eye, in radians a second: each gives or takes this much */
+    /* Many at once, as Niagara's GPU emitters: its particles are not instances, but a buffer, moved in parallel where
+     * the scene is drawn (by a compute shader when Vulkan draws, on the CPU's workers otherwise: the same to a
+     * rounding) and drawn as quads facing the eye, after all other layers, in the order of their places in the buffer.
+     * most may then be a million. A particle's numbers come from its birth's: steps that differ in size give others.
+     * Set when made. */
+    bool parallel;
 } ArtfEmitterDesc;
 typedef uint32_t ArtfEmitter;
 
@@ -466,6 +494,29 @@ typedef struct ArtfScatterDesc {
     uint32_t seed;
 } ArtfScatterDesc;
 uint32_t artfSceneScatter(ArtfScene* s, const ArtfScatterDesc* desc, ArtfInstance* instances, uint32_t room);
+
+/* Far away, many as one (Unreal's hierarchical levels of detail): instances that do not move, gathered in cubes of
+ * the world, each cube's of a material merged into one mesh, made lighter, and drawn in their place past a distance:
+ * one instance where there were hundreds. The choice is made once a frame, before any backend draws, so all draw the
+ * same; while it holds them, the instances' opacity is the merged mesh's business. Their shadows go with what is
+ * drawn. Instances that bend, show through, are particles or are merged already are left as they are. Instances moved
+ * or removed after this are not followed: clear and build again. */
+typedef struct ArtfHlodDesc {
+    float cell;        /* the side of the cubes; 0: 32 */
+    float keep;        /* the share of a merged mesh's triangles kept; 0: .125 */
+    /* From the eye to a cube's ball, past which the merged mesh is drawn; 0: where what making it lighter moved stays
+     * under artfSceneSetLodError's pixels, as levels of detail are chosen, and never within the ball's radius. */
+    float distance;
+    uint32_t least;    /* the fewest instances worth merging; 0: 2 */
+} ArtfHlodDesc;
+/* All instances of the scene, by cubes: how many merged meshes it made. On all cores. */
+uint32_t artfSceneBuildHlod(ArtfScene* s, const ArtfHlodDesc* desc);
+/* These instances, as one, whatever their place: the merged mesh's instance, or 0. */
+ArtfInstance artfSceneAddHlod(ArtfScene* s, const ArtfInstance* instances, uint32_t count, const ArtfHlodDesc* desc);
+/* All merged meshes go, and what they held shows again. */
+void artfSceneClearHlod(ArtfScene* s);
+/* How many merged meshes were drawn in place of theirs at the last frame. */
+uint32_t artfSceneHlodShown(const ArtfScene* s);
 
 /* Decals: a picture laid over what is drawn, through a box. The transform takes the unit box (-.5 to .5 each way) to
  * the world; what is inside it takes the picture from above, down the box's y: u along its x, v along its z. The

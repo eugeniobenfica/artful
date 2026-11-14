@@ -83,6 +83,14 @@ do is choose. An instance takes the lightest level whose error, projected at its
 replaces it, and added up along a chain of collapses: a quadric's own cost is a mean weighed by area,
 and comes out far below what can be seen.
 
+**Far away, many as one.** `scale.c` merges the instances of a cube of the world, of one material, into one mesh, from
+each one's first lighter level through its transform, and makes that lighter again. Its error is what the levels had
+moved, and what this moves. Once a frame, before any backend draws (`artfSceneScaleStep`), each merged mesh is drawn
+past the distance where its error fits, never within its ball: what it holds is then at opacity 0, which every backend
+leaves out of what is drawn, of shadows and of rays, and it is at 1. So the choice is one, made in one place, and costs
+a scene that has none nothing. A choice that does not change touches nothing; one that does is an instance change, as
+moving one is.
+
 ## Occlusion
 
 With the `occlusion` feature, in two passes, on both backends (Haar and Aaltonen, 2015):
@@ -215,6 +223,15 @@ for the software backend, Metal and rays, which refit their part of the BVH. 2,0
 to pose and 2.5 ms to draw on a Ryzen 3200G. `artfAnimationSet` samples glTF's clips at a time the program gives;
 blending two is the program's.
 
+What bends has levels too. Collapses keep the vertex they move onto, so a level's vertices are some of the whole's, and
+each takes its joints, weights and targets along: a level is built from the floats the mesh was given, with its own
+skin. Moving a vertex onto one that bones or targets move otherwise costs more (the weights that differ, as a twentieth
+of the mesh; targets, by how far apart they move the two), so the cut between bones goes last. An instance has a copy
+of each level; once a frame `scale.c` picks the one its distance calls for, by the mesh at rest, as artfMeshLevel
+would, and makes it the instance's mesh, with the pose copied over. Only that copy is bent, so a far crowd bends a
+quarter of the vertices or less, on the GPU's `skin` shader as on the CPU. The backends never see a level of what bends
+as one: it is the instance's mesh.
+
 ## Shadows, levels and layers
 
 Each shadow map has a key: its view and what is not an instance. Each change to an instance leaves a ball where it was and
@@ -266,6 +283,14 @@ Residency is how many mipmaps of a texture the GPU holds. `artfSceneResidencySte
 view. Manual does nothing. Assisted reports what it would do, and the program calls `artfTextureSetResidentMip`.
 Automatic does that itself, within a budget. Main memory keeps all the mipmaps, so coming back costs an upload and not
 a read.
+
+Meshes have levels held the same way (`ArtfResidencyDesc.meshes`): of each, from the heaviest its instances need, at
+half their distance, to its lightest, which always stays. A level not held is a mesh of another generation with no
+triangles on the GPU, so the backends give its room back as they do for a mesh removed, and bring it back the same
+way. What chooses levels sees a level not held as having no error: `artfMeshLevelError` is 0 for those before the first
+held, and the CPU, the GPU's culling shader and Metal all read it, so all draw the next level held. Shadows go by
+`artfMeshHeld`. A mesh added with a way to read it (`artfSceneAddMeshStreamed`) drops its levels from memory too, and
+reading it again makes them again, the same bytes, so a picture before and after is the same.
 
 ## Taking out noise
 
@@ -379,6 +404,19 @@ taken still holds registers, and fewer pixels run at once for it: with all of th
 When one of them is turned on or off, the shaders are made again, as they are for new materials in C.
 
 ## Particles and terrain
+
+**Emitters of many** (`parallel`) are a buffer of particles, twelve floats each, and no instances. What makes the GPU
+and the CPU agree, and threads not matter, is that nothing depends on order. At each step the scene decides where the
+born go: places around the buffer, one after another from where the last went, as many as are free; it knows when each
+dies from its birth, without the particles, and keeps the step as eight rows of numbers. A particle's random numbers
+are a hash of its birth's number. Each place then moves alone: born if the step put a birth there, then gravity, drag,
+noise, the ground and spin, as `artfSwarmMove` says, which the compute shader `swarm` does too. A backend keeps its own
+copy of the particles, and applies the steps it has not seen, up to 120 of them: the CPU on its workers, by stretches
+of places, all steps for each; the GPU in one dispatch an emitter, each invocation a place. The same invocation turns
+its particle to the eye and writes it as an instance of the quad, with the material of its age and its opacity, into
+the frame's instance buffer, past the scene's, and its copy into the visible list: one indexed draw of the quad then
+draws them all, through the pipeline small particles use. The CPU makes the same instances and draws them as layers,
+each its own: after all other layers, in the order of their places, on both.
 
 Neither is a backend's: an emitter's particles are instances of one quad, which `artfEmitterStep` moves and fades
 (through eight materials between the first color and the last, and opacity), and terrain is a mesh. Each backend

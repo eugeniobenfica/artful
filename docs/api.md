@@ -38,19 +38,21 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneLoadGltf`, `artfSceneLoadGltfMemory` | All a glTF file holds. |
 | `artfSceneLoadModel`, `artfModelSetTransform`, `artfAnimationSet` | The same as a model you can move, with its clips. |
 | `artfModelCameraCount`, `artfModelCamera` | A file's cameras, for `artfSceneSetCamera`. |
-| `artfSceneAddSkinnedMesh`, `artfInstanceSetJoints` | Your own bones. |
+| `artfSceneAddSkinnedMesh`, `artfInstanceSetJoints` | Your own bones, with levels of detail. |
 | `artfSceneAddMesh` | Your own triangles. |
 | `artfSceneAddCube`, `AddSphere`, `AddTorus`, `AddPlane` | Shapes. |
 | `artfSceneAddTerrain` | A mesh from heights. |
 | `artfSceneAddTerrainMaterial` | Its layers: up to four surfaces, by a painted map or by slope and height. |
 | `artfSceneScatter` | Grass, trees or rocks over a terrain: placed, turned and sized at random, the same each time. |
-| `artfSceneAddEmitter`, `artfEmitterStep`, `artfEmitterSet`, `artfEmitterBurst`, `artfSceneRemoveEmitter` | Particles: fire, smoke, sparks; with a wind that swirls, a ground they bounce on, and spin. |
+| `artfSceneAddEmitter`, `artfEmitterStep`, `artfEmitterSet`, `artfEmitterBurst`, `artfSceneRemoveEmitter` | Particles: fire, smoke, sparks; with a wind that swirls, a ground they bounce on, and spin. `parallel`: a hundred thousand and more, moved where they are drawn, by a compute shader on the GPU. |
 | `artfSceneAddDecal`, `artfDecalSet`, `artfSceneRemoveDecal` | A picture laid over what is drawn, through a box. |
 | `artfSceneAddTexture`, `artfImageDecode` | Pixels, and PNG or JPEG to pixels. |
 | `artfSceneAddTextureKtx2` | A KTX2 file, compressed as it is. |
 | `artfPrepareMesh`, `artfPrepareTexture`, `artfSceneAddPreparedMesh`, `artfSceneAddPreparedTexture` | The slow part on your own thread. |
 | `artfSceneRemoveMesh`, `artfSceneRemoveTexture`, `artfSceneMemory` | Giving memory back, and how much is used. |
 | `artfSceneSetResidency`, `artfTextureSetResidentMip` | Who decides what stays on the GPU: you, you with help, or Artful. |
+| `ArtfResidencyDesc.meshes`, `artfMeshSetResidentLevel`, `artfSceneAddMeshStreamed` | Meshes' levels too, by distance and a budget; a mesh read again when it is wanted. |
+| `artfSceneBuildHlod`, `artfSceneAddHlod`, `artfSceneClearHlod` | Far away, many as one: cubes of instances merged into a lighter mesh each. |
 | `artfSceneAddMaterial`, `artfMaterialSet` | Color, metal, roughness, emission, alpha, two sides, refraction, normal maps, unlit, a clear coat, sheen. |
 | `artfGraphNew`, `artfExprMul` and the rest, `artfSceneAddGraph`, `artfMaterialSetParam` | Materials written in C. |
 | `artfSceneAddInstance`, `artfSceneRemoveInstance` | A mesh placed in the world. |

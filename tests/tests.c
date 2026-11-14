@@ -3,6 +3,7 @@
 #include "artful/artful.h"
 #include "scene/sceneInternal.h"
 #include "render/rendererInternal.h"
+#include "core/threads.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -4159,6 +4160,415 @@ static void testTraceHardware(void) {
     artfRendererFree(gpu);
 }
 
+/* ---- scale: many as one, levels of what bends, emitters of many, meshes that come and go ---- */
+
+static ArtfScene* groveScene(void) {
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetBackground(s, artfVec3(0, 0, 0));
+    const ArtfMesh ball = artfSceneAddSphere(s, .4f, 16, 24);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.3f, .7f, .3f);
+    const ArtfMaterial m = artfSceneAddMaterial(s, &d);
+    for (int z = 0; z < 6; ++z)
+        for (int x = 0; x < 6; ++x) addAt(s, ball, m, (float)x - 2.5f, 0, (float)z - 2.5f, 1);
+    return s;
+}
+
+/* Far away, many as one: balls in cubes become a merged mesh each past a distance, the same choice and near the same
+ * picture on both backends; near, the same bytes as without it; cleared, all as it was. */
+static void testHlod(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_VULKAN;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    uint32_t* c = artfMalloc((size_t)W * H * 4);
+    ArtfScene* plain = groveScene();
+    setCamera(plain, 0, 3, 8, 0, 0, 0);
+    drawInto(cpu, plain, a);
+    ArtfScene* s = groveScene();
+    ArtfHlodDesc d;
+    memset(&d, 0, sizeof d);
+    d.cell = 100;
+    /* (the cubes meet at the origin: four of them) */
+    CHECK(artfSceneBuildHlod(s, &d) == 4);
+    CHECK(artfSceneInstanceCount(s) == 40);
+    CHECK(artfSceneBuildHlod(s, &d) == 0); /* (what is merged is not merged again) */
+    setCamera(s, 0, 3, 8, 0, 0, 0);
+    drawInto(cpu, s, b);
+    CHECK(artfSceneHlodShown(s) == 0);
+    CHECK(hashOf(a, (size_t)W * H) == hashOf(b, (size_t)W * H));
+    /* far: four instances where there were 36 */
+    setCamera(s, 0, 12, 40, 0, 0, 0);
+    setCamera(plain, 0, 12, 40, 0, 0, 0);
+    drawInto(cpu, s, b);
+    CHECK(artfSceneHlodShown(s) == 4);
+    ArtfFrameStats stats;
+    artfRendererStats(cpu, &stats);
+    CHECK(stats.instancesDrawn == 4);
+    drawInto(cpu, plain, c);
+    printf("many as one: %.3f%% of the pixels differ from all of them, far away\n", differentShare(b, c, 24) * 100);
+    CHECK(differentShare(b, c, 24) < .01);
+    if (gpu) {
+        drawInto(gpu, s, c);
+        CHECK(artfSceneHlodShown(s) == 4);
+        CHECK(differentShare(b, c, 24) < .005);
+    }
+    /* near again, and cleared */
+    setCamera(s, 0, 3, 8, 0, 0, 0);
+    drawInto(cpu, s, b);
+    CHECK(artfSceneHlodShown(s) == 0);
+    CHECK(hashOf(a, (size_t)W * H) == hashOf(b, (size_t)W * H));
+    setCamera(s, 0, 12, 40, 0, 0, 0);
+    drawInto(cpu, s, b);
+    artfSceneClearHlod(s);
+    CHECK(artfSceneInstanceCount(s) == 36 && artfSceneHlodShown(s) == 0);
+    setCamera(s, 0, 3, 8, 0, 0, 0);
+    drawInto(cpu, s, b);
+    CHECK(hashOf(a, (size_t)W * H) == hashOf(b, (size_t)W * H));
+    /* some of them, by hand */
+    ArtfInstance some[3] = {s->instanceHandles.items[0], s->instanceHandles.items[1], s->instanceHandles.items[2]};
+    CHECK(artfSceneAddHlod(s, some, 3, NULL) != 0);
+    CHECK(artfSceneInstanceCount(s) == 37);
+    artfSceneFree(plain);
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+    artfRendererFree(cpu);
+    if (gpu) artfRendererFree(gpu);
+}
+
+/* A tube that bends at its middle: 960 triangles, the upper half going with the second bone. */
+static ArtfMesh addTube(ArtfScene* s) {
+    enum { RINGS = 40, AROUND = 12 };
+    static ArtfVertex v[(RINGS + 1) * (AROUND + 1)];
+    static ArtfVertexSkin k[(RINGS + 1) * (AROUND + 1)];
+    static uint32_t idx[RINGS * AROUND * 6];
+    for (int r = 0; r <= RINGS; ++r)
+        for (int a = 0; a <= AROUND; ++a) {
+            const float y = (float)r / RINGS * 4.f, turn = (float)a / AROUND * 6.2831853f;
+            const float cx = artfCosFast(turn), sz = artfSinFast(turn);
+            const ArtfVertex q = {cx * .3f, y, sz * .3f, cx, 0, sz, (float)a / AROUND, (float)r / RINGS, 0};
+            const float top = artfClampf((y - 1.6f) / .8f, 0, 1);
+            const ArtfVertexSkin w = {{0, 1, 0, 0}, {1.f - top, top, 0, 0}};
+            v[r * (AROUND + 1) + a] = q;
+            k[r * (AROUND + 1) + a] = w;
+        }
+    uint32_t n = 0;
+    for (uint32_t r = 0; r < RINGS; ++r)
+        for (uint32_t a = 0; a < AROUND; ++a) {
+            const uint32_t p = r * (AROUND + 1) + a, q = p + AROUND + 1;
+            idx[n++] = p; idx[n++] = q + 1; idx[n++] = p + 1;
+            idx[n++] = p; idx[n++] = q; idx[n++] = q + 1;
+        }
+    return artfSceneAddSkinnedMesh(s, v, (RINGS + 1) * (AROUND + 1), idx, n, k);
+}
+
+/* The upper half turned about (0, 2, 0), around z. */
+static void bendTube(ArtfScene* s, ArtfInstance i, float angle) {
+    const ArtfTransform turn = artfTransformTrs(artfVec3(0, 0, 0), artfQuatAxisAngle(artfVec3(0, 0, 1), angle), artfVec3(1, 1, 1));
+    ArtfTransform joints[2] = {artfTransformIdentity(), turn};
+    joints[1].m[3] = -turn.m[1] * 2.f;
+    joints[1].m[7] = 2.f - turn.m[5] * 2.f;
+    artfInstanceSetJoints(s, i, joints, 2);
+}
+
+/* What bends has levels: far, an instance takes a lighter one, bent as the whole would be, on both backends; near, the
+ * whole. With the levels off, the picture far is near the same. */
+static void testSkinLod(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_VULKAN;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    uint32_t* c = artfMalloc((size_t)W * H * 4);
+    ArtfScene* s = plainScene();
+    artfSceneSetLodError(s, 8); /* (so that the first level comes where the tube still shows) */
+    const ArtfMesh tube = addTube(s);
+    const ArtfMeshData* source = &s->meshes.items[tube - 1];
+    CHECK(source->skinLodCount >= 2);
+    const float error = source->skinLodErrors[0];
+    const ArtfInstance i = addAt(s, tube, whiteMaterial(s), 0, -2, 0, 1);
+    const uint32_t home = s->instances.items[0].mesh;
+    setCamera(s, 0, 0, 3, 0, 0, 0);
+    drawInto(cpu, s, a);
+    CHECK(s->instances.items[0].mesh == home);
+    /* as far as the first level takes */
+    const float far = error * (float)H * .5f / tanf(.5f) / 8.f + 2.5f;
+    printf("what bends: %u levels, the first at %.1f\n", source->skinLodCount, far);
+    setCamera(s, 0, 0, far + 1.f, 0, 0, 0);
+    bendTube(s, i, 1.2f);
+    drawInto(cpu, s, a);
+    const uint32_t level = s->instances.items[0].mesh;
+    CHECK(level != home && s->meshes.items[level].home == home + 1);
+    CHECK(s->meshes.items[level].indexCount < s->meshes.items[home].indexCount);
+    {
+        /* each vertex the level kept is where its own joints and weights put it */
+        const ArtfMeshData* m = &s->meshes.items[level];
+        ArtfVertex* got = artfMalloc((size_t)m->vertexCount * sizeof *got);
+        artfMeshUnpack(m, got);
+        const ArtfTransform turn = artfTransformTrs(artfVec3(0, 0, 0), artfQuatAxisAngle(artfVec3(0, 0, 1), 1.2f), artfVec3(1, 1, 1));
+        ArtfTransform joints[2] = {artfTransformIdentity(), turn};
+        joints[1].m[3] = -turn.m[1] * 2.f;
+        joints[1].m[7] = 2.f - turn.m[5] * 2.f;
+        float worst = 0, weightsApart = 0;
+        for (uint32_t v = 0; v < m->vertexCount; ++v) {
+            const float* rest = m->skin->rest + (size_t)v * 6;
+            float want[3] = {0, 0, 0};
+            for (int k = 0; k < 8; ++k) {
+                const float w = m->skin->weights[(size_t)v * 8 + k];
+                const float* J = joints[m->skin->joints[(size_t)v * 8 + k] & 1].m;
+                for (int c = 0; c < 3; ++c) want[c] += w * (J[c * 4] * rest[0] + J[c * 4 + 1] * rest[1] + J[c * 4 + 2] * rest[2] + J[c * 4 + 3]);
+            }
+            worst = artfMaxf(worst, fabsf(want[0] - got[v].px) + fabsf(want[1] - got[v].py) + fabsf(want[2] - got[v].pz));
+            /* (and its weights are those it was given, by its height) */
+            const float top = artfClampf((rest[1] - 1.6f) / .8f, 0, 1);
+            weightsApart = artfMaxf(weightsApart, fabsf(m->skin->weights[(size_t)v * 8 + 1] - top));
+        }
+        printf("what bends: a level's vertices %.4f from where their bones put them\n", worst);
+        CHECK(worst < .01f && weightsApart < 1e-6f);
+        artfFree(got);
+    }
+    if (gpu) {
+        drawInto(gpu, s, b);
+        CHECK(differentShare(a, b, 24) < .005);
+    }
+    /* the pose is the whole's: straight is far from it, and the whole bent is near it */
+    bendTube(s, i, 0);
+    drawInto(cpu, s, c);
+    CHECK(differentShare(a, c, 24) > .002);
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, false);
+    bendTube(s, i, 1.2f);
+    drawInto(cpu, s, b);
+    CHECK(s->instances.items[0].mesh == home);
+    printf("what bends, far: a level against the whole, %.3f%% of the pixels differ; bent against straight, %.3f%%\n", differentShare(a, b, 24) * 100, differentShare(a, c, 24) * 100);
+    CHECK(differentShare(a, b, 24) < .01);
+    artfSceneRemoveInstance(s, i);
+    CHECK(artfSceneRemoveMesh(s, tube));
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+    artfRendererFree(cpu);
+    if (gpu) artfRendererFree(gpu);
+}
+
+static ArtfEmitterDesc swarmDesc(uint32_t most) {
+    ArtfEmitterDesc d;
+    memset(&d, 0, sizeof d);
+    d.position = artfVec3(0, -.5f, 0);
+    d.area = .2f;
+    d.velocity = artfVec3(0, 3, 0);
+    d.spread = .5f;
+    d.gravity = artfVec3(0, -4, 0);
+    d.drag = .3f;
+    d.rate = 400;
+    d.life = 2;
+    d.size = .25f;
+    d.sizeEnd = .08f;
+    d.color = artfVec3(1, .6f, .2f);
+    d.colorEnd = artfVec3(.3f, .3f, .9f);
+    d.opacity = 1;
+    d.opacityEnd = .2f;
+    d.glow = .5f;
+    d.most = most;
+    d.turbulence = 2;
+    d.ground = true;
+    d.groundHeight = -1;
+    d.bounce = .4f;
+    d.friction = .3f;
+    d.spin = 2;
+    d.parallel = true;
+    return d;
+}
+
+static int litCount(const uint32_t* f) {
+    int n = 0;
+    for (int i = 0; i < W * H; ++i) n += (f[i] & 0xFFFFFF) != 0;
+    return n;
+}
+
+/* Emitters of many: the same particles on any number of workers, as many alive as said, none through the ground; the
+ * GPU's compute shader moves them as the CPU does, steps that wait included, and both draw the same; 100,000 of them
+ * draw. */
+static void testSwarm(void) {
+    ArtfScene* s1 = plainScene();
+    ArtfScene* s2 = plainScene();
+    const ArtfEmitterDesc d = swarmDesc(3000);
+    const ArtfEmitter e1 = artfSceneAddEmitter(s1, &d), e2 = artfSceneAddEmitter(s2, &d);
+    artfEmitterBurst(s1, e1, 300);
+    artfEmitterBurst(s2, e2, 300);
+    for (int k = 0; k < 90; ++k) {
+        artfEmitterStep(s1, e1, 1.f / 60.f);
+        artfEmitterStep(s2, e2, 1.f / 60.f);
+    }
+    ArtfSwarm* w1;
+    ArtfSwarm* w2;
+    CHECK(artfSceneSwarms(s1, &w1, 1) == 1 && artfSceneSwarms(s2, &w2, 1) == 1);
+    ArtfPool* pool = artfPoolNew(4);
+    const float* p1 = artfSwarmCpu(w1, NULL);
+    const float* p2 = artfSwarmCpu(w2, pool);
+    CHECK(!memcmp(p1, p2, (size_t)artfSwarmPlaces(w1) * ARTF_SWARM_FLOATS * 4));
+    uint32_t alive = 0;
+    float lowest = 1e30f;
+    for (uint32_t i = 0; i < artfSwarmPlaces(w1); ++i)
+        if (p1[i * ARTF_SWARM_FLOATS + 3] >= 0) {
+            ++alive;
+            lowest = artfMinf(lowest, p1[i * ARTF_SWARM_FLOATS + 1]);
+        }
+    printf("emitters of many: %u alive, the lowest at %.4f\n", alive, lowest);
+    CHECK(alive == artfEmitterAlive(s1, e1) && alive > 500);
+    CHECK(lowest >= -1.0001f);
+    artfPoolFree(pool);
+    artfSceneFree(s1);
+    artfSceneFree(s2);
+
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_VULKAN;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    ArtfScene* s = plainScene();
+    setCamera(s, 0, 1, 7, 0, .5f, 0);
+    const ArtfEmitter e = artfSceneAddEmitter(s, &d);
+    artfEmitterBurst(s, e, 200);
+    for (int k = 0; k < 60; ++k) {
+        artfEmitterStep(s, e, 1.f / 60.f);
+        if (k % 20 == 0) {
+            CHECK(artfRendererDraw(cpu, s));
+            if (gpu) CHECK(artfRendererDraw(gpu, s));
+        }
+    }
+    drawInto(cpu, s, a);
+    printf("emitters of many: %d pixels lit\n", litCount(a));
+    CHECK(litCount(a) > 2000);
+    if (gpu) {
+        drawInto(gpu, s, b);
+        printf("emitters of many: %.3f%% of the pixels differ between the backends\n", differentShare(a, b, 24) * 100);
+        CHECK(differentShare(a, b, 24) < .01);
+    }
+    artfSceneFree(s);
+
+    /* many */
+    s = plainScene();
+    setCamera(s, 0, 1, 7, 0, .5f, 0);
+    ArtfEmitterDesc many = swarmDesc(100000);
+    many.size = many.sizeEnd = .05f;
+    many.area = 1.5f;
+    many.rate = 0;
+    const ArtfEmitter big = artfSceneAddEmitter(s, &many);
+    artfEmitterBurst(s, big, 100000);
+    artfEmitterStep(s, big, 1.f / 60.f);
+    CHECK(artfEmitterAlive(s, big) == 100000);
+    CHECK(artfSceneInstanceCount(s) == 0);
+    double t0 = artfNowMs();
+    drawInto(cpu, s, a);
+    printf("100,000 particles: %.1f ms for three frames on the CPU, %d pixels lit\n", artfNowMs() - t0, litCount(a));
+    CHECK(litCount(a) > 5000);
+    if (gpu) {
+        drawInto(gpu, s, b);
+        CHECK(differentShare(a, b, 24) < .03);
+    }
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(cpu);
+    if (gpu) artfRendererFree(gpu);
+}
+
+/* A ball of 48 x 64 squares, the same each time it is read; how many times it was. */
+static uint32_t ballVertices(void) { return 49 * 65; }
+static uint32_t ballIndices(void) { return 48 * 64 * 6; }
+static bool readBall(void* user, ArtfVertex* v, uint32_t* idx) {
+    ++*(int*)user;
+    for (int r = 0; r <= 48; ++r)
+        for (int a = 0; a <= 64; ++a) {
+            const float up = (float)r / 48 * 3.1415927f, turn = (float)a / 64 * 6.2831853f;
+            const float y = artfCosFast(up), ring = artfSinFast(up);
+            const ArtfVertex q = {ring * artfCosFast(turn), y, ring * artfSinFast(turn), ring * artfCosFast(turn), y, ring * artfSinFast(turn), (float)a / 64, (float)r / 48, 0};
+            v[r * 65 + a] = q;
+        }
+    uint32_t n = 0;
+    for (uint32_t r = 0; r < 48; ++r)
+        for (uint32_t a = 0; a < 64; ++a) {
+            const uint32_t p = r * 65 + a, q = p + 65;
+            idx[n++] = p; idx[n++] = p + 1; idx[n++] = q + 1;
+            idx[n++] = p; idx[n++] = q + 1; idx[n++] = q;
+        }
+    return true;
+}
+
+/* Meshes that come and go: only the lightest level held at first; near, all of it, read again, and the same bytes as
+ * the mesh given whole; far, the heavy levels leave, memory too; near again, the same bytes. A budget holds them out. */
+static void testMeshStreaming(ArtfBackend backend) {
+    ArtfRendererOptions o = options(backend, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    if (!r) return;
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    int reads = 0;
+    ArtfScene* whole = plainScene();
+    ArtfVertex* v = artfMalloc(ballVertices() * sizeof *v);
+    uint32_t* idx = artfMalloc(ballIndices() * 4);
+    readBall(&reads, v, idx);
+    addAt(whole, artfSceneAddMesh(whole, v, ballVertices(), idx, ballIndices()), whiteMaterial(whole), 0, 0, 0, 1);
+    setCamera(whole, 0, 0, 3, 0, 0, 0);
+    drawInto(r, whole, a);
+    artfFree(v);
+    artfFree(idx);
+
+    reads = 0;
+    ArtfScene* s = plainScene();
+    const ArtfMesh mesh = artfSceneAddMeshStreamed(s, ballVertices(), ballIndices(), readBall, &reads);
+    CHECK(mesh && reads == 1);
+    const int lightest = (int)s->meshes.items[mesh - 1].lodCount;
+    CHECK(lightest >= 2 && artfMeshResidentLevel(s, mesh) == lightest);
+    ArtfSceneMemory memory;
+    artfSceneMemory(s, &memory);
+    const size_t held = memory.residentMeshes;
+    CHECK(held < memory.meshes / 2);
+    addAt(s, mesh, whiteMaterial(s), 0, 0, 0, 1);
+    ArtfResidencyDesc rd;
+    memset(&rd, 0, sizeof rd);
+    rd.mode = ARTF_RESIDENCY_AUTOMATIC;
+    rd.interval = 1;
+    rd.meshes = true;
+    artfSceneSetResidency(s, &rd);
+    setCamera(s, 0, 0, 3, 0, 0, 0);
+    drawInto(r, s, b);
+    CHECK(artfMeshResidentLevel(s, mesh) == 0 && reads == 2);
+    CHECK(hashOf(a, (size_t)W * H) == hashOf(b, (size_t)W * H));
+    setCamera(s, 0, 0, 300, 0, 0, 0);
+    drawInto(r, s, b);
+    CHECK(artfMeshResidentLevel(s, mesh) > 0);
+    artfSceneMemory(s, &memory);
+    CHECK(memory.residentMeshes < memory.meshes);
+    setCamera(s, 0, 0, 3, 0, 0, 0);
+    drawInto(r, s, b);
+    CHECK(artfMeshResidentLevel(s, mesh) == 0 && reads == 3);
+    CHECK(hashOf(a, (size_t)W * H) == hashOf(b, (size_t)W * H));
+    /* over the budget: the lightest, whatever the distance, and drawn */
+    rd.meshBudget = 1;
+    artfSceneSetResidency(s, &rd);
+    drawInto(r, s, b);
+    CHECK(artfMeshResidentLevel(s, mesh) == lightest);
+    CHECK(litCount(b) > 1000 && hashOf(a, (size_t)W * H) != hashOf(b, (size_t)W * H));
+    /* traced, all of it */
+    const ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 1, 0};
+    artfSceneSetTrace(s, &rays);
+    CHECK(artfRendererDraw(r, s));
+    CHECK(artfMeshResidentLevel(s, mesh) == 0);
+    artfSceneFree(s);
+    artfSceneFree(whole);
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(r);
+}
+
 /* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
  * next to nothing, though a probe outside is nearer to it than one inside. */
 static void testProbesWalls(void) {
@@ -5327,6 +5737,11 @@ int main(void) {
     testCullSize();
     testParticleForces();
     testTerrainLayers();
+    testHlod();
+    testSkinLod();
+    testSwarm();
+    testMeshStreaming(ARTF_BACKEND_SOFTWARE);
+    testMeshStreaming(ARTF_BACKEND_VULKAN);
     testTraceHardware();
     testProbesWalls();
     testExtraShadows();

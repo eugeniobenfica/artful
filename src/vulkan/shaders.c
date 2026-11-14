@@ -3699,4 +3699,244 @@ uint32_t* artfShaderDenoiseEnd(size_t* size) {
     return denoiseEnd(s, main, global, merge, size);
 }
 
+/* ---- emitters of many: as artfSwarmMove and artfSwarmFace (particles.c) ----
+ *
+ * Bindings: 1 and 2, written: an instance of the quad for each particle, and its copy; 65 the particles, three vec4s
+ * each; 66 this frame's rows: of each emitter, where its own start, and there: how many steps, places, where its
+ * particles start, whether they start over; where its instances and copies go, and the quad; four rows of facing;
+ * then each step's ARTF_SWARM_ROWS rows. Push constant: which emitter. An invocation is a place, and does all of it. */
+
+/* As hashOf. */
+static SpvId swarmHash(Spv* s, SpvId x) {
+    x = XOR_U(x, SHR_U(x, 16));
+    x = MUL_U(x, UINT(0x7FEB352Du));
+    x = XOR_U(x, SHR_U(x, 15));
+    x = MUL_U(x, UINT(0x846CA68Bu));
+    return XOR_U(x, SHR_U(x, 16));
+}
+
+/* As randomAt. */
+static SpvId swarmRandom(Spv* s, SpvId seed, SpvId birth, uint32_t k) {
+    SpvId h = swarmHash(s, XOR_U(seed, swarmHash(s, ADD_U(MUL_U(birth, UINT(16)), UINT(k)))));
+    return MUL_F(TO_F(SHR_U(h, 8)), FLOAT(1.f / 16777216.f));
+}
+
+/* As latticeOf: x, y and z are ints. */
+static SpvId swarmLattice(Spv* s, SpvId x, SpvId y, SpvId z, SpvId seed) {
+    SpvId h = XOR_U(XOR_U(MUL_U(AS_UINT(x), UINT(0x8DA6B343u)), MUL_U(AS_UINT(y), UINT(0xD8163841u))), XOR_U(MUL_U(AS_UINT(z), UINT(0xCB1AB31Fu)), seed));
+    h = XOR_U(h, SHR_U(h, 16));
+    h = MUL_U(h, UINT(0x7FEB352Du));
+    h = XOR_U(h, SHR_U(h, 15));
+    return SUB_F(MUL_F(TO_F(SHR_U(h, 8)), FLOAT(2.f / 16777216.f)), FLOAT(1.f));
+}
+
+#define SW_INT(i) spvConstInt(s, i)
+#define SW_ADD_I(a, b) spvOp2(s, SPV_OP_IAdd, s->intType, a, b)
+#define SW_TO_I(f) spvOp1(s, SPV_OP_ConvertFToS, s->intType, f)
+#define SW_TO_F(i) spvOp1(s, 111 /* OpConvertSToF */, s->floatType, i)
+#define SW_NONZERO(f) spvOp2(s, 182 /* OpFOrdNotEqual */, s->boolType, f, FLOAT(0.f))
+#define SW_SMOOTH(t) MUL_F(MUL_F(t, t), SUB_F(FLOAT(3.f), MUL_F(FLOAT(2.f), t)))
+
+/* As noiseOf. */
+static SpvId swarmNoise(Spv* s, SpvId x, SpvId y, SpvId z, SpvId seed) {
+    const SpvId big = FLOAT(65536.f);
+    SpvId fx = SUB_F(SW_TO_F(SW_TO_I(ADD_F(x, big))), big), fy = SUB_F(SW_TO_F(SW_TO_I(ADD_F(y, big))), big), fz = SUB_F(SW_TO_F(SW_TO_I(ADD_F(z, big))), big);
+    SpvId ix = SW_TO_I(fx), iy = SW_TO_I(fy), iz = SW_TO_I(fz);
+    SpvId tx = SW_SMOOTH(SUB_F(x, fx)), ty = SW_SMOOTH(SUB_F(y, fy)), tz = SW_SMOOTH(SUB_F(z, fz));
+    SpvId c[2][2];
+    for (int j = 0; j < 2; ++j)
+        for (int k = 0; k < 2; ++k) {
+            SpvId yy = SW_ADD_I(iy, SW_INT(j)), zz = SW_ADD_I(iz, SW_INT(k));
+            SpvId a = swarmLattice(s, ix, yy, zz, seed), b = swarmLattice(s, SW_ADD_I(ix, SW_INT(1)), yy, zz, seed);
+            c[j][k] = ADD_F(a, MUL_F(SUB_F(b, a), tx));
+        }
+    SpvId nearer = ADD_F(c[0][0], MUL_F(SUB_F(c[1][0], c[0][0]), ty)), farther = ADD_F(c[0][1], MUL_F(SUB_F(c[1][1], c[0][1]), ty));
+    return ADD_F(nearer, MUL_F(SUB_F(farther, nearer), tz));
+}
+
+/* As artfSinFast. */
+static SpvId swarmSine(Spv* s, SpvId x) {
+    SpvId half = PICK_F(LESS_F(x, FLOAT(0.f)), FLOAT(-.5f), FLOAT(.5f));
+    x = SUB_F(x, MUL_F(FLOAT(6.28318531f), SW_TO_F(SW_TO_I(ADD_F(MUL_F(x, FLOAT(.159154943f)), half)))));
+    x = PICK_F(MORE_F(x, FLOAT(1.57079633f)), SUB_F(FLOAT(3.14159265f), x), PICK_F(LESS_F(x, FLOAT(-1.57079633f)), SUB_F(FLOAT(-3.14159265f), x), x));
+    SpvId x2 = MUL_F(x, x);
+    SpvId p = SUB_F(FLOAT(.00019841270f), MUL_F(x2, FLOAT(.0000027557319f)));
+    p = SUB_F(FLOAT(.0083333333f), MUL_F(x2, p));
+    p = SUB_F(FLOAT(.16666667f), MUL_F(x2, p));
+    return MUL_F(x, SUB_F(FLOAT(1.f), MUL_F(x2, p)));
+}
+
+uint32_t* artfShaderSwarm(size_t* size) {
+    Spv b, *s = &b;
+    spvInit(s);
+    Resources r;
+    memset(&r, 0, sizeof r);
+    r.zero = spvConstInt(s, 0);
+    r.ptrStorageVec4 = spvTypePointer(s, SPV_STORAGE_StorageBuffer, s->vec4);
+    r.ptrStorageUint = spvTypePointer(s, SPV_STORAGE_StorageBuffer, s->uintType);
+    r.vec4Array = spvTypeArray(s, s->vec4, 0, 16);
+    r.uintArray = spvTypeArray(s, s->uintType, 0, 4);
+    SpvId instances = spvResource(s, blockOf(s, r.vec4Array, true), SPV_STORAGE_StorageBuffer, 1);
+    SpvId visible = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 2);
+    SpvId state = spvResource(s, blockOf(s, r.vec4Array, true), SPV_STORAGE_StorageBuffer, 65);
+    SpvId rows = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 66);
+    SpvId pushBlock = spvTypeStruct(s, &s->uintType, 1);
+    spvDecorate(s, pushBlock, SPV_DECORATE_Block, -1);
+    spvMemberDecorate(s, pushBlock, 0, SPV_DECORATE_Offset, 0);
+    SpvId push = spvVariable(s, spvTypePointer(s, SPV_STORAGE_PushConstant, pushBlock), SPV_STORAGE_PushConstant);
+    SpvId uvec3 = spvNewId(s);
+    spvEmit(&s->types, 23 /* OpTypeVector */, SPV_WORDS(uvec3, s->uintType, 3));
+    SpvId global = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, uvec3), SPV_STORAGE_Input);
+    spvDecorate(s, global, SPV_DECORATE_BuiltIn, SPV_BUILTIN_GlobalInvocationId);
+    SpvId ptrFn4 = spvTypePointer(s, SPV_STORAGE_Function, s->vec4), ptrFnUint = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
+    SpvId bvec4 = spvTypeVector(s, s->boolType, 4);
+
+    SpvId main = spvBeginMain(s);
+    SpvId vp0 = VAR(ptrFn4), vp1 = VAR(ptrFn4), vp2 = VAR(ptrFn4), vi = VAR(ptrFnUint);
+    SpvId x = spvExtract(s, s->uintType, spvLoad(s, uvec3, global), 0);
+    SpvId which = spvLoad(s, s->uintType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_PushConstant, s->uintType), push, &r.zero, 1));
+    SpvId start = AS_UINT(X(bufferVec(s, &r, rows, which)));
+    SpvId head = bufferVec(s, &r, rows, start), where = bufferVec(s, &r, rows, ADD_U(start, UINT(1)));
+    SpvId stepCount = AS_UINT(X(head)), places = AS_UINT(Y(head)), offset = AS_UINT(Z(head)), fresh = NOT_EQ(AS_UINT(W(head)), UINT(0));
+    SpvId merge;
+    spvIfBegin(s, LESS_U(x, places), &merge);
+    SpvId at = MUL_U(ADD_U(offset, x), UINT(3));
+    const SpvId zero4[4] = {FLOAT(0.f), FLOAT(0.f), FLOAT(0.f), FLOAT(0.f)}, none4[4] = {FLOAT(0.f), FLOAT(0.f), FLOAT(0.f), FLOAT(-1.f)};
+    SpvId zero = spvCompose(s, s->vec4, zero4, 4), none = spvCompose(s, s->vec4, none4, 4);
+    SpvId fresh4 = spvCompose(s, bvec4, (const SpvId[4]){fresh, fresh, fresh, fresh}, 4);
+    spvStore(s, vp0, spvSelect(s, s->vec4, fresh4, none, bufferVec(s, &r, state, at)));
+    spvStore(s, vp1, spvSelect(s, s->vec4, fresh4, zero, bufferVec(s, &r, state, ADD_U(at, UINT(1)))));
+    spvStore(s, vp2, spvSelect(s, s->vec4, fresh4, zero, bufferVec(s, &r, state, ADD_U(at, UINT(2)))));
+    spvStore(s, vi, UINT(0));
+
+    /* each step it has not seen */
+    Loop loop;
+    loopOpen(s, &loop);
+    SpvId i = LOAD_U(vi);
+    loopWhile(s, &loop, LESS_U(i, stepCount));
+    {
+        SpvId row = ADD_U(ADD_U(start, UINT(6)), MUL_U(i, UINT(ARTF_SWARM_ROWS)));
+        SpvId q[7];
+        for (uint32_t k = 0; k < 7; ++k) q[k] = bufferVec(s, &r, rows, ADD_U(row, UINT(k)));
+        SpvId first = AS_UINT(Y(q[5])), count = AS_UINT(Z(q[5])), firstBirth = AS_UINT(W(q[5])), stepPlaces = AS_UINT(X(q[6])), seed = AS_UINT(Y(q[6]));
+        SpvId seconds = X(q[3]), life = Y(q[3]), spin = X(q[5]);
+        SpvId j = spvOp2(s, SPV_OP_UMod, s->uintType, SUB_U(ADD_U(x, stepPlaces), first), stepPlaces);
+        /* born here */
+        SpvId born;
+        spvIfBegin(s, LESS_U(j, count), &born);
+        {
+            SpvId birth = ADD_U(firstBirth, j);
+            SpvId rnd[9];
+            for (uint32_t k = 0; k < 9; ++k) rnd[k] = swarmRandom(s, seed, birth, k);
+            SpvId p[3], v[3];
+            for (int k = 0; k < 3; ++k) {
+                SpvId origin = spvExtract(s, s->floatType, q[0], (uint32_t)k), leave = spvExtract(s, s->floatType, q[1], (uint32_t)k);
+                p[k] = ADD_F(origin, MUL_F(SUB_F(MUL_F(rnd[3 + k], FLOAT(2.f)), FLOAT(1.f)), W(q[0])));
+                v[k] = ADD_F(leave, MUL_F(SUB_F(MUL_F(rnd[k], FLOAT(2.f)), FLOAT(1.f)), W(q[1])));
+            }
+            SpvId turns = SW_NONZERO(spin);
+            SpvId angle = PICK_F(turns, MUL_F(rnd[7], FLOAT(6.28318531f)), FLOAT(0.f));
+            SpvId turning = PICK_F(turns, MUL_F(SUB_F(MUL_F(rnd[8], FLOAT(2.f)), FLOAT(1.f)), spin), FLOAT(0.f));
+            const SpvId a0[4] = {p[0], p[1], p[2], MUL_F(rnd[6], seconds)}, a1[4] = {v[0], v[1], v[2], angle};
+            const SpvId a2[4] = {turning, spvOp1(s, SPV_OP_Bitcast, s->floatType, birth), FLOAT(0.f), FLOAT(0.f)};
+            spvStore(s, vp0, spvCompose(s, s->vec4, a0, 4));
+            spvStore(s, vp1, spvCompose(s, s->vec4, a1, 4));
+            spvStore(s, vp2, spvCompose(s, s->vec4, a2, 4));
+        }
+        spvIfEnd(s, born);
+        /* moved, if it is there */
+        SpvId alive;
+        SpvId p0 = spvLoad(s, s->vec4, vp0);
+        spvIfBegin(s, spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, W(p0), FLOAT(0.f)), &alive);
+        {
+            SpvId before = spvLoad(s, s->vec4, vp1); /* (what dies keeps it) */
+            SpvId age = ADD_F(W(spvLoad(s, s->vec4, vp0)), seconds);
+            SpvId dies = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, age, life);
+            SpvId turbulence = Z(q[3]);
+            SpvId swirl;
+            spvIfBegin(s, SW_NONZERO(turbulence), &swirl);
+            {
+                SpvId here = spvLoad(s, s->vec4, vp0), going = spvLoad(s, s->vec4, vp1);
+                SpvId sx = MUL_F(X(here), W(q[3])), sy = MUL_F(Y(here), W(q[3])), sz = MUL_F(Z(here), W(q[3]));
+                SpvId pushed[3];
+                for (int k = 0; k < 3; ++k) {
+                    SpvId n = swarmNoise(s, ADD_F(sx, FLOAT(31.4f * (float)k)), sy, sz, UINT(0x51ED270Bu + (uint32_t)k));
+                    pushed[k] = ADD_F(spvExtract(s, s->floatType, going, (uint32_t)k), MUL_F(MUL_F(n, turbulence), seconds));
+                }
+                const SpvId g4[4] = {pushed[0], pushed[1], pushed[2], W(going)};
+                spvStore(s, vp1, spvCompose(s, s->vec4, g4, 4));
+            }
+            spvIfEnd(s, swirl);
+            SpvId here = spvLoad(s, s->vec4, vp0), going = spvLoad(s, s->vec4, vp1), turn = spvLoad(s, s->vec4, vp2);
+            SpvId slow = DIV_F(FLOAT(1.f), ADD_F(FLOAT(1.f), MUL_F(W(q[2]), seconds)));
+            SpvId p[3], v[3];
+            for (uint32_t k = 0; k < 3; ++k) {
+                v[k] = MUL_F(ADD_F(spvExtract(s, s->floatType, going, k), MUL_F(spvExtract(s, s->floatType, q[2], k), seconds)), slow);
+                p[k] = ADD_F(spvExtract(s, s->floatType, here, k), MUL_F(v[k], seconds));
+            }
+            /* off the ground */
+            SpvId ground = BOTH(SW_NONZERO(X(q[4])), LESS_F(p[1], Y(q[4])));
+            SpvId bounce = Z(q[4]), keep = W(q[4]);
+            p[1] = PICK_F(ground, ADD_F(Y(q[4]), MUL_F(SUB_F(Y(q[4]), p[1]), bounce)), p[1]);
+            v[1] = PICK_F(BOTH(ground, LESS_F(v[1], FLOAT(0.f))), MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, v[1]), bounce), v[1]);
+            v[0] = PICK_F(ground, MUL_F(v[0], keep), v[0]);
+            v[2] = PICK_F(ground, MUL_F(v[2], keep), v[2]);
+            SpvId angle = ADD_F(W(going), MUL_F(X(turn), seconds));
+            /* (what dies keeps where it was, as on the CPU) */
+            const SpvId a0[4] = {PICK_F(dies, X(here), p[0]), PICK_F(dies, Y(here), p[1]), PICK_F(dies, Z(here), p[2]), PICK_F(dies, FLOAT(-1.f), age)};
+            const SpvId a1[4] = {PICK_F(dies, X(before), v[0]), PICK_F(dies, Y(before), v[1]), PICK_F(dies, Z(before), v[2]), PICK_F(dies, W(before), angle)};
+            spvStore(s, vp0, spvCompose(s, s->vec4, a0, 4));
+            spvStore(s, vp1, spvCompose(s, s->vec4, a1, 4));
+        }
+        spvIfEnd(s, alive);
+        spvStore(s, vi, ADD_U(i, UINT(1)));
+    }
+    loopClose(s, &loop);
+
+    SpvId p0 = spvLoad(s, s->vec4, vp0), p1 = spvLoad(s, s->vec4, vp1), p2 = spvLoad(s, s->vec4, vp2);
+    spvStore(s, spvAccess(s, r.ptrStorageVec4, state, (const SpvId[2]){r.zero, at}, 2), p0);
+    spvStore(s, spvAccess(s, r.ptrStorageVec4, state, (const SpvId[2]){r.zero, ADD_U(at, UINT(1))}, 2), p1);
+    spvStore(s, spvAccess(s, r.ptrStorageVec4, state, (const SpvId[2]){r.zero, ADD_U(at, UINT(2))}, 2), p2);
+
+    /* facing the eye, as an instance of the quad */
+    SpvId f[4];
+    for (uint32_t k = 0; k < 4; ++k) f[k] = bufferVec(s, &r, rows, ADD_U(start, UINT(2 + k)));
+    SpvId alive = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, W(p0), FLOAT(0.f));
+    SpvId t = DIV_F(W(p0), W(f[2]));
+    SpvId sized = ADD_F(W(f[0]), MUL_F(SUB_F(W(f[1]), W(f[0])), t));
+    SpvId angle = W(p1), turned = SW_NONZERO(angle);
+    SpvId c = PICK_F(turned, swarmSine(s, ADD_F(angle, FLOAT(1.57079633f))), FLOAT(1.f)), sn = PICK_F(turned, swarmSine(s, angle), FLOAT(0.f));
+    SpvId instance = ADD_U(AS_UINT(X(where)), x), quad = AS_UINT(Z(where));
+    SpvId alive4 = spvCompose(s, bvec4, (const SpvId[4]){alive, alive, alive, alive}, 4);
+    for (uint32_t k = 0; k < 3; ++k) {
+        SpvId right = spvExtract(s, s->floatType, f[0], k), forward = spvExtract(s, s->floatType, f[1], k), up = spvExtract(s, s->floatType, f[2], k);
+        const SpvId m[4] = {MUL_F(ADD_F(MUL_F(right, c), MUL_F(up, sn)), sized), MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, forward), sized),
+                            MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, SUB_F(MUL_F(up, c), MUL_F(right, sn))), sized), spvExtract(s, s->floatType, p0, k)};
+        SpvId rowValue = spvSelect(s, s->vec4, alive4, spvCompose(s, s->vec4, m, 4), zero);
+        spvStore(s, spvAccess(s, r.ptrStorageVec4, instances, (const SpvId[2]){r.zero, ADD_U(MUL_U(instance, UINT(4)), UINT(k))}, 2), rowValue);
+    }
+    SpvId shade = TO_U(MIN_F(MAX_F(FLOOR_F(MUL_F(t, FLOAT((float)ARTF_SWARM_SHADES))), FLOAT(0.f)), FLOAT((float)(ARTF_SWARM_SHADES - 1))));
+    SpvId material = PICK_F(alive, spvOp1(s, SPV_OP_Bitcast, s->floatType, ADD_U(AS_UINT(Z(f[3])), shade)), Z(f[3]));
+    SpvId opacity = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(MIN_F(MAX_F(ADD_F(X(f[3]), MUL_F(SUB_F(Y(f[3]), X(f[3])), t)), FLOAT(0.f)), FLOAT(1.f)), FLOAT(65535.f)), FLOAT(.5f)));
+    opacity = spvSelect(s, s->uintType, alive, opacity, UINT(0));
+    SpvId bits = spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, opacity, UINT((uint32_t)(ARTF_INSTANCE_UNIFORM | ARTF_INSTANCE_CUTOUT | ARTF_INSTANCE_PARTICLE) << 16 | 1u << 24));
+    const SpvId meta[4] = {spvOp1(s, SPV_OP_Bitcast, s->floatType, quad), material, PICK_F(alive, ABS_F(sized), FLOAT(0.f)), spvOp1(s, SPV_OP_Bitcast, s->floatType, bits)};
+    spvStore(s, spvAccess(s, r.ptrStorageVec4, instances, (const SpvId[2]){r.zero, ADD_U(MUL_U(instance, UINT(4)), UINT(3))}, 2), spvCompose(s, s->vec4, meta, 4));
+    SpvId copy = MUL_U(ADD_U(AS_UINT(Y(where)), x), UINT(2));
+    spvStore(s, bufferUintPtr(s, &r, visible, copy), instance);
+    spvStore(s, bufferUintPtr(s, &r, visible, ADD_U(copy, UINT(1))), quad);
+    spvIfEnd(s, merge);
+    spvEndMain(s);
+    spvEntryPoint(s, SPV_MODEL_GLCompute, main, &global, 1);
+    spvExecutionMode(s, main, 17 /* LocalSize */, 64, 1, 1, 3);
+    return finish(s, size);
+}
+
+#undef SW_INT
+#undef SW_ADD_I
+#undef SW_TO_I
+#undef SW_TO_F
+#undef SW_SMOOTH
+#undef SW_NONZERO
+
 #include "vulkan/postShaders.inc"

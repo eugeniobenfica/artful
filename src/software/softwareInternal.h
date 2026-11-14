@@ -89,6 +89,7 @@ typedef struct ArtfSoftFrame {
     ArtfVisible* visible;
     uint32_t visibleCount;
     uint32_t solidCount;     /* those from here on are layers */
+    uint32_t swarmFirst;     /* and from here on, particles of emitters of many: drawn whole, after the rest */
     uint32_t firstVisible;   /* the first the next geometry pass takes */
     bool geometryAppend;     /* it adds to what the pass before left */
     uint32_t* meshletStarts; /* of each visible instance, then the total */
