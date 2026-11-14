@@ -33,11 +33,11 @@
 #endif
 
 enum {
-    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
+    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_R32G32_UINT = 101, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
     LAYOUT_UNDEFINED = 0, LAYOUT_COLOR = 2, LAYOUT_DEPTH = 3, LAYOUT_DEPTH_READ = 4, LAYOUT_SHADER_READ = 5, LAYOUT_TRANSFER_SRC = 6, LAYOUT_TRANSFER_DST = 7, LAYOUT_PRESENT = 1000001002,
     IMAGE_TRANSFER_SRC = 1, IMAGE_TRANSFER_DST = 2, IMAGE_SAMPLED = 4, IMAGE_COLOR = 0x10, IMAGE_DEPTH = 0x20,
     BUFFER_TRANSFER_SRC = 1, BUFFER_TRANSFER_DST = 2, BUFFER_UNIFORM = 0x10, BUFFER_STORAGE = 0x20, BUFFER_INDEX = 0x40, BUFFER_VERTEX = 0x80, BUFFER_INDIRECT = 0x100,
-    MEMORY_DEVICE_LOCAL = 1, MEMORY_HOST_VISIBLE = 2, MEMORY_HOST_COHERENT = 4,
+    MEMORY_DEVICE_LOCAL = 1, MEMORY_HOST_VISIBLE = 2, MEMORY_HOST_COHERENT = 4, MEMORY_HOST_CACHED = 8,
     STAGE_TOP = 1, STAGE_DRAW_INDIRECT = 2, STAGE_VERTEX_INPUT = 4, STAGE_VERTEX_SHADER = 8, STAGE_FRAGMENT = 0x80, STAGE_EARLY_TESTS = 0x100, STAGE_LATE_TESTS = 0x200, STAGE_COLOR = 0x400, STAGE_COMPUTE = 0x800, STAGE_TRANSFER = 0x1000, STAGE_BOTTOM = 0x2000, STAGE_HOST = 0x4000,
     ACCESS_INDIRECT = 1, ACCESS_VERTEX_READ = 4, ACCESS_SHADER_READ = 0x20, ACCESS_SHADER_WRITE = 0x40, ACCESS_COLOR_READ = 0x80, ACCESS_COLOR_WRITE = 0x100, ACCESS_DEPTH_READ = 0x200, ACCESS_DEPTH_WRITE = 0x400, ACCESS_TRANSFER_READ = 0x800, ACCESS_TRANSFER_WRITE = 0x1000, ACCESS_HOST_READ = 0x2000,
     DESCRIPTOR_COMBINED = 1, DESCRIPTOR_UNIFORM = 6, DESCRIPTOR_STORAGE = 7,
@@ -78,6 +78,8 @@ typedef struct Slot {
     bool meshletBound;
     uint32_t shadowCasterCount, shadowViews;
     uint64_t motionVersion;
+    uint64_t motionStep;  /* (what of ArtfMotion this slot holds, after its instances) */
+    size_t motionCount;
     VkBuffer skinBoundData, skinBoundVertices; /* what its set says binding 34 and 36 are */
     uint64_t shadowInstances, shadowStructure, shadowMaterials, shadowScene;
     uint32_t shadowMeshes;
@@ -173,6 +175,7 @@ typedef struct Vulkan {
     VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES];
     VkSemaphore rendered[MAX_SWAPCHAIN_IMAGES];
     GpuImage offscreen; /* in place of a swapchain */
+    GpuBuffer readback; /* where artfRendererReadPixels copies it, kept from one frame to the next */
     GpuImage depth;
     GpuImage samples4;  /* with antialiasing: what is drawn, before it is resolved into the frame */
     int samples;        /* of a pixel: 1 or 4 */
@@ -217,7 +220,7 @@ typedef struct Vulkan {
     VkShaderModule sceneVertexModule; /* kept: a scene's graphs make new pipelines */
     uint64_t graphScene;
     uint32_t graphCount;
-    bool probes, walls, froxels;    /* the scene's pixel shaders read probes, their maps, the fog's grid: made again when that changes */
+    bool probes, walls, froxels, coats, softShadows; /* the scene's pixel shaders read probes, their maps, the fog's grid, coats: made again when that changes */
     /* shadow maps: all in one atlas of depth */
     VkRenderPass shadowPass;
     VkFramebuffer shadowFramebuffer;
@@ -227,6 +230,15 @@ typedef struct Vulkan {
     VkDescriptorPool descriptorPool;
     VkSampler sampler, depthSampler;
     bool multiDraw;       /* several draws in one indirect call */
+    /* The ray tracing hardware (ArtfTraceDesc.hardware): a bottom level for each mesh traced, in one buffer; the top
+     * level over the traced instances, in their order (binding 64). */
+    bool rayQuery;        /* the device has acceleration structures and ray queries, and they are on */
+    bool traceHardware;   /* the trace pipeline goes through them */
+    GpuBuffer rtPositions, rtIndices, rtInstances, rtScratch, rtBottom, rtTop;
+    VkAccelerationStructureKHR* rtBottoms;
+    uint32_t rtBottomCount;
+    VkAccelerationStructureKHR rtTopLevel;
+    uint64_t rtMeshVersion, rtTopVersion, rtScene;
     uint32_t maxTextures;
     /* the depth pyramid; flags: what showed last frame */
     GpuBuffer hiz, flags;
@@ -275,7 +287,9 @@ typedef struct Vulkan {
     VkRenderPass presentPass;
     VkFramebuffer presentFramebuffers[MAX_SWAPCHAIN_IMAGES];
     VkPipeline presentPipeline;
-    VkPipeline postPipelines[10];   /* gather, occlusion, its blur, reflections, froxels, temporal, focus, bloom down, up, reflections' use */
+    VkPipeline postPipelines[12];   /* gather, occlusion, its blur, reflections, froxels, temporal, focus, bloom down, up, reflections' use, meter, motion blur */
+    ArtfMotion motion;              /* how each instance moved: after the instances in each slot's buffer */
+    bool exposureValid;             /* auto exposure has a state to go on from */
     VkPipeline fogPipeline;         /* fog that light goes through, over what is behind the scene */
     GpuBuffer postLight, postDepth, postSurface, postScratch, postHistory, postOcclusion, postFog, postBloom;
     uint32_t postBloomSizes[6][3];  /* of each level: where it starts, its width, its height */
@@ -308,23 +322,37 @@ static int memoryType(const Vulkan* v, uint32_t bits, VkFlags wanted) {
     return -1;
 }
 
-static bool bufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, bool hostVisible) {
+typedef enum BufferUse { BUFFER_GPU, BUFFER_WRITTEN_BY_CPU, BUFFER_READ_BY_CPU } BufferUse;
+
+static bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, BufferUse use) {
     memset(b, 0, sizeof *b);
     BufferCreateInfo info = {ST_BUFFER_CREATE_INFO, NULL, 0, size ? size : 16, usage, 0, 0, NULL};
     if (v->vkCreateBuffer(v->device, &info, NULL, &b->buffer) != VK_OK) return false;
     MemoryRequirements req;
     v->vkGetBufferMemoryRequirements(v->device, b->buffer, &req);
-    /* written by the CPU: straight into the GPU's memory where it can be (always, on an integrated
-     * GPU; with resizable BAR, on others) */
-    int type = hostVisible ? memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL | MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT) : memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL);
-    if (type < 0 && hostVisible) type = memoryType(v, req.typeBits, MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT);
+    int type = -1;
+    if (use == BUFFER_GPU) type = memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL);
+    else if (use == BUFFER_WRITTEN_BY_CPU) {
+        /* written by the CPU: straight into the GPU's memory where it can be (always, on an integrated
+         * GPU; with resizable BAR, on others) */
+        type = memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL | MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT);
+    } else {
+        /* read by the CPU: from its own cache. The GPU's memory, or memory the CPU does not cache, is read a few
+         * bytes at a time across the bus: a frame of 1920 x 1080 took 60 to 120 ms where it takes 1 from here */
+        type = memoryType(v, req.typeBits, MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT | MEMORY_HOST_CACHED);
+    }
+    if (type < 0 && use != BUFFER_GPU) type = memoryType(v, req.typeBits, MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT);
     if (type < 0) return false;
     MemoryAllocateInfo alloc = {ST_MEMORY_ALLOCATE_INFO, NULL, req.size, (uint32_t)type};
     if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) return false;
     v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
     b->size = info.size;
-    if (hostVisible && v->vkMapMemory(v->device, b->memory, 0, ~(VkDeviceSize)0, 0, &b->mapped) != VK_OK) return false;
+    if (use != BUFFER_GPU && v->vkMapMemory(v->device, b->memory, 0, ~(VkDeviceSize)0, 0, &b->mapped) != VK_OK) return false;
     return true;
+}
+
+static bool bufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, bool hostVisible) {
+    return bufferNewFor(v, b, size, usage, hostVisible ? BUFFER_WRITTEN_BY_CPU : BUFFER_GPU);
 }
 
 static void bufferFree(Vulkan* v, GpuBuffer* b) {
@@ -408,6 +436,7 @@ static void targetsFree(Vulkan* v) {
     imageFree(v, &v->depth);
     imageFree(v, &v->samples4);
     imageFree(v, &v->offscreen);
+    bufferFree(v, &v->readback);
     imageFree(v, &v->overlay);
     bufferFree(v, &v->hiz);
     bufferFree(v, &v->traceSum);
@@ -460,7 +489,8 @@ static void lightDescriptors(Vulkan* v, Slot* s);
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
 static bool postTargetsMake(Vulkan* v) {
     if (!imageNew(v, &v->floatColor, v->sceneFormat, v->width, v->height, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
-    if (!imageNew(v, &v->floatSurface, FORMAT_R32_UINT, v->width, v->height, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    /* (the surface word, and the instance that shows + 1: what is followed for motion) */
+    if (!imageNew(v, &v->floatSurface, FORMAT_R32G32_UINT, v->width, v->height, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
     const VkDeviceSize pixels = (VkDeviceSize)v->width * v->height;
     const VkDeviceSize fog = (VkDeviceSize)((v->width + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ((v->height + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ARTF_FROXEL_SLICES;
     VkDeviceSize bloom = 0;
@@ -474,7 +504,9 @@ static bool postTargetsMake(Vulkan* v) {
         bloom += (VkDeviceSize)w * h;
     }
     GpuBuffer* const buffers[8] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom};
-    const VkDeviceSize sizes[8] = {pixels * 16, pixels * 4, pixels * 4, pixels * 16, pixels * 16, pixels * 4, fog * 16, bloom * 16};
+    /* (bloom's levels, and past them auto exposure's state) */
+    /* (the surface's words, then the instance that shows at each pixel) */
+    const VkDeviceSize sizes[8] = {pixels * 16, pixels * 4, pixels * 8, pixels * 16, pixels * 16, pixels * 4, fog * 16, (bloom + 1) * 16};
     for (int i = 0; i < 8; ++i)
         if (!bufferNew(v, buffers[i], sizes[i], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
     for (int k = 0; k < SLOTS; ++k) {
@@ -494,6 +526,7 @@ static bool postTargetsMake(Vulkan* v) {
         v->vkUpdateDescriptorSets(v->device, 10, writes, 0, NULL);
     }
     v->historyValid = false;
+    v->exposureValid = false;
     v->hasPrevious = false;
     return true;
 }
@@ -611,7 +644,7 @@ static VkShaderModule shaderModule(Vulkan* v, uint32_t* code, size_t size) {
  * what is solid writes it. */
 static PipelineColorBlend blendOf(const Vulkan* v, ColorBlendAttachment* pair, ColorBlendAttachment color, bool surface) {
     pair[0] = color;
-    const ColorBlendAttachment kept = {0, 0, 0, 0, 0, 0, 0, surface ? 1u : 0u};
+    const ColorBlendAttachment kept = {0, 0, 0, 0, 0, 0, 0, surface ? 3u : 0u};
     pair[1] = kept;
     const PipelineColorBlend b = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, v->floats ? 2u : 1u, pair, {0, 0, 0, 0}};
     return b;
@@ -631,7 +664,7 @@ static bool renderPassMake(Vulkan* v, VkRenderPass* out, bool load, bool store, 
         /* (the depth buffer is not kept unless asked: on a tiler it never leaves the chip) */
         {0, FORMAT_D32, samples, load ? 0 : 1, store ? 0 : 1, 2, 1, depthFrom, store ? LAYOUT_DEPTH_READ : LAYOUT_DEPTH},
         {0, v->sceneFormat, 1, 2, 0, 2, 1, LAYOUT_UNDEFINED, colorFinal},
-        {0, FORMAT_R32_UINT, samples, load ? 0 : 1, 0, 2, 1, colorFrom, colorFinal}};
+        {0, FORMAT_R32G32_UINT, samples, load ? 0 : 1, 0, 2, 1, colorFrom, colorFinal}};
     /* (readDepth: only colors, which stay for the pass that comes next: a shader reads depth) */
     const AttachmentReference depth = {1, LAYOUT_DEPTH};
     /* (the surface is the last; with samples, only the light is resolved: the surface's first sample is read) */
@@ -729,7 +762,8 @@ static bool shadowAtlasMake(Vulkan* v, int width, int height) {
 }
 
 static uint32_t shaderVariant(const Vulkan* v) {
-    return (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->probes ? ARTF_SHADER_PROBES : 0u) | (v->probes && v->walls ? ARTF_SHADER_WALLS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u);
+    return (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->probes ? ARTF_SHADER_PROBES : 0u) | (v->probes && v->walls ? ARTF_SHADER_WALLS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u) |
+           (v->coats ? ARTF_SHADER_COAT : 0u) | (v->softShadows ? ARTF_SHADER_SOFT : 0u);
 }
 
 /* The pipeline of what is plain and solid, made again: when the probes come or go. */
@@ -934,14 +968,22 @@ static bool pipelinesMake(Vulkan* v) {
         {53, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {54, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {55, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {56, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {57, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {58, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}, {59, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}};
-    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, v->floats ? 64 : 54, bindings};
+    /* (and with the ray tracing hardware, the top level) */
+    DescriptorSetLayoutBinding all[65];
+    uint32_t bindingCount = v->floats ? 64 : 54;
+    memcpy(all, bindings, bindingCount * sizeof *all);
+    if (v->rayQuery) {
+        const DescriptorSetLayoutBinding top = {64, DESCRIPTOR_AS, 1, SHADER_COMPUTE, NULL};
+        all[bindingCount++] = top;
+    }
+    const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, bindingCount, all};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     const PushConstantRange push[2] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}};
     const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 1, &v->setLayout, 2, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
-    const DescriptorPoolSize sizes[3] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 54}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}};
-    const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, 3, sizes};
+    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 54}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
+    const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, v->rayQuery ? 4u : 3u, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
         const DescriptorSetAllocateInfo alloc = {ST_DESCRIPTOR_SET_ALLOCATE, NULL, v->descriptorPool, 1, &v->setLayout};
@@ -1071,9 +1113,10 @@ static bool pipelinesMake(Vulkan* v) {
     v->environmentPipeline = made[6];
     if (ok && v->floats) {
         /* what comes after: postShaders.inc */
-        uint32_t* (*const makers[10])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
-                                                  artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply};
-        for (int i = 0; i < 10 && ok; ++i) {
+        uint32_t* (*const makers[12])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
+                                                  artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply,
+                                                  artfShaderPostMeter, artfShaderPostMotionBlur};
+        for (int i = 0; i < 12 && ok; ++i) {
             uint32_t* postCode = i == 0 ? artfShaderPostGather(&size, v->samples) : makers[i](&size);
             VkShaderModule module = shaderModule(v, postCode, size);
             const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
@@ -1467,7 +1510,7 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
             Slot* s = &v->slots[i];
             bufferFree(v, &s->instances);
             bufferFree(v, &s->visible);
-            if (!bufferNew(v, &s->instances, (VkDeviceSize)v->instanceCapacity * sizeof(ArtfInstanceData), BUFFER_STORAGE, true)) return false;
+            if (!bufferNew(v, &s->instances, (VkDeviceSize)v->instanceCapacity * (sizeof(ArtfInstanceData) + 48), BUFFER_STORAGE, true)) return false;
             if (!bufferNew(v, &s->visible, visibleSize(v), BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
             s->fresh = true;
         }
@@ -1480,7 +1523,7 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
         for (int i = 0; i < SLOTS; ++i) {
             Slot* s = &v->slots[i];
             bufferFree(v, &s->materials);
-            if (!bufferNew(v, &s->materials, (VkDeviceSize)v->materialCapacity * sizeof(ArtfMaterialData), BUFFER_STORAGE, true)) return false;
+            if (!bufferNew(v, &s->materials, (VkDeviceSize)v->materialCapacity * (sizeof(ArtfMaterialData) + sizeof(ArtfMaterialMore)), BUFFER_STORAGE, true)) return false;
             s->fresh = true;
         }
         rebind = true;
@@ -1497,6 +1540,8 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
 static void syncSlot(Vulkan* v, Slot* s, const ArtfScene* scene) {
     if (s->fresh || s->materialVersion != scene->materialVersion) {
         memcpy(s->materials.mapped, scene->materials.items, scene->materials.len * sizeof(ArtfMaterialData));
+        /* (a coat and sheen after them all: ArtfFrameData.materials says where) */
+        memcpy((char*)s->materials.mapped + scene->materials.len * sizeof(ArtfMaterialData), scene->materialsMore.items, scene->materials.len * sizeof(ArtfMaterialMore));
         s->materialVersion = scene->materialVersion;
     }
     if (s->fresh || s->instanceVersion != scene->instanceVersion) {
@@ -1578,11 +1623,218 @@ static bool traceBuffer(Vulkan* v, GpuBuffer* b, uint32_t binding, const void* d
 /* Rays on the GPU go through the same trees as on the CPU, which makes them, as they change only when
  * the scene does: the scene's arrays go up as they are. The shader is large, so it is made only when a
  * scene first asks. It needs no ray tracing hardware. That is rare, so this may wait. */
+/* ---- the ray tracing hardware: acceleration structures ---- */
+
+enum {
+    BUFFER_DEVICE_ADDRESS = 0x20000, BUFFER_AS_INPUT = 0x80000, BUFFER_AS_STORAGE = 0x100000, STAGE_AS_BUILD = 0x02000000, ACCESS_AS_READ = 0x00200000, ACCESS_AS_WRITE = 0x00400000
+};
+
+/* A buffer the GPU knows by its address: where the CPU writes it (inputs), or the GPU's own (the structures, scratch). */
+static bool rtBufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, bool written) {
+    memset(b, 0, sizeof *b);
+    BufferCreateInfo info = {ST_BUFFER_CREATE_INFO, NULL, 0, size ? size : 16, usage | BUFFER_DEVICE_ADDRESS, 0, 0, NULL};
+    if (v->vkCreateBuffer(v->device, &info, NULL, &b->buffer) != VK_OK) return false;
+    MemoryRequirements req;
+    v->vkGetBufferMemoryRequirements(v->device, b->buffer, &req);
+    int type = written ? memoryType(v, req.typeBits, MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT) : memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL);
+    if (type < 0) return false;
+    const MemoryAllocateFlagsInfo flags = {ST_MEMORY_ALLOCATE_FLAGS_INFO, NULL, 2 /* device address */, 0};
+    MemoryAllocateInfo alloc = {ST_MEMORY_ALLOCATE_INFO, &flags, req.size, (uint32_t)type};
+    if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) return false;
+    v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
+    b->size = info.size;
+    if (written && v->vkMapMemory(v->device, b->memory, 0, ~(VkDeviceSize)0, 0, &b->mapped) != VK_OK) return false;
+    return true;
+}
+
+static VkDeviceAddress rtAddress(Vulkan* v, const GpuBuffer* b) {
+    const BufferDeviceAddressInfo info = {ST_BUFFER_DEVICE_ADDRESS_INFO, NULL, b->buffer};
+    return v->vkGetBufferDeviceAddress(v->device, &info);
+}
+
+static void rtFreeBottoms(Vulkan* v) {
+    for (uint32_t i = 0; i < v->rtBottomCount; ++i)
+        if (v->rtBottoms[i]) v->vkDestroyAccelerationStructureKHR(v->device, v->rtBottoms[i], NULL);
+    artfFree(v->rtBottoms);
+    v->rtBottoms = NULL;
+    v->rtBottomCount = 0;
+    bufferFree(v, &v->rtBottom);
+}
+
+static void rtFree(Vulkan* v) {
+    if (!v->rayQuery) return;
+    rtFreeBottoms(v);
+    if (v->rtTopLevel) v->vkDestroyAccelerationStructureKHR(v->device, v->rtTopLevel, NULL);
+    v->rtTopLevel = 0;
+    GpuBuffer* const buffers[5] = {&v->rtPositions, &v->rtIndices, &v->rtInstances, &v->rtScratch, &v->rtTop};
+    for (int i = 0; i < 5; ++i) bufferFree(v, buffers[i]);
+}
+
+/* Room for this much scratch, at the least. */
+static bool rtScratchFor(Vulkan* v, VkDeviceSize size) {
+    if (v->rtScratch.buffer && v->rtScratch.size >= size) return true;
+    bufferFree(v, &v->rtScratch);
+    return rtBufferNew(v, &v->rtScratch, size * 2, BUFFER_STORAGE, false);
+}
+
+static AsGeometry rtTriangles(Vulkan* v, uint32_t vertexCount) {
+    AsGeometry g;
+    memset(&g, 0, sizeof g);
+    g.sType = ST_AS_GEOMETRY;
+    g.geometryType = 0; /* triangles */
+    g.flags = 1;        /* opaque */
+    AsGeometryTriangles* tri = &g.geometry.triangles;
+    tri->sType = ST_AS_GEOMETRY_TRIANGLES;
+    tri->vertexFormat = 106; /* R32G32B32_SFLOAT */
+    tri->vertexData = rtAddress(v, &v->rtPositions);
+    tri->vertexStride = 12;
+    tri->maxVertex = vertexCount ? vertexCount - 1 : 0;
+    tri->indexType = 1; /* uint32 */
+    tri->indexData = rtAddress(v, &v->rtIndices);
+    return g;
+}
+
+/* Brings the structures up to date with what tracing holds: each mesh's bottom level when meshes change, the top
+ * when instances do. Meshes are built again whole when one moves, as bones do: a refit is for later. */
+static bool rtSync(Vulkan* v, const ArtfScene* scene) {
+    const ArtfTrace* t = &scene->trace;
+    const bool otherScene = v->rtScene != scene->id;
+    bool topNeeded = otherScene || v->rtTopVersion != t->topVersion || !v->rtTopLevel;
+    if (otherScene || v->rtMeshVersion != t->meshVersion || !v->rtBottoms) {
+        v->vkDeviceWaitIdle(v->device);
+        rtFreeBottoms(v);
+        /* the positions, and the triangles' corners, packed as the hardware reads them */
+        const size_t vertexCount = t->vertices.len, triangleCount = t->triangles.len;
+        if (v->rtPositions.size < vertexCount * 12 + 12) {
+            bufferFree(v, &v->rtPositions);
+            if (!rtBufferNew(v, &v->rtPositions, (VkDeviceSize)vertexCount * 24 + 12, BUFFER_AS_INPUT, true)) return false;
+        }
+        if (v->rtIndices.size < triangleCount * 12 + 12) {
+            bufferFree(v, &v->rtIndices);
+            if (!rtBufferNew(v, &v->rtIndices, (VkDeviceSize)triangleCount * 24 + 12, BUFFER_AS_INPUT, true)) return false;
+        }
+        float* positions = v->rtPositions.mapped;
+        for (size_t i = 0; i < vertexCount; ++i) memcpy(positions + i * 3, t->vertices.items[i].p, 12);
+        uint32_t* corners = v->rtIndices.mapped;
+        for (size_t i = 0; i < triangleCount; ++i) memcpy(corners + i * 3, t->triangles.items[i].v, 12);
+        /* sizes first: then one buffer for them all, each at a multiple of 256 */
+        const uint32_t meshes = (uint32_t)t->ranges.len;
+        v->rtBottoms = artfCalloc(meshes + 1, sizeof *v->rtBottoms);
+        v->rtBottomCount = meshes;
+        VkDeviceSize* offsets = artfCalloc(meshes + 1, sizeof *offsets);
+        VkDeviceSize total = 0, scratch = 0;
+        AsGeometry geometry = rtTriangles(v, (uint32_t)vertexCount);
+        for (uint32_t m = 0; m < meshes; ++m) {
+            const ArtfTraceRange* r = &t->ranges.items[m];
+            if (!r->triangleCount) continue;
+            AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1 /* bottom */, 4 /* fast to trace */, 0, 0, 0, 1, &geometry, NULL, 0};
+            AsBuildSizes sizes = {ST_AS_BUILD_SIZES, NULL, 0, 0, 0};
+            v->vkGetAccelerationStructureBuildSizesKHR(v->device, 1 /* on the device */, &build, &r->triangleCount, &sizes);
+            offsets[m] = total;
+            total += (sizes.structureSize + 255) & ~(VkDeviceSize)255;
+            if (sizes.buildScratchSize > scratch) scratch = sizes.buildScratchSize;
+        }
+        if (!rtBufferNew(v, &v->rtBottom, total, BUFFER_AS_STORAGE, false) || !rtScratchFor(v, scratch)) {
+            artfFree(offsets);
+            return false;
+        }
+        VkCommandBuffer c = oneShotBegin(v);
+        const VkDeviceAddress scratchAt = rtAddress(v, &v->rtScratch);
+        for (uint32_t m = 0; m < meshes; ++m) {
+            const ArtfTraceRange* r = &t->ranges.items[m];
+            if (!r->triangleCount) continue;
+            AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1, 4, 0, 0, 0, 1, &geometry, NULL, 0};
+            AsBuildSizes sizes = {ST_AS_BUILD_SIZES, NULL, 0, 0, 0};
+            v->vkGetAccelerationStructureBuildSizesKHR(v->device, 1, &build, &r->triangleCount, &sizes);
+            const AsCreateInfo create = {ST_AS_CREATE_INFO, NULL, 0, v->rtBottom.buffer, offsets[m], sizes.structureSize, 1, 0};
+            if (v->vkCreateAccelerationStructureKHR(v->device, &create, NULL, &v->rtBottoms[m]) != VK_OK) {
+                artfFree(offsets);
+                oneShotEnd(v, c);
+                return false;
+            }
+            build.dst = v->rtBottoms[m];
+            build.scratch = scratchAt;
+            /* (the mesh's triangles, from the first: the triangle a ray meets is the first plus what the hardware says) */
+            const AsBuildRange range = {r->triangleCount, r->firstTriangle * 12, 0, 0};
+            const AsBuildRange* ranges = &range;
+            v->vkCmdBuildAccelerationStructuresKHR(c, 1, &build, &ranges);
+            /* (each build uses the same scratch) */
+            memoryBarrier(v, c, STAGE_AS_BUILD, STAGE_AS_BUILD, ACCESS_AS_WRITE, ACCESS_AS_READ | ACCESS_AS_WRITE);
+        }
+        artfFree(offsets);
+        if (!oneShotEnd(v, c)) return false;
+        v->rtMeshVersion = t->meshVersion;
+        topNeeded = true;
+    }
+    if (topNeeded) {
+        v->vkDeviceWaitIdle(v->device);
+        const uint32_t count = (uint32_t)t->instances.len;
+        if (v->rtInstances.size < (VkDeviceSize)(count + 1) * sizeof(AsInstance)) {
+            bufferFree(v, &v->rtInstances);
+            if (!rtBufferNew(v, &v->rtInstances, (VkDeviceSize)(count + 1) * 2 * sizeof(AsInstance), BUFFER_AS_INPUT, true)) return false;
+        }
+        AsInstance* out = v->rtInstances.mapped;
+        uint32_t made = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t mesh = t->instanceMeshes.items[i];
+            const VkAccelerationStructureKHR bottom = mesh < v->rtBottomCount ? v->rtBottoms[mesh] : 0;
+            AsInstance o;
+            memcpy(o.transform, t->instanceWorlds.items + (size_t)i * 12, 48);
+            /* (its custom index, its mesh's first triangle; fronts counter-clockwise, as the trees have them; and both
+             * sides of what has two) */
+            o.customAndMask = (t->ranges.items[mesh].firstTriangle & 0xFFFFFFu) | 0xFFu << 24;
+            o.offsetAndFlags = (uint32_t)(2u /* counter-clockwise */ | 4u /* opaque */ | (t->instances.items[i].twoSided ? 1u /* no culling */ : 0u)) << 24;
+            const AsDeviceAddressInfo address = {ST_AS_DEVICE_ADDRESS_INFO, NULL, bottom};
+            o.reference = bottom ? v->vkGetAccelerationStructureDeviceAddressKHR(v->device, &address) : 0;
+            /* (one with no triangles is there, empty: ids are places among the traced instances) */
+            if (!bottom) o.customAndMask &= 0xFFFFFFu; /* (a mask of 0: no ray meets it) */
+            out[made++] = o;
+        }
+        AsGeometry geometry;
+        memset(&geometry, 0, sizeof geometry);
+        geometry.sType = ST_AS_GEOMETRY;
+        geometry.geometryType = 2; /* instances */
+        geometry.geometry.instances.sType = ST_AS_GEOMETRY_INSTANCES;
+        geometry.geometry.instances.data = rtAddress(v, &v->rtInstances);
+        AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 0 /* top */, 4, 0, 0, 0, 1, &geometry, NULL, 0};
+        AsBuildSizes sizes = {ST_AS_BUILD_SIZES, NULL, 0, 0, 0};
+        v->vkGetAccelerationStructureBuildSizesKHR(v->device, 1, &build, &made, &sizes);
+        if (v->rtTopLevel) v->vkDestroyAccelerationStructureKHR(v->device, v->rtTopLevel, NULL);
+        v->rtTopLevel = 0;
+        if (v->rtTop.size < sizes.structureSize) {
+            bufferFree(v, &v->rtTop);
+            if (!rtBufferNew(v, &v->rtTop, sizes.structureSize * 2, BUFFER_AS_STORAGE, false)) return false;
+        }
+        if (!rtScratchFor(v, sizes.buildScratchSize)) return false;
+        const AsCreateInfo create = {ST_AS_CREATE_INFO, NULL, 0, v->rtTop.buffer, 0, sizes.structureSize, 0, 0};
+        if (v->vkCreateAccelerationStructureKHR(v->device, &create, NULL, &v->rtTopLevel) != VK_OK) return false;
+        build.dst = v->rtTopLevel;
+        build.scratch = rtAddress(v, &v->rtScratch);
+        VkCommandBuffer c = oneShotBegin(v);
+        const AsBuildRange range = {made, 0, 0, 0};
+        const AsBuildRange* ranges = &range;
+        v->vkCmdBuildAccelerationStructuresKHR(c, 1, &build, &ranges);
+        memoryBarrier(v, c, STAGE_AS_BUILD, STAGE_COMPUTE, ACCESS_AS_WRITE, ACCESS_AS_READ);
+        if (!oneShotEnd(v, c)) return false;
+        const WriteDescriptorSetAs structures = {ST_WRITE_DESCRIPTOR_SET_AS, NULL, 1, &v->rtTopLevel};
+        for (int i = 0; i < SLOTS; ++i) {
+            const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, &structures, v->slots[i].set, 64, 0, 1, DESCRIPTOR_AS, NULL, NULL, NULL};
+            v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
+        }
+        v->rtTopVersion = t->topVersion;
+    }
+    v->rtScene = scene->id;
+    return true;
+}
+
+_Static_assert(sizeof(AsGeometryTriangles) == 64 && sizeof(AsGeometry) == 96 && sizeof(AsBuildGeometryInfo) == 80 && sizeof(AsInstance) == 64 && sizeof(AsCreateInfo) == 64,
+               "the ray tracing structures are laid out as Vulkan's");
+
 static bool syncTrace(Vulkan* v, ArtfScene* scene) {
     artfSceneTraceSync(scene);
     const ArtfTrace* t = &scene->trace;
-    const bool guides = t->desc.denoise;
-    if (v->tracePipeline && v->traceGuides != guides) {
+    const bool guides = t->desc.denoise, hardware = t->desc.hardware && v->rayQuery;
+    if (v->tracePipeline && (v->traceGuides != guides || v->traceHardware != hardware)) {
         v->vkDeviceWaitIdle(v->device);
         v->vkDestroyPipeline(v->device, v->tracePipeline, NULL);
         v->tracePipeline = 0;
@@ -1590,7 +1842,9 @@ static bool syncTrace(Vulkan* v, ArtfScene* scene) {
     if (!v->tracePipeline) {
         size_t size;
         v->traceGuides = guides;
-        uint32_t* code = artfShaderTrace(&size, v->maxTextures, scene->graphs.items, (uint32_t)scene->graphs.len, guides);
+        v->traceHardware = hardware;
+        if (hardware) artfLog("artful: rays go through the ray tracing hardware");
+        uint32_t* code = artfShaderTrace(&size, v->maxTextures, scene->graphs.items, (uint32_t)scene->graphs.len, guides, hardware);
         VkShaderModule module = shaderModule(v, code, size);
         if (!module) return false;
         const ComputePipelineCreateInfo info = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
@@ -1613,6 +1867,7 @@ static bool syncTrace(Vulkan* v, ArtfScene* scene) {
         v->traceTopVersion = t->topVersion;
     }
     v->traceScene = scene->id;
+    if (hardware && !rtSync(v, scene)) return false;
     if (!v->traceSum.buffer) {
         v->vkDeviceWaitIdle(v->device);
         if (!bufferNew(v, &v->traceSum, (VkDeviceSize)v->width * v->height * 16, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
@@ -2353,7 +2608,8 @@ static void postCopy(Vulkan* v, VkCommandBuffer c, GpuBuffer* from, GpuBuffer* t
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
 }
 
-enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY };
+enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY, POST_METER,
+       POST_MOTION_BLUR };
 
 static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* frame, uint32_t image, const Viewport* viewport, const Rect2D* area) {
     const uint32_t pixels = (uint32_t)v->width * (uint32_t)v->height;
@@ -2378,6 +2634,16 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     if (frame->post[2][1] > 0 && frame->post[2][0] > 0) {
         postStep(v, c, POST_FOCUS, 0, pixels);
         postCopy(v, c, &v->postScratch, &v->postLight);
+    }
+    if (frame->motionBlur > 0) {
+        postStep(v, c, POST_MOTION_BLUR, 0, pixels);
+        postCopy(v, c, &v->postScratch, &v->postLight);
+    }
+    if (frame->grade[0][1] > 0) {
+        postStep(v, c, POST_METER, v->exposureValid ? 1u : 0u, 1);
+        v->exposureValid = true;
+    } else {
+        v->exposureValid = false;
     }
     if (frame->post[0][0] > 0) {
         for (uint32_t l = 0; l < 6; ++l) postStep(v, c, POST_BLOOM_DOWN, l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
@@ -2410,11 +2676,14 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     /* probes that come or go: the scene's pixel shaders, with or without what reads them */
     const bool probes = scene->indirect.on && scene->indirect.probes, walls = probes && !scene->indirect.desc.throughWalls;
     const bool fogGrid = v->floats && scene->post.volumetric > 0 && scene->fogDensity > 0;
-    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels) {
+    const bool coats = scene->layeredMaterials > 0, softShadows = scene->shadows.soft && scene->shadows.resolution > 0;
+    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels || coats != v->coats || softShadows != v->softShadows) {
         v->vkDeviceWaitIdle(v->device);
         v->probes = probes;
         v->walls = walls;
         v->froxels = fogGrid;
+        v->coats = coats;
+        v->softShadows = softShadows;
         if (!scenePipelineMake(v) || !cutoutPipelinesMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
         v->graphCount = (uint32_t)scene->graphs.len;
     }
@@ -2471,6 +2740,16 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->hasPrevious = true;
         if (scene->post.temporal) artfFrameJitter(&frame, v->postFrames++, v->width, v->height);
         if (tracing) frame.post[1][1] = 0; /* (fog that light goes through is drawn, not traced) */
+        /* how each instance moved, after the instances in this slot's buffer: for temporal antialiasing and motion blur */
+        if (scene->post.temporal || scene->post.motionBlur > 0) {
+            artfMotionStep(&v->motion, scene);
+            frame.moving = v->motion.moving ? 1.f : 0.f;
+            if (s->motionStep != v->motion.version || s->motionCount != v->motion.count || s->instanceVersion != scene->instanceVersion) {
+                memcpy((char*)s->instances.mapped + scene->instances.len * sizeof(ArtfInstanceData), v->motion.motion, v->motion.count * 48);
+                s->motionStep = v->motion.version;
+                s->motionCount = v->motion.count;
+            }
+        }
     } else {
         memset(frame.post, 0, sizeof frame.post);
     }
@@ -2829,15 +3108,19 @@ static bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
     if (v->lost || v->swapchain || !v->frameNumber) return false; /* (what was presented is the window system's) */
     if (v->vkDeviceWaitIdle(v->device) != VK_OK) return false;
     const size_t bytes = (size_t)v->width * v->height * 4;
-    GpuBuffer readback;
-    if (!bufferNew(v, &readback, bytes, BUFFER_TRANSFER_DST, true)) return false;
+    if (v->readback.size < bytes) {
+        bufferFree(v, &v->readback);
+        if (!bufferNewFor(v, &v->readback, bytes, BUFFER_TRANSFER_DST, BUFFER_READ_BY_CPU)) {
+            bufferFree(v, &v->readback);
+            return false;
+        }
+    }
     VkCommandBuffer c = oneShotBegin(v);
     const BufferImageCopy region = {0, 0, 0, {ASPECT_COLOR, 0, 0, 1}, {0, 0, 0}, {(uint32_t)v->width, (uint32_t)v->height, 1}};
-    v->vkCmdCopyImageToBuffer(c, v->offscreen.image, LAYOUT_TRANSFER_SRC, readback.buffer, 1, &region);
+    v->vkCmdCopyImageToBuffer(c, v->offscreen.image, LAYOUT_TRANSFER_SRC, v->readback.buffer, 1, &region);
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_HOST, ACCESS_TRANSFER_WRITE, ACCESS_HOST_READ);
     bool ok = oneShotEnd(v, c);
-    if (ok) memcpy(dst, readback.mapped, bytes);
-    bufferFree(v, &readback);
+    if (ok) memcpy(dst, v->readback.mapped, bytes);
     return ok;
 }
 
@@ -2877,6 +3160,7 @@ static void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->traceVertices);
         bufferFree(v, &v->traceTop);
         bufferFree(v, &v->traceInstances);
+        rtFree(v);
         if (v->skinPipeline) v->vkDestroyPipeline(v->device, v->skinPipeline, NULL);
         for (int i = 0; i < 3; ++i)
             if (v->meshletPipelines[i]) v->vkDestroyPipeline(v->device, v->meshletPipelines[i], NULL);
@@ -2901,8 +3185,9 @@ static void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->holeMap);
         bufferFree(v, &v->environment);
         if (v->environmentPipeline) v->vkDestroyPipeline(v->device, v->environmentPipeline, NULL);
-        for (int i = 0; i < 10; ++i)
+        for (int i = 0; i < 12; ++i)
             if (v->postPipelines[i]) v->vkDestroyPipeline(v->device, v->postPipelines[i], NULL);
+        artfMotionFree(&v->motion);
         if (v->fogPipeline) v->vkDestroyPipeline(v->device, v->fogPipeline, NULL);
         if (v->presentPipeline) v->vkDestroyPipeline(v->device, v->presentPipeline, NULL);
         if (v->presentPass) v->vkDestroyRenderPass(v->device, v->presentPass, NULL);
@@ -3111,6 +3396,31 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
         features.sType = ST_PHYSICAL_DEVICE_FEATURES2;
         features.pNext = &f12;
         v->vkGetPhysicalDeviceFeatures2(gpus[i], &features);
+        /* the ray tracing hardware: both extensions, and what they need (ARTFUL_NO_RAY_QUERY: as a device without) */
+        bool rayQuery = false;
+        {
+            ExtensionProperties* have = artfMalloc(512 * sizeof *have);
+            uint32_t extensionCount = 512;
+            int found = 0;
+            if (v->vkEnumerateDeviceExtensionProperties && v->vkEnumerateDeviceExtensionProperties(gpus[i], NULL, &extensionCount, have) >= 0)
+                for (uint32_t e = 0; e < extensionCount; ++e)
+                    found |= (!strcmp(have[e].name, "VK_KHR_acceleration_structure") ? 1 : 0) | (!strcmp(have[e].name, "VK_KHR_ray_query") ? 2 : 0) | (!strcmp(have[e].name, "VK_KHR_deferred_host_operations") ? 4 : 0);
+            artfFree(have);
+            if (found == 7 && !getenv("ARTFUL_NO_RAY_QUERY")) {
+                RayQueryFeatures query = {ST_RAY_QUERY_FEATURES, NULL, 0};
+                AsFeatures as = {ST_AS_FEATURES, &query, 0, 0, 0, 0, 0};
+                Vulkan12Features more;
+                memset(&more, 0, sizeof more);
+                more.sType = ST_VULKAN12_FEATURES;
+                more.pNext = &as;
+                PhysicalDeviceFeatures2 all;
+                memset(&all, 0, sizeof all);
+                all.sType = ST_PHYSICAL_DEVICE_FEATURES2;
+                all.pNext = &more;
+                v->vkGetPhysicalDeviceFeatures2(gpus[i], &all);
+                rayQuery = query.rayQuery && as.accelerationStructure && more.rest[8] /* bufferDeviceAddress */;
+            }
+        }
         if (!features.features.drawIndirectFirstInstance || !f12.shaderSampledImageArrayNonUniformIndexing) {
             artfLog("artful: %s lacks drawIndirectFirstInstance or non-uniform texture indexing", props.deviceName);
             continue;
@@ -3136,6 +3446,7 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             v->multiDraw = features.features.multiDrawIndirect && !getenv("ARTFUL_SINGLE_DRAW");
             v->drawCounted = v->multiDraw && f12.drawIndirectCount;
             v->fragmentStores = features.features.fragmentStoresAndAtomics;
+            v->rayQuery = rayQuery;
             v->sampleShading = features.features.sampleRateShading;
             v->independentBlend = features.features.independentBlend;
             v->takesEtc = features.features.textureCompressionETC2 && !getenv("ARTFUL_NO_BLOCKS");
@@ -3188,8 +3499,19 @@ static bool createDevice(Vulkan* v) {
     features.features.fragmentStoresAndAtomics = v->fragmentStores;
     features.features.sampleRateShading = v->sampleShading;
     features.features.independentBlend = v->independentBlend;
-    const char* extensions[2] = {"VK_KHR_swapchain", "VK_KHR_portability_subset"};
-    const uint32_t extensionCount = !v->surface ? 0 : v->native.kind == ARTF_SURFACE_METAL ? 2 : 1;
+    const char* extensions[5];
+    uint32_t extensionCount = 0;
+    if (v->surface) extensions[extensionCount++] = "VK_KHR_swapchain";
+    if (v->surface && v->native.kind == ARTF_SURFACE_METAL) extensions[extensionCount++] = "VK_KHR_portability_subset";
+    RayQueryFeatures query = {ST_RAY_QUERY_FEATURES, NULL, 1};
+    AsFeatures as = {ST_AS_FEATURES, &query, 1, 0, 0, 0, 0};
+    if (v->rayQuery) {
+        extensions[extensionCount++] = "VK_KHR_acceleration_structure";
+        extensions[extensionCount++] = "VK_KHR_ray_query";
+        extensions[extensionCount++] = "VK_KHR_deferred_host_operations";
+        f12.rest[8] = 1; /* bufferDeviceAddress */
+        f12.pNext = &as;
+    }
     const DeviceCreateInfo info = {ST_DEVICE_CREATE_INFO, &features, 0, 1, &queue, 0, NULL, extensionCount, extensions, NULL};
     if (v->vkCreateDevice(v->gpu, &info, NULL, &v->device) != VK_OK) return false;
 #define X(name, result, args) *(void**)&v->name = v->vkGetDeviceProcAddr(v->device, #name);
@@ -3269,9 +3591,9 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
         if (!bufferNew(v, &s->trace, sizeof(ArtfTraceFrame), BUFFER_UNIFORM, true)) goto failed;
         if (!bufferNew(v, &s->shadow, sizeof(ArtfShadowFrame), BUFFER_UNIFORM, true)) goto failed;
         if (!bufferNew(v, &s->fluid, (VkDeviceSize)ARTF_FLUID_WIDTH * ARTF_FLUID_HEIGHT * 4, BUFFER_STORAGE, true)) goto failed;
-        if (!bufferNew(v, &s->instances, (VkDeviceSize)v->instanceCapacity * sizeof(ArtfInstanceData), BUFFER_STORAGE, true)) goto failed;
+        if (!bufferNew(v, &s->instances, (VkDeviceSize)v->instanceCapacity * (sizeof(ArtfInstanceData) + 48), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->visible, visibleSize(v), BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) goto failed;
-        if (!bufferNew(v, &s->materials, (VkDeviceSize)v->materialCapacity * sizeof(ArtfMaterialData), BUFFER_STORAGE, true)) goto failed;
+        if (!bufferNew(v, &s->materials, (VkDeviceSize)v->materialCapacity * (sizeof(ArtfMaterialData) + sizeof(ArtfMaterialMore)), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->indirect, 64 * 80, BUFFER_INDIRECT | BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) goto failed;
         if (!bufferNew(v, &s->template_, 64 * 80, BUFFER_TRANSFER_SRC, true)) goto failed;
     }

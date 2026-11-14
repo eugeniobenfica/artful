@@ -4,6 +4,7 @@
 #define ARTFUL_SCENE_INTERNAL_H
 
 #include "artful/scene.h"
+#include <string.h>
 
 #define ARTF_MESHLET_VERTICES 64
 #define ARTF_MESHLET_TRIANGLES 124
@@ -145,6 +146,18 @@ typedef struct ArtfMaterialData {
 
 enum { ARTF_MATERIAL_MASK = 1, ARTF_MATERIAL_BLEND = 2, ARTF_MATERIAL_DOUBLE = 4, ARTF_MATERIAL_UNLIT = 8 };
 
+/* What a material has past glTF's core: a clear coat and sheen. Apart from ArtfMaterialData, whose layout Metal's
+ * shaders were made for: on the GPU these follow all of those, in the same buffer (ArtfFrameData.materials says
+ * where). */
+typedef struct ArtfMaterialMore {
+    float coat, coatRoughness, pad0, pad1;
+    float sheen[3], pad2;
+} ArtfMaterialMore;
+#define ARTF_MATERIAL_MORE_ROWS 2
+/* Burley's sheen has no 1 / pi, as Lambert's light has: lights here have pi taken out, so it is put back in its color. */
+#define ARTF_SHEEN_SCALE 3.14159265f
+ARTF_INLINE bool artfMaterialLayered(const ArtfMaterialMore* m) { return m->coat > 0 || m->sheen[0] > 0 || m->sheen[1] > 0 || m->sheen[2] > 0; }
+
 /* A material of the program's own: steps on four floats, each reading those before it (graph.c). */
 #define ARTF_GRAPH_NODES 256
 #define ARTF_GRAPH_OUTPUTS 6
@@ -259,7 +272,78 @@ typedef struct ArtfFrameData {
     float previous[16]; /* the frame before's viewProj, with no jitter: where a point was */
     /* Light that bounced: the grid's corner and strength (0: off); how far apart its probes are; how many each way. */
     float indirect[3][4];
+    /* The look (ArtfPostDesc): the tone map, auto exposure (1 or 0), log2 of its key, its speed; log2 of its least and
+     * most, saturation, contrast; temperature, tint, vignette, chromatic. */
+    float grade[3][4];
+    /* How many materials there are: on the GPU, where their ArtfMaterialMore begin, in rows. Fog by height: where it
+     * is as dense as artfSceneSetFog says, and how fast it thins above that (0: it does not). */
+    uint32_t materialCount;
+    float fogBase, fogFalloff, motionBlur; /* motionBlur: ArtfPostDesc's, the share of a frame */
+    float lightSizes[ARTF_FRAME_LIGHTS]; /* of each light the frame holds, the radius of its ball (artfLightSetSize) */
+    /* What is too small is not drawn (artfSceneSetCullSize): a ball of radius r at distance d is, when r * cullScale < d.
+     * 0: all of it is. */
+    float cullScale;
+    float moving;       /* 1: something moved since the frame before, and the GPU has how (ArtfMotion); 0: the view alone */
+    float cullPad[2];
 } ArtfFrameData;
+
+/* A ball of this radius, this far from the eye, is too small to draw (ArtfFrameData.cullScale). */
+ARTF_INLINE bool artfTooSmall(const ArtfFrameData* f, float radius, float distance) { return f->cullScale > 0 && radius * f->cullScale < distance; }
+
+
+/* log2 and 2^x by bits and polynomials, the same on every processor and in the shaders: for metering, where a few
+ * millionths do not matter. log2 of x > 0; 2^x for x within +-100. */
+ARTF_INLINE float artfLog2Fast(float x) {
+    uint32_t bits;
+    memcpy(&bits, &x, 4);
+    const float e = (float)(int32_t)((bits >> 23) & 255) - 127.f;
+    bits = (bits & 0x7FFFFFu) | 0x3F800000u;
+    float m;
+    memcpy(&m, &bits, 4);
+    const float z = (m - 1.f) / (m + 1.f), z2 = z * z; /* log2 m = 2 / ln 2 atanh z */
+    return e + z * 2.8853901f * (1.f + z2 * (.33333333f + z2 * (.2f + z2 * .14285714f)));
+}
+ARTF_INLINE float artfExp2Fast(float x) {
+    x = x < -100.f ? -100.f : x > 100.f ? 100.f : x;
+    const int32_t i = (int32_t)(x + 128.f) - 128; /* floor */
+    const float u = (x - (float)i) * .69314718f;
+    const float f = 1.f + u * (1.f + u * (.5f + u * (.16666667f + u * (.041666668f + u * (.0083333333f + u * .0013888889f)))));
+    const uint32_t bits = (uint32_t)(i + 127) << 23;
+    float scale;
+    memcpy(&scale, &bits, 4);
+    return f * scale;
+}
+/* What fog by height makes of the fog's density at a height: as much as that, times this. */
+ARTF_INLINE float artfFogHeight(const ArtfFrameData* f, float y) {
+    if (!(f->fogFalloff > 0)) return 1.f;
+    return artfMinf(artfExp2Fast((f->fogBase - y) * f->fogFalloff * 1.44269504f), 16.f);
+}
+/* How each instance moved since the last step (motion.c): of each, twelve floats, the rows of what takes a point
+ * of the world from where it is to where it was. A renderer keeps its own. */
+typedef struct ArtfMotion {
+    float* at;          /* by handle: where each was at the last step */
+    uint8_t* there;     /* by handle: it was */
+    size_t handles;     /* room for so many */
+    float* motion;      /* by instance */
+    size_t count, capacity;
+    uint64_t scene, version; /* version: the motion changed */
+    bool moving;
+} ArtfMotion;
+void artfMotionStep(ArtfMotion* m, const ArtfScene* s);
+void artfMotionFree(ArtfMotion* m);
+
+/* sin and cos of any angle by polynomials, within 4e-6: the same bytes everywhere, as the C library's are not. */
+ARTF_INLINE float artfSinFast(float x) {
+    x -= 6.28318531f * (float)(int32_t)(x * .159154943f + (x < 0 ? -.5f : .5f));
+    if (x > 1.57079633f) x = 3.14159265f - x;
+    else if (x < -1.57079633f) x = -3.14159265f - x;
+    const float x2 = x * x;
+    return x * (1.f - x2 * (.16666667f - x2 * (.0083333333f - x2 * (.00019841270f - x2 * .0000027557319f))));
+}
+ARTF_INLINE float artfCosFast(float x) { return artfSinFast(x + 1.57079633f); }
+
+#define ARTF_METER_X 32 /* auto exposure's grid */
+#define ARTF_METER_Y 18
 
 /* A step of the probes: their rays, from what a frame says of light (needs artfSceneTraceSync). */
 typedef struct ArtfPool ArtfPool;
@@ -385,6 +469,7 @@ uint32_t artfNormalPack(const float* n);
 
 typedef struct ArtfTraceRange {
     uint32_t firstNode, nodeEnd, firstVertex;
+    uint32_t firstTriangle, triangleCount; /* its triangles, one after the other: for the ray tracing hardware */
     uint64_t deformVersion;
     bool moved;         /* its vertices have somewhere they were */
 } ArtfTraceRange;
@@ -398,6 +483,8 @@ typedef struct ArtfTrace {
     ARTF_VEC(uint32_t) roots;               /* of each mesh */
     ARTF_VEC(ArtfTraceNode) top;            /* over the instances */
     ARTF_VEC(ArtfTraceInstance) instances;
+    ARTF_VEC(uint32_t) instanceMeshes;      /* of each of those, its mesh, */
+    ARTF_VEC(float) instanceWorlds;         /* and the rows of where it is: for the ray tracing hardware */
     ARTF_VEC(float) motion;                 /* of each of those, twelve floats: from where a point of it is to where it was */
     ARTF_VEC(ArtfTraceSeen) seen;
     uint64_t motionVersion;
@@ -424,6 +511,8 @@ struct ArtfScene {
     ARTF_VEC(ArtfMeshData) meshes;
     ARTF_VEC(ArtfTextureData) textures;     /* 0 is white */
     ARTF_VEC(ArtfMaterialData) materials;   /* 0 is grey */
+    ARTF_VEC(ArtfMaterialMore) materialsMore; /* one for each of those */
+    uint32_t layeredMaterials;              /* of those, how many have a coat or sheen */
     ARTF_VEC(ArtfInstanceData) instances;   /* dense, in no order */
     ARTF_VEC(uint32_t) instanceHandles;     /* of each dense instance */
     ARTF_VEC(uint32_t) handleSlots;         /* of each handle's number - 1: dense index, or the next free number */
@@ -454,7 +543,10 @@ struct ArtfScene {
     ArtfVec3 toSun, sunColor, sky, ground, background, fogColor;
     ArtfShadowDesc shadows;
     bool lightCasts[ARTF_MAX_LIGHTS];
+    float lightSize[ARTF_MAX_LIGHTS]; /* the radius of the ball of light; 0: a point */
     float backgroundAlpha, exposure, fogDensity, sunSize;
+    float fogBase, fogFalloff; /* fog by height */
+    float cullSize;            /* artfSceneSetCullSize's pixels */
     ArtfCamera camera;
     bool features[ARTF_FEATURE_COUNT];
     float lodError;

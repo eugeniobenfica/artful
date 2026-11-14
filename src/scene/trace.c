@@ -129,7 +129,7 @@ static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
         order[i] = i;
     }
     const uint32_t root = (uint32_t)t->nodes.len, firstNode = root;
-    ArtfTraceRange range = {root, 0, firstVertex, m->deformVersion};
+    ArtfTraceRange range = {root, 0, firstVertex, firstTriangle, triangles, m->deformVersion};
     artfVecReserve(&t->nodes, root + 1);
     t->nodes.len = root + 1;
     NodeList list = {t->nodes.items, t->nodes.len, t->nodes.cap};
@@ -213,6 +213,8 @@ static void buildTop(ArtfScene* s) {
     uint32_t* order = artfMalloc((count + 1) * 4);
     ArtfTraceInstance* made = artfMalloc((count + 1) * sizeof *made);
     float* moved = artfMalloc((count + 1) * 48);
+    float* worlds = artfMalloc((count + 1) * 48);
+    uint32_t* meshes = artfMalloc((count + 1) * 4);
     uint32_t n = 0;
     for (size_t i = 0; i < count; ++i) {
         const ArtfInstanceData* d = &s->instances.items[i];
@@ -250,6 +252,8 @@ static void buildTop(ArtfScene* s) {
             }
         memcpy(seen->at, d->m, sizeof seen->at);
         seen->there = true;
+        memcpy(worlds + (size_t)n * 12, d->m, 48);
+        meshes[n] = d->mesh;
         boxes[n] = b;
         order[n] = n;
         made[n++] = o;
@@ -271,11 +275,19 @@ static void buildTop(ArtfScene* s) {
     t->instances.len = n;
     artfVecReserve(&t->motion, (size_t)n * 12 + 1);
     t->motion.len = (size_t)n * 12;
+    artfVecReserve(&t->instanceMeshes, n + 1);
+    t->instanceMeshes.len = n;
+    artfVecReserve(&t->instanceWorlds, (size_t)n * 12 + 1);
+    t->instanceWorlds.len = (size_t)n * 12;
     for (uint32_t i = 0; i < n; ++i) {
         t->instances.items[i] = made[order[i]];
         memcpy(t->motion.items + (size_t)i * 12, moved + (size_t)order[i] * 12, 48);
+        t->instanceMeshes.items[i] = meshes[order[i]];
+        memcpy(t->instanceWorlds.items + (size_t)i * 12, worlds + (size_t)order[i] * 12, 48);
     }
     artfFree(moved);
+    artfFree(worlds);
+    artfFree(meshes);
     artfFree(boxes);
     artfFree(order);
     artfFree(made);
@@ -349,6 +361,8 @@ void artfTraceFini(ArtfTrace* t) {
     artfVecFree(&t->top);
     artfVecFree(&t->instances);
     artfVecFree(&t->motion);
+    artfVecFree(&t->instanceMeshes);
+    artfVecFree(&t->instanceWorlds);
     artfVecFree(&t->seen);
 }
 
@@ -510,6 +524,9 @@ typedef struct Surface {
     float rough, a2, k, ndv, open;
     float f0[3], mirror[3]; /* what it reflects head on, and toward the eye */
     float emissive[3];
+    /* a clear coat and sheen (ArtfMaterialMore): how much coat, its lobe; what the coat leaves of what is under it;
+     * the sheen's color, as much as the coat leaves of it */
+    float coat, coatA2, coatK, under, sheen[3];
 } Surface;
 
 void artfTexelAt(const ArtfTextureData* t, float u, float v, float* out) { artfTexelAtLevel(t, t->residentMip, u, v, out); }
@@ -634,6 +651,26 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         out->mirror[i] = out->shiny ? out->f0[i] + (artfMaxf(1.f - out->rough, out->f0[i]) - out->f0[i]) * far : 0.f;
         out->albedo[i] = albedo[i] * notMetal;
     }
+    /* a coat over all that, and sheen under it: the coat takes what its Fresnel reflects, and what is under keeps the
+     * rest, mirror included; the coat mirrors as smoothly as it is */
+    const ArtfMaterialMore* more = &s->materialsMore.items[inst->material];
+    out->coat = 0;
+    out->under = 1.f;
+    for (int i = 0; i < 3; ++i) out->sheen[i] = 0;
+    if (artfMaterialLayered(more) && !(m->flags & ARTF_MATERIAL_UNLIT)) {
+        const float a = more->coatRoughness * more->coatRoughness, plus = more->coatRoughness + 1.f;
+        out->coat = more->coat;
+        out->coatA2 = a * a;
+        out->coatK = plus * plus * .125f;
+        out->under = 1.f - more->coat * (.04f + .96f * far);
+        const float coatMirror = .04f + (artfMaxf(1.f - more->coatRoughness, .04f) - .04f) * far;
+        for (int i = 0; i < 3; ++i) {
+            out->albedo[i] *= out->under;
+            out->mirror[i] = out->mirror[i] * out->under + more->coat * coatMirror;
+            out->sheen[i] = more->sheen[i] * notMetal * out->under;
+        }
+        out->shiny = true;
+    }
     const float coverage = texel[3] * color[3];
     out->alpha = inst->opacity * m->opacity * color[3] * graphAlpha;
     if (m->flags & ARTF_MATERIAL_BLEND) out->alpha *= texel[3];
@@ -701,7 +738,15 @@ static void lightFrom(const ArtfScene* s, const float* p, const float* view, con
         const float seen = (m->ndv * rest + m->k) * (ndl * rest + m->k);
         const float lit = m->a2 / (d * d) * ndl * m->material->specular / (seen * 4.f);
         const float y = 1.f - vdh, far = y * y * y * y * y;
-        for (int k = 0; k < 3; ++k) highlight[k] = (m->f0[k] + (1.f - m->f0[k]) * far) * lit;
+        for (int k = 0; k < 3; ++k) highlight[k] = (m->f0[k] + (1.f - m->f0[k]) * far) * lit * m->under;
+        if (m->coat > 0) {
+            /* the coat's own lobe: of no color, F0 .04 */
+            const float dc = ndh * ndh * (m->coatA2 - 1.f) + 1.f, restC = 1.f - m->coatK;
+            const float seenC = (m->ndv * restC + m->coatK) * (ndl * restC + m->coatK);
+            const float coat = m->coat * m->coatA2 / (dc * dc) * ndl / (seenC * 4.f) * (.04f + .96f * far);
+            for (int k = 0; k < 3; ++k) highlight[k] += coat;
+        }
+        for (int k = 0; k < 3; ++k) highlight[k] += m->sheen[k] * ndl * far;
     }
     for (int k = 0; k < 3; ++k) light[k] += path[k] * color[k] * strength * through * (m->albedo[k] * ndl + highlight[k]);
 }
@@ -801,7 +846,9 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         }
         for (uint32_t i = 0; i < f->lightCount; ++i) {
             const ArtfLightData* L = &f->lights[i];
-            float to[3] = {L->position[0] - lifted[0], L->position[1] - lifted[1], L->position[2] - lifted[2]};
+            /* (a light with a size: each path sees another point of it, so its shadows go soft) */
+            const float size = f->lightSizes[i];
+            float to[3] = {L->position[0] + ball[0] * size - lifted[0], L->position[1] + ball[1] * size - lifted[1], L->position[2] + ball[2] * size - lifted[2]};
             const float d2 = dot3(to, to), distance = sqrtf(artfMaxf(d2, 1e-8f));
             const float fade = artfMaxf(1.f - d2 / (L->radius * L->radius), 0);
             for (int k = 0; k < 3; ++k) to[k] /= distance;

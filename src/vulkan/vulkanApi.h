@@ -163,7 +163,7 @@ typedef struct BufferImageCopy { VkDeviceSize offset; uint32_t rowLength, imageH
     X(vkDestroyInstance, void, (VkInstance, const void*)) \
     X(vkEnumeratePhysicalDevices, VkResult, (VkInstance, uint32_t*, VkPhysicalDevice*)) \
     X(vkGetPhysicalDeviceProperties, void, (VkPhysicalDevice, PhysicalDeviceProperties*)) \
-    X(vkGetPhysicalDeviceFeatures2, void, (VkPhysicalDevice, PhysicalDeviceFeatures2*)) \
+    X(vkGetPhysicalDeviceFeatures2, void, (VkPhysicalDevice, PhysicalDeviceFeatures2*))     X(vkEnumerateDeviceExtensionProperties, VkResult, (VkPhysicalDevice, const char*, uint32_t*, ExtensionProperties*)) \
     X(vkGetPhysicalDeviceMemoryProperties, void, (VkPhysicalDevice, PhysicalDeviceMemoryProperties*)) \
     X(vkGetPhysicalDeviceQueueFamilyProperties, void, (VkPhysicalDevice, uint32_t*, QueueFamilyProperties*)) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR, VkResult, (VkPhysicalDevice, uint32_t, VkSurfaceKHR, VkBool32*)) \
@@ -174,7 +174,32 @@ typedef struct BufferImageCopy { VkDeviceSize offset; uint32_t rowLength, imageH
     X(vkCreateDevice, VkResult, (VkPhysicalDevice, const DeviceCreateInfo*, const void*, VkDevice*)) \
     X(vkGetDeviceProcAddr, void*, (VkDevice, const char*))
 
-#define ARTF_VK_DEVICE_FUNCTIONS(X) \
+/* ---- the ray tracing hardware: acceleration structures and ray queries (VK_KHR_acceleration_structure, VK_KHR_ray_query) ---- */
+typedef uint64_t VkAccelerationStructureKHR, VkDeviceAddress;
+enum {
+    ST_AS_BUILD_GEOMETRY_INFO = 1000150000, ST_AS_DEVICE_ADDRESS_INFO = 1000150002, ST_AS_GEOMETRY_INSTANCES = 1000150004, ST_AS_GEOMETRY_TRIANGLES = 1000150005,
+    ST_AS_GEOMETRY = 1000150006, ST_WRITE_DESCRIPTOR_SET_AS = 1000150007, ST_AS_FEATURES = 1000150013, ST_AS_CREATE_INFO = 1000150017, ST_AS_BUILD_SIZES = 1000150020,
+    ST_RAY_QUERY_FEATURES = 1000348013, ST_BUFFER_DEVICE_ADDRESS_INFO = 1000244001, ST_MEMORY_ALLOCATE_FLAGS_INFO = 1000060000, DESCRIPTOR_AS = 1000150000
+};
+typedef struct ExtensionProperties { char name[256]; uint32_t specVersion; } ExtensionProperties;
+typedef struct AsFeatures { int sType; void* pNext; VkBool32 accelerationStructure, captureReplay, indirectBuild, hostCommands, updateAfterBind; } AsFeatures;
+typedef struct RayQueryFeatures { int sType; void* pNext; VkBool32 rayQuery; } RayQueryFeatures;
+typedef struct MemoryAllocateFlagsInfo { int sType; const void* pNext; VkFlags flags; uint32_t deviceMask; } MemoryAllocateFlagsInfo;
+typedef struct BufferDeviceAddressInfo { int sType; const void* pNext; VkBuffer buffer; } BufferDeviceAddressInfo;
+typedef struct AsCreateInfo { int sType; const void* pNext; VkFlags createFlags; VkBuffer buffer; VkDeviceSize offset, size; int type; VkDeviceAddress deviceAddress; } AsCreateInfo;
+typedef struct AsGeometryTriangles { int sType; const void* pNext; int vertexFormat; VkDeviceAddress vertexData; VkDeviceSize vertexStride; uint32_t maxVertex; int indexType; VkDeviceAddress indexData, transformData; } AsGeometryTriangles;
+typedef struct AsGeometryInstances { int sType; const void* pNext; VkBool32 arrayOfPointers; VkDeviceAddress data; } AsGeometryInstances;
+typedef union AsGeometryData { AsGeometryTriangles triangles; AsGeometryInstances instances; } AsGeometryData;
+typedef struct AsGeometry { int sType; const void* pNext; int geometryType; AsGeometryData geometry; VkFlags flags; } AsGeometry;
+typedef struct AsBuildGeometryInfo { int sType; const void* pNext; int type; VkFlags flags; int mode; VkAccelerationStructureKHR src, dst; uint32_t geometryCount; const AsGeometry* geometries; const AsGeometry* const* geometryPointers; VkDeviceAddress scratch; } AsBuildGeometryInfo;
+typedef struct AsBuildRange { uint32_t primitiveCount, primitiveOffset, firstVertex, transformOffset; } AsBuildRange;
+typedef struct AsBuildSizes { int sType; const void* pNext; VkDeviceSize structureSize, updateScratchSize, buildScratchSize; } AsBuildSizes;
+typedef struct AsDeviceAddressInfo { int sType; const void* pNext; VkAccelerationStructureKHR structure; } AsDeviceAddressInfo;
+/* An instance in the top level: its rows, its custom index (24 bits) and mask (8), its record offset (24) and flags (8). */
+typedef struct AsInstance { float transform[12]; uint32_t customAndMask, offsetAndFlags; uint64_t reference; } AsInstance;
+typedef struct WriteDescriptorSetAs { int sType; const void* pNext; uint32_t count; const VkAccelerationStructureKHR* structures; } WriteDescriptorSetAs;
+
+#define ARTF_VK_DEVICE_FUNCTIONS(X)     X(vkGetAccelerationStructureBuildSizesKHR, void, (VkDevice, int, const AsBuildGeometryInfo*, const uint32_t*, AsBuildSizes*))     X(vkCreateAccelerationStructureKHR, VkResult, (VkDevice, const AsCreateInfo*, const void*, VkAccelerationStructureKHR*))     X(vkDestroyAccelerationStructureKHR, void, (VkDevice, VkAccelerationStructureKHR, const void*))     X(vkCmdBuildAccelerationStructuresKHR, void, (VkCommandBuffer, uint32_t, const AsBuildGeometryInfo*, const AsBuildRange* const*))     X(vkGetAccelerationStructureDeviceAddressKHR, VkDeviceAddress, (VkDevice, const AsDeviceAddressInfo*))     X(vkGetBufferDeviceAddress, VkDeviceAddress, (VkDevice, const BufferDeviceAddressInfo*)) \
     X(vkDestroyDevice, void, (VkDevice, const void*)) \
     X(vkGetDeviceQueue, void, (VkDevice, uint32_t, uint32_t, VkQueue*)) \
     X(vkDeviceWaitIdle, VkResult, (VkDevice)) \

@@ -42,6 +42,7 @@ typedef struct Software {
     ArtfSoftPost post;
     uint32_t postFrames;  /* for the jitter */
     float previous[16];   /* the frame before's viewProj */
+    ArtfMotion motion;    /* how each instance moved */
     bool hasPrevious;
 } Software;
 
@@ -130,8 +131,10 @@ static void allocateTargets(Software* s, int width, int height) {
         }
         artfFree(f->postDepth);
         artfFree(f->postSurface);
+        artfFree(f->postInstance);
         f->postDepth = artfCalloc(pixels, 4);
         f->postSurface = artfCalloc(pixels, 4);
+        f->postInstance = artfCalloc(pixels, 4);
         artfSoftPostSize(&s->post, width, height);
         s->hasPrevious = false;
     }
@@ -202,6 +205,7 @@ static bool placeInstance(const ArtfSoftFrame* f, size_t i, ArtfVisible* v) {
     v->instance = inst;
     const float dx = wx - eye[0], dy = wy - eye[1], dz = wz - eye[2];
     const float distance = artfMaxf(sqrtf(dx * dx + dy * dy + dz * dz) - r, f->nearW);
+    if (artfTooSmall(&f->data, r, distance)) return false;
     v->mesh = &scene->meshes.items[artfMeshLevel(scene, base, f->data.lodScale, inst->maxScale, distance)];
     uint32_t from;
     const uint32_t fade = artfMeshFade(scene, base, f->data.lodScale, inst->maxScale, distance, f->data.look[3], &from);
@@ -583,6 +587,13 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         memcpy(s->previous, now, sizeof now);
         s->hasPrevious = true;
         if (scene->post.temporal) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
+        /* how each instance moved: for temporal antialiasing and motion blur */
+        f->motion = NULL;
+        if (scene->post.temporal || scene->post.motionBlur > 0) {
+            artfMotionStep(&s->motion, scene);
+            /* (nothing moved: the view alone says where each pixel was) */
+            f->motion = s->motion.moving ? s->motion.motion : NULL;
+        }
     } else {
         memset(f->data.post, 0, sizeof f->data.post);
     }
@@ -597,6 +608,8 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         artfSceneLightTiles(&f->data, f->width, f->height, f->extra, f->extraCount, f->tileLights);
     }
     f->nearW = scene->camera.near_;
+    f->sizedLights = false;
+    for (uint32_t i = 0; i < f->data.lightCount; ++i) f->sizedLights |= f->data.lightSizes[i] > 0;
     if (!f->decals) f->decals = artfMalloc(ARTF_MAX_DECALS * sizeof *f->decals);
     f->decalCount = artfSceneDecals(scene, &f->data, f->height, f->decals);
     const bool occlusion = scene->features[ARTF_FEATURE_OCCLUSION];
@@ -721,6 +734,7 @@ static void softFree(ArtfRenderer* r) {
         artfAlignedFree(f->workers[i].color);
         artfAlignedFree(f->workers[i].layer);
         artfAlignedFree(f->workers[i].postDepth);
+        artfAlignedFree(f->workers[i].postInstance);
         artfFree(f->workers[i].solidDepth);
         artfFree(f->workers[i].fragmentDepth);
         artfFree(f->workers[i].fragmentColor);
@@ -750,6 +764,8 @@ static void softFree(ArtfRenderer* r) {
     for (int c = 0; c < 4; ++c) artfFree(f->postLight[c]);
     artfFree(f->postDepth);
     artfFree(f->postSurface);
+    artfFree(f->postInstance);
+    artfMotionFree(&s->motion);
     artfSoftPostFree(&s->post);
     artfFree(f->extra);
     artfFree(f->tileLights);
@@ -782,7 +798,10 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
         f->workers[i].ids = artfAlignedMalloc(planes, 64);
         f->workers[i].color = artfAlignedMalloc(colors, 64);
         f->workers[i].layer = artfAlignedMalloc(colors, 64);
-        if (f->post) f->workers[i].postDepth = artfAlignedMalloc(ARTF_TILE_PIXELS * 4, 64);
+        if (f->post) {
+            f->workers[i].postDepth = artfAlignedMalloc(ARTF_TILE_PIXELS * 4, 64);
+            f->workers[i].postInstance = artfAlignedMalloc(ARTF_TILE_PIXELS * 4, 64);
+        }
     }
     allocateTargets(s, artfMaxi(o->width, 1), artfMaxi(o->height, 1));
     return &s->base;

@@ -4,6 +4,7 @@
 #include "scene/sceneInternal.h"
 #include "render/rendererInternal.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,7 +90,7 @@ static void testPacking(void) {
         CHECK(found);
     }
     artfSceneFree(s);
-    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 95 * 16);
+    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 104 * 16);
 }
 
 static void testMeshlets(void) {
@@ -3381,6 +3382,783 @@ static void testFloats(void) {
     artfFree(c);
 }
 
+/* The look: log2 and 2^x as the metering has them; each setting changes the picture the same way every time, on both
+ * backends, and they agree; auto exposure brings a dim scene and a bright one together. */
+static double frameMean(const uint32_t* f) {
+    double sum = 0;
+    for (int i = 0; i < W * H; ++i) sum += CHANNEL(f[i], 0) + CHANNEL(f[i], 8) + CHANNEL(f[i], 16);
+    return sum / (3.0 * W * H);
+}
+
+static void testGrading(void) {
+    double worstLog = 0, worstExp = 0;
+    for (float x = 1.f / 8192.f; x < 8192.f; x *= 1.0137f) worstLog = fmax(worstLog, fabs(artfLog2Fast(x) - log2(x)));
+    for (float x = -30.f; x < 30.f; x += .0173f) worstExp = fmax(worstExp, fabs(artfExp2Fast(x) / exp2(x) - 1));
+    printf("log2 within %.2g, 2^x within %.2g of its value\n", worstLog, worstExp);
+    CHECK(worstLog < 5e-5 && worstExp < 2e-5);
+
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* c = artfMalloc(W * H * 4);
+    const ArtfPostDesc each[9] = {{.toneMap = ARTF_TONE_NEUTRAL}, {.toneMap = ARTF_TONE_REINHARD}, {.toneMap = ARTF_TONE_NONE},
+                                  {.temperature = .8f}, {.tint = -.6f}, {.saturation = -.7f}, {.contrast = .5f}, {.vignette = 1}, {.chromatic = 6}};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = bleedScene();
+        artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(3, 3, 3));
+        artfSceneSetExposure(s, 1);
+        drawInto(r, s, b);
+        for (int e = 0; e < 9; ++e) {
+            artfSceneSetPost(s, &each[e]);
+            drawInto(r, s, c);
+            const double changed = differentShare(b, c, 2);
+            if (changed <= .01) printf("%s, look %d changed %.4f of the pixels\n", backend ? "GPU" : "CPU", e, changed);
+            CHECK(changed > .01);
+            drawInto(r, s, a);
+            CHECK(differentShare(a, c, 0) == 0);
+        }
+        /* nothing asked: the same bytes as before there was a look */
+        const ArtfPostDesc none = {0};
+        artfSceneSetPost(s, &none);
+        drawInto(r, s, c);
+        CHECK(differentShare(b, c, 0) == 0);
+        /* auto exposure: the sun eight times as bright, nearly the same picture */
+        const ArtfPostDesc meter = {.autoExposure = true, .exposureSpeed = 1};
+        artfSceneSetPost(s, &meter);
+        artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(.5f, .5f, .5f));
+        artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
+        drawInto(r, s, a);
+        artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(4, 4, 4));
+        artfSceneSetAmbient(s, artfVec3(.16f, .16f, .16f), artfVec3(.16f, .16f, .16f));
+        drawInto(r, s, b);
+        const double dim = frameMean(a), bright = frameMean(b);
+        artfSceneSetPost(s, NULL);
+        artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(.5f, .5f, .5f));
+        artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
+        drawInto(r, s, c);
+        printf("%s, auto exposure: a sun 8 times as bright shows %.1f against %.1f; the dim one %.1f without it\n", backend ? "GPU" : "CPU", bright, dim, frameMean(c));
+        CHECK(fabs(bright - dim) < 8 && frameMean(c) < dim - 30);
+        artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(4, 4, 4));
+        artfSceneSetAmbient(s, artfVec3(.16f, .16f, .16f), artfVec3(.16f, .16f, .16f));
+        /* and slowly: a twentieth of the way a frame */
+        const ArtfPostDesc slow = {.autoExposure = true};
+        artfSceneSetPost(s, &slow);
+        drawInto(r, s, a); /* (from what it had: a state goes on while the renderer meters) */
+        artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(.5f, .5f, .5f));
+        artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
+        drawInto(r, s, b);
+        const double first = frameMean(b);
+        for (int k = 0; k < 60; ++k) drawInto(r, s, b);
+        printf("%s, auto exposure going up: %.1f, then %.1f after 60 frames\n", backend ? "GPU" : "CPU", first, frameMean(b));
+        CHECK(frameMean(b) > first + 10);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    /* the backends agree, all of it at once */
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    o.hdr = true;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        o.backend = ARTF_BACKEND_SOFTWARE;
+        ArtfRenderer* cpu = artfRendererNew(&o);
+        for (int curve = 0; curve < 4; ++curve) {
+            ArtfScene* s = bleedScene();
+            artfSceneSetSun(s, artfVec3(-.6f, -1, -.3f), artfVec3(3, 3, 3));
+            const ArtfPostDesc all = {.bloom = .1f, .toneMap = (ArtfToneMap)curve, .autoExposure = true, .exposureSpeed = 1, .temperature = .4f,
+                                      .tint = .2f, .saturation = .3f, .contrast = .2f, .vignette = .6f, .chromatic = 3};
+            artfSceneSetPost(s, &all);
+            drawInto(cpu, s, a);
+            drawInto(gpu, s, b);
+            const double apart = differentShare(a, b, 16);
+            printf("the look with curve %d, the GPU against the CPU: %.2f%% of pixels apart\n", curve, apart * 100);
+            CHECK(apart < .02);
+            artfSceneFree(s);
+        }
+        artfRendererFree(cpu);
+        artfRendererFree(gpu);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+}
+
+/* A clear coat and sheen: each changes the picture, where it should; the two backends agree, drawing and tracing; and
+ * glTF's extensions reach them. */
+static ArtfScene* coatScene(float coat, float sheen) {
+    ArtfScene* s = plainScene();
+    artfSceneSetSun(s, artfVec3(-.5f, -1, -.6f), artfVec3(2, 2, 2));
+    artfSceneSetAmbient(s, artfVec3(.2f, .25f, .3f), artfVec3(.05f, .05f, .05f));
+    setCamera(s, 0, .5f, 4, 0, 0, 0);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.5f, .05f, .05f);
+    d.roughness = .8f;
+    d.clearcoat = coat;
+    d.clearcoatRoughness = .1f;
+    d.sheen = artfVec3(sheen, sheen, sheen);
+    addAt(s, artfSceneAddSphere(s, 1.2f, 48, 64), artfSceneAddMaterial(s, &d), 0, 0, 0, 1);
+    return s;
+}
+
+static void testCoat(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* plain = coatScene(0, 0);
+        ArtfScene* coated = coatScene(1, 0);
+        ArtfScene* velvet = coatScene(0, 1);
+        drawInto(r, plain, a);
+        drawInto(r, coated, b);
+        /* a sharp highlight where there was a dull one */
+        int brightest[2] = {0, 0};
+        for (int i = 0; i < W * H; ++i) {
+            brightest[0] = artfMaxi(brightest[0], CHANNEL(a[i], 8));
+            brightest[1] = artfMaxi(brightest[1], CHANNEL(b[i], 8));
+        }
+        printf("%s, a clear coat: its highlight's green %d, %d without\n", backend ? "GPU" : "CPU", brightest[1], brightest[0]);
+        CHECK(brightest[1] > brightest[0] + 60 && differentShare(a, b, 2) > .05);
+        /* sheen: the rim, not the middle */
+        drawInto(r, velvet, b);
+        const int rimX = W / 2 + (int)(H * .28f), midX = W / 2;
+        const double rim = meanOf(b, rimX, H / 2, 16) - meanOf(a, rimX, H / 2, 16), middle = meanOf(b, midX, H / 2, 16) - meanOf(a, midX, H / 2, 16);
+        printf("%s, sheen: the rim %.1f brighter, the middle %.1f\n", backend ? "GPU" : "CPU", rim, middle);
+        CHECK(rim > 8 && rim > middle * 2);
+        artfSceneFree(plain);
+        artfSceneFree(coated);
+        artfSceneFree(velvet);
+        artfRendererFree(r);
+    }
+    /* both at once, on both backends: drawn, and traced */
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        o.backend = ARTF_BACKEND_SOFTWARE;
+        ArtfRenderer* cpu = artfRendererNew(&o);
+        ArtfScene* s = coatScene(.8f, .6f);
+        drawInto(cpu, s, a);
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("a clear coat and sheen, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .005);
+        ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 32, 0};
+        artfSceneSetTrace(s, &rays);
+        for (int k = 0; k < 32; ++k) drawInto(cpu, s, a);
+        for (int k = 0; k < 32; ++k) drawInto(gpu, s, b);
+        const double tracedApart = differentShare(a, b, 24);
+        printf("a clear coat and sheen traced, the GPU against the CPU: %.2f%% of pixels apart\n", tracedApart * 100);
+        CHECK(tracedApart < .01);
+        artfSceneFree(s);
+        artfRendererFree(cpu);
+        artfRendererFree(gpu);
+    }
+    artfFree(a);
+    artfFree(b);
+    /* from glTF */
+    static const char file[] =
+        "{\"asset\":{\"version\":\"2.0\"},\"extensionsRequired\":[\"KHR_materials_clearcoat\",\"KHR_materials_sheen\"],"
+        "\"buffers\":[{\"byteLength\":36,\"uri\":\"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA\"}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"type\":\"VEC3\","
+        "\"count\":3,\"max\":[1,1,0],\"min\":[0,0,0]}],\"materials\":[{\"extensions\":{\"KHR_materials_clearcoat\":{\"clearcoatFactor\":0.75,"
+        "\"clearcoatRoughnessFactor\":0.25},\"KHR_materials_sheen\":{\"sheenColorFactor\":[0.5,0.25,1]}}}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0}]}],\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}]}";
+    ArtfScene* s = artfSceneNew();
+    CHECK(artfSceneLoadModelMemory(s, file, sizeof file - 1, NULL, NULL) != 0);
+    const ArtfMaterialMore* more = &s->materialsMore.items[s->materialsMore.len - 1];
+    CHECK(s->materialsMore.len == s->materials.len && more->coat == .75f && more->coatRoughness == .25f);
+    CHECK(more->sheen[0] == .5f * ARTF_SHEEN_SCALE && more->sheen[1] == .25f * ARTF_SHEEN_SCALE && more->sheen[2] == ARTF_SHEEN_SCALE && s->layeredMaterials == 1);
+    ArtfMaterialDesc none = artfMaterialDefaults();
+    artfMaterialSet(s, (ArtfMaterial)(s->materials.len - 1), &none);
+    CHECK(s->layeredMaterials == 0);
+    artfSceneFree(s);
+}
+
+/* A sky from the sun: blue overhead by day, red toward a low sun, the sun reddened and then gone; the same on both
+ * backends. Fog by height: thinner above. */
+static void testSky(void) {
+    ArtfScene* s = artfSceneNew();
+    const ArtfSkyDesc day = {{3, 3, 3}, 0, 0, {0, 0, 0}, 128, false, false};
+    float up[3], side[3];
+    artfSceneSetSun(s, artfVec3(-.2f, -1, -.3f), artfVec3(3, 3, 3));
+    CHECK(artfSceneSetSky(s, &day));
+    artfEnvSample(s->environment, 0, 0, 1, 0, up);
+    artfEnvSample(s->environment, 0, 1, .02f, 0, side);
+    printf("a sky at noon: overhead %.3f %.3f %.3f, at the horizon %.3f %.3f %.3f; the sun %.2f %.2f %.2f\n", up[0], up[1], up[2], side[0], side[1], side[2],
+           s->sunColor.x, s->sunColor.y, s->sunColor.z);
+    CHECK(up[2] > up[1] && up[1] > up[0] && up[2] > .05f && side[1] > up[1] && s->sunColor.x > 2.5f && s->sunColor.z < s->sunColor.x);
+    /* the sun low: toward it, red over blue; and the sun itself reddened */
+    artfSceneSetSun(s, artfVec3(0, -.03f, 1), artfVec3(3, 3, 3));
+    CHECK(artfSceneSetSky(s, &day));
+    float toward[3];
+    artfEnvSample(s->environment, 0, 0, .03f, -1, toward);
+    printf("a sky at sunset: toward the sun %.3f %.3f %.3f; the sun %.3f %.3f %.3f\n", toward[0], toward[1], toward[2], s->sunColor.x, s->sunColor.y, s->sunColor.z);
+    CHECK(toward[0] > toward[2] && s->sunColor.x > s->sunColor.z * 3);
+    /* below the horizon: no sun */
+    artfSceneSetSun(s, artfVec3(0, .3f, 1), artfVec3(3, 3, 3));
+    CHECK(artfSceneSetSky(s, &day));
+    CHECK(s->sunColor.x == 0 && s->sunColor.y == 0 && s->sunColor.z == 0);
+    /* the same bytes, made again */
+    const size_t size = ARTF_ENV_FLOATS * sizeof(float);
+    float* first = artfMalloc(size);
+    memcpy(first, s->environment, size);
+    CHECK(artfSceneSetSky(s, &day));
+    CHECK(memcmp(first, s->environment, size) == 0);
+    artfFree(first);
+    CHECK(artfSceneSetSky(s, NULL) && !s->environment);
+    artfSceneFree(s);
+
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    o.hdr = true;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    s = bleedScene();
+    artfSceneSetSun(s, artfVec3(-.6f, -.4f, -.3f), artfVec3(3, 3, 3));
+    CHECK(artfSceneSetSky(s, &day));
+    artfSceneSetExposure(s, 1);
+    drawInto(cpu, s, a);
+    /* the sky shows behind the scene: blue at the top */
+    CHECK(CHANNEL(a[W * 4 + W / 2], 0) > CHANNEL(a[W * 4 + W / 2], 16));
+    if (gpu) {
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("a sky, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .005);
+    }
+    /* fog by height, in fog that light goes through: thinner above, on both backends alike */
+    const ArtfPostDesc fog = {.volumetric = 1, .scattering = .3f};
+    artfSceneSetPost(s, &fog);
+    artfSceneSetFog(s, artfVec3(.5f, .5f, .55f), .08f);
+    drawInto(cpu, s, b);
+    artfSceneSetFogHeight(s, -1, 2);
+    drawInto(cpu, s, a);
+    printf("fog by height: %.1f%% of pixels changed\n", differentShare(a, b, 8) * 100);
+    CHECK(differentShare(a, b, 8) > .05);
+    if (gpu) {
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("fog by height, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+    }
+    artfSceneFree(s);
+    artfRendererFree(cpu);
+    artfRendererFree(gpu);
+    artfFree(a);
+    artfFree(b);
+}
+
+/* A light with a size: its highlight on something smooth is wider, the same on both backends; traced, its shadow is
+ * softer. */
+static ArtfScene* bulbScene(float size) {
+    ArtfScene* s = plainScene();
+    artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+    artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
+    setCamera(s, 0, 2.5f, 5, 0, 0, 0);
+    ArtfMaterialDesc smooth = artfMaterialDefaults();
+    smooth.baseColor = artfVec3(.2f, .2f, .25f);
+    smooth.roughness = .08f;
+    const ArtfTransform floor = artfTransformAt(0, -1, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 20, 1), artfSceneAddMaterial(s, &smooth), &floor);
+    addAt(s, artfSceneAddCube(s, .6f), whiteMaterial(s), 0, .1f, 0, 1);
+    const ArtfLight bulb = artfSceneAddLight(s, artfVec3(0, 1.6f, -.6f), artfVec3(1.5f, 1.5f, 1.5f), 12);
+    artfLightSetSize(s, bulb, size);
+    return s;
+}
+
+static int brightCount(const uint32_t* f, int over) {
+    int n = 0;
+    for (int i = 0; i < W * H; ++i) n += CHANNEL(f[i], 8) > over;
+    return n;
+}
+static int greyCount(const uint32_t* f) {
+    int n = 0;
+    for (int i = 0; i < W * H; ++i) n += CHANNEL(f[i], 8) > 25 && CHANNEL(f[i], 8) < 90;
+    return n;
+}
+
+static void testSizedLights(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* point = bulbScene(0);
+        ArtfScene* bulb = bulbScene(.5f);
+        drawInto(r, point, a);
+        drawInto(r, bulb, b);
+        printf("%s, a light with a size: %d bright pixels, %d from a point\n", backend ? "GPU" : "CPU", brightCount(b, 150), brightCount(a, 150));
+        CHECK(brightCount(b, 150) > brightCount(a, 150) * 2);
+        artfSceneFree(point);
+        artfSceneFree(bulb);
+        artfRendererFree(r);
+    }
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    ArtfScene* s = bulbScene(.5f);
+    if (gpu) {
+        drawInto(cpu, s, a);
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("a light with a size, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .005);
+    }
+    /* traced: the cube's shadow has a soft edge */
+    ArtfScene* point = bulbScene(0);
+    const ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 64, 0};
+    artfSceneSetTrace(s, &rays);
+    artfSceneSetTrace(point, &rays);
+    for (int k = 0; k < 64; ++k) drawInto(cpu, point, a);
+    for (int k = 0; k < 64; ++k) drawInto(cpu, s, b);
+    printf("traced, a light with a size: %d pixels between light and shadow, %d from a point\n", greyCount(b), greyCount(a));
+    CHECK(greyCount(b) > greyCount(a) + 200);
+    if (gpu) {
+        for (int k = 0; k < 64; ++k) drawInto(gpu, s, a);
+        const double apart = differentShare(a, b, 24);
+        printf("traced, a light with a size, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .02);
+    }
+    /* removed, it is a point again when its place is taken */
+    artfSceneRemoveLight(point, 1);
+    CHECK(point->lightSize[0] == 0);
+    artfSceneFree(point);
+    artfSceneFree(s);
+    artfRendererFree(cpu);
+    artfRendererFree(gpu);
+    artfFree(a);
+    artfFree(b);
+}
+
+/* What moves, followed: with nothing moving, motion blur changes no byte; a sphere going sideways is blurred along its
+ * way and not across it; temporal antialiasing follows it, so it leaves no trail; both backends alike. */
+static ArtfScene* movingScene(ArtfInstance* ball) {
+    ArtfScene* s = plainScene();
+    artfSceneSetSun(s, artfVec3(-.3f, -1, -.4f), artfVec3(1.5f, 1.5f, 1.5f));
+    setCamera(s, 0, 0, 6, 0, 0, 0);
+    ArtfMaterialDesc red = artfMaterialDefaults();
+    red.baseColor = artfVec3(.9f, .1f, .1f);
+    *ball = addAt(s, artfSceneAddSphere(s, .8f, 32, 48), artfSceneAddMaterial(s, &red), -1.2f, 0, 0, 1);
+    return s;
+}
+
+/* One frame, and what it shows: drawInto draws three, and what moved has stopped by the last. */
+static void drawOnce(ArtfRenderer* r, ArtfScene* s, uint32_t* frame) {
+    CHECK(artfRendererDraw(r, s));
+    CHECK(artfRendererReadPixels(r, frame));
+}
+
+static void placeBall(ArtfScene* s, ArtfInstance ball, float x) {
+    const ArtfTransform at = artfTransformAt(x, 0, 0, 1);
+    artfInstanceSetTransform(s, ball, &at);
+}
+
+/* The mean difference of a channel, over the frame. */
+static double meanApart(const uint32_t* a, const uint32_t* b) {
+    double sum = 0;
+    for (int i = 0; i < W * H; ++i) sum += abs(CHANNEL(a[i], 16) - CHANNEL(b[i], 16));
+    return sum / (W * H);
+}
+
+static void testMotion(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* c = artfMalloc(W * H * 4);
+    uint32_t* blurred[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfInstance ball;
+        ArtfScene* s = movingScene(&ball);
+        /* still: not a byte changes */
+        drawInto(r, s, a);
+        const ArtfPostDesc blur = {.motionBlur = .5f};
+        artfSceneSetPost(s, &blur);
+        drawInto(r, s, b);
+        drawInto(r, s, b);
+        CHECK(differentShare(a, b, 0) == 0);
+        /* going sideways: blurred along its way; above and below it, nothing changes */
+        placeBall(s, ball, -.6f);
+        drawOnce(r, s, blurred[backend]);
+        artfSceneSetPost(s, NULL);
+        drawInto(r, s, a);
+        const double changed = differentShare(a, blurred[backend], 8);
+        int across = 0;
+        for (int y = 0; y < H / 5; ++y)
+            for (int x = 0; x < W; ++x) across += a[y * W + x] != blurred[backend][y * W + x];
+        printf("%s, motion blur: %.2f%% of pixels blurred, %d across its way\n", backend ? "GPU" : "CPU", changed * 100, across);
+        CHECK(changed > .003 && changed < .1 && across == 0);
+        /* temporal antialiasing, the sphere going on: what it shows against the sphere drawn still there */
+        const ArtfPostDesc temporal = {.temporal = true};
+        artfSceneSetPost(s, &temporal);
+        for (int k = 0; k < 12; ++k) {
+            placeBall(s, ball, -.9f + (float)k * .15f);
+            drawOnce(r, s, b);
+        }
+        artfSceneSetPost(s, NULL);
+        drawInto(r, s, c);
+        const double trail = meanApart(b, c);
+        printf("%s, temporal antialiasing on a moving sphere: %.2f of 255 from it drawn still, on average\n", backend ? "GPU" : "CPU", trail);
+        CHECK(trail < 1.5);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (blurred[1][0] || blurred[1][W * H / 2]) {
+        const double apart = differentShare(blurred[0], blurred[1], 24);
+        printf("motion blur, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .005);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+    artfFree(blurred[0]);
+    artfFree(blurred[1]);
+}
+
+/* Soft shadows, drawn: as wide as their light, for the sun and a light with a size; sharp ones as they were; both
+ * backends alike. */
+static void testSoftShadows(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* c[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        for (int sun = 0; sun < 2; ++sun) {
+            ArtfScene* s = bulbScene(.5f);
+            if (sun) {
+                artfSceneRemoveLight(s, 1);
+                artfSceneSetSun(s, artfVec3(.3f, -1, .4f), artfVec3(1.5f, 1.5f, 1.5f));
+                artfSceneSetSunSize(s, .08f);
+            } else {
+                artfLightSetShadow(s, 1, true);
+            }
+            const ArtfShadowDesc hard = {1024, 20, false}, soft = {1024, 20, true};
+            artfSceneSetShadows(s, &hard);
+            drawInto(r, s, a);
+            artfSceneSetShadows(s, &soft);
+            drawInto(r, s, b);
+            printf("%s, soft shadows from %s: %d pixels between light and shadow, %d sharp\n", backend ? "GPU" : "CPU", sun ? "the sun" : "a light", greyCount(b), greyCount(a));
+            CHECK(greyCount(b) > greyCount(a) + 100);
+            if (sun) memcpy(c[backend], b, W * H * 4);
+            /* with no size, sharp as they were */
+            if (sun) artfSceneSetSunSize(s, 0);
+            else artfLightSetSize(s, 1, 0);
+            drawInto(r, s, b);
+            artfSceneSetShadows(s, &hard);
+            drawInto(r, s, a);
+            CHECK(differentShare(a, b, 0) == 0);
+            artfSceneFree(s);
+        }
+        artfRendererFree(r);
+    }
+    if (c[1][0] || c[1][W * H / 2]) {
+        const double apart = differentShare(c[0], c[1], 24);
+        printf("soft shadows, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(c[0]);
+    artfFree(c[1]);
+}
+
+/* Light that bounced, in what a surface reflects: a metal floor, which takes no light of its own, by a red wall turns
+ * red once probes are on; both backends alike. */
+static void testProbeReflections(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    const int fx = W / 2 + 28, fy = H / 2 + 34;
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = bleedScene();
+        ArtfMaterialDesc metal = artfMaterialDefaults();
+        metal.baseColor = artfVec3(.9f, .9f, .9f);
+        metal.metallic = 1;
+        metal.roughness = .35f;
+        artfMaterialSet(s, 1, &metal);
+        drawInto(r, s, a);
+        const ArtfIndirectDesc probes = {{8, 4, 8}, 64, .5f, 1, {-4, -1.5f, -3}, {4, 3, 3}};
+        artfSceneSetIndirect(s, &probes);
+        for (int k = 0; k < 4; ++k) drawInto(r, s, b[backend]);
+        const double before = meanOf(a, fx, fy, 16) - meanOf(a, fx, fy, 8), after = meanOf(b[backend], fx, fy, 16) - meanOf(b[backend], fx, fy, 8);
+        printf("%s, light that bounced in a metal floor: red over green %.1f without probes, %.1f with\n", backend ? "GPU" : "CPU", before, after);
+        CHECK(after > before + 3);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (b[1][0] || b[1][W * H / 2]) {
+        const double apart = differentShare(b[0], b[1], 24);
+        printf("light that bounced in a metal floor, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .02);
+    }
+    artfFree(a);
+    artfFree(b[0]);
+    artfFree(b[1]);
+}
+
+/* What is too small to see is not drawn: a far ball goes, a near one stays, on both backends alike. */
+static void testCullSize(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = plainScene();
+        const ArtfMesh ball = artfSceneAddSphere(s, .3f, 16, 24);
+        addAt(s, ball, whiteMaterial(s), -.6f, 0, 2, 1);   /* near: tens of pixels */
+        addAt(s, ball, whiteMaterial(s), 3, 0, -40, 1);    /* far: a few */
+        drawInto(r, s, a);
+        artfSceneSetCullSize(s, 12);
+        drawInto(r, s, b[backend]);
+        int lit[2] = {0, 0}, litLeft = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const bool was = CHANNEL(a[y * W + x], 8) > 40, is = CHANNEL(b[backend][y * W + x], 8) > 40;
+                lit[0] += was;
+                lit[1] += is;
+                litLeft += is && x < W / 2;
+            }
+        printf("%s, too small to draw: %d pixels lit, %d before\n", backend ? "GPU" : "CPU", lit[1], lit[0]);
+        CHECK(lit[1] < lit[0] && lit[1] == litLeft && litLeft > 200);
+        artfSceneSetCullSize(s, 0);
+        drawInto(r, s, b[backend]);
+        CHECK(differentShare(a, b[backend], 0) == 0);
+        artfSceneSetCullSize(s, 12);
+        drawInto(r, s, b[backend]);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (b[1][0] || b[1][W * H / 2]) CHECK(differentShare(b[0], b[1], 24) < .002);
+    artfFree(a);
+    artfFree(b[0]);
+    artfFree(b[1]);
+}
+
+/* Particles: a burst gives that many; none goes through the ground they bounce on; turbulence moves them, and spin
+ * turns them; the same steps give the same places. */
+static void particlePlaces(const ArtfScene* s, float* lowest, double* sumX, double* sumTurn) {
+    *lowest = 1e30f;
+    *sumX = 0;
+    *sumTurn = 0;
+    for (size_t i = 0; i < s->instances.len; ++i) {
+        const ArtfInstanceData* d = &s->instances.items[i];
+        if (!(d->flags & ARTF_INSTANCE_PARTICLE) || d->m[0] == 0 && d->m[2] == 0 && d->m[8] == 0) continue;
+        *lowest = artfMinf(*lowest, d->m[7]);
+        *sumX += d->m[3];
+        *sumTurn += fabs(d->m[4]); /* (the quad's x leaning off the eye's right) */
+    }
+}
+
+static void testParticleForces(void) {
+    for (int variant = 0; variant < 4; ++variant) {
+        ArtfScene* s = plainScene();
+        setCamera(s, 0, 1, 8, 0, 0, 0);
+        ArtfEmitterDesc d;
+        memset(&d, 0, sizeof d);
+        d.velocity = artfVec3(0, 2, 0);
+        d.spread = .8f;
+        d.gravity = artfVec3(0, -9.8f, 0);
+        d.life = 3;
+        d.size = .1f;
+        d.sizeEnd = .1f;
+        d.color = d.colorEnd = artfVec3(1, 1, 1);
+        d.opacity = 1;
+        d.most = 200;
+        d.ground = true;
+        d.bounce = .5f;
+        d.friction = .2f;
+        if (variant == 1) d.turbulence = 6;
+        if (variant == 2) d.spin = 3;
+        const ArtfEmitter e = artfSceneAddEmitter(s, &d);
+        artfEmitterBurst(s, e, 120);
+        artfEmitterStep(s, e, 1.f / 60.f);
+        CHECK(artfEmitterAlive(s, e) == 120);
+        for (int k = 0; k < 120; ++k) artfEmitterStep(s, e, 1.f / 60.f);
+        float lowest;
+        double sumX, sumTurn;
+        particlePlaces(s, &lowest, &sumX, &sumTurn);
+        static double plainX, plainTurn;
+        if (variant == 0) {
+            plainX = sumX;
+            plainTurn = sumTurn;
+            printf("particles on the ground: the lowest at %.4f\n", lowest);
+            CHECK(lowest >= -1e-4f && plainTurn < 1e-3);
+        }
+        if (variant == 1) CHECK(fabs(sumX - plainX) > 1);
+        if (variant == 2) CHECK(sumTurn > 1); /* (what turns draws more numbers: it goes its own ways) */
+        if (variant == 3) CHECK(sumX == plainX);
+        artfSceneFree(s);
+    }
+}
+
+/* Layers of a terrain, by rules and by a map, the same on both backends; things scattered over it, where the ground is,
+ * as many as asked, the same each time, and not where it is steep. */
+static void testTerrainLayers(void) {
+    static float heights[65 * 65];
+    for (int z = 0; z < 65; ++z)
+        for (int x = 0; x < 65; ++x) {
+            const float dx = (float)(x - 32) / 32.f, dz = (float)(z - 32) / 32.f, r2 = dx * dx + dz * dz;
+            heights[z * 65 + x] = r2 < 1 ? (1.f - r2) * (1.f - r2) : 0.f;
+        }
+    uint32_t* a[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = plainScene();
+        artfSceneSetSun(s, artfVec3(-.3f, -1, -.4f), artfVec3(1, 1, 1));
+        artfSceneSetAmbient(s, artfVec3(.4f, .4f, .4f), artfVec3(.2f, .2f, .2f));
+        setCamera(s, 0, 4, 9, 0, .8f, 0);
+        const ArtfMesh hill = artfSceneAddTerrain(s, heights, 65, 65, .15f, 3.f, 1.f);
+        ArtfTerrainLayersDesc layers;
+        memset(&layers, 0, sizeof layers);
+        layers.count = 3;
+        layers.layers[0].color = artfVec3(.1f, .5f, .1f);  /* grass */
+        layers.layers[1].color = artfVec3(.4f, .4f, .4f);  /* rock, where it is steep */
+        layers.layers[2].color = artfVec3(1, 1, 1);        /* snow, high */
+        layers.steep = .75f;
+        layers.high = 2.4f;
+        const ArtfMaterial ground = artfSceneAddTerrainMaterial(s, &layers);
+        CHECK(ground != 0);
+        artfSceneAddInstance(s, hill, ground, NULL);
+        drawInto(r, s, a[backend]);
+        /* the top is snow, the foot grass: green over red there, and none at the top */
+        uint32_t top = 0, foot = 0;
+        int topY = H, footY = 0;
+        for (int y = 0; y < H; ++y) {
+            const uint32_t p = a[backend][y * W + W / 2];
+            if (CHANNEL(p, 8) > 20 && y < topY) { topY = y; top = a[backend][(y + 3) * W + W / 2]; }
+        }
+        /* (the foot: up from the bottom, past the terrain's near edge) */
+        for (footY = H - 1; footY > 0 && CHANNEL(a[backend][footY * W + W / 2], 8) < 20; --footY) {}
+        footY -= 4;
+        foot = a[backend][footY * W + W / 2];
+        printf("%s, terrain layers: at the top %d %d %d, at the foot %d %d %d\n", backend ? "GPU" : "CPU", CHANNEL(top, 16), CHANNEL(top, 8), CHANNEL(top, 0), CHANNEL(foot, 16), CHANNEL(foot, 8), CHANNEL(foot, 0));
+        CHECK(CHANNEL(foot, 8) > CHANNEL(foot, 16) + 30 && abs(CHANNEL(top, 8) - CHANNEL(top, 16)) < 20 && CHANNEL(top, 16) > CHANNEL(foot, 16) + 60);
+        /* by a map: red on the left half, green on the right */
+        const uint32_t map[8] = {0x00FF0000u, 0x00FF0000u, 0x00FF0000u, 0x00FF0000u, 0x0000FF00u, 0x0000FF00u, 0x0000FF00u, 0x0000FF00u};
+        layers.weights = artfSceneAddTexture(s, map, 8, 1, 0);
+        layers.count = 2;
+        const ArtfMaterial painted = artfSceneAddTerrainMaterial(s, &layers);
+        artfInstanceSetMaterial(s, 1, painted);
+        uint32_t* b = artfMalloc(W * H * 4);
+        drawInto(r, s, b);
+        const uint32_t left = b[footY * W + W / 2 - W / 6], right = b[footY * W + W / 2 + W / 6];
+        printf("%s, terrain painted: on the left %d %d %d, on the right %d %d %d\n", backend ? "GPU" : "CPU", CHANNEL(left, 16), CHANNEL(left, 8), CHANNEL(left, 0), CHANNEL(right, 16), CHANNEL(right, 8), CHANNEL(right, 0));
+        CHECK(CHANNEL(left, 8) > CHANNEL(left, 16) + 30 && abs(CHANNEL(right, 8) - CHANNEL(right, 16)) < 12);
+        artfFree(b);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (a[1][0] || a[1][W * H / 2]) {
+        const double apart = differentShare(a[0], a[1], 24);
+        printf("terrain layers, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+    }
+    artfFree(a[0]);
+    artfFree(a[1]);
+    /* scattered: as many as the area asks, on the ground, the same each time */
+    ArtfScene* s = artfSceneNew();
+    const ArtfMesh rock = artfSceneAddSphere(s, .1f, 8, 12);
+    ArtfScatterDesc d;
+    memset(&d, 0, sizeof d);
+    d.heights = heights;
+    d.width = d.depth = 65;
+    d.cell = .15f;
+    d.height = 3.f;
+    d.mesh = rock;
+    d.material = 0;
+    d.density = 10;
+    d.seed = 7;
+    ArtfInstance placed[2048];
+    const uint32_t n = artfSceneScatter(s, &d, placed, 2048);
+    const float area = 64 * .15f * 64 * .15f;
+    CHECK(n == (uint32_t)(area * 10));
+    float worst = 0;
+    for (uint32_t i = 0; i < artfMini((int)n, 2048); ++i) {
+        const ArtfInstanceData* inst = &s->instances.items[i];
+        const float fx = (inst->m[3] + 32 * .15f) / .15f, fz = (inst->m[11] + 32 * .15f) / .15f;
+        const int x = artfMini((int)fx, 63), z = artfMini((int)fz, 63);
+        const float tx = fx - (float)x, tz = fz - (float)z;
+        const float h0 = heights[z * 65 + x] + (heights[z * 65 + x + 1] - heights[z * 65 + x]) * tx;
+        const float h1 = heights[(z + 1) * 65 + x] + (heights[(z + 1) * 65 + x + 1] - heights[(z + 1) * 65 + x]) * tx;
+        worst = artfMaxf(worst, fabsf(inst->m[7] - (h0 + (h1 - h0) * tz) * 3.f));
+    }
+    CHECK(worst < 1e-4f);
+    ArtfScene* again = artfSceneNew();
+    artfSceneAddSphere(again, .1f, 8, 12);
+    CHECK(artfSceneScatter(again, &d, NULL, 0) == n && memcmp(again->instances.items, s->instances.items, n * sizeof(ArtfInstanceData)) == 0);
+    d.steepest = .9f;
+    const uint32_t flatOnly = artfSceneScatter(again, &d, NULL, 0);
+    printf("scattered over a terrain: %u, %u where it is flat enough\n", n, flatOnly);
+    CHECK(flatOnly < n && flatOnly > n / 4);
+    artfSceneFree(again);
+    artfSceneFree(s);
+}
+
+/* Rays through the ray tracing hardware, where the GPU has some: the same picture as through the trees, rays and paths,
+ * with what has one side and two, and after something moves. */
+static void sawHardware(void* user, const char* message) {
+    if (strstr(message, "ray tracing hardware")) *(bool*)user = true;
+}
+
+static void testTraceHardware(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    bool hardware = false;
+    artfSetLog(sawHardware, &hardware);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (!gpu) {
+        artfSetLog(NULL, NULL);
+        return;
+    }
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    for (int mode = 0; mode < 2; ++mode) {
+        ArtfScene* s = bleedScene();
+        ArtfMaterialDesc twoSided = artfMaterialDefaults();
+        twoSided.baseColor = artfVec3(.2f, .4f, .9f);
+        twoSided.doubleSided = true;
+        const ArtfTransform card = artfTransformTrs(artfVec3(-2.4f, .2f, -.5f), artfQuatAxisAngle(artfVec3(0, 1, 0), 2.6f), artfVec3(1, 1, 1));
+        const ArtfInstance back = artfSceneAddInstance(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &twoSided), &card);
+        ArtfTraceDesc d = {mode ? ARTF_TRACE_PATHS : ARTF_TRACE_RAYS, 4, 64, 0, false, false};
+        for (int moved = 0; moved < 2; ++moved) {
+            if (moved) {
+                const ArtfTransform there = artfTransformTrs(artfVec3(-2.f, .6f, -.2f), artfQuatAxisAngle(artfVec3(0, 1, 0), 2.2f), artfVec3(1, 1, 1));
+                artfInstanceSetTransform(s, back, &there);
+            }
+            d.hardware = false;
+            artfSceneSetTrace(s, &d);
+            for (int k = 0; k < 16; ++k) drawInto(gpu, s, a);
+            d.hardware = true;
+            artfSceneSetTrace(s, &d);
+            for (int k = 0; k < 16; ++k) drawInto(gpu, s, b);
+            const double apart = differentShare(a, b, 24);
+            printf("%s%s through the ray tracing hardware against the trees: %.2f%% of pixels apart\n", mode ? "paths" : "rays", moved ? ", moved," : "", apart * 100);
+            CHECK(apart < .01);
+        }
+        artfSceneFree(s);
+    }
+    artfSetLog(NULL, NULL);
+    printf(hardware ? "(rays went through the ray tracing hardware)\n" : "(no ray tracing hardware here: the trees were held to themselves)\n");
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(gpu);
+}
+
 /* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
  * next to nothing, though a probe outside is nearer to it than one inside. */
 static void testProbesWalls(void) {
@@ -4539,6 +5317,17 @@ int main(void) {
     testGltfMeshopt();
     testEnvironment();
     testFloats();
+    testGrading();
+    testCoat();
+    testSky();
+    testSizedLights();
+    testMotion();
+    testSoftShadows();
+    testProbeReflections();
+    testCullSize();
+    testParticleForces();
+    testTerrainLayers();
+    testTraceHardware();
     testProbesWalls();
     testExtraShadows();
     testFloatsSamples();

@@ -394,7 +394,24 @@ V8_INLINE V8F fifth(V8F x) {
     return v8fMul(v8fMul(y2, y2), y);
 }
 
-/* How much light a surface gives back toward the eye, for one light: adds to diffuse and specular. */
+/* A light with a size (a ball, artfLightSetSize), seen from where d (to its middle) starts: the direction to its point
+ * nearest the mirror ray, which its highlight comes from, and how much that highlight keeps, as it is spread over as
+ * wide as the ball looks (Karis, 2013). */
+V8_INLINE Lanes3 nearestOfBall(Lanes3 n, Lanes3 view, Lanes3 d, float size, V8F rough, V8F* energy) {
+    const V8F one = v8fSet(1.f), twice = v8fMul(dot3(n, view), v8fSet(2.f));
+    const Lanes3 r = {v8fSub(v8fMul(n.x, twice), view.x), v8fSub(v8fMul(n.y, twice), view.y), v8fSub(v8fMul(n.z, twice), view.z)};
+    const V8F along = dot3(d, r);
+    const Lanes3 across = {v8fSub(v8fMul(r.x, along), d.x), v8fSub(v8fMul(r.y, along), d.y), v8fSub(v8fMul(r.z, along), d.z)};
+    const V8F share = v8fMin(v8fDiv(v8fSet(size), v8fMax(v8fSqrt(dot3(across, across)), v8fSet(1e-6f))), one);
+    const Lanes3 nearest = {v8fAdd(d.x, v8fMul(across.x, share)), v8fAdd(d.y, v8fMul(across.y, share)), v8fAdd(d.z, v8fMul(across.z, share))};
+    const V8F a = v8fMul(rough, rough), wider = v8fMin(v8fAdd(a, v8fDiv(v8fSet(size * .5f), v8fSqrt(v8fMax(dot3(d, d), v8fSet(1e-8f))))), one);
+    const V8F kept = v8fDiv(a, wider);
+    *energy = v8fMul(kept, kept);
+    return normalize3(nearest);
+}
+
+/* How much light a surface gives back toward the eye, for one light: adds to diffuse and specular. The highlight comes
+ * from toward (toLight but for a light with a size), times energy. */
 V8_INLINE void addLight(Lanes3 n, Lanes3 view, Lanes3 toLight, V8F strength, const float* color, bool shiny, const Reflecting* r, Lanes3* diffuse, Lanes3* highlight) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
     V8F ndl = v8fMax(dot3(n, toLight), zero);
@@ -418,6 +435,56 @@ V8_INLINE void addLight(Lanes3 n, Lanes3 view, Lanes3 toLight, V8F strength, con
         highlight->y = v8fAdd(highlight->y, v8fMul(v8fMul(cg, lit), v8fAdd(r->f0.y, v8fMul(v8fSub(one, r->f0.y), far))));
         highlight->z = v8fAdd(highlight->z, v8fMul(v8fMul(cb, lit), v8fAdd(r->f0.z, v8fMul(v8fSub(one, r->f0.z), far))));
     }
+}
+
+/* A light with a size: its diffuse light from its middle, its highlight from its point nearest the mirror ray, kept as
+ * bright in all as a point's. */
+V8_INLINE void addLightSized(Lanes3 n, Lanes3 view, Lanes3 toLight, Lanes3 toward, V8F energy, V8F strength, const float* color, bool shiny, const Reflecting* r, Lanes3* diffuse, Lanes3* highlight) {
+    const V8F zero = v8fSet(0.f);
+    const V8F amount = v8fMul(v8fMax(dot3(n, toLight), zero), strength);
+    diffuse->x = v8fAdd(diffuse->x, v8fMul(v8fSet(color[0]), amount));
+    diffuse->y = v8fAdd(diffuse->y, v8fMul(v8fSet(color[1]), amount));
+    diffuse->z = v8fAdd(diffuse->z, v8fMul(v8fSet(color[2]), amount));
+    if (shiny) {
+        Lanes3 none = {zero, zero, zero};
+        addLight(n, view, toward, v8fMul(strength, energy), color, true, r, &none, highlight);
+    }
+}
+
+/* The same, called: what has no light with a size keeps its loop as small as it was. */
+#ifdef _MSC_VER
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static void addBall(Lanes3 n, Lanes3 view, Lanes3 d, Lanes3 toLight, float size, V8F rough, V8F strength, const float* color, bool shiny, const Reflecting* r, Lanes3* diffuse, Lanes3* highlight) {
+    V8F energy;
+    const Lanes3 toward = nearestOfBall(n, view, d, size, rough, &energy);
+    addLightSized(n, view, toLight, toward, energy, strength, color, shiny, r, diffuse, highlight);
+}
+
+/* A clear coat's highlight and sheen, for one light (ArtfMaterialMore). The coat is addLight's lobe with its own
+ * roughness, F0 .04 and no color; sheen is Burley's, the fifth power of 1 - l.h, which grazing light and eye bring
+ * out. */
+V8_INLINE void addLayers(Lanes3 n, Lanes3 view, Lanes3 toLight, V8F strength, const float* color, const Reflecting* c, Lanes3* coat, Lanes3* sheen) {
+    const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
+    const V8F ndl = v8fMax(dot3(n, toLight), zero);
+    Lanes3 sum = {v8fAdd(view.x, toLight.x), v8fAdd(view.y, toLight.y), v8fAdd(view.z, toLight.z)};
+    Lanes3 h = normalize3(sum);
+    const V8F ndh = v8fMax(dot3(n, h), zero), far = fifth(v8fMax(dot3(view, h), zero));
+    const V8F d = v8fAdd(v8fMul(v8fMul(ndh, ndh), v8fSub(c->a2, one)), one);
+    const V8F rest = v8fSub(one, c->k);
+    const V8F seen = v8fMul(v8fAdd(v8fMul(c->ndv, rest), c->k), v8fAdd(v8fMul(ndl, rest), c->k));
+    V8F lit = v8fDiv(v8fMul(v8fMul(v8fDiv(c->a2, v8fMul(d, d)), ndl), strength), v8fMul(seen, v8fSet(4.f)));
+    lit = v8fMul(v8fSelect(v8fGt(ndl, zero), zero, lit), v8fAdd(v8fSet(.04f), v8fMul(v8fSet(.96f), far)));
+    const V8F grazing = v8fMul(v8fMul(ndl, strength), far);
+    const V8F cr = v8fSet(color[0]), cg = v8fSet(color[1]), cb = v8fSet(color[2]);
+    coat->x = v8fAdd(coat->x, v8fMul(cr, lit));
+    coat->y = v8fAdd(coat->y, v8fMul(cg, lit));
+    coat->z = v8fAdd(coat->z, v8fMul(cb, lit));
+    sheen->x = v8fAdd(sheen->x, v8fMul(cr, grazing));
+    sheen->y = v8fAdd(sheen->y, v8fMul(cg, grazing));
+    sheen->z = v8fAdd(sheen->z, v8fMul(cb, grazing));
 }
 
 /* ---- a frame in floats (f->post): light as RGB9E5, three nine-bit mantissas over one exponent ---- */
@@ -567,15 +634,18 @@ static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
     _Alignas(32) float wx[8], wy[8], wz[8], nx[8], ny[8], nz[8], out[8];
     v8fStore(wx, world.x); v8fStore(wy, world.y); v8fStore(wz, world.z);
     v8fStore(nx, n.x); v8fStore(ny, n.y); v8fStore(nz, n.z);
+    const bool soft = f->scene->shadows.soft;
     for (int i = 0; i < 8; ++i) {
         const float p[3] = {wx[i], wy[i], wz[i]}, normal[3] = {nx[i], ny[i], nz[i]};
-        out[i] = light < 0 ? artfShadowOfSun(f->shadows, f->data.cameraPos, p, normal) : artfShadowOfLight(f->shadows, (uint32_t)light, f->data.lights[light].position, p, normal);
+        out[i] = light < 0 ? artfShadowOfSun(f->shadows, f->data.cameraPos, p, normal, soft ? f->data.look[2] : 0.f)
+                           : artfShadowOfLight(f->shadows, (uint32_t)light, f->data.lights[light].position, p, normal, soft ? f->data.lightSizes[light] : 0.f);
     }
     return v8fLoad(out);
 }
 
 /* Light that bounced, at eight places: artfIndirectAt's arithmetic, in the same order, eight at a time. */
-static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n) {
+/* mirror: also, into reflected, what the same probes give toward that direction, for what a surface reflects. */
+static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lanes3* mirror, Lanes3* reflected) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
     V8F q[3], w[3];
     V8I i0[3];
@@ -590,7 +660,7 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n) {
     }
     const uint32_t count = artfIndirectCount(g);
     const uint32_t* bits = (const uint32_t*)g->probes;
-    V8F sum[3] = {zero, zero, zero}, weights = zero;
+    V8F sum[3] = {zero, zero, zero}, mirrored[3] = {zero, zero, zero}, weights = zero;
     for (int c = 0; c < 8; ++c) {
         const V8I x = v8iAdd(i0[0], v8iSet(c & 1)), y = v8iAdd(i0[1], v8iSet(c >> 1 & 1)), z = v8iAdd(i0[2], v8iSet(c >> 2));
         V8F weight = v8fMul(v8fMul(c & 1 ? w[0] : v8fSub(one, w[0]), c & 2 ? w[1] : v8fSub(one, w[1])), c & 4 ? w[2] : v8fSub(one, w[2]));
@@ -628,20 +698,38 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n) {
         for (int k = 0; k < 3; ++k) {
             const V8F taken = v8fAdd(v8fAdd(v8fAdd(PROBE(k), v8fMul(PROBE(4 + 4 * k), nk[0])), v8fMul(PROBE(5 + 4 * k), nk[1])), v8fMul(PROBE(6 + 4 * k), nk[2]));
             sum[k] = v8fAdd(sum[k], v8fMul(weight, v8fMax(taken, zero)));
+            if (mirror) {
+                const V8F toward = v8fAdd(v8fAdd(v8fAdd(PROBE(k), v8fMul(PROBE(4 + 4 * k), mirror->x)), v8fMul(PROBE(5 + 4 * k), mirror->y)), v8fMul(PROBE(6 + 4 * k), mirror->z));
+                mirrored[k] = v8fAdd(mirrored[k], v8fMul(weight, v8fMax(toward, zero)));
+            }
         }
 #undef PROBE
     }
     const V8F scale = v8fSelect(v8fGt(weights, v8fSet(1e-6f)), zero, v8fDiv(one, weights));
     const Lanes3 out = {v8fMul(sum[0], scale), v8fMul(sum[1], scale), v8fMul(sum[2], scale)};
+    if (mirror) {
+        reflected->x = v8fMul(mirrored[0], scale);
+        reflected->y = v8fMul(mirrored[1], scale);
+        reflected->z = v8fMul(mirrored[2], scale);
+    }
     return out;
 }
 
 /* The color of eight pixels. A light out of reach adds exactly nothing, so which lights are looked
  * at changes the time this takes, never the pixels. */
-static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
-                      bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent) {
+/* (reflecting is read only where shiny, coating only where coated: GCC cannot see that through the lanes, and zeroing
+ * them for the eight pixels of every call costs a quarter of a plain frame) */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+/* coated: a clear coat or sheen. It is made twice, with and without (lightLanes): what has neither pays nothing for
+ * them, not even the registers. */
+V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
+                              bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent, const bool coated, const bool sized) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
     const bool shiny = material->specular > 0 || material->metallic > 0 || material->graph;
+    const ArtfMaterialMore* more = &f->scene->materialsMore.items[material - f->scene->materials.items];
     Lanes3 n = normalize3(rawN);
 
     /* what it is made of, here */
@@ -760,11 +848,18 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         }
         diffuse.x = v8fLoad(got[0]); diffuse.y = v8fLoad(got[1]); diffuse.z = v8fLoad(got[2]);
     }
+    /* (what light that bounced gives a shiny surface in its mirror direction: what it reflects of it) */
+    Lanes3 bounced = {v8fSet(0.f), v8fSet(0.f), v8fSet(0.f)};
     if (frame->indirect[0][3] > 0) {
         /* or from the probes near it: light that bounced */
-        const Lanes3 got = indirectLanes(&f->scene->indirect, world, n);
+        Lanes3 toEye = {v8fSub(v8fSet(frame->cameraPos[0]), world.x), v8fSub(v8fSet(frame->cameraPos[1]), world.y), v8fSub(v8fSet(frame->cameraPos[2]), world.z)};
+        const Lanes3 seen = normalize3(toEye);
+        const V8F twice = v8fMul(dot3(n, seen), v8fSet(2.f));
+        const Lanes3 mirror = {v8fSub(v8fMul(n.x, twice), seen.x), v8fSub(v8fMul(n.y, twice), seen.y), v8fSub(v8fMul(n.z, twice), seen.z)};
+        const Lanes3 got = indirectLanes(&f->scene->indirect, world, n, shiny ? &mirror : NULL, &bounced);
         const V8F strength = v8fSet(frame->indirect[0][3]);
         diffuse.x = v8fMul(got.x, strength); diffuse.y = v8fMul(got.y, strength); diffuse.z = v8fMul(got.z, strength);
+        bounced.x = v8fMul(bounced.x, strength); bounced.y = v8fMul(bounced.y, strength); bounced.z = v8fMul(bounced.z, strength);
     }
     diffuse.x = v8fMul(diffuse.x, open);
     diffuse.y = v8fMul(diffuse.y, open);
@@ -772,9 +867,11 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
     Lanes3 highlight = {zero, zero, zero};
     Lanes3 view = {zero, zero, zero};
     Reflecting reflecting;
-    if (shiny) {
+    if (shiny || coated) {
         Lanes3 toEye = {v8fSub(v8fSet(frame->cameraPos[0]), world.x), v8fSub(v8fSet(frame->cameraPos[1]), world.y), v8fSub(v8fSet(frame->cameraPos[2]), world.z)};
         view = normalize3(toEye);
+    }
+    if (shiny) {
         const V8F a = v8fMul(rough, rough), plusOne = v8fAdd(rough, one), dielectric = v8fSet(.04f * material->specular), notMetal = v8fSub(one, metal);
         reflecting.a2 = v8fMul(a, a);
         reflecting.k = v8fMul(v8fMul(plusOne, plusOne), v8fSet(.125f));
@@ -810,16 +907,62 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
             highlight.y = v8fMul(env.y, v8fAdd(v8fMul(reflecting.f0.y, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.y), reflecting.f0.y), far)));
             highlight.z = v8fMul(env.z, v8fAdd(v8fMul(reflecting.f0.z, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.z), reflecting.f0.z), far)));
         }
+        if (frame->indirect[0][3] > 0) {
+            /* light that bounced, toward the mirror direction, in place of the sky's: as rough as the probes are */
+            highlight.x = v8fMul(bounced.x, v8fAdd(v8fMul(reflecting.f0.x, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.x), reflecting.f0.x), far)));
+            highlight.y = v8fMul(bounced.y, v8fAdd(v8fMul(reflecting.f0.y, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.y), reflecting.f0.y), far)));
+            highlight.z = v8fMul(bounced.z, v8fAdd(v8fMul(reflecting.f0.z, open), v8fMul(v8fSub(v8fMax(smooth, reflecting.f0.z), reflecting.f0.z), far)));
+        }
         const V8F keep = v8fSub(one, metal);
         albedo.x = v8fMul(albedo.x, keep);
         albedo.y = v8fMul(albedo.y, keep);
         albedo.z = v8fMul(albedo.z, keep);
     }
     const Lanes3 aroundDiffuse = diffuse, aroundHighlight = highlight; /* (for ambient occlusion) */
+    /* a clear coat and sheen: what comes from all around first, as for the surface under them */
+    Reflecting coating;
+    Lanes3 coatLight = {zero, zero, zero}, sheenLight = {zero, zero, zero};
+    V8F coatSeen = zero; /* (the coat's Fresnel toward the eye: what it takes from under it) */
+    if (coated) {
+        const V8F coatRough = v8fSet(more->coatRoughness), a = v8fMul(coatRough, coatRough), plusOne = v8fAdd(coatRough, one);
+        coating.a2 = v8fMul(a, a);
+        coating.k = v8fMul(v8fMul(plusOne, plusOne), v8fSet(.125f));
+        coating.ndv = v8fMax(dot3(n, view), v8fSet(1e-4f));
+        const V8F far = fifth(coating.ndv), dielectric = v8fSet(.04f);
+        coatSeen = v8fAdd(dielectric, v8fMul(v8fSet(.96f), far));
+        const V8F twice = v8fMul(dot3(n, view), v8fSet(2.f));
+        const V8F reflectedUp = v8fAdd(v8fMul(v8fSub(v8fMul(n.y, twice), view.y), v8fSet(.5f)), v8fSet(.5f));
+        const V8F kept = v8fAdd(v8fMul(dielectric, open), v8fMul(v8fSub(v8fMax(v8fSub(one, coatRough), dielectric), dielectric), v8fMul(far, open)));
+        coatLight.x = v8fMul(v8fAdd(v8fSet(frame->ground[0]), v8fMul(reflectedUp, v8fSet(frame->sky[0] - frame->ground[0]))), kept);
+        coatLight.y = v8fMul(v8fAdd(v8fSet(frame->ground[1]), v8fMul(reflectedUp, v8fSet(frame->sky[1] - frame->ground[1]))), kept);
+        coatLight.z = v8fMul(v8fAdd(v8fSet(frame->ground[2]), v8fMul(reflectedUp, v8fSet(frame->sky[2] - frame->ground[2]))), kept);
+        if (environment) {
+            _Alignas(32) float laneV[3][8], got[3][8];
+            v8fStore(laneV[0], view.x); v8fStore(laneV[1], view.y); v8fStore(laneV[2], view.z);
+            if (!shiny) { v8fStore(laneN[0], n.x); v8fStore(laneN[1], n.y); v8fStore(laneN[2], n.z); }
+            for (int i = 0; i < 8; ++i) {
+                const float nx = laneN[0][i], ny = laneN[1][i], nz = laneN[2][i];
+                const float twiceNv = 2.f * (nx * laneV[0][i] + ny * laneV[1][i] + nz * laneV[2][i]);
+                float c[3];
+                artfEnvReflected(environment, more->coatRoughness, nx * twiceNv - laneV[0][i], ny * twiceNv - laneV[1][i], nz * twiceNv - laneV[2][i], c);
+                for (int j = 0; j < 3; ++j) got[j][i] = c[j] * frame->sky[3];
+            }
+            coatLight.x = v8fMul(v8fLoad(got[0]), kept);
+            coatLight.y = v8fMul(v8fLoad(got[1]), kept);
+            coatLight.z = v8fMul(v8fLoad(got[2]), kept);
+        }
+        /* (sheen from all around: the rim of what lights the surface) */
+        sheenLight.x = v8fMul(diffuse.x, far);
+        sheenLight.y = v8fMul(diffuse.y, far);
+        sheenLight.z = v8fMul(diffuse.z, far);
+    }
+    const Lanes3 aroundCoat = coatLight, aroundSheen = sheenLight;
 
     if (frame->sunColor[0] > 0 || frame->sunColor[1] > 0 || frame->sunColor[2] > 0) {
         Lanes3 toSun = {v8fSet(frame->toSun[0]), v8fSet(frame->toSun[1]), v8fSet(frame->toSun[2])};
-        addLight(n, view, toSun, f->shadows ? shadowLanes(f, -1, world, n) : v8fSet(1.f), frame->sunColor, shiny, &reflecting, &diffuse, &highlight);
+        const V8F sunShadow = f->shadows ? shadowLanes(f, -1, world, n) : v8fSet(1.f);
+        addLight(n, view, toSun, sunShadow, frame->sunColor, shiny, &reflecting, &diffuse, &highlight);
+        if (coated) addLayers(n, view, toSun, sunShadow, frame->sunColor, &coating, &coatLight, &sheenLight);
     }
     for (uint32_t i = 0; lights >> i; ++i) {
         if (!(lights >> i & 1)) continue;
@@ -833,7 +976,10 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
         if (f->shadows && f->shadows->frame->lights[i][0]) spot = v8fMul(spot, shadowLanes(f, (int)i, world, n));
+        if (sized && frame->lightSizes[i] > 0) addBall(n, view, d, toLight, frame->lightSizes[i], rough, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
+        else
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
+        if (coated) addLayers(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, &coating, &coatLight, &sheenLight);
     }
     /* those past them that reach this tile: the same light; the first few with a shadow of their own */
     for (uint32_t k = 0; extra && k < extra[0]; ++k) {
@@ -850,11 +996,30 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
         if (f->shadows && index < ARTF_SHADOW_EXTRA && f->shadows->frame->extra[index][0]) spot = v8fMul(spot, shadowLanesExtra(f, index, L->position, world, n));
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
+        if (coated) addLayers(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, &coating, &coatLight, &sheenLight);
     }
 
     Lanes3 lit = {v8fAdd(v8fAdd(v8fMul(albedo.x, diffuse.x), highlight.x), own.x),
                   v8fAdd(v8fAdd(v8fMul(albedo.y, diffuse.y), highlight.y), own.y),
                   v8fAdd(v8fAdd(v8fMul(albedo.z, diffuse.z), highlight.z), own.z)};
+    /* (what came from all around, for ambient occlusion: only a frame in floats reads it) */
+    Lanes3 aroundLit = {zero, zero, zero};
+    if (f->post || coated) {
+        aroundLit.x = v8fAdd(v8fMul(albedo.x, aroundDiffuse.x), aroundHighlight.x);
+        aroundLit.y = v8fAdd(v8fMul(albedo.y, aroundDiffuse.y), aroundHighlight.y);
+        aroundLit.z = v8fAdd(v8fMul(albedo.z, aroundDiffuse.z), aroundHighlight.z);
+    }
+    if (coated) {
+        /* sheen on the surface, under the coat; the coat takes from all of it what its Fresnel reflects */
+        const V8F notMetal = v8fSub(one, metal), coat = v8fSet(more->coat), keep = v8fSub(one, v8fMul(coat, coatSeen));
+        const V8F sr = v8fMul(v8fSet(more->sheen[0]), notMetal), sg = v8fMul(v8fSet(more->sheen[1]), notMetal), sb = v8fMul(v8fSet(more->sheen[2]), notMetal);
+        lit.x = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fSub(lit.x, own.x), v8fMul(sr, sheenLight.x)), keep), v8fMul(coat, coatLight.x)), own.x);
+        lit.y = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fSub(lit.y, own.y), v8fMul(sg, sheenLight.y)), keep), v8fMul(coat, coatLight.y)), own.y);
+        lit.z = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fSub(lit.z, own.z), v8fMul(sb, sheenLight.z)), keep), v8fMul(coat, coatLight.z)), own.z);
+        aroundLit.x = v8fAdd(v8fMul(v8fAdd(aroundLit.x, v8fMul(sr, aroundSheen.x)), keep), v8fMul(coat, aroundCoat.x));
+        aroundLit.y = v8fAdd(v8fMul(v8fAdd(aroundLit.y, v8fMul(sg, aroundSheen.y)), keep), v8fMul(coat, aroundCoat.y));
+        aroundLit.z = v8fAdd(v8fMul(v8fAdd(aroundLit.z, v8fMul(sb, aroundSheen.z)), keep), v8fMul(coat, aroundCoat.z));
+    }
     if (material->flags & ARTF_MATERIAL_UNLIT) {
         /* its color as it is, and its own light */
         lit.x = v8fAdd(baseColor.x, own.x);
@@ -898,8 +1063,7 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
         out.color = pack9e5(kept);
         out.alpha = a;
         const V8F all = v8fAdd(v8fAdd(v8fMul(lit.x, v8fSet(.3f)), v8fMul(lit.y, v8fSet(.59f))), v8fMul(lit.z, v8fSet(.11f)));
-        const V8F around = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fMul(albedo.x, aroundDiffuse.x), aroundHighlight.x), v8fSet(.3f)), v8fMul(v8fAdd(v8fMul(albedo.y, aroundDiffuse.y), aroundHighlight.y), v8fSet(.59f))),
-                                  v8fMul(v8fAdd(v8fMul(albedo.z, aroundDiffuse.z), aroundHighlight.z), v8fSet(.11f)));
+        const V8F around = v8fAdd(v8fAdd(v8fMul(aroundLit.x, v8fSet(.3f)), v8fMul(aroundLit.y, v8fSet(.59f))), v8fMul(aroundLit.z, v8fSet(.11f)));
         out.surface = packSurface(n, rough, metal, v8fDiv(v8fMul(around, airLeft), v8fMax(all, v8fSet(1e-6f))));
         return out;
     }
@@ -912,6 +1076,29 @@ static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, con
     out.color = layered ? packLayer(lit, alpha) : packColor(lit);
     return out;
 }
+
+/* (with a clear coat or sheen, or lights with a size: a copy of its own, called, so that the plain one stays as small as
+ * it was) */
+#ifdef _MSC_VER
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static LitOut lightLanesCoated(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
+                               bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent) {
+    return lightLanesAs(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent,
+                        artfMaterialLayered(&f->scene->materialsMore.items[material - f->scene->materials.items]), true);
+}
+
+static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
+                      bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent) {
+    if (f->sizedLights || artfMaterialLayered(&f->scene->materialsMore.items[material - f->scene->materials.items]))
+        return lightLanesCoated(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent);
+    return lightLanesAs(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent, false, false);
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 static void batchFlush(LitBatch* b, const ArtfSoftFrame* f, uint32_t* color) {
     const ArtfFrameData* frame = &f->data;
@@ -1599,6 +1786,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
             for (int c = 0; c < 4; ++c) memset(f->postLight[c] + row, 0, (size_t)tw * 4);
             memset(f->postDepth + row, 0, (size_t)tw * 4);
             memset(f->postSurface + row, 0, (size_t)tw * 4);
+            memset(f->postInstance + row, 0, (size_t)tw * 4);
         }
         return 1;
     }
@@ -1662,8 +1850,23 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     }
     /* fog that light goes through, over what is behind the scene: where nothing solid is, before layers */
     if (f->postFog) fogBackdrop(f, w, ox, oy, tw, th, drawn);
-    /* (what comes after reads the depth of what is solid: layers write theirs over it) */
-    if (f->post) memcpy(w->postDepth, w->depth, ARTF_TILE_PIXELS * 4);
+    /* (what comes after reads the depth of what is solid: layers write theirs over it; and what instance shows) */
+    if (f->post) {
+        memcpy(w->postDepth, w->depth, ARTF_TILE_PIXELS * 4);
+        /* (only when something moved: what stood still needs no instance) */
+        if (f->motion) {
+            /* (pixels side by side mostly show the same triangle: it is looked up once for them) */
+            uint32_t last = ~0u, who = 0;
+            for (int i = 0; i < ARTF_TILE_PIXELS; ++i) {
+                const uint32_t id = drawn ? w->ids[i] : 0;
+                if (id != last) {
+                    last = id;
+                    who = id && id <= w->tris.len ? f->visible[w->tris.items[id - 1]->instance].index + 1 : 0;
+                }
+                w->postInstance[i] = who;
+            }
+        }
+    }
     if (w->layers.len) {
         if (f->scene->features[ARTF_FEATURE_LAYERS_SORTED] && !f->post) drawLayersSorted(f, w, ox, oy, tw, th);
         else drawLayers(f, w, ox, oy, tw, th);
@@ -1728,6 +1931,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
                 for (int k = 0; k < 4; ++k) memcpy(f->postLight[k] + row + x, out[k], (size_t)n * 4);
                 memcpy(f->postDepth + row + x, depth, (size_t)n * 4);
                 memcpy(f->postSurface + row + x, color + ARTF_POST_SURFACE + x, (size_t)n * 4);
+                if (f->motion) memcpy(f->postInstance + row + x, w->postInstance + y * ARTF_TILE + x, (size_t)n * 4);
             }
         }
         return 0;

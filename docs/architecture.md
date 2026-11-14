@@ -416,6 +416,63 @@ weighed as the sky and ground were. Traced rays read the first where they leave 
 every texel of a smaller map for each texel of a larger one, on all cores, with no sine or power from the C
 library: about 40 ms for a picture of 512 x 256, and the same bytes on every processor.
 
+## The look
+
+Last, before the frame is bytes (`finalRow`, `artfShaderPostFinal`): white balance and saturation in light, a vignette,
+then the tone curve, then contrast in what a screen shows. Each is skipped at 0, so a frame that asks for none is the
+same bytes as before. Chromatic aberration reads red and blue a little apart, toward the corners.
+
+Auto exposure meters the frame on a grid of 32 x 18 points: the mean of their light in stops, the middle weighed twice
+the corners and each by what covers it. log2 and 2^x are worked out from a float's bits and a short polynomial
+(`artfLog2Fast`, `artfExp2Fast`), so that the CPU and the GPU agree and no C library is asked. The exposure goes a share
+of the way to the key each frame, and the state lives past bloom's levels in its buffer on the GPU, where one
+invocation meters before bloom reads it.
+
+## What moves
+
+Each renderer keeps, by instance handle, where each instance was at its last frame (`motion.c`): from that, for each,
+the matrix that takes a point from where it is to where it was. The CPU's tiles leave which instance shows at each
+pixel beside its depth; the GPU's scene pass writes it beside the surface word, as a second word. Temporal antialiasing
+then takes a pixel back through its instance's matrix and the frame before's view, and motion blur spreads it along
+that way. When nothing moved, neither reads it.
+
+## A clear coat and sheen
+
+A coat is a second highlight, as addLight's but of no color, F0 .04 and its own roughness, on top of everything: what
+its Fresnel reflects toward the eye is taken from what is under it, sheen included. Sheen is Burley's: the fifth power
+of 1 - l.h, which a grazing light or eye brings out, with pi put back as Lambert's light has it taken out. They are kept
+apart from `ArtfMaterialData` (Metal's shaders read that one as it was), after all of them in the material buffer; the
+GPU builds the shaders that read them only for a scene that has some, and the CPU has a copy of its lighting with them
+and one without, so that what has neither pays nothing, registers included.
+
+## A sky
+
+`sky.c` follows each direction from a point a little above the ground, in 24 steps through air (Rayleigh's, a scale
+height of 8 km), haze (Mie's, 1.2 km, Cornette and Shanks's phase) and ozone (a tent at 25 km), and at each, 8 more
+steps toward the sun for what reaches it. That is light scattered once, in Artful's units: the sun's color times pi
+times what the air sends toward the eye. Below the horizon the ground, lit through the air, is seen through it. The
+picture becomes the scene's environment, so nothing of it is a backend's.
+
+## Lights with a size, and soft shadows
+
+A light with a size is a ball. Its diffuse light comes from its middle; its highlight from the point of the ball nearest
+the mirror ray, made wider by as much as the ball looks wide, and dimmer by as much, so that the light in all is a
+point's (Karis, 2013). Traced, each path aims at a point of the ball.
+
+Soft shadows look in the map around a pixel for what is in the way (25 texels over 12), take the mean of their depths,
+and from how far that is from the pixel, against how far from the light, the penumbra's width: for the sun, its angle
+times the distance; for a lamp, its size times how much nearer the blocker is (Fernando's PCSS). 25 texels over that
+width are each in or out.
+
+## The ray tracing hardware
+
+With `ArtfTraceDesc.hardware` on a device that has ray queries, the tracing shader asks the hardware where a ray meets
+the scene, in place of walking the trees, and all that follows is as it was. Each mesh gets a bottom level from the
+triangles the trees were made from, in the same order; the top level holds the traced instances in their order, so an
+instance's id is its place among them, and its custom index is its mesh's first triangle. Fronts are counter-clockwise,
+as the trees have them; eye rays cull backs but for what has two sides; everything is opaque to the hardware, as what
+shows through is the path's business.
+
 ## The GPU: the CPU stays out of the way
 
 All meshes share one vertex buffer and one index buffer, every texture is in one descriptor array,

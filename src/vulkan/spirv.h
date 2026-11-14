@@ -16,6 +16,7 @@ typedef struct Spv {
     SpvId bound;
     SpvId glsl;           /* the GLSL.std.450 set */
     SpvId voidType, boolType, uintType, intType, floatType, vec2, vec3, vec4;
+    SpvId block;          /* the label of the block being written */
 } Spv;
 
 enum {
@@ -87,11 +88,14 @@ SpvId spvImageSampleLod(Spv* s, SpvId sampledImage, SpvId uv, SpvId lod); /* out
 SpvId spvImageFetchAs(Spv* s, SpvId resultType, SpvId imageType, SpvId sampledImage, SpvId coords); /* level 0, of any type */
 SpvId spvTypeSampledImage2DOf(Spv* s, SpvId sampledType, SpvId* imageType); /* of uints, say */
 SpvId spvTypeVector(Spv* s, SpvId element, uint32_t count);
+SpvId spvTypeOpaque(Spv* s, uint32_t op); /* a type with no operands: OpTypeRayQueryKHR, say */
 SpvId spvImageFetch(Spv* s, SpvId imageType, SpvId sampledImage, SpvId coords);
 SpvId spvImageFetchSample(Spv* s, SpvId imageType, SpvId sampledImage, SpvId coords, SpvId sample);
 void spvBranch(Spv* s, SpvId label);
 void spvIfBegin(Spv* s, SpvId condition, SpvId* merge); /* an if with no else; ends at spvIfEnd */
 void spvIfEnd(Spv* s, SpvId merge);
+/* A value that is a where the block `from` led here, and b where `other` did: what an if computed, or what was before. */
+SpvId spvPhi(Spv* s, SpvId type, SpvId a, SpvId from, SpvId b, SpvId other);
 void spvKillIf(Spv* s, SpvId condition); /* a fragment shader leaves this pixel */
 void spvLoopMerge(Spv* s, SpvId merge, SpvId next);
 void spvBranchIf(Spv* s, SpvId condition, SpvId yes, SpvId no);

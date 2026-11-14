@@ -34,13 +34,16 @@ int main(int argc, char** argv) {
     SAVE("sceneFragmentProbes", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_PROBES));
     SAVE("sceneFragmentFloats", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_WALLS | ARTF_SHADER_FROXELS));
     SAVE("sceneCutoutFloats", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_WALLS | ARTF_SHADER_FROXELS));
+    SAVE("sceneFragmentCoat", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_COAT));
+    SAVE("sceneFragmentSoft", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_COAT | ARTF_SHADER_SOFT));
     SAVE("sceneFragmentFloatsPlain", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS));
     SAVE("sceneLayerList", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 1, 0));
     SAVE("sceneLayerListSamples", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4, 0));
     SAVE("layerResolve", artfShaderLayerResolve(&size, 1));
     SAVE("layerResolveSamples", artfShaderLayerResolve(&size, 4));
-    SAVE("trace", artfShaderTrace(&size, 1024, NULL, 0, false));
-    SAVE("traceGuides", artfShaderTrace(&size, 1024, NULL, 0, true));
+    SAVE("trace", artfShaderTrace(&size, 1024, NULL, 0, false, false));
+    SAVE("traceHardware", artfShaderTrace(&size, 1024, NULL, 0, true, true));
+    SAVE("traceGuides", artfShaderTrace(&size, 1024, NULL, 0, true, false));
     SAVE("skin", artfShaderSkin(&size));
     SAVE("meshletCull", artfShaderMeshletCull(&size, ARTF_CULL_ALL));
     SAVE("meshletCullEarly", artfShaderMeshletCull(&size, ARTF_CULL_EARLY));
@@ -70,7 +73,7 @@ int main(int argc, char** argv) {
     artfSceneAddGraph(scene, g);
     artfGraphFree(g);
     SAVE("graphFragment", artfShaderSceneFragment(&size, 1024, true, scene->graphs.items, 1, 0, 0));
-    SAVE("graphTrace", artfShaderTrace(&size, 1024, scene->graphs.items, 1, false));
+    SAVE("graphTrace", artfShaderTrace(&size, 1024, scene->graphs.items, 1, false, false));
     artfSceneFree(scene);
     SAVE("shadowVertex", artfShaderShadowVertex(&size));
     SAVE("shadowFragment", artfShaderShadowFragment(&size, 1024));
@@ -96,5 +99,7 @@ int main(int argc, char** argv) {
     SAVE("postBloomDown", artfShaderPostBloomDown(&size));
     SAVE("postBloomUp", artfShaderPostBloomUp(&size));
     SAVE("postFinal", artfShaderPostFinal(&size));
+    SAVE("postMeter", artfShaderPostMeter(&size));
+    SAVE("postMotionBlur", artfShaderPostMotionBlur(&size));
     return failed;
 }

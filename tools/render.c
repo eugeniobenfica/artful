@@ -3,15 +3,21 @@
  *   artful-render [--backend vulkan|software] [--simd portable|128|256] [--threads n] [--size w h]
  *                 [--scene spheres|field|heavy|city|layers|lights|outdoors|blackhole] [--frames n] [--out file.png]
  *                 [--antialias]: four samples a pixel  [--clear]: no background, and a PNG with alpha
- *                 [--shadows side]: the sun casts shadows, in maps of that side
+ *                 [--shadows side]: the sun casts shadows, in maps of that side; [--soft-shadows]: as wide as the
+ *                 sun is, [--sun-size radians]
  *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room
  *                 [--trace rays|paths] [--trace-samples n]: light followed along rays, for n samples a
- *                 pixel, gathered over frames (1 to start with); [--bounces n]; [--denoise]
+ *                 pixel, gathered over frames (1 to start with); [--bounces n]; [--denoise]; [--hardware]: through the
+ *                 GPU's ray tracing hardware
  *                 [--environment file.hdr]: light from all around, from a picture of it; [--environment-light x];
  *                 [--show-environment]: it is the background too; [--scene-exposure x]
  *                 [--hdr]: the frame in floats, and then: [--glow x] [--glow-threshold t] [--occlusion x]
  *                 [--occlusion-radius r] [--reflections x] [--volumetric x] [--scattering g] [--temporal]
  *                 [--focus distance --aperture pixels] [--fog density r g b]
+ *                 [--tone aces|neutral|reinhard|none] [--auto-exposure] [--temperature x] [--tint x]
+ *                 [--saturation x] [--contrast x] [--vignette x] [--chromatic pixels] [--motion-blur shutter]
+ *                 [--sun x y z]: where the sun shines, as a direction; [--sky [haze]]: a sky from the sun
+ *                 [--fog-height base falloff]: fog that light goes through thins with height
  *                 [--indirect]: light that bounces, from probes, every frame; [--through-walls]: lighter, and it leaks
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
@@ -380,7 +386,9 @@ int main(int argc, char** argv) {
     const char* model = NULL;
     int shadowSide = 0;
     const char* environment = NULL;
-    float environmentLight = 1.f, sceneExposure = 0;
+    bool softShadows = false;
+    float sunSize = -1;
+    float environmentLight = 1.f, sceneExposure = 0, skyHaze = -1, fogHeight[2] = {0, 0}, sunAt[3] = {0, 0, 0};
     bool showEnvironment = false;
     ArtfPostDesc post;
     memset(&post, 0, sizeof post);
@@ -407,7 +415,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(a, "--antialias")) o.antialias = true;
         else if (!strcmp(a, "--denoise")) trace.denoise = true;
+        else if (!strcmp(a, "--hardware")) trace.hardware = true;
         else if (!strcmp(a, "--shadows") && i + 1 < argc) shadowSide = atoi(argv[++i]);
+        else if (!strcmp(a, "--soft-shadows")) softShadows = true;
+        else if (!strcmp(a, "--sun-size") && i + 1 < argc) sunSize = (float)atof(argv[++i]);
         else if (!strcmp(a, "--environment") && i + 1 < argc) environment = argv[++i];
         else if (!strcmp(a, "--environment-light") && i + 1 < argc) environmentLight = (float)atof(argv[++i]);
         else if (!strcmp(a, "--show-environment")) showEnvironment = true;
@@ -420,12 +431,27 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--volumetric") && i + 1 < argc) post.volumetric = (float)atof(argv[++i]);
         else if (!strcmp(a, "--scattering") && i + 1 < argc) post.scattering = (float)atof(argv[++i]);
         else if (!strcmp(a, "--temporal")) post.temporal = true;
+        else if (!strcmp(a, "--tone") && i + 1 < argc) {
+            const char* curve = argv[++i];
+            post.toneMap = !strcmp(curve, "neutral") ? ARTF_TONE_NEUTRAL : !strcmp(curve, "reinhard") ? ARTF_TONE_REINHARD : !strcmp(curve, "none") ? ARTF_TONE_NONE : ARTF_TONE_ACES;
+        }
+        else if (!strcmp(a, "--auto-exposure")) post.autoExposure = true;
+        else if (!strcmp(a, "--temperature") && i + 1 < argc) post.temperature = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--tint") && i + 1 < argc) post.tint = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--saturation") && i + 1 < argc) post.saturation = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--contrast") && i + 1 < argc) post.contrast = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--vignette") && i + 1 < argc) post.vignette = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--chromatic") && i + 1 < argc) post.chromatic = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--motion-blur") && i + 1 < argc) post.motionBlur = (float)atof(argv[++i]);
         else if (!strcmp(a, "--indirect")) indirect = true;
         else if (!strcmp(a, "--through-walls")) throughWalls = true;
         else if (!strcmp(a, "--focus") && i + 1 < argc) post.focus = (float)atof(argv[++i]);
         else if (!strcmp(a, "--aperture") && i + 1 < argc) post.aperture = (float)atof(argv[++i]);
         else if (!strcmp(a, "--fog") && i + 4 < argc) { for (int k = 0; k < 4; ++k) fog[k] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--scene-exposure") && i + 1 < argc) sceneExposure = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--sky")) skyHaze = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 0.f;
+        else if (!strcmp(a, "--sun") && i + 3 < argc) { for (int k = 0; k < 3; ++k) sunAt[k] = (float)atof(argv[++i]); }
+        else if (!strcmp(a, "--fog-height") && i + 2 < argc) { fogHeight[0] = (float)atof(argv[++i]); fogHeight[1] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(a, "--trace") && i + 1 < argc) trace.mode = !strcmp(argv[++i], "paths") ? ARTF_TRACE_PATHS : ARTF_TRACE_RAYS;
         else if (!strcmp(a, "--trace-samples") && i + 1 < argc) traceSamples = atoi(argv[++i]);
@@ -474,6 +500,15 @@ int main(int argc, char** argv) {
     if (sceneExposure > 0) artfSceneSetExposure(s, sceneExposure);
     artfSceneSetPost(s, &post);
     if (fog[0] > 0) artfSceneSetFog(s, artfVec3(fog[1], fog[2], fog[3]), fog[0]);
+    if (fogHeight[1] > 0) artfSceneSetFogHeight(s, fogHeight[0], fogHeight[1]);
+    if (sunSize >= 0) artfSceneSetSunSize(s, sunSize);
+    if (sunAt[0] != 0 || sunAt[1] != 0 || sunAt[2] != 0) artfSceneSetSun(s, artfVec3(sunAt[0], sunAt[1], sunAt[2]), artfVec3(3, 3, 3));
+    if (skyHaze >= 0) {
+        ArtfSkyDesc sky;
+        memset(&sky, 0, sizeof sky);
+        sky.haze = skyHaze;
+        artfSceneSetSky(s, &sky);
+    }
     if (indirect) {
         ArtfIndirectDesc probes;
         memset(&probes, 0, sizeof probes);
@@ -499,7 +534,7 @@ int main(int argc, char** argv) {
         artfFree(rgb);
     }
     if (shadowSide) {
-        const ArtfShadowDesc shadows = {shadowSide, 0};
+        const ArtfShadowDesc shadows = {shadowSide, 0, softShadows};
         artfSceneSetShadows(s, &shadows);
     }
     if (trace.mode) {
@@ -532,7 +567,7 @@ int main(int argc, char** argv) {
     }
     if (!artfRendererDraw(r, s)) { fputs("the device was lost\n", stderr); return 1; }
     /* (temporal antialiasing gathers over frames: a still picture gets sixteen) */
-    for (int k = 1; k < 16 && ((post.temporal && o.hdr) || indirect); ++k) artfRendererDraw(r, s);
+    for (int k = 1; k < 16 && (((post.temporal || post.autoExposure) && o.hdr) || indirect); ++k) artfRendererDraw(r, s);
     if (trace.mode && !frames) {
         const double start = artfNowMs();
         for (int i = 1; i < traceSamples; ++i)

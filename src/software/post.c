@@ -24,6 +24,13 @@
 
 #include <string.h>
 
+/* (what runs for every pixel, inlined into its row, whatever the compiler would choose) */
+#ifdef _MSC_VER
+#define POST_INLINE static __forceinline
+#else
+#define POST_INLINE static inline __attribute__((always_inline))
+#endif
+
 typedef void (*RowFn)(ArtfSoftPost* p, int y);
 
 typedef struct RowJob { ArtfSoftPost* p; RowFn fn; } RowJob;
@@ -294,8 +301,8 @@ static void froxelRow(ArtfSoftPost* p, int j) {
             const float d0 = far * a * a, d1 = far * b * b, t = (d0 + d1) * .5f;
             float q[3];
             for (int c = 0; c < 3; ++c) q[c] = f->cameraPos[c] + dir[c] * t;
-            const float sun = p->f->shadows ? artfShadowOfSun(p->f->shadows, f->cameraPos, q, f->toSun) : 1.f;
-            const float stepThrough = through(density * (d1 - d0) * along), taken = left * (1.f - stepThrough);
+            const float sun = p->f->shadows ? artfShadowOfSun(p->f->shadows, f->cameraPos, q, f->toSun, 0) : 1.f;
+            const float stepThrough = through(density * artfFogHeight(f, q[1]) * (d1 - d0) * along), taken = left * (1.f - stepThrough);
             for (int c = 0; c < 3; ++c) light[c] += taken * (f->sunColor[c] * sun * phase * 12.566371f + f->fog[c]);
             left *= stepThrough;
             float* cell = out + (size_t)k * 4;
@@ -344,8 +351,24 @@ void artfFroxelAt(const ArtfSoftFrame* f, float sx, float sy, float w, float* ou
 
 /* ---- temporal antialiasing ---- */
 
-static void temporalRow(ArtfSoftPost* p, int y) {
+/* Where the surface at a pixel was in the frame before, in pixels: by its depth and how its instance moved, or for
+ * what is far, by the view alone. false: it was behind the eye. */
+POST_INLINE bool wasAt(const ArtfSoftPost* p, int x, int y, float* sx, float* sy) {
     const ArtfFrameData* f = &p->f->data;
+    const float d = distanceAt(p, x, y);
+    float at[3], w;
+    worldAt(f, p->width, p->height, (float)x - f->post[2][2], (float)y + f->post[2][3], d > 0 ? d : 1e4f, at);
+    const uint32_t who = d > 0 && p->f->motion ? p->f->postInstance[(size_t)y * p->width + x] : 0;
+    if (who) {
+        const float* m = p->f->motion + (size_t)(who - 1) * 12;
+        float was[3];
+        for (int r = 0; r < 3; ++r) was[r] = m[r * 4] * at[0] + m[r * 4 + 1] * at[1] + m[r * 4 + 2] * at[2] + m[r * 4 + 3];
+        memcpy(at, was, sizeof was);
+    }
+    return project(f->previous, at, p->width, p->height, sx, sy, &w);
+}
+
+static void temporalRow(ArtfSoftPost* p, int y) {
     for (int x = 0; x < p->width; ++x) {
         const size_t i = (size_t)y * p->width + x;
         float lo[3] = {3e38f, 3e38f, 3e38f}, hi[3] = {-3e38f, -3e38f, -3e38f};
@@ -357,16 +380,46 @@ static void temporalRow(ArtfSoftPost* p, int y) {
                     hi[c] = artfMaxf(hi[c], p->f->postLight[c][q]);
                 }
             }
-        /* where this pixel was: by its depth, or for what is far, by the view alone */
-        const float d = distanceAt(p, x, y);
-        float at[3], sx, sy, w;
-        worldAt(f, p->width, p->height, (float)x - f->post[2][2], (float)y + f->post[2][3], d > 0 ? d : 1e4f, at);
+        /* where this pixel was */
+        float sx, sy;
         float share = .1f;
-        if (!p->historyValid || !project(f->previous, at, p->width, p->height, &sx, &sy, &w) || sx < 0 || sy < 0 || sx > p->width - 1 || sy > p->height - 1) share = 1.f;
+        if (!p->historyValid || !wasAt(p, x, y, &sx, &sy) || sx < 0 || sy < 0 || sx > p->width - 1 || sy > p->height - 1) share = 1.f;
         for (int c = 0; c < 3; ++c) {
             const float now = p->f->postLight[c][i];
             const float was = share < 1.f ? artfClampf(tap(p->history[c], p->width, p->height, sx, sy), lo[c], hi[c]) : now;
             p->scratch[c][i] = was + (now - was) * share;
+        }
+    }
+}
+
+/* ---- motion blur: eight points along the way each pixel went, as long as the shutter was open (at most 32 pixels) ---- */
+
+static void blurRow(ArtfSoftPost* p, int y) {
+    const float shutter = p->f->data.motionBlur;
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        float sx, sy, vx = 0, vy = 0;
+        if (wasAt(p, x, y, &sx, &sy)) {
+            vx = ((float)x - sx) * shutter;
+            vy = ((float)y - sy) * shutter;
+            const float length = vx * vx + vy * vy;
+            if (length > 32.f * 32.f) {
+                const float scale = 32.f / sqrtf(length);
+                vx *= scale;
+                vy *= scale;
+            }
+        }
+        if (vx * vx + vy * vy < .25f) {
+            for (int c = 0; c < 3; ++c) p->scratch[c][i] = p->f->postLight[c][i];
+            continue;
+        }
+        for (int c = 0; c < 3; ++c) {
+            float sum = 0;
+            for (int k = 0; k < 8; ++k) {
+                const float along = ((float)k + .5f) * .125f - .5f;
+                sum += tap(p->f->postLight[c], p->width, p->height, (float)x + vx * along, (float)y + vy * along);
+            }
+            p->scratch[c][i] = sum * .125f;
         }
     }
 }
@@ -410,11 +463,44 @@ static void focusRow(ArtfSoftPost* p, int y) {
 
 /* ---- bloom ---- */
 
+/* ---- auto exposure ---- */
+
+/* The exposure the frame is shown at: the scene's (with auto exposure, or 1), times what auto exposure got to. */
+static inline float exposureOf(const ArtfSoftPost* p) {
+    const ArtfFrameData* f = &p->f->data;
+    if (f->grade[0][1] > 0) return (f->look[0] > 0 ? f->look[0] : 1.f) * p->exposureScale;
+    return f->look[0];
+}
+
+/* The frame's mean in stops, on a grid of points, the middle weighed twice the corners and each by what covers it;
+ * the exposure goes that share of the way to bringing it to the key. One thread: 576 points. */
+static void meter(ArtfSoftPost* p) {
+    const ArtfFrameData* f = &p->f->data;
+    float sum = 0, weights = 0;
+    for (int gy = 0; gy < ARTF_METER_Y; ++gy)
+        for (int gx = 0; gx < ARTF_METER_X; ++gx) {
+            const float u = ((float)gx + .5f) / (float)ARTF_METER_X, v = ((float)gy + .5f) / (float)ARTF_METER_Y;
+            const size_t i = (size_t)(int)(v * (float)p->height) * p->width + (size_t)(int)(u * (float)p->width);
+            const float alpha = artfClampf(p->f->postLight[3][i], 0, 1);
+            if (!(alpha > 0)) continue;
+            const float luminance = (.2126f * p->f->postLight[0][i] + .7152f * p->f->postLight[1][i] + .0722f * p->f->postLight[2][i]) / alpha;
+            const float du = u * 2.f - 1.f, dv = v * 2.f - 1.f;
+            const float weight = alpha * (1.f - .25f * (du * du + dv * dv));
+            sum += weight * artfLog2Fast(artfClampf(luminance, 1.f / 4096.f, 4096.f));
+            weights += weight;
+        }
+    float target = weights > 0 ? f->grade[0][2] - sum / weights : p->exposureValid ? p->exposureLog : 0.f;
+    target = artfClampf(target, f->grade[1][0], f->grade[1][1]);
+    p->exposureLog = p->exposureValid ? p->exposureLog + (target - p->exposureLog) * f->grade[0][3] : target;
+    p->exposureScale = artfExp2Fast(p->exposureLog);
+    p->exposureValid = true;
+}
+
 static void bloomDownRow(ArtfSoftPost* p, int y) {
     const int level = p->bloomLevel;
     const int w = p->bloomW[level], h = p->bloomH[level];
     (void)h;
-    const float threshold = p->f->data.post[0][1], exposure = p->f->data.look[0] > 0 ? p->f->data.look[0] : 1.f;
+    const float shown = exposureOf(p), threshold = p->f->data.post[0][1], exposure = shown > 0 ? shown : 1.f;
     for (int x = 0; x < w; ++x) {
         float sum[3] = {0, 0, 0};
         for (int k = 0; k < 4; ++k) {
@@ -445,23 +531,73 @@ static void bloomUpRow(ArtfSoftPost* p, int y) {
 
 /* ---- the frame: exposure, tone mapping, the overlay ---- */
 
+/* Khronos's PBR Neutral: what is under its start stays as it is, past it the peak rolls off to 1, toward white. */
+static inline void toneNeutral(float* c) {
+    const float start = .76f, desaturation = .15f;
+    const float least = artfMinf(c[0], artfMinf(c[1], c[2]));
+    const float offset = least < .08f ? least - 6.25f * least * least : .04f;
+    for (int k = 0; k < 3; ++k) c[k] -= offset;
+    const float peak = artfMaxf(c[0], artfMaxf(c[1], c[2]));
+    if (peak < start) return;
+    const float d = 1.f - start, top = 1.f - d * d / (peak + d - start);
+    const float g = 1.f - 1.f / (desaturation * (peak - top) + 1.f);
+    for (int k = 0; k < 3; ++k) {
+        c[k] *= top / peak;
+        c[k] += (top - c[k]) * g;
+    }
+}
+
 static void finalRow(ArtfSoftPost* p, int y) {
     const ArtfSoftFrame* sf = p->f;
     const ArtfFrameData* f = &sf->data;
-    const float exposure = f->look[0], bloom = f->post[0][0];
+    const float exposure = exposureOf(p), bloom = f->post[0][0];
     const int bw = p->bloomW[0], bh = p->bloomH[0];
+    const int curve = (int)f->grade[0][0];
+    const float saturation = f->grade[1][2], contrast = f->grade[1][3];
+    const float temperature = f->grade[2][0], tint = f->grade[2][1], vignette = f->grade[2][2], chromatic = f->grade[2][3];
+    const float balance[3] = {1.f + .2f * temperature, 1.f - .2f * tint, 1.f - .2f * temperature};
+    const bool balanced = temperature != 0 || tint != 0;
+    /* (from the middle, as a share of the way to a corner) */
+    const float cx = (float)p->width * .5f, cy = (float)p->height * .5f, corner = 1.f / (cx * cx + cy * cy);
+    const float apart = chromatic * sqrtf(corner), dy = (float)y + .5f - cy;
     for (int x = 0; x < p->width; ++x) {
         const size_t i = (size_t)y * p->width + x;
         const float alpha = artfClampf(sf->postLight[3][i], 0, 1);
+        const float dx = (float)x + .5f - cx;
         uint32_t out = (uint32_t)(alpha * 255.f + .5f) << 24;
+        float v[3];
+        for (int c = 0; c < 3; ++c) v[c] = sf->postLight[c][i];
+        if (chromatic > 0) {
+            v[0] = tap(sf->postLight[0], p->width, p->height, (float)x + dx * apart, (float)y + dy * apart);
+            v[2] = tap(sf->postLight[2], p->width, p->height, (float)x - dx * apart, (float)y - dy * apart);
+        }
         for (int c = 0; c < 3; ++c) {
-            float v = sf->postLight[c][i];
-            if (alpha > 0) v /= alpha;
-            if (exposure > 0) v *= exposure;
-            if (bloom > 0) v += tap(p->bloom[c], bw, bh, ((float)x + .5f) * .5f - .5f, ((float)y + .5f) * .5f - .5f) * bloom / artfMaxf(alpha, 1e-3f);
-            v = v > 0 ? artfMinf(v, 65504.f) : 0.f; /* (and not a number: nothing) */
-            if (exposure > 0) v = v * (v * 2.51f + .03f) / (v * (v * 2.43f + .59f) + .14f);
-            out |= (uint32_t)(sqrtf(artfClampf(v, 0, 1)) * alpha * 255.f + .5f) << (16 - 8 * c);
+            if (alpha > 0) v[c] /= alpha;
+            if (exposure > 0) v[c] *= exposure;
+            if (bloom > 0) v[c] += tap(p->bloom[c], bw, bh, ((float)x + .5f) * .5f - .5f, ((float)y + .5f) * .5f - .5f) * bloom / artfMaxf(alpha, 1e-3f);
+        }
+        if (balanced)
+            for (int c = 0; c < 3; ++c) v[c] *= balance[c];
+        if (saturation != 0) {
+            const float grey = .2126f * v[0] + .7152f * v[1] + .0722f * v[2];
+            for (int c = 0; c < 3; ++c) v[c] = grey + (v[c] - grey) * (1.f + saturation);
+        }
+        if (vignette > 0) {
+            const float q = 1.f + vignette * (dx * dx + dy * dy) * corner, keep = 1.f / (q * q);
+            for (int c = 0; c < 3; ++c) v[c] *= keep;
+        }
+        for (int c = 0; c < 3; ++c) v[c] = v[c] > 0 ? artfMinf(v[c], 65504.f) : 0.f; /* (and not a number: nothing) */
+        if (exposure > 0) {
+            if (curve == ARTF_TONE_NEUTRAL) toneNeutral(v);
+            for (int c = 0; c < 3; ++c) {
+                if (curve == ARTF_TONE_ACES) v[c] = v[c] * (v[c] * 2.51f + .03f) / (v[c] * (v[c] * 2.43f + .59f) + .14f);
+                else if (curve == ARTF_TONE_REINHARD) v[c] = v[c] / (1.f + v[c]);
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            float shown = sqrtf(artfClampf(v[c], 0, 1));
+            if (contrast != 0) shown = artfClampf(.5f + (shown - .5f) * (1.f + contrast), 0, 1);
+            out |= (uint32_t)(shown * alpha * 255.f + .5f) << (16 - 8 * c);
         }
         if (sf->overlay && x < sf->overlayWidth && y < sf->overlayHeight) {
             const uint32_t s = sf->overlay[(size_t)y * sf->overlayStride + x];
@@ -553,6 +689,12 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
         rows(p, p->height, focusRow);
         copyScratch(p);
     }
+    if (d->motionBlur > 0) {
+        rows(p, p->height, blurRow);
+        copyScratch(p);
+    }
+    if (d->grade[0][1] > 0) meter(p);
+    else p->exposureValid = false;
     if (d->post[0][0] > 0) {
         for (p->bloomLevel = 0; p->bloomLevel < ARTF_POST_BLOOM_LEVELS; ++p->bloomLevel) rows(p, p->bloomH[p->bloomLevel], bloomDownRow);
         for (p->bloomLevel = ARTF_POST_BLOOM_LEVELS - 2; p->bloomLevel >= 0; --p->bloomLevel) rows(p, p->bloomH[p->bloomLevel], bloomUpRow);

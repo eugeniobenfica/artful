@@ -13,6 +13,7 @@ typedef struct Particle {
     float position[3], velocity[3];
     float age;       /* seconds; < 0: not alive */
     float size;      /* now */
+    float angle, turning; /* facing the eye; radians a second */
 } Particle;
 
 typedef struct EmitterData {
@@ -22,6 +23,7 @@ typedef struct EmitterData {
     uint32_t count;
     ArtfMaterial shades[EMITTER_SHADES];
     float owed;      /* particles to spawn, in part */
+    uint32_t burst;  /* and at once, at the next step */
     uint32_t state;  /* (the same sequence everywhere) */
     bool removed;
 } EmitterData;
@@ -138,16 +140,45 @@ void artfSceneRemoveEmitter(ArtfScene* s, ArtfEmitter emitter) {
 }
 
 /* A particle's transform, facing the eye: the quad's x to the eye's right, its face (+y) toward the eye, its z down the
- * eye's up. */
+ * eye's up; turned by its angle about the way it faces. */
 static void face(ArtfScene* s, ArtfInstance instance, const Particle* p, const ArtfVec3* right, const ArtfVec3* forward, const ArtfVec3* up) {
     ArtfTransform m;
+    const float c = p->angle != 0 ? artfCosFast(p->angle) : 1.f, sn = p->angle != 0 ? artfSinFast(p->angle) : 0.f;
     for (int r = 0; r < 3; ++r) {
-        m.m[r * 4] = (&right->x)[r] * p->size;
+        const float x = (&right->x)[r], z = (&up->x)[r];
+        m.m[r * 4] = (x * c + z * sn) * p->size;
         m.m[r * 4 + 1] = -(&forward->x)[r] * p->size;
-        m.m[r * 4 + 2] = -(&up->x)[r] * p->size;
+        m.m[r * 4 + 2] = -(z * c - x * sn) * p->size;
         m.m[r * 4 + 3] = p->position[r];
     }
     artfInstanceSetTransform(s, instance, &m);
+}
+
+/* ---- a wind that swirls: smooth noise of the place, three of it, the same everywhere ---- */
+
+static float latticeOf(int32_t x, int32_t y, int32_t z, uint32_t seed) {
+    uint32_t h = (uint32_t)x * 0x8DA6B343u ^ (uint32_t)y * 0xD8163841u ^ (uint32_t)z * 0xCB1AB31Fu ^ seed;
+    h ^= h >> 16;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15;
+    return (float)(h >> 8) * (2.f / 16777216.f) - 1.f;
+}
+
+static float noiseOf(float x, float y, float z, uint32_t seed) {
+    const float fx = (float)(int32_t)(x + 65536.f) - 65536.f, fy = (float)(int32_t)(y + 65536.f) - 65536.f, fz = (float)(int32_t)(z + 65536.f) - 65536.f;
+    const int32_t ix = (int32_t)fx, iy = (int32_t)fy, iz = (int32_t)fz;
+    float tx = x - fx, ty = y - fy, tz = z - fz;
+    tx = tx * tx * (3.f - 2.f * tx);
+    ty = ty * ty * (3.f - 2.f * ty);
+    tz = tz * tz * (3.f - 2.f * tz);
+    float c[2][2];
+    for (int j = 0; j < 2; ++j)
+        for (int k = 0; k < 2; ++k) {
+            const float a = latticeOf(ix, iy + j, iz + k, seed), b = latticeOf(ix + 1, iy + j, iz + k, seed);
+            c[j][k] = a + (b - a) * tx;
+        }
+    const float near_ = c[0][0] + (c[1][0] - c[0][0]) * ty, far = c[0][1] + (c[1][1] - c[0][1]) * ty;
+    return near_ + (far - near_) * tz;
 }
 
 static void eyeFrame(const ArtfScene* s, ArtfVec3* right, ArtfVec3* forward, ArtfVec3* up) {
@@ -177,7 +208,7 @@ void artfEmitterStep(ArtfScene* s, ArtfEmitter emitter, float seconds) {
     if (!e || seconds < 0) return;
     const ArtfEmitterDesc* d = &e->desc;
     /* born, then moved */
-    e->owed += d->rate * seconds;
+    e->owed += d->rate * seconds + (float)e->burst;
     for (uint32_t i = 0; i < e->count && e->owed >= 1.f; ++i) {
         Particle* p = &e->particles[i];
         if (p->age >= 0) continue;
@@ -191,8 +222,12 @@ void artfEmitterStep(ArtfScene* s, ArtfEmitter emitter, float seconds) {
         }
         /* (born somewhere within this step, not all at its start) */
         p->age = randomOf(&e->state) * seconds;
+        /* (only what turns draws more numbers: what does not is born as it always was) */
+        p->angle = d->spin != 0 ? randomOf(&e->state) * 6.28318531f : 0.f;
+        p->turning = d->spin != 0 ? (randomOf(&e->state) * 2.f - 1.f) * d->spin : 0.f;
     }
     if (e->owed > 1.f) e->owed = 1.f; /* (none free: what was owed is not kept) */
+    e->burst = 0;
     /* the eye's frame: each faces it (and again as it is drawn, if the eye moved) */
     ArtfVec3 right, forward, up;
     eyeFrame(s, &right, &forward, &up);
@@ -206,11 +241,26 @@ void artfEmitterStep(ArtfScene* s, ArtfEmitter emitter, float seconds) {
             hide(s, e->instances[i]);
             continue;
         }
+        if (d->turbulence != 0) {
+            /* (three noises of the place, offset from each other: a push that varies smoothly, and swirls) */
+            const float scale = 1.f / (d->turbulenceSize > 0 ? d->turbulenceSize : 1.f);
+            const float x = p->position[0] * scale, y = p->position[1] * scale, z = p->position[2] * scale;
+            for (int k = 0; k < 3; ++k) p->velocity[k] += noiseOf(x + 31.4f * (float)k, y, z, 0x51ED270Bu + (uint32_t)k) * d->turbulence * seconds;
+        }
         for (int k = 0; k < 3; ++k) {
             p->velocity[k] += (&d->gravity.x)[k] * seconds;
             p->velocity[k] *= 1.f / (1.f + d->drag * seconds);
             p->position[k] += p->velocity[k] * seconds;
         }
+        if (d->ground && p->position[1] < d->groundHeight) {
+            /* off the ground: what went into it comes back, as much as it bounces; along it, less its friction */
+            p->position[1] = d->groundHeight + (d->groundHeight - p->position[1]) * artfClampf(d->bounce, 0, 1);
+            if (p->velocity[1] < 0) p->velocity[1] = -p->velocity[1] * artfClampf(d->bounce, 0, 1);
+            const float keep = 1.f - artfClampf(d->friction, 0, 1);
+            p->velocity[0] *= keep;
+            p->velocity[2] *= keep;
+        }
+        p->angle += p->turning * seconds;
         const float t = p->age / d->life;
         p->size = d->size + (d->sizeEnd - d->size) * t;
         face(s, e->instances[i], p, &right, &forward, &up);
@@ -218,6 +268,11 @@ void artfEmitterStep(ArtfScene* s, ArtfEmitter emitter, float seconds) {
         const float opacity = d->opacity + (d->opacityEnd - d->opacity) * t;
         artfInstanceSetOpacity(s, e->instances[i], artfClampf(opacity, 0, 1));
     }
+}
+
+void artfEmitterBurst(ArtfScene* s, ArtfEmitter emitter, uint32_t count) {
+    EmitterData* e = emitterAt(s, emitter);
+    if (e) e->burst += count;
 }
 
 uint32_t artfEmitterAlive(const ArtfScene* s, ArtfEmitter emitter) {
@@ -305,6 +360,125 @@ uint32_t artfSceneDecals(const ArtfScene* s, const ArtfFrameData* frame, int hei
 }
 
 /* ---- terrain ---- */
+
+/* ---- layers of a terrain: a material in C ---- */
+
+ArtfMaterial artfSceneAddTerrainMaterial(ArtfScene* s, const ArtfTerrainLayersDesc* desc) {
+    const uint32_t count = artfClampi((int)desc->count, 1, 4);
+    const float repeat = desc->uvRepeat > 0 ? desc->uvRepeat : 1.f;
+    ArtfGraph* g = artfGraphNew();
+    const ArtfExpr uv = artfExprUv(g);
+    ArtfExpr color[4], rough[4];
+    for (uint32_t i = 0; i < count; ++i) {
+        const ArtfTerrainLayer* l = &desc->layers[i];
+        const ArtfVec3 c = artfVec3Dot(l->color, l->color) > 0 ? l->color : artfVec3(1, 1, 1);
+        color[i] = artfExprConst(g, c.x, c.y, c.z, 1);
+        if (l->texture) {
+            const float tiling = (l->tiling > 0 ? l->tiling : 1.f) / repeat;
+            color[i] = artfExprMul(g, color[i], artfExprTexture(g, l->texture, artfExprMul(g, uv, artfExprNumber(g, tiling))));
+        }
+        rough[i] = artfExprNumber(g, l->roughness > 0 ? l->roughness : .8f);
+    }
+    ArtfExpr outColor, outRough;
+    if (desc->weights) {
+        /* what the map says of each, as shares of all it says */
+        const ArtfExpr w = artfExprTexture(g, desc->weights, artfExprMul(g, uv, artfExprNumber(g, 1.f / repeat)));
+        const ArtfExpr share[4] = {artfExprX(g, w), artfExprY(g, w), artfExprZ(g, w), artfExprW(g, w)};
+        ArtfExpr total = share[0];
+        outColor = artfExprMul(g, color[0], share[0]);
+        outRough = artfExprMul(g, rough[0], share[0]);
+        for (uint32_t i = 1; i < count; ++i) {
+            total = artfExprAdd(g, total, share[i]);
+            outColor = artfExprAdd(g, outColor, artfExprMul(g, color[i], share[i]));
+            outRough = artfExprAdd(g, outRough, artfExprMul(g, rough[i], share[i]));
+        }
+        total = artfExprMax(g, total, artfExprNumber(g, 1e-4f));
+        outColor = artfExprDiv(g, outColor, total);
+        outRough = artfExprDiv(g, outRough, total);
+    } else {
+        /* the rules: steep where the normal's up is under steep, high above high, each with a soft edge */
+        const float blend = desc->blend > 0 ? desc->blend : .1f, steep = desc->steep > 0 ? desc->steep : .8f;
+        const ArtfExpr zero = artfExprNumber(g, 0), one = artfExprNumber(g, 1);
+#define SOFT(e) artfExprMin(g, artfExprMax(g, e, zero), one)
+        outColor = color[0];
+        outRough = rough[0];
+        if (count > 1) {
+            const ArtfExpr t = SOFT(artfExprAdd(g, artfExprMul(g, artfExprSub(g, artfExprNumber(g, steep), artfExprY(g, artfExprNormal(g))), artfExprNumber(g, 1.f / blend)), artfExprNumber(g, .5f)));
+            outColor = artfExprMix(g, outColor, color[1], t);
+            outRough = artfExprMix(g, outRough, rough[1], t);
+        }
+        if (count > 2) {
+            const ArtfExpr t = SOFT(artfExprAdd(g, artfExprMul(g, artfExprSub(g, artfExprY(g, artfExprPosition(g)), artfExprNumber(g, desc->high)), artfExprNumber(g, 1.f / blend)), artfExprNumber(g, .5f)));
+            outColor = artfExprMix(g, outColor, color[2], t);
+            outRough = artfExprMix(g, outRough, rough[2], t);
+        }
+#undef SOFT
+    }
+    artfGraphSetOutput(g, ARTF_OUT_COLOR, outColor);
+    artfGraphSetOutput(g, ARTF_OUT_ROUGHNESS, outRough);
+    ArtfMaterialDesc m = artfMaterialDefaults();
+    m.graph = artfSceneAddGraph(s, g);
+    artfGraphFree(g);
+    return m.graph ? artfSceneAddMaterial(s, &m) : 0;
+}
+
+/* ---- scattered over a terrain ---- */
+
+uint32_t artfSceneScatter(ArtfScene* s, const ArtfScatterDesc* d, ArtfInstance* instances, uint32_t room) {
+    if (!d->heights || d->width < 2 || d->depth < 2 || !(d->density > 0) || !(d->cell > 0)) return 0;
+    const float sizeX = (float)(d->width - 1) * d->cell, sizeZ = (float)(d->depth - 1) * d->cell;
+    const float area = sizeX * sizeZ;
+    const uint32_t wanted = (uint32_t)artfMinf(area * d->density, 4e6f);
+    const bool placed = d->at.m[0] != 0 || d->at.m[5] != 0 || d->at.m[10] != 0;
+    const float* at = placed ? d->at.m : NULL;
+    const float least = d->scaleMin > 0 ? d->scaleMin : 1.f, most = d->scaleMax > 0 ? artfMaxf(d->scaleMax, least) : least;
+    uint32_t state = 0x2545F491u ^ d->seed * 0x9E3779B9u, made = 0;
+#define H(x, z) (d->heights[(size_t)artfClampi(z, 0, d->depth - 1) * d->width + artfClampi(x, 0, d->width - 1)] * d->height)
+    for (uint32_t k = 0; k < wanted; ++k) {
+        /* a place in the grid, its height between the four around it, and the ground's up there */
+        const float fx = randomOf(&state) * (float)(d->width - 1), fz = randomOf(&state) * (float)(d->depth - 1);
+        const float turn = randomOf(&state) * 6.28318531f, size = least + (most - least) * randomOf(&state);
+        const int x = artfMini((int)fx, d->width - 2), z = artfMini((int)fz, d->depth - 2);
+        const float tx = fx - (float)x, tz = fz - (float)z;
+        const float h0 = H(x, z) + (H(x + 1, z) - H(x, z)) * tx, h1 = H(x, z + 1) + (H(x + 1, z + 1) - H(x, z + 1)) * tx;
+        const float y = h0 + (h1 - h0) * tz;
+        const ArtfVec3 up = artfVec3Normalize(artfVec3((H(x, z) - H(x + 1, z) + H(x, z + 1) - H(x + 1, z + 1)) * .5f, d->cell, (H(x, z) - H(x, z + 1) + H(x + 1, z) - H(x + 1, z + 1)) * .5f));
+        const float local[3] = {-sizeX * .5f + fx * d->cell, y, -sizeZ * .5f + fz * d->cell};
+        float world[3];
+        for (int r = 0; r < 3; ++r) world[r] = at ? at[r * 4] * local[0] + at[r * 4 + 1] * local[1] + at[r * 4 + 2] * local[2] + at[r * 4 + 3] : local[r];
+        if (d->steepest > 0 && up.y < d->steepest) continue;
+        if ((d->lowest != 0 || d->highest != 0) && (world[1] < d->lowest || world[1] > d->highest)) continue;
+        /* turned about up, then up made the ground's if it leans: the columns are where x, y and z go */
+        const float c = artfCosFast(turn), sn = artfSinFast(turn);
+        ArtfVec3 ax = artfVec3(c, 0, -sn), ay = artfVec3(0, 1, 0), az = artfVec3(sn, 0, c);
+        if (d->lean) {
+            ay = up;
+            ax = artfVec3Normalize(artfVec3Sub(ax, artfVec3Scale(up, artfVec3Dot(ax, up))));
+            az = artfVec3Cross(ax, ay);
+        }
+        ArtfTransform m;
+        const ArtfVec3 cols[3] = {ax, ay, az};
+        for (int r = 0; r < 3; ++r) {
+            for (int col = 0; col < 3; ++col) {
+                const float v = (&cols[col].x)[r] * size;
+                m.m[r * 4 + col] = v;
+            }
+            m.m[r * 4 + 3] = world[r];
+        }
+        if (at) {
+            /* (and the terrain's own turn and scale) */
+            ArtfTransform t = m;
+            for (int r = 0; r < 3; ++r)
+                for (int col = 0; col < 3; ++col) m.m[r * 4 + col] = at[r * 4] * t.m[col] + at[r * 4 + 1] * t.m[4 + col] + at[r * 4 + 2] * t.m[8 + col];
+        }
+        const ArtfInstance i = artfSceneAddInstance(s, d->mesh, d->material, &m);
+        if (!i) break;
+        if (instances && made < room) instances[made] = i;
+        ++made;
+    }
+#undef H
+    return made;
+}
 
 ArtfMesh artfSceneAddTerrain(ArtfScene* s, const float* heights, int width, int depth, float cell, float height, float uvRepeat) {
     if (!heights || width < 2 || depth < 2) return 0;

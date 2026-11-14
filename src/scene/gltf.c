@@ -579,6 +579,17 @@ static ArtfMaterial materialOf(Loader* l, const Json* m) {
         d.transparency = artfMaxf(d.transparency, artfClampf(through, 0, 1));
         d.ior = index >= 1.f ? index : 1.5f;
     }
+    /* a clear layer over it, and sheen: their factors (their textures are left out, and logged) */
+    const Json* coat = member(l, extensions, "KHR_materials_clearcoat");
+    d.clearcoat = (float)numberOf(l, coat, "clearcoatFactor", 0);
+    d.clearcoatRoughness = (float)numberOf(l, coat, "clearcoatRoughnessFactor", 0);
+    const Json* sheen = member(l, extensions, "KHR_materials_sheen");
+    float sheenColor[3] = {0, 0, 0};
+    readNumbers(l, member(l, sheen, "sheenColorFactor"), sheenColor, 3);
+    d.sheen = artfVec3(sheenColor[0], sheenColor[1], sheenColor[2]);
+    if (member(l, coat, "clearcoatTexture") || member(l, coat, "clearcoatRoughnessTexture") || member(l, coat, "clearcoatNormalTexture") ||
+        member(l, sheen, "sheenColorTexture") || member(l, sheen, "sheenRoughnessTexture"))
+        artfLog("artful: glTF: a clear coat's or sheen's textures are left out: their factors are kept");
     return artfSceneAddMaterial(l->scene, &d);
 }
 
@@ -1233,7 +1244,7 @@ static bool openJson(Loader* l, const char* text, size_t size) {
         for (const Json* e = nodeAt(l, required->first); e; e = nodeAt(l, e->next))
             if (!stringIs(e, "KHR_mesh_quantization") && !stringIs(e, "KHR_texture_transform") && !stringIs(e, "KHR_materials_emissive_strength") &&
                 !stringIs(e, "EXT_meshopt_compression") && !stringIs(e, "KHR_materials_unlit") && !stringIs(e, "KHR_materials_ior") &&
-                !stringIs(e, "KHR_materials_transmission")) {
+                !stringIs(e, "KHR_materials_transmission") && !stringIs(e, "KHR_materials_clearcoat") && !stringIs(e, "KHR_materials_sheen")) {
                 artfLog("artful: glTF: the file requires %.*s, which cannot be read here", e->kind == J_STRING ? (int)e->length : 0, e->text);
                 return 0;
             }

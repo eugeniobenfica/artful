@@ -22,7 +22,8 @@ uint32_t* artfShaderSceneVertex(size_t* size);
  * to the frame; 0: they do not. */
 /* What a scene's pixel shader holds beside the rest: a frame in floats, light from probes (what costs its registers, so
  * that a scene without probes does not pay for them). */
-enum { ARTF_SHADER_FLOATS = 1, ARTF_SHADER_PROBES = 2, ARTF_SHADER_WALLS = 4 /* the probes' maps of how far they see */, ARTF_SHADER_FROXELS = 8 };
+enum { ARTF_SHADER_FLOATS = 1, ARTF_SHADER_PROBES = 2, ARTF_SHADER_WALLS = 4 /* the probes' maps of how far they see */, ARTF_SHADER_FROXELS = 8,
+       ARTF_SHADER_COAT = 16 /* materials with a clear coat or sheen */, ARTF_SHADER_SOFT = 32 /* soft shadows */ };
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant);
 uint32_t* artfShaderLayerResolve(size_t* size, int samples);
 /* Shadow maps: depth from a light; and, for what has holes, what leaves pixels. */
@@ -30,7 +31,8 @@ uint32_t* artfShaderShadowVertex(size_t* size);
 uint32_t* artfShaderShadowFragment(size_t* size, uint32_t maxTextures);
 uint32_t* artfShaderOverlayVertex(size_t* size);
 /* Tracing: a sample more for each pixel; and what was gathered, shown over what is there. */
-uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides);
+/* hardware: rays through the ray tracing hardware (binding 64, the top level), not the trees */
+uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides, bool hardware);
 /* Taking out noise: time; a pass of the filter in space; and back to light. */
 uint32_t* artfShaderSkin(size_t* size);
 uint32_t* artfShaderMeshletCull(size_t* size, ArtfCullPhase phase);
@@ -62,5 +64,7 @@ uint32_t* artfShaderPostFocus(size_t* size);
 uint32_t* artfShaderPostBloomDown(size_t* size);
 uint32_t* artfShaderPostBloomUp(size_t* size);
 uint32_t* artfShaderPostFinal(size_t* size);
+uint32_t* artfShaderPostMeter(size_t* size); /* auto exposure, one invocation */
+uint32_t* artfShaderPostMotionBlur(size_t* size);
 
 #endif

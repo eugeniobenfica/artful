@@ -32,6 +32,8 @@ ArtfScene* artfSceneNew(void) {
     artfSceneAddTexture(s, &white, 1, 1, 1);
     ArtfMaterialData grey = {{.6f, .6f, .6f}, 1.f, {0, 0, 0}, .5f, 0, 1.f, 0, 0, 0, 0, 1.f, 1.f, 0, 0, 0, 0, {{0}}};
     artfVecPush(&s->materials, grey);
+    const ArtfMaterialMore plain = {0};
+    artfVecPush(&s->materialsMore, plain);
     s->toSun = artfVec3Normalize(artfVec3(.4f, .8f, .45f));
     s->sunColor = artfVec3(1.f, .96f, .9f);
     s->sky = artfVec3(.28f, .32f, .4f);
@@ -60,6 +62,7 @@ void artfSceneFree(ArtfScene* s) {
     artfVecFree(&s->freeMeshes);
     artfVecFree(&s->textures);
     artfVecFree(&s->materials);
+    artfVecFree(&s->materialsMore);
     artfVecFree(&s->instances);
     artfVecFree(&s->instanceHandles);
     artfVecFree(&s->handleSlots);
@@ -241,6 +244,7 @@ void artfSceneSetFeature(ArtfScene* s, ArtfFeature feature, bool on) {
 
 bool artfSceneFeature(const ArtfScene* s, ArtfFeature feature) { return feature < ARTF_FEATURE_COUNT && s->features[feature]; }
 void artfSceneSetLodError(ArtfScene* s, float pixels) { s->lodError = artfMaxf(pixels, .01f); }
+void artfSceneSetCullSize(ArtfScene* s, float pixels) { s->cullSize = artfMaxf(pixels, 0); }
 
 ArtfMesh artfSceneAddCube(ArtfScene* s, float size) {
     static const float faces[6][9] = { /* normal, then the u and the v axes */
@@ -610,6 +614,12 @@ static ArtfMaterialData materialData(const ArtfScene* s, const ArtfMaterialDesc*
     return m;
 }
 
+static ArtfMaterialMore materialMore(const ArtfMaterialDesc* d) {
+    ArtfMaterialMore m = {artfClampf(d->clearcoat, 0, 1), artfClampf(d->clearcoatRoughness, .045f, 1.f), 0, 0,
+                          {artfMaxf(d->sheen.x, 0) * ARTF_SHEEN_SCALE, artfMaxf(d->sheen.y, 0) * ARTF_SHEEN_SCALE, artfMaxf(d->sheen.z, 0) * ARTF_SHEEN_SCALE}, 0};
+    return m;
+}
+
 /* What an instance is, from its opacity, its mesh and its material. */
 static void refreshInstance(ArtfScene* s, ArtfInstanceData* d) {
     const uint32_t material = s->materials.items[d->material].flags;
@@ -634,6 +644,9 @@ ArtfMaterialDesc artfMaterialDefaults(void) {
 ArtfMaterial artfSceneAddMaterial(ArtfScene* s, const ArtfMaterialDesc* desc) {
     ArtfMaterialData m = materialData(s, desc);
     artfVecPush(&s->materials, m);
+    const ArtfMaterialMore more = materialMore(desc);
+    artfVecPush(&s->materialsMore, more);
+    s->layeredMaterials += artfMaterialLayered(&more);
     ++s->materialVersion;
     return (ArtfMaterial)(s->materials.len - 1);
 }
@@ -643,6 +656,9 @@ void artfMaterialSet(ArtfScene* s, ArtfMaterial m, const ArtfMaterialDesc* desc)
     const ArtfMaterialData old = s->materials.items[m];
     s->materials.items[m] = materialData(s, desc);
     memcpy(s->materials.items[m].params, old.params, sizeof old.params);
+    s->layeredMaterials -= artfMaterialLayered(&s->materialsMore.items[m]);
+    s->materialsMore.items[m] = materialMore(desc);
+    s->layeredMaterials += artfMaterialLayered(&s->materialsMore.items[m]);
     ++s->materialVersion;
     if (old.flags == s->materials.items[m].flags && old.graph == s->materials.items[m].graph) return;
     for (size_t i = 0; i < s->instances.len; ++i)
@@ -887,6 +903,7 @@ uint32_t artfSceneLayers(const ArtfScene* s, const ArtfFrameData* frame, ArtfLay
         if (!inView) continue;
         const float dx = wx - frame->cameraPos[0], dy = wy - frame->cameraPos[1], dz = wz - frame->cameraPos[2];
         const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (artfTooSmall(frame, r, artfMaxf(distance - r, frame->nearW))) continue;
         /* (by depth along the view, as depth is tested: what faces the eye then comes in the order it shows in) */
         const float along = dx * frame->eye[2][0] + dy * frame->eye[2][1] + dz * frame->eye[2][2];
         const ArtfLayer layer = {(uint32_t)i, artfMeshLevel(s, inst->mesh, frame->lodScale, inst->maxScale, artfMaxf(distance - r, frame->nearW)), along};
@@ -924,6 +941,10 @@ void artfLightSet(ArtfScene* s, ArtfLight l, ArtfVec3 position, ArtfVec3 color, 
     s->lights[l - 1] = d;
 }
 
+void artfLightSetSize(ArtfScene* s, ArtfLight l, float radius) {
+    if (l && l <= ARTF_MAX_LIGHTS) s->lightSize[l - 1] = artfMaxf(radius, 0);
+}
+
 void artfLightSetSpot(ArtfScene* s, ArtfLight l, ArtfVec3 direction, float inner, float outer) {
     if (!l || l > ARTF_MAX_LIGHTS) return;
     ArtfLightData* d = &s->lights[l - 1];
@@ -935,7 +956,10 @@ void artfLightSetSpot(ArtfScene* s, ArtfLight l, ArtfVec3 direction, float inner
 }
 
 void artfSceneRemoveLight(ArtfScene* s, ArtfLight l) {
-    if (l && l <= ARTF_MAX_LIGHTS) s->lightOn[l - 1] = false;
+    if (l && l <= ARTF_MAX_LIGHTS) {
+        s->lightOn[l - 1] = false;
+        s->lightSize[l - 1] = 0;
+    }
 }
 
 void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera) { s->camera = *camera; }
@@ -1097,6 +1121,7 @@ void artfSceneSetShadows(ArtfScene* s, const ArtfShadowDesc* desc) {
     if (!desc || desc->resolution <= 0) return;
     s->shadows.resolution = artfClampi((desc->resolution + 63) & ~63, 64, 4096);
     s->shadows.distance = desc->distance > 0 ? desc->distance : 60.f;
+    s->shadows.soft = desc->soft;
 }
 
 void artfLightSetShadow(ArtfScene* s, ArtfLight l, bool casts) {
@@ -1285,6 +1310,10 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
 void artfSceneSetBackgroundAlpha(ArtfScene* s, float alpha) { s->backgroundAlpha = artfClampf(alpha, 0, 1); }
 void artfSceneSetExposure(ArtfScene* s, float exposure) { s->exposure = artfMaxf(exposure, 0); }
 void artfSceneSetSunSize(ArtfScene* s, float size) { s->sunSize = artfMaxf(size, 0); }
+void artfSceneSetFogHeight(ArtfScene* s, float base, float falloff) {
+    s->fogBase = base;
+    s->fogFalloff = artfMaxf(falloff, 0);
+}
 void artfSceneSetFog(ArtfScene* s, ArtfVec3 color, float density) {
     s->fogColor = color;
     s->fogDensity = artfMaxf(density, 0);
@@ -1333,10 +1362,15 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->nearW = c->near_;
     out->meshCount = (uint32_t)s->meshes.len;
     out->lodScale = s->features[ARTF_FEATURE_LOD] ? (float)height * .5f * proj.m[5] / s->lodError : 0.f;
+    /* (a ball of radius r at distance d is r * height / 2 * focal / d pixels in radius: twice that across) */
+    out->cullScale = s->cullSize > 0 ? (float)height * proj.m[5] / s->cullSize : 0.f;
     out->look[3] = s->features[ARTF_FEATURE_LOD_FADE] ? ARTF_LOD_FADE : 0.f;
     out->fog[3] = (float)width;
     for (uint32_t i = 0; i < ARTF_MAX_LIGHTS && out->lightCount < ARTF_FRAME_LIGHTS; ++i)
-        if (s->lightOn[i]) out->lights[out->lightCount++] = s->lights[i];
+        if (s->lightOn[i]) {
+            out->lightSizes[out->lightCount] = s->lightSize[i];
+            out->lights[out->lightCount++] = s->lights[i];
+        }
     if (s->environment) {
         out->sky[3] = s->environmentLight;
         out->ground[3] = s->environmentShown ? 1.f : 0.f;
@@ -1350,6 +1384,14 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
                               {p->reflections, p->volumetric, artfClampf(p->scattering, -.95f, .95f), p->temporal ? 1.f : 0.f},
                               {p->focus, p->aperture, 0, 0}};
     memcpy(out->post, post, sizeof post);
+    {
+        const float key = p->exposureKey > 0 ? p->exposureKey : .18f;
+        const float least = p->exposureMin > 0 ? p->exposureMin : 1.f / 64.f, most = p->exposureMax > 0 ? p->exposureMax : 64.f;
+        const float grade[3][4] = {{(float)artfClampi((int)p->toneMap, 0, 3), p->autoExposure ? 1.f : 0.f, artfLog2Fast(key), p->exposureSpeed > 0 ? artfMinf(p->exposureSpeed, 1) : .05f},
+                                   {artfLog2Fast(least), artfLog2Fast(artfMaxf(most, least)), artfClampf(p->saturation, -1, 4), artfClampf(p->contrast, -1, 4)},
+                                   {artfClampf(p->temperature, -1, 1), artfClampf(p->tint, -1, 1), artfMaxf(p->vignette, 0), artfMaxf(p->chromatic, 0)}};
+        memcpy(out->grade, grade, sizeof grade);
+    }
     if (s->indirect.on && s->indirect.probes) {
         const ArtfIndirect* g = &s->indirect;
         const float rows[3][4] = {{g->origin[0], g->origin[1], g->origin[2], g->desc.strength > 0 ? g->desc.strength : 1.f},
@@ -1358,6 +1400,10 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
         memcpy(out->indirect, rows, sizeof rows);
     }
     memcpy(out->previous, vp.m, sizeof vp.m);
+    out->materialCount = (uint32_t)s->materials.len;
+    out->fogBase = s->fogBase;
+    out->fogFalloff = s->fogFalloff;
+    out->motionBlur = artfClampf(p->motionBlur, 0, 1);
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;
     {

@@ -6,11 +6,15 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   pixel's depth, up to eight in a pixel, at 96 bytes a pixel on the GPU. A layer shows only its nearest surface. Tracing
   has neither limit.
 - Antialiasing is four samples, or none, and it smooths edges only: what a texture or a highlight does
-  inside a triangle is not sampled again.
-- Point lights are points when tracing, so only the sun has soft shadows; and glass has no Fresnel of its own,
-  nor color. It reads textures in their largest mipmap. Black holes stay behind everything and do not bend what
-  is traced. Without `denoise`, a scene that moves starts over each frame; with it, what was hidden starts with no
-  history, and is soft for some frames. It uses compute shaders, and not the ray tracing hardware some GPUs have.
+  inside a triangle is not sampled again. There is no upscaling: the frame is drawn at its size.
+- When tracing, a light is a point unless it has a size (`artfLightSetSize`), and those past the sixteen are points;
+  glass has no Fresnel of its own, nor color. It reads textures in their largest mipmap. Black holes stay behind
+  everything and do not bend what is traced. Without `denoise`, a scene that moves starts over each frame; with it,
+  what was hidden starts with no history, and is soft for some frames.
+- The ray tracing hardware (`ArtfTraceDesc.hardware`) builds every mesh's bottom level again whenever meshes change,
+  bones included: what bones move each frame pays that each frame, where a refit would do. A mesh's first triangle
+  goes in 24 bits, so a scene traced this way holds up to 16 million triangles. It was run on one device, a Radeon
+  RX 9060 XT; CI's software Vulkan has no such hardware, and so does not run it.
 - Bones run on the GPU when Vulkan draws; targets, and bones on the CPU or Metal, go per instance on the CPU. What
   bends is not culled by its parts, and has no levels of detail.
 - ASTC is its low dynamic range profile: a block in high dynamic range decodes to magenta on the CPU. The CPU makes
@@ -21,8 +25,11 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - A frame in floats (`hdr`): layers go by their centers. With four samples, what comes after reads the first sample's
   depth and surface. Reflections see only what the frame shows: what is off screen or behind something is not
   reflected, and the light from all around stays there instead. Ambient occlusion reads depth, not geometry: thin
-  things and their backs are guessed. Temporal antialiasing follows pixels by depth and the view alone: what moves
-  leaves a trail where its history does not fit. The black hole keeps its own exposure and tone mapping. Fog that
+  things and their backs are guessed. Temporal antialiasing and motion blur follow instances, not what bones bend,
+  which leaves a trail where its history does not fit. Motion blur takes eight points over at most 32 pixels, and
+  spreads what is behind a moving thing over its edge, as it spreads the thing.
+- Auto exposure meters 576 points of the frame, not all of it, and has no histogram to leave out its brightest and
+  darkest: a small, very bright light in the middle of a dark frame darkens it more than a camera would. The black hole keeps its own exposure and tone mapping. Fog that
   light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is
   wide, and it reaches 4 / density along the view. It is not traced. Metal leaves all of it out.
 - Lights past the first 16 are listed up to 64 for each 64 x 64 square of the frame, and are left out of tracing and of
@@ -31,8 +38,21 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - Light that bounced (probes) fills a box set when it is turned on: a scene that grows needs it set again. A wall
   stops it once probes see it, as far as an 8 x 8 map of directions can tell; a wall much thinner than the probes are
   apart, with probes on both sides near it, can still let some through; `throughWalls` leaves walls out, for less
-  work. It does not reach specular reflections.
+  work. What it gives reflections is as rough as the probes are: a mirror shows its color, not what it would see.
 - Particles are stepped on the calling thread, one instance each; they are not traced, unless the whole frame is.
+  They bounce on a flat ground only, not on what the scene holds, and their wind is noise, not a fluid.
+- A clear coat and sheen are their factors: their textures, and sheen's roughness, are not read. Sheen is Burley's
+  rim, not the Charlie lobe glTF's sample viewer draws. The coat has the surface's own normal.
+- A sky (`artfSceneSetSky`) scatters light once: twilight, which comes of light scattered more than once, is darker
+  than a real one. It is a picture of all around, so its sun is not a disc in it, and it is made again, in tens of
+  milliseconds, when the sun moves. Fog by height thins fog that light goes through, not the plain fog.
+- Lights' sizes count for the sixteen lights the frame holds. Soft shadows (`ArtfShadowDesc.soft`) take 50 reads a
+  pixel and light; their penumbra is at most 12 texels wide, and lights past the sixteen and fog that light goes
+  through keep sharp ones.
+- What is too small to see (`artfSceneSetCullSize`) goes by an instance's bounding ball: a long thin thing seen end on
+  counts as large.
+- A terrain's layers are a material in C, with one set of texture coordinates; what is scattered over it is placed
+  once, and does not follow if the heights change.
 - On the GPU, turning probes, their walls or fog that light goes through on or off makes the scene's pixel shaders
   again: that frame waits for them.
 - Decals are tested against each drawn pixel, all of those in view: dozens are cheap, hundreds cost. They go on what is
@@ -57,6 +77,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   radian high. A file's lights end at a radius, as Artful's do, and are not the square law: as bright as it at a
   quarter of their reach. Each material has one set of texture coordinates, moved by the transform of its first
   texture. Transmission is drawn as blending, and bends light only when traced.
+- Metal leaves out everything since 0.4: its shaders were not made again, and read the records they did.
 - **Metal has never been run.** It was written without a Mac: CI builds it on macOS and puts its shaders through
   Apple's compiler, and no more than that is known. So it is chosen only by name. It needs Metal 3; it leaves out
   occlusion, black holes, materials in C and light from a picture, and sends textures up decoded. Linux and macOS are

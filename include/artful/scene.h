@@ -61,6 +61,9 @@ void artfSceneSetFeature(ArtfScene* s, ArtfFeature feature, bool on);
 bool artfSceneFeature(const ArtfScene* s, ArtfFeature feature);
 /* How far a lighter mesh may stray on screen, in pixels (1 to start with). */
 void artfSceneSetLodError(ArtfScene* s, float pixels);
+/* What is too small to see is not drawn: an instance whose bounding ball is less than this many pixels across, where it
+ * is, as Unreal's minimum screen size. It still casts shadows, and is traced. 0 (to start with): all of it is drawn. */
+void artfSceneSetCullSize(ArtfScene* s, float pixels);
 
 /* ---- meshes ---- */
 
@@ -194,6 +197,13 @@ typedef struct ArtfMaterialDesc {
     float occlusionStrength;   /* 0: 1 */
     uint32_t graph;            /* what artfSceneAddGraph gave: see below; 0: none */
     bool unlit;                /* its color as it is, lit by nothing (glTF's KHR_materials_unlit): with emissive added */
+    /* A clear layer over it, as on lacquer, varnish or a car's paint (glTF's KHR_materials_clearcoat): a second
+     * highlight, of no color, and what it reflects is taken from what is under it. 0 to 1 */
+    float clearcoat;
+    float clearcoatRoughness;  /* the layer's own: 0 is as smooth as can be */
+    /* Light that grazing angles catch, as on velvet, felt or dust (glTF's KHR_materials_sheen, its color): a rim of
+     * this color, strongest where the eye or the light skims the surface. 0: none */
+    ArtfVec3 sheen;
 } ArtfMaterialDesc;
 
 /* White, not metal, half rough: fields set by name on this stay right when the struct grows. */
@@ -299,6 +309,21 @@ void artfSceneSetAmbient(ArtfScene* s, ArtfVec3 sky, ArtfVec3 ground);
 bool artfSceneSetEnvironment(ArtfScene* s, const float* rgb, int width, int height, float light, bool shown);
 /* The same maps, with another light, or shown or not: costs nothing. */
 void artfSceneSetEnvironmentLight(ArtfScene* s, float light, bool shown);
+/* A sky from the sun, as its light from all around (in place of a picture): the air (Rayleigh) and haze (Mie)
+ * scatter the sun's light once, and ozone takes some, along each direction from a point above the ground. It is blue
+ * by day, red and orange where the sun is low, and dark past the horizon; the ground below takes the sun through the
+ * air. Call it after artfSceneSetSun, and again when the sun moves: it takes tens of milliseconds, on all cores.
+ * The sun's color is then what of desc.sun reaches the ground. NULL: none. */
+typedef struct ArtfSkyDesc {
+    ArtfVec3 sun;     /* the sun's light above the air; 0: 3, 3, 3 */
+    float haze;       /* how much haze, against a clear day's; 0: 1 */
+    float altitude;   /* the eye's height over the ground, in meters; 0: 200 */
+    ArtfVec3 ground;  /* the color of the ground under the horizon; 0: .1 */
+    int width;        /* of the picture it makes, twice its height; 0: 256 */
+    bool hidden;      /* it lights and is reflected, but the frame's background stays */
+    bool keepSun;     /* the scene's sun keeps its color */
+} ArtfSkyDesc;
+bool artfSceneSetSky(ArtfScene* s, const ArtfSkyDesc* desc);
 /* Decodes a Radiance .hdr (RGBE) into linear RGB, three floats a pixel, for artfSceneSetEnvironment. The caller owns
  * them (artfFree). NULL: it is not one, or it is damaged. */
 float* artfImageDecodeHdr(const void* data, size_t size, int* width, int* height);
@@ -308,6 +333,11 @@ void artfLightSet(ArtfScene* s, ArtfLight l, ArtfVec3 position, ArtfVec3 color, 
 /* Makes it a spot: light goes toward direction, full up to inner radians from it, none past outer. */
 void artfLightSetSpot(ArtfScene* s, ArtfLight l, ArtfVec3 direction, float inner, float outer);
 void artfSceneRemoveLight(ArtfScene* s, ArtfLight l);
+/* Gives it a size: a ball of light this wide around its position, as a bulb or a lamp's shade is, in place of a
+ * point. Its highlights are as wide as it looks, on what is smooth too, with their light kept (Karis's nearest point);
+ * traced, its shadows go soft with distance. For the sixteen lights the frame holds: those past them stay points.
+ * 0: a point. */
+void artfLightSetSize(ArtfScene* s, ArtfLight l, float radius);
 
 /* ---- the view ---- */
 
@@ -326,6 +356,11 @@ void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera);
 typedef struct ArtfShadowDesc {
     int resolution;  /* of a map, a multiple of 64: 1024 is a good start; 0: no shadows */
     float distance;  /* how far from the eye the sun's shadows go; 0: 60 */
+    /* Shadows as soft as their light is wide, sharp where they touch what casts them (Fernando's PCSS): the sun's
+     * size (artfSceneSetSunSize) and the sixteen lights' (artfLightSetSize). What is in the way is looked for in the
+     * map around each pixel, and its distance says how wide the penumbra is there: 50 reads in place of 9. Lights
+     * past the sixteen, and fog that light goes through, keep sharp ones. */
+    bool soft;
 } ArtfShadowDesc;
 
 /* NULL: none. The sun casts; other lights do when asked. */
@@ -338,6 +373,10 @@ void artfSceneSetExposure(ArtfScene* s, float exposure);
 /* Air that is not clear: a surface fades into color with distance, by about e^(-density x distance). The
  * background is not touched: set it to the same color. density 0: none. */
 void artfSceneSetFog(ArtfScene* s, ArtfVec3 color, float density);
+/* Fog that thins with height, for fog that light goes through (ArtfPostDesc.volumetric): its density is
+ * artfSceneSetFog's at height base, and falls by e every 1 / falloff above it (and grows below, up to 16 times).
+ * falloff 0: the same at every height. */
+void artfSceneSetFogHeight(ArtfScene* s, float base, float falloff);
 /* When traced, how wide the sun is, as the tangent of its radius: 0 (to start with) gives hard shadows. */
 void artfSceneSetSunSize(ArtfScene* s, float size);
 /* What shows where nothing is drawn, as it shows (no light applied): 0..1 for red, green, blue. */
@@ -364,6 +403,13 @@ typedef struct ArtfEmitterDesc {
     float glow;           /* how much of their color is light of their own */
     ArtfTexture texture;  /* its alpha is its shape; 0: a soft round puff */
     uint32_t most;        /* alive at once; 0: 1024 */
+    float turbulence;     /* a wind that swirls, as smoke and sparks have it: how hard it pushes, per second */
+    float turbulenceSize; /* how wide its swirls are; 0: 1 */
+    bool ground;          /* they bounce off the plane y = groundHeight, and do not go through it */
+    float groundHeight;
+    float bounce;         /* what they keep of their speed into the ground: 0 they stop, 1 all of it */
+    float friction;       /* what they lose of their speed along it, at each bounce: 0 to 1 */
+    float spin;           /* how they turn, facing the eye, in radians a second: each gives or takes this much */
 } ArtfEmitterDesc;
 typedef uint32_t ArtfEmitter;
 
@@ -371,12 +417,55 @@ ArtfEmitter artfSceneAddEmitter(ArtfScene* s, const ArtfEmitterDesc* desc);
 /* All but most, which stays as it was made. */
 void artfEmitterSet(ArtfScene* s, ArtfEmitter e, const ArtfEmitterDesc* desc);
 void artfEmitterStep(ArtfScene* s, ArtfEmitter e, float seconds);
+/* So many are born at the next step, as many as there is room for, as well as those its rate gives. */
+void artfEmitterBurst(ArtfScene* s, ArtfEmitter e, uint32_t count);
 uint32_t artfEmitterAlive(const ArtfScene* s, ArtfEmitter e);
 void artfSceneRemoveEmitter(ArtfScene* s, ArtfEmitter e);
 
 /* Terrain: a mesh from heights (width x depth of them, by rows, times height), cell apart, centered, facing +y, with
  * texture coordinates repeating uvRepeat times across. Its lighter versions are made as any mesh's. */
 ArtfMesh artfSceneAddTerrain(ArtfScene* s, const float* heights, int width, int depth, float cell, float height, float uvRepeat);
+
+/* Layers of a terrain, as a landscape's: up to four surfaces, each a color times a texture tiled over it, blended by a
+ * map of weights painted over the terrain (its red, green, blue and alpha: how much of each), or, with no map, by
+ * rules: the second where it is steep, the third high up. A material in C (artfSceneAddGraph), so both backends draw
+ * it alike. */
+typedef struct ArtfTerrainLayer {
+    ArtfVec3 color;       /* times the texture, in linear light; 0 0 0: white */
+    ArtfTexture texture;  /* 0: the color alone */
+    float tiling;         /* how many times the texture repeats across the terrain; 0: 1 */
+    float roughness;      /* 0: .8 */
+} ArtfTerrainLayer;
+typedef struct ArtfTerrainLayersDesc {
+    ArtfTerrainLayer layers[4];
+    uint32_t count;       /* 1 to 4 */
+    ArtfTexture weights;  /* the map, over the whole terrain; 0: the rules below */
+    float uvRepeat;       /* what artfSceneAddTerrain was given; 0: 1 */
+    float steep;          /* rules: the second layer where the surface's up is under this (1 flat, 0 a wall); 0: .8 */
+    float high;           /* the third above this height, in the world */
+    float blend;          /* how wide the rules' edges are; 0: .1 */
+} ArtfTerrainLayersDesc;
+ArtfMaterial artfSceneAddTerrainMaterial(ArtfScene* s, const ArtfTerrainLayersDesc* desc);
+
+/* Foliage, rocks and the like scattered over a terrain made from the same heights (as artfSceneAddTerrain, then placed
+ * by at): instances of a mesh, so many a unit of area, each at its own place, turned about up and sized at random,
+ * standing up or leaning with the ground, and only where the ground is flat enough and high enough. The same seed,
+ * the same places. How many it placed; their handles, if instances is given, up to room. */
+typedef struct ArtfScatterDesc {
+    const float* heights;
+    int width, depth;
+    float cell, height;
+    ArtfTransform at;       /* where the terrain is; zeros: where it was made */
+    ArtfMesh mesh;
+    ArtfMaterial material;
+    float density;          /* a unit of area */
+    float scaleMin, scaleMax; /* 0: 1 */
+    bool lean;              /* each leans with the ground under it */
+    float steepest;         /* none where the ground's up is under this; 0: anywhere */
+    float lowest, highest;  /* only between these heights, in the world; both 0: anywhere */
+    uint32_t seed;
+} ArtfScatterDesc;
+uint32_t artfSceneScatter(ArtfScene* s, const ArtfScatterDesc* desc, ArtfInstance* instances, uint32_t room);
 
 /* Decals: a picture laid over what is drawn, through a box. The transform takes the unit box (-.5 to .5 each way) to
  * the world; what is inside it takes the picture from above, down the box's y: u along its x, v along its z. The
@@ -399,6 +488,12 @@ void artfSceneRemoveDecal(ArtfScene* s, ArtfDecal d);
 
 /* ---- after the frame: what a renderer made with ArtfRendererOptions.hdr does to it ----
  * Each is off at 0. Lengths are the world's; what a scene asks of a renderer without hdr is not done. */
+typedef enum ArtfToneMap {
+    ARTF_TONE_ACES = 0,     /* Narkowicz's fit to ACES: bright colors go to white */
+    ARTF_TONE_NEUTRAL = 1,  /* Khronos's PBR Neutral: a base color under light of 1 shows as it is, hue kept */
+    ARTF_TONE_REINHARD = 2, /* x / (1 + x), each channel */
+    ARTF_TONE_NONE = 3      /* cut at 1 */
+} ArtfToneMap;
 typedef struct ArtfPostDesc {
     float bloom;            /* light past the threshold spreads around it: .05 is a camera's lens */
     float bloomThreshold;   /* what is bright enough to spread, after exposure; 0: 1 */
@@ -412,6 +507,26 @@ typedef struct ArtfPostDesc {
                              * mixed, as far as each pixel's history can be followed */
     float focus;            /* depth of field: the distance in focus */
     float aperture;         /* how much what is out of focus spreads, in pixels, for something twice as far: 0 none */
+
+    /* The look: what is done to the light last, before it is bytes. */
+    ArtfToneMap toneMap;    /* the curve from light to what a screen shows, when there is an exposure */
+    bool autoExposure;      /* the exposure follows what the frame shows: artfSceneSetExposure's (or 1) then
+                             * multiplies it, as a camera's compensation does. The frame is metered on a grid of
+                             * 32 x 18 points, the middle weighed twice the corners, and its mean in stops is aimed at */
+    float exposureKey;      /* the grey the mean is brought to; 0: .18 */
+    float exposureSpeed;    /* the share of the way there taken each frame, in stops; 0: .05; 1: at once */
+    float exposureMin;      /* the least auto exposure multiplies by; 0: 1 / 64 */
+    float exposureMax;      /* the most; 0: 64 */
+    float temperature;      /* white balance: -1 cool (bluer) to 1 warm (redder); 0 as it is */
+    float tint;             /* -1 toward green to 1 toward magenta; 0 as it is */
+    float saturation;       /* -1 grey, 0 as it is, 1 twice as far from grey */
+    float contrast;         /* around the middle of what is shown: -1 flat, 0 as it is, 1 twice as steep */
+    float vignette;         /* light falls toward the corners: at 1 a corner keeps a quarter */
+    float chromatic;        /* red and blue part toward the edges, as a cheap lens's: how far, in pixels, at a corner */
+    /* Motion blur: what moved since the frame before is spread along the way it went, the eye's own motion too, as a
+     * film's shutter does. This is the share of a frame the shutter is open: .5 is a film camera's. Temporal
+     * antialiasing follows what moves by the same measure. Instances are followed; what bones bend is not. */
+    float motionBlur;
 } ArtfPostDesc;
 
 /* NULL: none. */
@@ -456,6 +571,9 @@ typedef struct ArtfTraceDesc {
      * scene does not start over, and a sample or two a frame looks clean, a little soft at first. It takes
      * about eight times a frame's size in memory. */
     bool denoise;
+    /* Rays go through the GPU's ray tracing hardware, where it has some (Vulkan's ray queries), in place of the
+     * trees the compute shader walks: the same picture, and on a large scene, faster. Elsewhere it is as without. */
+    bool hardware;
 } ArtfTraceDesc;
 
 /* NULL: drawing as ever. Meshes get what rays need the first time they are traced, on the calling thread:

@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+- **The ray tracing hardware**: `ArtfTraceDesc.hardware`. Where the GPU has acceleration structures and ray queries
+  (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`), a ray goes through them in place of the trees the compute
+  shader walks: a bottom level for each mesh traced, from the same triangles, and the top over the traced instances,
+  in their order, so that all that follows a hit is as it was. The picture is the same to the pixel: on a Radeon
+  RX 9060 XT, rays and paths, with what has one side and two, and after an instance moved, 0.00% of the pixels apart.
+  `city` (40,201 instances) traced at 1280 x 720 went from 7.1 ms a frame to 1.1. Elsewhere, and on the CPU, it is as
+  without (`ARTFUL_NO_RAY_QUERY`: as a device without).
+- **The look**, in `ArtfPostDesc`, last before the frame is bytes, on both backends: **auto exposure**
+  (`autoExposure`), the frame metered on 32 x 18 points in stops (log2 by bits and a polynomial, the same everywhere),
+  the middle weighed twice the corners, brought to a key at a speed, within bounds, in a pass of its own on the GPU;
+  a choice of **tone curve** (`toneMap`: ACES's fit as before, Khronos's PBR Neutral, Reinhard's, none); **white
+  balance** (`temperature`, `tint`), **saturation**, **contrast**, a **vignette** and **chromatic aberration**. With
+  none of it asked, a frame is the same bytes as before.
+- **Motion followed**: each renderer keeps how each instance moved since the frame before (`artfMotionStep`, by
+  handle), and each pixel which instance it shows (on the GPU in the surface target, now two words a pixel). Temporal
+  antialiasing follows a surface to where it was, so what moves no longer leaves a trail (a sphere going sideways
+  under it: 0.54 of 255 from it drawn still, on average); and **motion blur** (`ArtfPostDesc.motionBlur`, the share of
+  a frame the shutter is open) spreads it along the way it went, eight points, at most 32 pixels. What bones bend
+  moves as its instance does.
+- **Clear coat and sheen**: `ArtfMaterialDesc.clearcoat`, `clearcoatRoughness` and `sheen`, and glTF's
+  `KHR_materials_clearcoat` and `KHR_materials_sheen` (their factors; their textures are logged and left out). The coat
+  is a second lobe of no color, F0 .04, with its own roughness, over the sky, the picture of all around and every
+  light; what it reflects is taken from what is under it. Sheen is Burley's: the fifth power of 1 - l.h. Drawn on both
+  backends and traced on both. They live apart from the material record Metal's shaders read, after all of them in the
+  same buffer; on the GPU only scenes that have them build the shaders that read them, and on the CPU what has neither
+  goes through a copy of the lighting without them.
+- **A sky from the sun**: `artfSceneSetSky`. Air (Rayleigh), haze (Mie) and ozone scatter and take the sun's light,
+  once, along each direction from a point above the ground, with Bruneton's and Hillaire's constants: blue overhead by
+  day, orange and red toward a low sun, and the ground below lit through the air. It becomes the scene's light from all
+  around, so both backends light by it, reflect it, show it and trace it; and the sun's color becomes what reaches the
+  ground. Tens of milliseconds, on all cores.
+- **Fog by height**: `artfSceneSetFogHeight`. Fog that light goes through thins above a height, and thickens below it.
+- **Lights with a size**: `artfLightSetSize`. Their highlights come from the point of the ball nearest the mirror ray,
+  spread as wide as it looks with their light kept (Karis's): on a smooth floor, 2.6 times as wide. Traced, each path
+  aims at a point of the ball, so shadows go soft with distance.
+- **Soft shadows when drawing**: `ArtfShadowDesc.soft`. What is in the way is looked for around each pixel in the map,
+  and its distance gives the penumbra's width (Fernando's PCSS): as wide as the sun (`artfSceneSetSunSize`) or a light
+  is, sharp where they touch. 50 reads in place of 9, for the sun and the sixteen lights.
+- **Light that bounced, in reflections**: probes are read along the mirror direction too, in place of the sky's two
+  colors: a metal floor by a red wall turns red.
+- **What is too small to see**: `artfSceneSetCullSize`, as Unreal's minimum screen size. Shadows and rays still have it.
+- **Particles**: `turbulence`, a wind that swirls (smooth noise, the same on every processor); a `ground` they bounce
+  on, with `bounce` and `friction`; `spin`; and `artfEmitterBurst`.
+- **Terrain's layers and what grows on it**: `artfSceneAddTerrainMaterial`, up to four surfaces, by a painted map or by
+  slope and height, as a material in C; and `artfSceneScatter`, instances over the same heights, turned, sized and
+  leaning at random, kept off what is steep, the same for the same seed.
+- `artful-render`: `--tone`, `--auto-exposure`, `--temperature`, `--tint`, `--saturation`, `--contrast`, `--vignette`,
+  `--chromatic`, `--motion-blur`, `--sun`, `--sky`, `--fog-height`, `--soft-shadows`, `--sun-size`, `--hardware`.
+- The frame's block grows to 104 rows. Metal's shaders were not made again (SPIRV-Cross was not at hand): they read
+  the records they did, and leave all of the above out.
+- Cost, where none of it is used, measured against 0.4 on a Ryzen with a Radeon RX 9060 XT, best of several runs at
+  1920 x 1080: the CPU within 2% (`spheres`, `heavy`, `city`, `outdoors` in floats with temporal antialiasing); the
+  GPU within 1% on `city`, 4% on `spheres` (0.008 ms), 4% on `outdoors` in floats (0.11 ms), most of that the surface
+  target being two words a pixel.
+- Fixed: `artfRendererReadPixels` on Vulkan read the frame from memory the CPU does not cache (on a discrete card
+  with resizable BAR, the GPU's own), through a buffer made again each time: 60 to 120 ms for a frame of 1051 x 754
+  on a Radeon RX 9060 XT, where the GPU drew it in 0.2. It now reads it from cached memory, through a buffer kept
+  from one frame to the next: 0.6 ms.
+
 ## 0.4.0
 
 - **Fog that light goes through, as a grid**: froxels 16 pixels square in 64 slices along the view, built before the

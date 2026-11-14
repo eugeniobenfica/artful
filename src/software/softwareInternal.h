@@ -68,6 +68,7 @@ typedef struct ArtfWorker {
     uint32_t* fragmentColor;
     uint8_t* fragmentCount;
     float* postDepth;   /* with a frame in floats: what is solid, before layers */
+    uint32_t* postInstance; /* and what instance shows there, + 1 */
     ARTF_VEC(const ArtfRasterTri*) tris;
     ARTF_VEC(const ArtfRasterTri*) layers; /* what shows what is behind it: by instance, the farthest first */
     ARTF_VEC(uint8_t) seen;
@@ -123,6 +124,9 @@ typedef struct ArtfSoftFrame {
     float* postLight[4]; /* premultiplied light, and alpha */
     float* postDepth;    /* 1 / w; 0 where nothing is */
     uint32_t* postSurface;
+    uint32_t* postInstance; /* the scene's instance + 1 that shows, of what is solid; 0: none */
+    const float* motion;    /* with motion followed: of each instance, from where it is to where it was (ArtfMotion) */
+    bool sizedLights;       /* of the frame's lights, one has a size (artfLightSetSize) */
     /* lights past the frame's own, and of each tile, which of them reach it (artfSceneLightTiles) */
     ArtfLightData* extra;
     uint32_t extraCount;
@@ -152,6 +156,9 @@ typedef struct ArtfSoftPost {
     int bloomW[ARTF_POST_BLOOM_LEVELS], bloomH[ARTF_POST_BLOOM_LEVELS];
     size_t bloomAt[ARTF_POST_BLOOM_LEVELS];
     int bloomLevel;
+    float exposureLog;   /* auto exposure: where it has got to, in stops, */
+    float exposureScale; /* and 2 to that */
+    bool exposureValid;  /* false: it goes straight to what the next frame meters */
 } ArtfSoftPost;
 
 void artfSoftPostSize(ArtfSoftPost* p, int width, int height);

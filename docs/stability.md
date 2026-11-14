@@ -87,7 +87,7 @@ Each of these could turn out to be a bug that users would meet. In the order to 
 
 | What | Why | Size |
 | --- | --- | --- |
-| Ray tracing hardware | Where a GPU has it, `VK_KHR_ray_query` would run the same paths several times as fast. It needs a second way through the shader, and a device to test it on. | Medium |
+| Ray tracing hardware | Done, as `ArtfTraceDesc.hardware`: the same picture, 6.7 times as fast on `city`. A refit for what bones move, and a run on other vendors' devices, are left. | Small |
 | glTF's compressed files | `EXT_meshopt_compression` is read, and checked against an encoder in the tests: it should be checked against files meshoptimizer made. `KHR_texture_basisu`'s Basis formats need transcoders of their own (ETC1S, UASTC) and Zstandard; Draco a decoder. | Medium |
 | Metal's gaps | Occlusion, black holes, materials in C, textures that stay compressed, bones on the GPU. They wait for a Mac: nothing of it can be run here. Materials need its shaders written as text, and compiled at run time. | Large |
 

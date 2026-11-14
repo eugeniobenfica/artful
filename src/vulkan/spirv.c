@@ -27,6 +27,9 @@ static uint32_t packString(const char* text, uint32_t* out) {
 }
 
 /* A type made of operands, once each. (The list is small, and read when a shader is built.) */
+static SpvId typeOf(Spv* s, uint32_t op, const uint32_t* operands, uint32_t n);
+SpvId spvTypeOpaque(Spv* s, uint32_t op) { return typeOf(s, op, NULL, 0); }
+
 static SpvId typeOf(Spv* s, uint32_t op, const uint32_t* operands, uint32_t n) {
     for (size_t i = 0; i < s->types.len;) {
         const uint32_t head = s->types.items[i], length = head >> 16;
@@ -183,7 +186,14 @@ void spvEndMain(Spv* s) {
 SpvId spvLabel(Spv* s, SpvId label) {
     if (!label) label = spvNewId(s);
     spvEmit(&s->code, OP_Label, SPV_WORDS(label));
+    s->block = label;
     return label;
+}
+
+SpvId spvPhi(Spv* s, SpvId type, SpvId a, SpvId from, SpvId b, SpvId other) {
+    SpvId id = spvNewId(s);
+    spvEmit(&s->code, 245 /* OpPhi */, SPV_WORDS(type, id, a, from, b, other));
+    return id;
 }
 
 SpvId spvOp2(Spv* s, uint32_t op, SpvId type, SpvId a, SpvId b) {
