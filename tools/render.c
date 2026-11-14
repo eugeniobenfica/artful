@@ -32,6 +32,10 @@
  *                 [--view lit|base-color|normals|roughness|metallic|ambient|emissive|lod|meshlets|instances|overdraw|depth|
  *                 motion|lights]: what the frame shows (ArtfView); [--passes]: with --frames, what each pass of the
  *                 last frame took
+ *                 [--scene forest] [--hlod [cell]]: far trees merged by cubes of that side (Unreal's HLOD)
+ *                 [--scene crowd]: figures that bend, each frame, with levels of detail as the lod feature says
+ *                 [--particles n]: an emitter of many, n of them at once, stepped each frame
+ *                 [--stream-meshes [MB]]: meshes' levels held by distance, within that budget
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
  *
@@ -345,6 +349,79 @@ static void sceneCity(ArtfScene* s) {
     setCamera(s, &c);
 }
 
+/* trees as far as the eye goes: a trunk and a crown each, 40,000 of them over 800 m */
+static void sceneForest(ArtfScene* s) {
+    ArtfMesh crown = artfSceneAddSphere(s, 1.6f, 16, 24), trunk = artfSceneAddCube(s, 1.f), ground = artfSceneAddPlane(s, 1000.f, 200.f);
+    ArtfMaterialDesc green = {artfVec3(.18f, .42f, .16f), 0, .1f, .6f, artfVec3(0, 0, 0)};
+    ArtfMaterialDesc bark = {artfVec3(.35f, .25f, .16f), 0, .1f, .7f, artfVec3(0, 0, 0)};
+    ArtfMaterialDesc soil = {artfVec3(.3f, .32f, .22f), 0, .1f, .8f, artfVec3(0, 0, 0)};
+    ArtfMaterial leaves = artfSceneAddMaterial(s, &green), wood = artfSceneAddMaterial(s, &bark);
+    artfSceneAddInstance(s, ground, artfSceneAddMaterial(s, &soil), NULL);
+    uint32_t st = 5;
+    for (int i = 0; i < 40000; ++i) {
+        const float x = (frandom(&st) - .5f) * 800.f, z = -frandom(&st) * 800.f + 20.f, h = 3.f + frandom(&st) * 3.f;
+        ArtfTransform t = artfTransformTrs(artfVec3(x, h * .5f, z), artfQuatIdentity(), artfVec3(.4f, h, .4f));
+        artfSceneAddInstance(s, trunk, wood, &t);
+        t = artfTransformAt(x, h + 1.f, z, .8f + frandom(&st) * .5f);
+        artfSceneAddInstance(s, crown, leaves, &t);
+    }
+    ArtfCamera c = {artfVec3(0, 12, 40), artfVec3(0, 0, -100), artfVec3(0, 1, 0), 1.0f, .1f};
+    artfSceneSetCamera(s, &c);
+}
+
+/* figures that bend: a tube of 960 triangles, its upper half on a second bone, 2,500 of them */
+static ArtfMesh crowdMesh(ArtfScene* s) {
+    enum { RINGS = 40, AROUND = 12 };
+    static ArtfVertex v[(RINGS + 1) * (AROUND + 1)];
+    static ArtfVertexSkin k[(RINGS + 1) * (AROUND + 1)];
+    static uint32_t idx[RINGS * AROUND * 6];
+    for (int r = 0; r <= RINGS; ++r)
+        for (int a = 0; a <= AROUND; ++a) {
+            const float y = (float)r / RINGS * 2.f, turn = (float)a / AROUND * 6.2831853f;
+            const ArtfVertex q = {cosf(turn) * .25f, y, sinf(turn) * .25f, cosf(turn), 0, sinf(turn), (float)a / AROUND, (float)r / RINGS, 0};
+            const float top = y < .8f ? 0.f : y > 1.2f ? 1.f : (y - .8f) / .4f;
+            const ArtfVertexSkin w = {{0, 1, 0, 0}, {1.f - top, top, 0, 0}};
+            v[r * (AROUND + 1) + a] = q;
+            k[r * (AROUND + 1) + a] = w;
+        }
+    uint32_t n = 0;
+    for (uint32_t r = 0; r < RINGS; ++r)
+        for (uint32_t a = 0; a < AROUND; ++a) {
+            const uint32_t p = r * (AROUND + 1) + a, q = p + AROUND + 1;
+            idx[n++] = p; idx[n++] = q + 1; idx[n++] = p + 1;
+            idx[n++] = p; idx[n++] = q; idx[n++] = q + 1;
+        }
+    return artfSceneAddSkinnedMesh(s, v, (RINGS + 1) * (AROUND + 1), idx, n, k);
+}
+
+static ArtfInstance crowd[2500];
+
+static void crowdBend(ArtfScene* s, float time) {
+    for (int i = 0; i < 2500; ++i) {
+        const float angle = sinf(time * 2.f + (float)i * .37f) * .8f;
+        const ArtfTransform turn = artfTransformTrs(artfVec3(0, 0, 0), artfQuatAxisAngle(artfVec3(0, 0, 1), angle), artfVec3(1, 1, 1));
+        ArtfTransform joints[2] = {artfTransformIdentity(), turn};
+        joints[1].m[3] = -turn.m[1];
+        joints[1].m[7] = 1.f - turn.m[5];
+        artfInstanceSetJoints(s, crowd[i], joints, 2);
+    }
+}
+
+static void sceneCrowd(ArtfScene* s) {
+    ArtfMesh figure = crowdMesh(s), ground = artfSceneAddPlane(s, 400.f, 40.f);
+    ArtfMaterialDesc cloth = {artfVec3(.6f, .3f, .2f), 0, .3f, .5f, artfVec3(0, 0, 0)};
+    ArtfMaterialDesc soil = {artfVec3(.4f, .4f, .38f), 0, .1f, .8f, artfVec3(0, 0, 0)};
+    ArtfMaterial m = artfSceneAddMaterial(s, &cloth);
+    artfSceneAddInstance(s, ground, artfSceneAddMaterial(s, &soil), NULL);
+    for (int i = 0; i < 2500; ++i) {
+        const ArtfTransform t = artfTransformAt((float)(i % 50) * 2.f - 49.f, 0, -(float)(i / 50) * 4.f, 1.f);
+        crowd[i] = artfSceneAddInstance(s, figure, m, &t);
+    }
+    crowdBend(s, 0);
+    ArtfCamera c = {artfVec3(0, 6, 12), artfVec3(0, 0, -40), artfVec3(0, 1, 0), 1.0f, .1f};
+    artfSceneSetCamera(s, &c);
+}
+
 static void sceneHeavy(ArtfScene* s) {
     ArtfMesh ball = artfSceneAddSphere(s, 1.f, 192, 256);
     ArtfMaterialDesc d = {artfVec3(.5f, .6f, .75f), 0, .5f, .2f, artfVec3(0, 0, 0)};
@@ -428,6 +505,8 @@ int main(int argc, char** argv) {
     int frames = 0, fieldSide = 100;
     ArtfView view = ARTF_VIEW_LIT;
     bool passes = false;
+    float hlodCell = 0, streamBudget = -1;
+    uint32_t particles = 0;
     HoleOptions hole = {0, 0, 74.1f, 3.44f, 0, 19.f, 1.f, .6f, 0, 0, -1.f, 1, false, 0, .9f, -1.f, -1000.f, -1000.f}; /* (the eye of the film's own pictures) */
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -473,6 +552,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--motion-blur") && i + 1 < argc) post.motionBlur = (float)atof(argv[++i]);
         else if (!strcmp(a, "--indirect")) indirect = true;
         else if (!strcmp(a, "--through-walls")) throughWalls = true;
+        else if (!strcmp(a, "--hlod")) hlodCell = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 64.f;
+        else if (!strcmp(a, "--particles") && i + 1 < argc) particles = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(a, "--stream-meshes")) streamBudget = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 0.f;
         else if (!strcmp(a, "--focus") && i + 1 < argc) post.focus = (float)atof(argv[++i]);
         else if (!strcmp(a, "--aperture") && i + 1 < argc) post.aperture = (float)atof(argv[++i]);
         else if (!strcmp(a, "--fog") && i + 4 < argc) { for (int k = 0; k < 4; ++k) fog[k] = (float)atof(argv[++i]); }
@@ -552,6 +634,8 @@ int main(int argc, char** argv) {
     else if (!strcmp(sceneName, "layers")) sceneLayers(s);
     else if (!strcmp(sceneName, "lights")) sceneLights(s);
     else if (!strcmp(sceneName, "outdoors")) sceneOutdoors(s);
+    else if (!strcmp(sceneName, "forest")) sceneForest(s);
+    else if (!strcmp(sceneName, "crowd")) sceneCrowd(s);
     else if (isHole) sceneBlackHole(s, &hole);
     else sceneSpheres(s);
     if (pngAlpha) artfSceneSetBackgroundAlpha(s, 0);
@@ -617,6 +701,52 @@ int main(int argc, char** argv) {
         trace.maxSamples = traceSamples;
         artfSceneSetTrace(s, &trace);
     }
+    if (hlodCell > 0) {
+        const double h0 = artfNowMs();
+        ArtfHlodDesc hlod;
+        memset(&hlod, 0, sizeof hlod);
+        hlod.cell = hlodCell;
+        const uint32_t made = artfSceneBuildHlod(s, &hlod);
+        printf("%u merged meshes in %.1f ms\n", made, artfNowMs() - h0);
+    }
+    ArtfEmitter emitter = 0;
+    if (particles) {
+        ArtfEmitterDesc e;
+        memset(&e, 0, sizeof e);
+        e.position = artfVec3(0, 0, 0);
+        e.area = 1.f;
+        e.velocity = artfVec3(0, 6, 0);
+        e.spread = .6f;
+        e.gravity = artfVec3(0, -6, 0);
+        e.drag = .2f;
+        e.life = 3;
+        e.rate = (float)particles / 3.f;
+        e.size = .08f;
+        e.sizeEnd = .03f;
+        e.color = artfVec3(1, .7f, .3f);
+        e.colorEnd = artfVec3(.4f, .4f, 1);
+        e.opacity = 1;
+        e.opacityEnd = .1f;
+        e.glow = 1;
+        e.most = particles;
+        e.turbulence = 2;
+        e.ground = true;
+        e.groundHeight = -1;
+        e.bounce = .4f;
+        e.spin = 1;
+        e.parallel = true;
+        emitter = artfSceneAddEmitter(s, &e);
+        artfEmitterBurst(s, emitter, particles / 2);
+        for (int k = 0; k < 60; ++k) artfEmitterStep(s, emitter, 1.f / 60.f);
+    }
+    if (streamBudget >= 0) {
+        ArtfResidencyDesc residency;
+        memset(&residency, 0, sizeof residency);
+        residency.mode = ARTF_RESIDENCY_AUTOMATIC;
+        residency.meshes = true;
+        residency.meshBudget = (size_t)(streamBudget * 1048576.f);
+        artfSceneSetResidency(s, &residency);
+    }
     printf("scene built in %.1f ms, %u instances\n", artfNowMs() - t0, artfSceneInstanceCount(s));
 
     if (hole.sequence > 0 && out) {
@@ -663,6 +793,8 @@ int main(int argc, char** argv) {
                 hole.time += .2f;
                 sceneBlackHole(s, &hole);
             }
+            if (emitter) artfEmitterStep(s, emitter, 1.f / 60.f);
+            if (!strcmp(sceneName, "crowd")) crowdBend(s, (float)i / 60.f);
             const double a = artfNowMs();
             artfRendererDraw(r, s);
             const double b = artfNowMs() - a;

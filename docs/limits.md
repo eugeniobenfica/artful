@@ -31,7 +31,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   the sixteen lights with no shadows, its own light, and light from all around (the picture, or the sky's two colors:
   not probes, not fog); what is less than half there is gone through. One ray for each 2 x 2 pixels, as the march.
 - Bones run on the GPU when Vulkan draws; targets, and bones on the CPU or Metal, go per instance on the CPU. What
-  bends is not culled by its parts, and has no levels of detail.
+  bends is not culled by its parts. Its levels are made when it is added with the lod feature on (not when the feature
+  is turned on later), and each instance holds a copy of each level, a third more memory than the whole alone; an
+  instance chooses by its mesh at rest, not by how a pose moved it.
 - ASTC is its low dynamic range profile: a block in high dynamic range decodes to magenta on the CPU. The CPU makes
   blocks into pixels when first drawn, not sample by sample, for all mipmaps. A streamed texture is plain pixels.
 - A material in C picks its mipmap from neighbouring pixels along a row, on the CPU, so a surface slanted the other way
@@ -61,6 +63,19 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   work. What it gives reflections is as rough as the probes are: a mirror shows its color, not what it would see.
 - Particles are stepped on the calling thread, one instance each; they are not traced, unless the whole frame is.
   They bounce on a flat ground only, not on what the scene holds, and their wind is noise, not a fluid.
+- Emitters of many (`parallel`) go after all other layers, in the order of their places, not by depth: one nearer
+  that comes first hides what is behind it where it is dense. They are not traced, cast no shadow, and Metal leaves
+  them out. The steps are kept for what draws, 120 of them: a renderer made later, or one that missed more, starts
+  them over from the oldest kept. Born at a step, a particle's place is where the scene thinks one is free: one that
+  dies later than the scene reckoned, by a rounding, is replaced. The GPU and the CPU agree to a rounding, not a bit,
+  and turbulence makes that grow.
+- Merged meshes far away (`artfSceneBuildHlod`) do not follow what they hold: instances moved, removed or changed
+  after it are drawn as they were merged, until it is built again. They hold the opacity of what they merged while it
+  is far. One merged mesh is one material: a cube of many materials makes one for each. Building them reads each
+  instance's first lighter level, on all cores: 1.4 s for the 80,000 of `--scene forest`.
+- Meshes' residency holds levels whole, not parts of them, and only of meshes with levels. What is not held is gone
+  from memory only for a mesh that can be read again (`artfSceneAddMeshStreamed`); reading it again makes its levels
+  again, on the calling thread, which takes as long as adding it did.
 - A clear coat and sheen are their factors: their textures, and sheen's roughness, are not read. Sheen is Burley's
   rim, not the Charlie lobe glTF's sample viewer draws. The coat has the surface's own normal.
 - A sky (`artfSceneSetSky`) scatters light once unless `multiple` asks for more, and then every order is taken to
@@ -88,8 +103,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - A black hole bends only its own disc and stars: what the scene holds is drawn in front of it, straight.
   Its gas is painted, as the film's was, and moved by a two-dimensional fluid with no magnetic field; both
   are maps, which show their texels when the eye comes close.
-- A removed mesh gives back GPU memory, but its handle's place in the scene stays used. Residency manages textures
-  only, and keeps their mipmaps in main memory. A glTF file's JSON is read on the calling thread, and its images and meshes made on
+- A removed mesh gives back GPU memory, but its handle's place in the scene stays used. Residency keeps textures'
+  mipmaps in main memory. A glTF file's JSON is read on the calling thread, and its images and meshes made on
   all cores; all of it can go to another thread with `artfPrepareModel`. A scene holds up to 1024 textures on the GPU (beyond that they
   draw white).
 - Making levels of detail takes time, on the calling thread: about half a second for 100,000 triangles

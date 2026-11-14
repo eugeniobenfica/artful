@@ -42,6 +42,8 @@ uint32_t* artfShaderOverlayVertex(size_t* size);
 uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides, bool hardware);
 /* Taking out noise: time; a pass of the filter in space; and back to light. */
 uint32_t* artfShaderSkin(size_t* size);
+/* Emitters of many: each particle moved by the steps its emitter made, then an instance of the quad facing the eye. */
+uint32_t* artfShaderSwarm(size_t* size);
 uint32_t* artfShaderMeshletCull(size_t* size, ArtfCullPhase phase);
 uint32_t* artfShaderShadowCull(size_t* size);
 uint32_t* artfShaderDenoiseLight(size_t* size);

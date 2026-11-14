@@ -97,7 +97,23 @@ typedef struct ArtfMeshData {
     float lodErrors[ARTF_MAX_LODS];
     uint32_t lodCount;
     bool isLod;
+    /* What bends has levels apart (scale.c), each with a skin of its own: on the mesh given, those meshes; on an
+     * instance's copy of it, the copies of them that instance takes in turn. home: on each such copy, the copy of the
+     * whole + 1, which holds the list. The backends never see these: an instance's mesh is the level it takes. */
+    uint32_t skinLods[ARTF_MAX_LODS];
+    float skinLodErrors[ARTF_MAX_LODS];
+    uint32_t skinLodCount, home;
+    /* Residency (scale.c): of this mesh's levels (0 the whole, k its lods[k - 1]), the first that is held: those before
+     * it are drawn as that one. evicted: this mesh's own triangles are not on the GPU, nor, if it can be read again,
+     * in memory. */
+    uint32_t residentFrom;
+    bool evicted;
+    bool streamed;  /* it can be read again (artfSceneAddMeshStreamed) */
 } ArtfMeshData;
+
+/* The error of a mesh's level i, as both backends choose by it: 0, always taken, where the levels before it are not
+ * held. */
+ARTF_INLINE float artfMeshLevelError(const ArtfMeshData* m, uint32_t i) { return i < m->residentFrom ? 0.f : m->lodErrors[i]; }
 
 typedef struct ArtfTextureData {
     int width, height, mipCount;
@@ -631,7 +647,64 @@ struct ArtfScene {
     float* lut;                 /* ArtfPostDesc.lut's copy, lutSize^3 RGB, or NULL */
     size_t lutFloats;
     uint64_t lutVersion;        /* a new one */
+    struct ArtfScale* scale;    /* scale.c's: merged meshes, levels of what bends, meshes' residency; NULL: none of it */
 };
+
+/* ---- scale.c ---- */
+
+/* What a frame decides before any backend draws, the same for all: which cubes show their merged mesh, which level
+ * each instance of what bends takes, which levels of meshes are held. Costs nothing to a scene that uses none. */
+void artfSceneScaleStep(ArtfScene* s, int width, int height);
+void artfScaleFree(struct ArtfScale* scale);
+/* Lighter versions of a mesh that bends, made when it is added; and an instance's copies of them, after its copy of the
+ * whole (home). */
+void artfSceneSkinLevels(ArtfScene* s, uint32_t mesh);
+void artfSceneCopySkinLevels(ArtfScene* s, uint32_t source, uint32_t home);
+/* scene.c's, for scale.c: lighter versions of a mesh (touching no scene); a place for a mesh; an instance by handle,
+ * NULL if there is none, said to no one; and an instance that changed, for what keeps copies. */
+uint32_t artfSceneMakeLevels(const ArtfMeshData* m, ArtfMeshData* made, float* errors);
+uint32_t artfSceneMeshPlace(ArtfScene* s, const ArtfMeshData* m);
+ArtfInstanceData* artfSceneInstance(ArtfScene* s, ArtfInstance i);
+void artfSceneInstanceChanged(ArtfScene* s, ArtfInstanceData* d);
+
+/* The mesh drawn in place of this one when its own triangles are not held: its first level that is. */
+ARTF_INLINE uint32_t artfMeshHeld(const ArtfScene* s, uint32_t mesh) {
+    const ArtfMeshData* m = &s->meshes.items[mesh];
+    return m->residentFrom ? m->lods[m->residentFrom - 1] : mesh;
+}
+
+/* ---- emitters of many (particles.c) ----
+ * A particle is twelve floats, three vec4s, on both backends: where it is and its age (below 0: none); how fast it
+ * goes and its angle; how fast it turns, and its birth's number (as bits). A step of an emitter is ARTF_SWARM_ROWS
+ * vec4s, as the GPU reads them (particles.c says which). */
+#define ARTF_SWARM_FLOATS 12
+#define ARTF_SWARM_ROWS 8
+#define ARTF_SWARM_STEPS 120 /* steps kept for what draws: one that missed more starts its particles over */
+typedef struct ArtfSwarm ArtfSwarm;
+ArtfSwarm* artfSwarmNew(ArtfScene* s, const ArtfEmitterDesc* desc, uint32_t index, uint32_t material, uint32_t quad);
+void artfSwarmFree(ArtfSwarm* w);
+void artfSwarmSet(ArtfSwarm* w, const ArtfEmitterDesc* desc);
+void artfSwarmStep(ArtfScene* s, ArtfSwarm* w, float seconds, uint32_t burst);
+uint32_t artfSwarmAlive(const ArtfSwarm* w);
+/* The emitters of many in a scene, in order: how many, and each. */
+uint32_t artfSceneSwarms(const ArtfScene* s, ArtfSwarm** out, uint32_t room);
+/* What a backend reads of one: how many places; how many steps it made, and the oldest still kept (one that has seen
+ * less than that starts over, empty, from there), each as rows; its first material (of ARTF_SWARM_SHADES, from its
+ * first color to its last); and its rows for facing the eye as it is now. */
+#define ARTF_SWARM_SHADES 8
+uint32_t artfSwarmPlaces(const ArtfSwarm* w);
+uint64_t artfSwarmStepCount(const ArtfSwarm* w);
+uint64_t artfSwarmOldest(const ArtfSwarm* w);
+const float* artfSwarmStepRows(const ArtfSwarm* w, uint64_t step); /* ARTF_SWARM_ROWS * 4 floats */
+uint32_t artfSwarmMaterial(const ArtfSwarm* w);
+void artfSwarmFaceRows(const ArtfScene* s, const ArtfSwarm* w, float* rows); /* ARTF_SWARM_ROWS * 4 floats */
+/* The CPU's own copy of the particles, brought up to date on the pool's workers; and an instance of each place, facing
+ * the eye as those rows say (a zero transform where there is none). Both as the GPU does it. */
+typedef struct ArtfPool ArtfPool;
+const float* artfSwarmCpu(ArtfSwarm* w, ArtfPool* pool);
+void artfSwarmFace(const float* particles, const float* face, uint32_t first, uint32_t end, ArtfInstanceData* out);
+/* One step of a particle, as the GPU's shader does it. */
+void artfSwarmMove(float* particle, const float* step, uint32_t place);
 
 /* ---- light from all around, from a picture (environment.c) ----
  * Maps of an octahedron around +y, folded below, each with a border of one texel: five of light as surfaces of
@@ -835,7 +908,7 @@ ARTF_INLINE uint32_t artfMeshLevel(const ArtfScene* s, uint32_t mesh, float lodS
     uint32_t chosen = mesh;
     if (lodScale > 0)
         for (uint32_t i = 0; i < m->lodCount; ++i)
-            if (m->lodErrors[i] * maxScale * lodScale <= distance) chosen = m->lods[i];
+            if (artfMeshLevelError(m, i) * maxScale * lodScale <= distance) chosen = m->lods[i];
     return chosen;
 }
 
@@ -851,7 +924,7 @@ ARTF_INLINE uint32_t artfMeshFade(const ArtfScene* s, uint32_t mesh, float lodSc
     *other = mesh;
     if (lodScale > 0)
         for (uint32_t i = 0; i < m->lodCount; ++i) {
-            const float at = m->lodErrors[i] * maxScale * lodScale;
+            const float at = artfMeshLevelError(m, i) * maxScale * lodScale;
             if (at > distance) continue;
             *other = chosen;
             chosen = m->lods[i];

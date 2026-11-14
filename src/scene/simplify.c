@@ -38,6 +38,11 @@ typedef struct Simplifier {
     float* errors;       /* how far what this vertex stands for may have moved */
     uint32_t stamp;
     ARTF_VEC(Candidate) heap;
+    /* what bends: what moves each vertex, and the box's size, for targets in its units */
+    const ArtfVertexSkin* skin;
+    const float* morphs;
+    uint32_t morphCount;
+    double extent;
 } Simplifier;
 
 static void quadricAdd(Quadric* q, const Quadric* o) {
@@ -107,6 +112,36 @@ static bool seamEdge(const Simplifier* s, uint32_t a, uint32_t b) {
     return borderEdge(s, a, b) && borderEdge(s, s->twins[a] - 1, s->twins[b] - 1);
 }
 
+/* How far apart what bends two vertices is, as a squared length of the unit box: weights that differ cost as much as
+ * moving a twentieth of the mesh, and targets as far as they would move each apart. */
+#define SKIN_APART .0025
+static double bendApart(const Simplifier* s, uint32_t a, uint32_t b) {
+    double apart = 0;
+    if (s->skin) {
+        /* (each joint's pull on one, less its pull on the other) */
+        const ArtfVertexSkin* two[2] = {&s->skin[a], &s->skin[b]};
+        uint16_t joints[16];
+        float pull[16];
+        int n = 0;
+        for (int v = 0; v < 2; ++v)
+            for (int i = 0; i < 8; ++i) {
+                if (two[v]->weights[i] == 0) continue;
+                int k = 0;
+                while (k < n && joints[k] != two[v]->joints[i]) ++k;
+                if (k == n) { joints[n] = two[v]->joints[i]; pull[n++] = 0; }
+                pull[k] += v ? -two[v]->weights[i] : two[v]->weights[i];
+            }
+        float differ = 0;
+        for (int k = 0; k < n; ++k) differ += fabsf(pull[k]);
+        apart += (double)(differ * .5f) * (double)(differ * .5f) * SKIN_APART;
+    }
+    for (uint32_t t = 0; t < s->morphCount; ++t) {
+        const float *p = s->morphs + ((size_t)t * s->vertexCount + a) * 6, *q = s->morphs + ((size_t)t * s->vertexCount + b) * 6;
+        for (int i = 0; i < 3; ++i) apart += ((double)p[i] - q[i]) * ((double)p[i] - q[i]) / (s->extent * s->extent);
+    }
+    return apart;
+}
+
 /* What moving one end of an edge onto the other costs, the cheaper way round. */
 static void pushEdge(Simplifier* s, uint32_t a, uint32_t b) {
     const bool seam = s->locked[a] && s->locked[b] && seamEdge(s, a, b);
@@ -114,8 +149,9 @@ static void pushEdge(Simplifier* s, uint32_t a, uint32_t b) {
     if (!canA && !canB) return;
     Quadric q = s->quadrics[a];
     quadricAdd(&q, &s->quadrics[b]);
-    const double toB = canA ? quadricError(&q, &s->positions[(size_t)b * 3]) : 1e300;
-    const double toA = canB ? quadricError(&q, &s->positions[(size_t)a * 3]) : 1e300;
+    const double bend = s->skin || s->morphCount ? bendApart(s, a, b) : 0;
+    const double toB = canA ? quadricError(&q, &s->positions[(size_t)b * 3]) + bend : 1e300;
+    const double toA = canB ? quadricError(&q, &s->positions[(size_t)a * 3]) + bend : 1e300;
     const uint32_t from = toB <= toA ? a : b, to = toB <= toA ? b : a;
     const Candidate c = {(float)(toB <= toA ? toB : toA), from, to, s->versions[from], s->versions[to]};
     heapPush(s, c);
@@ -320,8 +356,16 @@ static void lockBorders(Simplifier* s) {
 }
 
 uint32_t artfSimplify(const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const uint32_t* targets, uint32_t targetCount, ArtfSimplified* out) {
+    return artfSimplifySkinned(vertices, vertexCount, indices, indexCount, targets, targetCount, out, NULL, NULL, 0);
+}
+
+uint32_t artfSimplifySkinned(const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const uint32_t* targets, uint32_t targetCount, ArtfSimplified* out,
+                             const ArtfVertexSkin* skin, const float* morphs, uint32_t morphCount) {
     Simplifier sim, *s = &sim;
     memset(s, 0, sizeof *s);
+    s->skin = skin;
+    s->morphs = morphs;
+    s->morphCount = morphs ? morphCount : 0;
     s->vertexCount = vertexCount;
     s->triangleCount = indexCount / 3;
     s->positions = artfMalloc((size_t)vertexCount * 24);
@@ -349,6 +393,7 @@ uint32_t artfSimplify(const ArtfVertex* vertices, uint32_t vertexCount, const ui
     double extent = 0;
     for (int k = 0; k < 3; ++k) extent = hi[k] - lo[k] > extent ? hi[k] - lo[k] : extent;
     if (extent <= 0) extent = 1;
+    s->extent = extent;
     for (uint32_t i = 0; i < vertexCount; ++i) {
         s->positions[(size_t)i * 3] = (vertices[i].px - lo[0]) / extent;
         s->positions[(size_t)i * 3 + 1] = (vertices[i].py - lo[1]) / extent;

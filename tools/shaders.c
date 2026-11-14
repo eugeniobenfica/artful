@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
     SAVE("traceHardware", artfShaderTrace(&size, 1024, NULL, 0, true, true));
     SAVE("traceGuides", artfShaderTrace(&size, 1024, NULL, 0, true, false));
     SAVE("skin", artfShaderSkin(&size));
+    SAVE("swarm", artfShaderSwarm(&size));
     SAVE("meshletCull", artfShaderMeshletCull(&size, ARTF_CULL_ALL));
     SAVE("meshletCullEarly", artfShaderMeshletCull(&size, ARTF_CULL_EARLY));
     SAVE("meshletCullLate", artfShaderMeshletCull(&size, ARTF_CULL_LATE));

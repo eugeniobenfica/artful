@@ -76,6 +76,7 @@ typedef struct Slot {
     GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
     GpuBuffer decals;                  /* the decals that may show (63) */
     GpuBuffer probes;                  /* light that bounced (62) */
+    GpuBuffer swarmRows;               /* this frame's rows for emitters of many (67) */
     GpuBuffer shadow, shadowList, shadowCommands, shadowViewCommands, shadowCasters, posed, skinTable, motion, meshletCommands, meshletState, layerCommands;
     VkBuffer meshletBoundTable; /* what its set says bindings 40 and 41 are */
     bool meshletBound;
@@ -215,6 +216,16 @@ typedef struct Vulkan {
     uint64_t skinRemovals, skinScene;
     VkPipeline skinPipeline;
     ARTF_VEC(uint32_t) skinJobs, scratchSkinCounts;
+    /* emitters of many (particles.c): their particles, each emitter's after the one before (binding 66); which they
+     * are, how many steps each has seen, and where each starts */
+    GpuBuffer swarmState;
+    VkPipeline swarmPipeline;
+    ARTF_VEC(ArtfSwarm*) swarms, swarmsBefore;
+    ARTF_VEC(uint64_t) swarmSeen;
+    ARTF_VEC(uint32_t) swarmAt;
+    uint32_t swarmRoom;   /* particles the instances' and copies' buffers have room for, after the rest */
+    uint32_t swarmPlaces; /* this frame's */
+    uint64_t swarmScene;
 
     VkRenderPass renderPass, earlyPass, latePass;
     VkDescriptorSetLayout setLayout;
@@ -1061,7 +1072,7 @@ static bool pipelinesMake(Vulkan* v) {
         {56, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {57, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {58, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}, {59, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}};
     /* (and with the ray tracing hardware, the top level) */
-    DescriptorSetLayoutBinding all[66];
+    DescriptorSetLayoutBinding all[68];
     uint32_t bindingCount = v->floats ? 64 : 54;
     memcpy(all, bindings, bindingCount * sizeof *all);
     if (v->rayQuery) {
@@ -1071,13 +1082,17 @@ static bool pipelinesMake(Vulkan* v) {
     /* (the meshlets view's table: written when it is first asked for) */
     const DescriptorSetLayoutBinding meshletIds = {65, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL};
     all[bindingCount++] = meshletIds;
+    /* (emitters of many: their particles, and this frame's rows for them) */
+    const DescriptorSetLayoutBinding swarmState = {66, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, swarmRows = {67, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL};
+    all[bindingCount++] = swarmState;
+    all[bindingCount++] = swarmRows;
     const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, bindingCount, all};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     const PushConstantRange push[2] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}};
     const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 1, &v->setLayout, 2, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
-    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 55}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
+    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 57}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, v->rayQuery ? 4u : 3u, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -1396,7 +1411,11 @@ static bool colorsReset(Vulkan* v) {
  * room for every instance in each of its levels, as any of them may be the one chosen; then the layers,
  * which the CPU writes. */
 static uint32_t layersAt(const Vulkan* v) { return v->instanceCapacity * (ARTF_MAX_LODS + 1) * 4; }
-static VkDeviceSize visibleSize(const Vulkan* v) { return ((VkDeviceSize)layersAt(v) + (VkDeviceSize)v->instanceCapacity * 3) * 2 * 4; }
+/* (and after all that, a copy for each particle of emitters of many: their instances follow the instances and their
+ * motion, at twice the room for instances) */
+static uint32_t swarmCopiesAt(const Vulkan* v) { return layersAt(v) + v->instanceCapacity * 3; }
+static VkDeviceSize visibleSize(const Vulkan* v) { return ((VkDeviceSize)swarmCopiesAt(v) + v->swarmRoom) * 2 * 4; }
+static VkDeviceSize instanceBytes(const Vulkan* v) { return (VkDeviceSize)v->instanceCapacity * 128 + (VkDeviceSize)v->swarmRoom * 64; }
 
 /* (below that many meshlets, about 65,000 triangles, what culling saves is less than it costs) */
 enum { MESHLET_COMMANDS = 1 << 16, MESHLET_LEAST = 512, MESHLET_HEADER = 12, MESHLET_DRAWN = 8 };
@@ -1495,7 +1514,7 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
                 const ArtfMeshData* m = &scene->meshes.items[i];
                 if (i < v->meshes.len && (m->removed || v->meshes.items[i].generation == m->generation)) continue;
                 MeshRange range = {0, 0, 0, 0, m->skin ? m->pose.applied : m->deformVersion, 0, 0, m->generation};
-                if (m->vertexCount) {
+                if (m->vertexCount && !m->evicted) {
                     const uint32_t atVertex = spanTake(&v->vertexSpans, m->vertexCount, &v->vertexCount, (uint32_t)(v->vertices.size / sizeof(ArtfPackedVertex)));
                     const uint32_t atIndex = atVertex == UINT32_MAX ? UINT32_MAX : spanTake(&v->indexSpans, m->indexCount, &v->indexCount, (uint32_t)(v->indices.size / 4));
                     const uint32_t atColor = atIndex == UINT32_MAX || !m->colors ? 0 : spanTake(&v->colorSpans, m->vertexCount, &v->colorCount, (uint32_t)(v->colors.size / 4));
@@ -1566,7 +1585,7 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
             for (uint32_t k = 0; k < ARTF_MAX_LODS; ++k) {
                 const uint32_t id = k < m->lodCount ? m->lods[k] : 0;
                 memcpy(&row[12 + k], &id, 4);
-                row[16 + k] = k < m->lodCount ? m->lodErrors[k] : -1.f;
+                row[16 + k] = k < m->lodCount ? artfMeshLevelError(m, k) : -1.f;
             }
             memcpy(out, row, sizeof row);
         }
@@ -1598,14 +1617,15 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
         }
     }
 
-    if (scene->instances.len > v->instanceCapacity) {
+    if (scene->instances.len > v->instanceCapacity || v->swarmPlaces > v->swarmRoom) {
         v->vkDeviceWaitIdle(v->device);
-        v->instanceCapacity = (uint32_t)scene->instances.len * 2;
+        if (scene->instances.len > v->instanceCapacity) v->instanceCapacity = (uint32_t)scene->instances.len * 2;
+        if (v->swarmPlaces > v->swarmRoom) v->swarmRoom = v->swarmPlaces;
         for (int i = 0; i < SLOTS; ++i) {
             Slot* s = &v->slots[i];
             bufferFree(v, &s->instances);
             bufferFree(v, &s->visible);
-            if (!bufferNew(v, &s->instances, (VkDeviceSize)v->instanceCapacity * (sizeof(ArtfInstanceData) + 48), BUFFER_STORAGE, true)) return false;
+            if (!bufferNew(v, &s->instances, instanceBytes(v), BUFFER_STORAGE, true)) return false;
             if (!bufferNew(v, &s->visible, visibleSize(v), BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
             s->fresh = true;
         }
@@ -2605,7 +2625,7 @@ static bool syncShadowList(Vulkan* v, Slot* s, const ArtfScene* scene, uint32_t 
 #define KIND(d) (scene->materials.items[(d)->material].flags & ARTF_MATERIAL_MASK ? meshes : 0)
     for (size_t i = 0; i < scene->instances.len; ++i) {
         const ArtfInstanceData* d = &scene->instances.items[i];
-        if (!d->translucent) ++counts[KIND(d) + d->mesh];
+        if (!d->translucent) ++counts[KIND(d) + artfMeshHeld(scene, d->mesh)];
     }
     uint32_t* commands = s->shadowCommands.mapped;
     uint32_t at = 0;
@@ -2627,9 +2647,10 @@ static bool syncShadowList(Vulkan* v, Slot* s, const ArtfScene* scene, uint32_t 
         const ArtfInstanceData* d = &scene->instances.items[i];
         if (d->translucent) continue;
         uint32_t* entry = casters + ((size_t)n + 1) * 4;
+        const uint32_t held = artfMeshHeld(scene, d->mesh);
         entry[0] = (uint32_t)i;
-        entry[1] = d->mesh;
-        entry[2] = KIND(d) + d->mesh;
+        entry[1] = held;
+        entry[2] = KIND(d) + held;
         ++n;
     }
 #undef KIND
@@ -2696,6 +2717,139 @@ static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowF
         shadowDraw(v, c, s, v->shadowHolesPipeline, i * meshes * 2 + meshes, meshes);
     }
     v->vkCmdEndRenderPass(c);
+}
+
+/* ---- emitters of many ---- */
+
+/* Which there are, and how many particles in all. */
+static uint32_t swarmList(Vulkan* v, const ArtfScene* scene) {
+    v->swarms.len = 0;
+    const uint32_t count = artfSceneSwarms(scene, NULL, 0);
+    if (!count) return 0;
+    artfVecReserve(&v->swarms, count);
+    v->swarms.len = artfSceneSwarms(scene, v->swarms.items, count);
+    uint32_t places = 0;
+    for (size_t k = 0; k < v->swarms.len; ++k) places += artfSwarmPlaces(v->swarms.items[k]);
+    return places;
+}
+
+static bool swarmPipelineMake(Vulkan* v) {
+    if (v->swarmPipeline) return true;
+    size_t size;
+    uint32_t* code = artfShaderSwarm(&size);
+    VkShaderModule module = shaderModule(v, code, size);
+    if (!module) return false;
+    const ComputePipelineCreateInfo info = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
+    const bool ok = v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &info, NULL, &v->swarmPipeline) == VK_OK;
+    v->vkDestroyShaderModule(v->device, module, NULL);
+    return ok;
+}
+
+/* Where each emitter's particles are: when they change, each that was there keeps what it had, in its new place; and
+ * this slot's rows: the steps each has not seen, and how to face the eye. */
+static bool syncSwarms(Vulkan* v, Slot* s, const ArtfScene* scene) {
+    const size_t count = v->swarms.len;
+    if (!count) return true;
+    if (!swarmPipelineMake(v)) return false;
+    const bool same = v->swarmScene == scene->id && v->swarmsBefore.len == count && !memcmp(v->swarmsBefore.items, v->swarms.items, count * sizeof *v->swarms.items);
+    if (!same) {
+        v->vkDeviceWaitIdle(v->device);
+        GpuBuffer state;
+        if (!bufferNew(v, &state, (VkDeviceSize)v->swarmPlaces * ARTF_SWARM_FLOATS * 4, BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
+        ARTF_VEC(uint64_t) seen = {0};
+        ARTF_VEC(BufferCopy) copies = {0};
+        uint32_t at = 0;
+        for (size_t k = 0; k < count; ++k) {
+            uint64_t had = UINT64_MAX;
+            for (size_t j = 0; j < v->swarmsBefore.len && v->swarmScene == scene->id; ++j)
+                if (v->swarmsBefore.items[j] == v->swarms.items[k] && v->swarmSeen.items[j] != UINT64_MAX) {
+                    had = v->swarmSeen.items[j];
+                    const BufferCopy copy = {(VkDeviceSize)v->swarmAt.items[j] * ARTF_SWARM_FLOATS * 4, (VkDeviceSize)at * ARTF_SWARM_FLOATS * 4, (VkDeviceSize)artfSwarmPlaces(v->swarms.items[k]) * ARTF_SWARM_FLOATS * 4};
+                    artfVecPush(&copies, copy);
+                }
+            artfVecPush(&seen, had);
+            at += artfSwarmPlaces(v->swarms.items[k]);
+        }
+        if (copies.len) {
+            VkCommandBuffer c = oneShotBegin(v);
+            v->vkCmdCopyBuffer(c, v->swarmState.buffer, state.buffer, (uint32_t)copies.len, copies.items);
+            if (!oneShotEnd(v, c)) return false;
+        }
+        artfVecFree(&copies);
+        bufferFree(v, &v->swarmState);
+        v->swarmState = state;
+        for (int i = 0; i < SLOTS; ++i) bindStorage(v, &v->slots[i], 66, &v->swarmState);
+        v->swarmSeen.len = 0;
+        v->swarmAt.len = 0;
+        v->swarmsBefore.len = 0;
+        at = 0;
+        for (size_t k = 0; k < count; ++k) {
+            artfVecPush(&v->swarmSeen, seen.items[k]);
+            artfVecPush(&v->swarmAt, at);
+            artfVecPush(&v->swarmsBefore, v->swarms.items[k]);
+            at += artfSwarmPlaces(v->swarms.items[k]);
+        }
+        artfVecFree(&seen);
+        v->swarmScene = scene->id;
+    }
+    /* the rows: where each emitter's start, then each one's */
+    size_t rows = count;
+    for (size_t k = 0; k < count; ++k) {
+        const ArtfSwarm* w = v->swarms.items[k];
+        const uint64_t seen = v->swarmSeen.items[k];
+        const uint64_t from = seen == UINT64_MAX || seen < artfSwarmOldest(w) ? artfSwarmOldest(w) : seen;
+        rows += 6 + (size_t)(artfSwarmStepCount(w) - from) * ARTF_SWARM_ROWS;
+    }
+    if (rows * 16 > s->swarmRows.size) {
+        bufferFree(v, &s->swarmRows);
+        if (!bufferNew(v, &s->swarmRows, rows * 32, BUFFER_STORAGE, true)) return false;
+        bindStorage(v, s, 67, &s->swarmRows);
+    }
+    float* out = s->swarmRows.mapped;
+    uint32_t row = (uint32_t)count;
+    for (size_t k = 0; k < count; ++k) {
+        ArtfSwarm* w = v->swarms.items[k];
+        const uint64_t seen = v->swarmSeen.items[k];
+        const bool fresh = seen == UINT64_MAX || seen < artfSwarmOldest(w);
+        const uint64_t from = fresh ? artfSwarmOldest(w) : seen, steps = artfSwarmStepCount(w) - from;
+        memcpy(out + k * 4, &row, 4);
+        float* at = out + (size_t)row * 4;
+        const uint32_t head[8] = {(uint32_t)steps, artfSwarmPlaces(w), v->swarmAt.items[k], fresh ? 1u : 0u,
+                                  v->instanceCapacity * 2 + v->swarmAt.items[k], swarmCopiesAt(v) + v->swarmAt.items[k], scene->particleQuad - 1, 0};
+        memcpy(at, head, sizeof head);
+        float face[ARTF_SWARM_ROWS * 4];
+        artfSwarmFaceRows(scene, w, face);
+        memcpy(at + 8, face, 16 * sizeof *face);
+        for (uint64_t i = 0; i < steps; ++i) memcpy(at + 24 + i * ARTF_SWARM_ROWS * 4, artfSwarmStepRows(w, from + i), ARTF_SWARM_ROWS * 16);
+        row += 6 + (uint32_t)steps * ARTF_SWARM_ROWS;
+        v->swarmSeen.items[k] = artfSwarmStepCount(w);
+    }
+    return true;
+}
+
+/* Each emitter's particles, moved and turned to the eye, into this slot's instances and copies. */
+static void runSwarms(Vulkan* v, VkCommandBuffer c, Slot* s) {
+    if (!v->swarms.len) return;
+    memoryBarrier(v, c, STAGE_COMPUTE | STAGE_VERTEX_SHADER, STAGE_COMPUTE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
+    v->vkCmdBindPipeline(c, 1, v->swarmPipeline);
+    v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+    for (uint32_t k = 0; k < (uint32_t)v->swarms.len; ++k) {
+        v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &k);
+        v->vkCmdDispatch(c, (artfSwarmPlaces(v->swarms.items[k]) + 63) / 64, 1, 1);
+    }
+    memoryBarrier(v, c, STAGE_COMPUTE, STAGE_VERTEX_SHADER, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ);
+}
+
+/* All of them, after the other layers, in one draw of the quad: each over what is there, in their order. */
+static void drawSwarms(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene) {
+    if (!v->swarms.len || !scene->particleQuad) return;
+    const MeshRange* quad = &v->meshes.items[scene->particleQuad - 1];
+    const VkDeviceSize zero = 0;
+    v->vkCmdBindVertexBuffers(c, 0, 1, &v->vertices.buffer, &zero);
+    v->vkCmdBindIndexBuffer(c, v->indices.buffer, 0, 1 /* 32 bits */);
+    v->vkCmdBindPipeline(c, 0, v->particlePipeline);
+    v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+    v->vkCmdDrawIndexed(c, quad->indexCount, v->swarmPlaces, quad->firstIndex, quad->vertexOffset, swarmCopiesAt(v));
 }
 
 /* What shows what is behind it, the farthest first: its depth among what is there, and then its colors
@@ -2912,9 +3066,13 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     Vulkan* v = (Vulkan*)r;
     const double start = artfNowMs();
     if (v->lost) return false;
+    artfSceneScaleStep(scene, v->width, v->height);
     artfSceneFaceParticles(scene);
     if (v->targetsStale && !targetsRemake(v)) return false;
     if (!v->framebuffers[0]) return true; /* a window with no size */
+    const bool tracingNow = scene->trace.desc.mode != ARTF_TRACE_NONE;
+    v->swarmPlaces = tracingNow ? 0 : swarmList(v, scene);
+    if (tracingNow) v->swarms.len = 0;
     if (!syncScene(v, scene)) return false;
     if (!syncEnvironment(v, scene)) return false;
     if (v->floats && !syncLut(v, scene)) return false;
@@ -3033,6 +3191,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     memcpy(s->frame.mapped, &frame, sizeof frame);
     if (!syncLights(v, s, scene, &frame) || !syncIndirect(v, s, scene, &frame)) return false;
     syncSlot(v, s, scene);
+    if (!syncSwarms(v, s, scene)) return false;
     uint32_t layerCount = 0, traceAdding = 0;
     bool traceClear = false;
     if (!stagePoses(v, s, scene)) return false;
@@ -3208,6 +3367,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     passMark(v, c, s, "cull");
 
+    runSwarms(v, c, s);
     if (hole) {
         traceHole(v, c, s, &holeFrame, holeApart);
         passMark(v, c, s, "black hole");
@@ -3350,6 +3510,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     } else if (layerCount) {
         drawLayers(v, c, scene, layerCount);
     }
+    drawSwarms(v, c, s, scene);
     if (layerCount) passMark(v, c, s, "layers");
     if (tracing && (v->traceDone || scene->trace.desc.denoise)) {
         v->vkCmdBindPipeline(c, 0, v->traceShowPipeline);
@@ -3459,6 +3620,12 @@ static void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->traceInstances);
         rtFree(v);
         if (v->skinPipeline) v->vkDestroyPipeline(v->device, v->skinPipeline, NULL);
+        if (v->swarmPipeline) v->vkDestroyPipeline(v->device, v->swarmPipeline, NULL);
+        bufferFree(v, &v->swarmState);
+        artfVecFree(&v->swarms);
+        artfVecFree(&v->swarmsBefore);
+        artfVecFree(&v->swarmSeen);
+        artfVecFree(&v->swarmAt);
         for (int i = 0; i < 3; ++i)
             if (v->meshletPipelines[i]) v->vkDestroyPipeline(v->device, v->meshletPipelines[i], NULL);
         bufferFree(v, &v->meshletFlags);
@@ -3513,6 +3680,7 @@ static void vkFree(ArtfRenderer* r) {
             bufferFree(v, &s->shadowCommands);
             bufferFree(v, &s->posed);
             bufferFree(v, &s->skinTable);
+            bufferFree(v, &s->swarmRows);
             bufferFree(v, &s->meshletCommands);
             bufferFree(v, &s->layerCommands);
             bufferFree(v, &s->meshletState);

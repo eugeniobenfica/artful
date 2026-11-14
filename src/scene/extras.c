@@ -26,6 +26,7 @@ typedef struct EmitterData {
     uint32_t burst;  /* and at once, at the next step */
     uint32_t state;  /* (the same sequence everywhere) */
     bool removed;
+    ArtfSwarm* swarm; /* of many: particles.c's, and no instances */
 } EmitterData;
 
 typedef ARTF_VEC(EmitterData*) EmitterList;
@@ -44,6 +45,7 @@ static void emittersFree(void* list) {
     for (size_t i = 0; i < l->len; ++i) {
         artfFree(l->items[i]->particles);
         artfFree(l->items[i]->instances);
+        artfSwarmFree(l->items[i]->swarm);
         artfFree(l->items[i]);
     }
     artfVecFree(l);
@@ -96,10 +98,10 @@ ArtfEmitter artfSceneAddEmitter(ArtfScene* s, const ArtfEmitterDesc* desc) {
     e->desc = *desc;
     if (e->desc.most == 0) e->desc.most = 1024;
     if (e->desc.life <= 0) e->desc.life = 2.f;
-    e->count = e->desc.most;
+    e->count = desc->parallel ? 0 : e->desc.most;
     e->state = 0x9E3779B9u ^ (uint32_t)((EmitterList*)s->emitters)->len;
-    e->particles = artfCalloc(e->count, sizeof *e->particles);
-    e->instances = artfCalloc(e->count, sizeof *e->instances);
+    e->particles = artfCalloc(e->count + 1, sizeof *e->particles);
+    e->instances = artfCalloc(e->count + 1, sizeof *e->instances);
     for (int k = 0; k < EMITTER_SHADES; ++k) {
         const float t = (float)k / (float)(EMITTER_SHADES - 1);
         ArtfMaterialDesc m = artfMaterialDefaults();
@@ -113,6 +115,7 @@ ArtfEmitter artfSceneAddEmitter(ArtfScene* s, const ArtfEmitterDesc* desc) {
         e->shades[k] = artfSceneAddMaterial(s, &m);
     }
     const ArtfMesh quad = quadOf(s);
+    if (desc->parallel) e->swarm = artfSwarmNew(s, &e->desc, (uint32_t)((EmitterList*)s->emitters)->len, e->shades[0], quad - 1);
     for (uint32_t i = 0; i < e->count; ++i) {
         e->particles[i].age = -1.f;
         e->instances[i] = artfSceneAddInstance(s, quad, e->shades[0], NULL);
@@ -127,16 +130,32 @@ void artfEmitterSet(ArtfScene* s, ArtfEmitter emitter, const ArtfEmitterDesc* de
     EmitterData* e = emitterAt(s, emitter);
     if (!e) return;
     const uint32_t most = e->desc.most;
+    const bool parallel = e->desc.parallel;
     e->desc = *desc;
-    e->desc.most = most; /* (its particles are made: their number stays) */
+    e->desc.most = most; /* (its particles are made: their number stays, and what they are) */
+    e->desc.parallel = parallel;
     if (e->desc.life <= 0) e->desc.life = 2.f;
+    if (e->swarm) artfSwarmSet(e->swarm, &e->desc);
 }
 
 void artfSceneRemoveEmitter(ArtfScene* s, ArtfEmitter emitter) {
     EmitterData* e = emitterAt(s, emitter);
     if (!e) return;
     for (uint32_t i = 0; i < e->count; ++i) artfSceneRemoveInstance(s, e->instances[i]);
+    artfSwarmFree(e->swarm);
+    e->swarm = NULL;
     e->removed = true;
+}
+
+uint32_t artfSceneSwarms(const ArtfScene* s, ArtfSwarm** out, uint32_t room) {
+    const EmitterList* l = s->emitters;
+    uint32_t n = 0;
+    for (size_t i = 0; l && i < l->len; ++i)
+        if (l->items[i]->swarm && !l->items[i]->removed) {
+            if (n < room) out[n] = l->items[i]->swarm;
+            ++n;
+        }
+    return n;
 }
 
 /* A particle's transform, facing the eye: the quad's x to the eye's right, its face (+y) toward the eye, its z down the
@@ -206,6 +225,11 @@ void artfSceneFaceParticles(ArtfScene* s) {
 void artfEmitterStep(ArtfScene* s, ArtfEmitter emitter, float seconds) {
     EmitterData* e = emitterAt(s, emitter);
     if (!e || seconds < 0) return;
+    if (e->swarm) {
+        artfSwarmStep(s, e->swarm, seconds, e->burst);
+        e->burst = 0;
+        return;
+    }
     const ArtfEmitterDesc* d = &e->desc;
     /* born, then moved */
     e->owed += d->rate * seconds + (float)e->burst;
@@ -277,6 +301,7 @@ void artfEmitterBurst(ArtfScene* s, ArtfEmitter emitter, uint32_t count) {
 
 uint32_t artfEmitterAlive(const ArtfScene* s, ArtfEmitter emitter) {
     const EmitterData* e = emitterAt(s, emitter);
+    if (e && e->swarm) return artfSwarmAlive(e->swarm);
     uint32_t n = 0;
     for (uint32_t i = 0; e && i < e->count; ++i) n += e->particles[i].age >= 0;
     return n;
