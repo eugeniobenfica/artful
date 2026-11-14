@@ -284,13 +284,40 @@ typedef struct ArtfFrameData {
      * 0: all of it is. */
     float cullScale;
     float moving;       /* 1: something moved since the frame before, and the GPU has how (ArtfMotion); 0: the view alone */
-    float cullPad[2];
+    float view;         /* what the frame shows (ArtfView): 0, the picture */
+    float cullPad;
     /* More of the look (ArtfPostDesc): lift, and 1 when there is grading (lift, gamma, gain or a wheel); 1 / gamma, the
      * grain; gain, the frame's number (for the grain); the shadows', midtones' and highlights' colors, after them the
      * look-up table's side (0: none), how much of it, and the flare; the histogram's darkest and brightest shares
      * left out, the speed down, and 1 when the histogram is on. */
     float grade2[7][4];
 } ArtfFrameData;
+
+/* What a view other than the lit one does to a frame, on both backends: nothing after the frame (no bloom, exposure,
+ * fog, grading or what follows motion), and black behind the scene. */
+void artfFrameForView(ArtfFrameData* f, int view);
+
+/* What views show, as colors of the frame (light is their square), the same on the GPU: for a number, by a hash; for
+ * a level of detail; and a count, red to yellow to white. */
+ARTF_INLINE void artfViewColor(uint32_t k, float out[3]) {
+    uint32_t h = (k + 1u) * 0x9E3779B1u; /* (+ 1: the first is not grey) */
+    h ^= h >> 15;
+    h *= 0x85EBCA77u;
+    h ^= h >> 13;
+    for (int c = 0; c < 3; ++c) out[c] = (float)(96u + ((h >> (8 * c)) & 255u) % 160u) * (1.f / 255.f);
+}
+ARTF_INLINE void artfViewLevel(uint32_t level, float out[3]) {
+    for (int c = 0; c < 3; ++c) out[c] = level == 0 || (uint32_t)c + 1 == level ? 1.f : .25f;
+}
+ARTF_INLINE void artfViewHeat(uint32_t count, float out[3]) {
+    static const uint32_t steps[3] = {32, 8, 2};
+    for (int c = 0; c < 3; ++c) out[c] = (float)(count * steps[c] < 255u ? count * steps[c] : 255u) * (1.f / 255.f);
+}
+/* Of depth: white at the eye, half at this far. */
+#define ARTF_VIEW_DEPTH_HALF 10.f
+/* Of motion: grey for what stands still (a byte's 128: not between two), and how far from it a pixel of motion goes. */
+#define ARTF_VIEW_MOTION_STILL (128.f / 255.f)
+#define ARTF_VIEW_MOTION_SCALE (1.f / 32.f)
 
 /* A ball of this radius, this far from the eye, is too small to draw (ArtfFrameData.cullScale). */
 ARTF_INLINE bool artfTooSmall(const ArtfFrameData* f, float radius, float distance) { return f->cullScale > 0 && radius * f->cullScale < distance; }

@@ -508,6 +508,28 @@ instance's id is its place among them, and its custom index is its mesh's first 
 as the trees have them; eye rays cull backs but for what has two sides; everything is opaque to the hardware, as what
 shows through is the path's business.
 
+## Views, and what passes take
+
+A view (`artfRendererSetView`) is worked out where light is: at the end of `lightLanesAs` on the CPU (`viewLanes`) and
+of the scene's pixel shader on the GPU (`viewLightSpv`), in the same order, from what lighting already has there. What
+it shows comes out as light, the square of the color wanted, so that the frame, in bytes or in floats, shows that
+color; `artfFrameForView` takes from the frame all that would change it after (exposure, fog, the passes after the
+frame) and makes what is behind black, once for both backends. A number becomes a color by a hash, the same in C and
+in SPIR-V.
+
+What is not in lighting is found beside it. On the CPU each triangle's setup says what it is colored by (its level,
+meshlet or instance), and the batch carries it for each lane; on the GPU the vertex shader hands on the whole word it
+reads of the mesh drawn, and the meshlet is found from `PrimitiveId` in a table of each triangle's, made when the view
+is first asked. Overdraw is not lighting at all: on the CPU each tile counts, for each sample, the triangles binned to
+it that cover it, with the rasterizer's edges; on the GPU a pipeline with no depth test adds a step for each.
+
+Off, a view costs nothing: the CPU's plain copy of the lighting is the one it always was, and the views live in the copy
+that is called (`lightsApart`, with lights that have a size); the GPU makes its pixel shaders with views only while
+one is asked (`ARTF_SHADER_VIEW`).
+
+What passes take: the CPU marks the clock as each phase ends (`artfPassMark`); the GPU writes a timestamp at the bottom
+of the pipe after each pass, 33 a frame in flight, and reads them when the frame's fence says it is done.
+
 ## The GPU: the CPU stays out of the way
 
 All meshes share one vertex buffer and one index buffer, every texture is in one descriptor array,

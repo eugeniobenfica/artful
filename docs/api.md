@@ -91,7 +91,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneSetShadows`, `artfLightSetShadow` | Shadows when drawing triangles; `soft` makes them as wide as their light. |
 | `artfSceneSetBlackHole` | A black hole behind the scene. |
 | `artfRendererSetOverlay` | A picture over the frame. |
-| `artfRendererStats` | What a frame cost, on the CPU and on the GPU. |
+| `artfRendererStats` | What a frame cost, on the CPU and on the GPU, and each of its passes (`passes`, `passCount`). |
+| `artfRendererSetView`, `artfViewName`, `artfViewFromName` | What the frame shows: the picture, or one thing that went into it (`ArtfView`). |
 
 ## Using it from CMake
 

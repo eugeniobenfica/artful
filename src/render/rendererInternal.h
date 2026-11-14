@@ -21,7 +21,29 @@ struct ArtfRenderer {
     /* trying occlusion both ways: where it is in its round, and what each way took */
     int trialFrame;
     double trialMs[2];
+    ArtfView view; /* artfRendererSetView's: each backend reads it as a frame starts */
 };
+
+/* The passes of a frame and what each took, as the CPU's clock sees them: each mark ends the pass it names, which
+ * started where the one before ended. */
+typedef struct ArtfPassLog {
+    ArtfPassTime passes[ARTF_PASS_TIMES];
+    uint32_t count;
+    double last;
+} ArtfPassLog;
+
+ARTF_INLINE void artfPassStart(ArtfPassLog* l) {
+    l->count = 0;
+    l->last = artfNowMs();
+}
+ARTF_INLINE void artfPassMark(ArtfPassLog* l, const char* name) {
+    const double now = artfNowMs();
+    if (l->count < ARTF_PASS_TIMES) {
+        l->passes[l->count].name = name;
+        l->passes[l->count++].ms = now - l->last;
+    }
+    l->last = now;
+}
 
 ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* options);
 /* For tests. Submits that go through before the device is reported lost, when not below 0; and a swapchain the driver

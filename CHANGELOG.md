@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Views**, as Unreal's view modes: `artfRendererSetView` shows, in place of the picture, a surface's base color, its
+  normal, roughness, metal, the light it has from all around, its own light, which level of detail is drawn, its
+  meshlets, its instance, how many triangles cover each pixel, depth, how far each pixel moved since the frame before,
+  or how many lights reach it. Both backends draw each the same: tested on a square whose values come out to the byte,
+  and on a scene where the two backends are under 0.2% of pixels apart in every view, with a frame in floats too. On
+  the CPU a view goes through the copy of the lighting that is called, as coats do; on the GPU the scene's pixel
+  shaders are made with it while one is asked. With the picture shown, nothing changes, to the byte, and nothing was
+  measured slower. `artful-render --view name`.
+- **What each pass takes**: `ArtfFrameStats.passes`, a name and its milliseconds for each pass of the frame, in order.
+  On Vulkan from timestamps (culling, shadows, the fog's grid, tracing, the scene's passes, occlusion, layers and each
+  pass after the frame); on the CPU from the clock (culling, geometry, occlusion, shadows, tiles and each pass after
+  the frame). They add up to `gpuMs` and `cpuMs`. `artful-render --frames n --passes` prints them.
 - **The ray tracing hardware**: `ArtfTraceDesc.hardware`. Where the GPU has acceleration structures and ray queries
   (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`), a ray goes through them in place of the trees the compute
   shader walks: a bottom level for each mesh traced, from the same triangles, and the top over the traced instances,

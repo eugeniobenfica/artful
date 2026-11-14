@@ -37,6 +37,11 @@ int main(int argc, char** argv) {
     SAVE("sceneFragmentCoat", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_COAT));
     SAVE("sceneFragmentSoft", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_COAT | ARTF_SHADER_SOFT));
     SAVE("sceneFragmentFloatsPlain", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS));
+    SAVE("sceneFragmentView", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_VIEW));
+    SAVE("sceneCutoutView", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_VIEW | ARTF_SHADER_MESHLETS));
+    SAVE("sceneFragmentViewFloats", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_COAT | ARTF_SHADER_VIEW | ARTF_SHADER_MESHLETS));
+    SAVE("sceneLayerListView", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4, ARTF_SHADER_VIEW | ARTF_SHADER_MESHLETS));
+    SAVE("overdraw", artfShaderOverdraw(&size, false));
     SAVE("sceneLayerList", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 1, 0));
     SAVE("sceneLayerListSamples", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4, 0));
     SAVE("layerResolve", artfShaderLayerResolve(&size, 1));

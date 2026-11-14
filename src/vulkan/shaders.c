@@ -12,9 +12,11 @@
  *   10 flags: of each instance, whether it showed last frame
  *   16 colors: of the vertices of meshes that have them, BGRA; the first is white
  *   24 ArtfShadowFrame   25 the shadow atlas: a sampler   26 what casts shadows: its instance and its mesh
+ *   65 the meshlets view: of each mesh where its triangles start, then each triangle's meshlet
  *
  * Lighting here is the same arithmetic as the CPU's (kernels.inc), so that both draw the same scene. */
 #include "vulkan/shaders.h"
+#include "artful/renderer.h"
 #include "scene/sceneInternal.h"
 #include "vulkan/spirv.h"
 
@@ -688,7 +690,7 @@ uint32_t* artfShaderSceneVertex(size_t* size) {
     /* (a mesh's number, and above it how far it is in a fade) */
     SpvId meshWord = spvLoad(s, s->uintType, bufferUintPtr(s, &r, r.visible, ADD_U(at, UINT(1))));
     SpvId mesh = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, meshWord, UINT((1u << 23) - 1));
-    spvStore(s, vFade, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, meshWord, UINT(23)));
+    spvStore(s, vFade, meshWord); /* (the fragment shader takes the fade from above bit 23) */
     spvStore(s, vInstance, id);
     SpvId base = MUL_U(id, UINT(4));
     SpvId r0 = bufferVec(s, &r, r.instances, base), r1 = bufferVec(s, &r, r.instances, ADD_U(base, UINT(1)));
@@ -1036,13 +1038,99 @@ static SpvId lampShadowSpv(Spv* s, const Shadows* shadows, SpvId lamp, SpvId d, 
     return softSize ? shadowLookupSoft(s, shadows, lampView, place, softSize, false) : shadowLookup(s, shadows, lampView, place);
 }
 
+/* ---- views (ArtfView): what kernels.inc's viewLanes does, in the same order ---- */
+
+/* As artfViewColor: a color for a number, by a hash. */
+static SpvId viewColorSpv(Spv* s, SpvId k) {
+    SpvId h = MUL_U(ADD_U(k, UINT(1)), UINT(0x9E3779B1u));
+    h = spvOp2(s, SPV_OP_BitwiseXor, s->uintType, h, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, h, UINT(15)));
+    h = MUL_U(h, UINT(0x85EBCA77u));
+    h = spvOp2(s, SPV_OP_BitwiseXor, s->uintType, h, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, h, UINT(13)));
+    SpvId c[3];
+    for (int i = 0; i < 3; ++i) {
+        SpvId byte = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, h, UINT(8u * (uint32_t)i)), UINT(255));
+        c[i] = MUL_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, ADD_U(UINT(96), spvOp2(s, SPV_OP_UMod, s->uintType, byte, UINT(160)))), FLOAT(1.f / 255.f));
+    }
+    return vec3Of(s, c[0], c[1], c[2]);
+}
+
+/* As artfViewHeat: a count, red to yellow to white. */
+static SpvId viewHeatSpv(Spv* s, SpvId count) {
+    static const uint32_t steps[3] = {32, 8, 2};
+    SpvId c[3];
+    for (int i = 0; i < 3; ++i) c[i] = MUL_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvGlsl2(s, SPV_GLSL_UMin, s->uintType, MUL_U(count, UINT(steps[i])), UINT(255))), FLOAT(1.f / 255.f));
+    return vec3Of(s, c[0], c[1], c[2]);
+}
+
+typedef struct ViewInputs {
+    SpvId albedo, n, rough, metal, around, emission, world; /* what the surface is, and where */
+    SpvId instance, meshWord, meshlet;                     /* what it is of: meshlet 0 where it is not known */
+    SpvId lights;                                          /* how many reach it, as a float */
+} ViewInputs;
+
+/* The light a view shows, by the frame's view, in place of lit. */
+static SpvId viewLightSpv(Spv* s, const Resources* r, const ViewInputs* in, SpvId lit) {
+    SpvId view = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(frameVec(s, r, F_CULL)));
+#define IS(v) spvOp2(s, 170 /* OpIEqual */, s->boolType, view, UINT(v))
+#define SQUARE(d) MUL_V3(d, d)
+    /* its level of detail: which of its instance's mesh's lighter versions is drawn */
+    SpvId mesh = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, in->meshWord, UINT((1u << 23) - 1));
+    SpvId base = AS_UINT(X(bufferVec(s, r, r->instances, ADD_U(MUL_U(in->instance, UINT(4)), UINT(3)))));
+    SpvId lods = bufferVec(s, r, r->meshes, ADD_U(MUL_U(base, UINT(5)), UINT(3)));
+#define SAME(a, b) spvOp2(s, 170, s->boolType, a, b)
+    SpvId level = spvSelect(s, s->uintType, SAME(mesh, AS_UINT(Z(lods))), UINT(3), UINT(0));
+    level = spvSelect(s, s->uintType, SAME(mesh, AS_UINT(Y(lods))), UINT(2), level);
+    level = spvSelect(s, s->uintType, SAME(mesh, AS_UINT(X(lods))), UINT(1), level);
+    level = spvSelect(s, s->uintType, SAME(mesh, base), UINT(0), level);
+#undef SAME
+    SpvId levelColor[3];
+    for (uint32_t c = 0; c < 3; ++c)
+        levelColor[c] = spvSelect(s, s->floatType, spvOp2(s, 166 /* OpLogicalOr */, s->boolType, spvOp2(s, 170, s->boolType, level, UINT(0)), spvOp2(s, 170, s->boolType, level, UINT(c + 1))), FLOAT(1.f), FLOAT(.25f));
+    /* how far along the view, and where it was in the frame before */
+    SpvId p4 = vec4Of(s, in->world, FLOAT(1.f));
+    SpvId clip = ADD_V4(ADD_V4(SCALE_V4(frameVec(s, r, F_VIEWPROJ), X(p4)), SCALE_V4(frameVec(s, r, F_VIEWPROJ + 1), Y(p4))), ADD_V4(SCALE_V4(frameVec(s, r, F_VIEWPROJ + 2), Z(p4)), frameVec(s, r, F_VIEWPROJ + 3)));
+    SpvId far = DIV_F(FLOAT(ARTF_VIEW_DEPTH_HALF), ADD_F(FLOAT(ARTF_VIEW_DEPTH_HALF), MAX_F(W(clip), FLOAT(0.f))));
+    SpvId row = ADD_U(MUL_U(AS_UINT(Y(frameVec(s, r, F_COUNTS))), UINT(4)), MUL_U(in->instance, UINT(3)));
+    SpvId k0 = bufferVec(s, r, r->instances, row), k1 = bufferVec(s, r, r->instances, ADD_U(row, UINT(1))), k2 = bufferVec(s, r, r->instances, ADD_U(row, UINT(2)));
+    SpvId moved = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Y(frameVec(s, r, F_CULL)), FLOAT(0.f));
+    SpvId was = pick3(s, moved, vec3Of(s, DOT4(k0, p4), DOT4(k1, p4), DOT4(k2, p4)), in->world);
+    SpvId was4 = vec4Of(s, was, FLOAT(1.f));
+    SpvId before = ADD_V4(ADD_V4(SCALE_V4(frameVec(s, r, F_PREVIOUS), X(was4)), SCALE_V4(frameVec(s, r, F_PREVIOUS + 1), Y(was4))), ADD_V4(SCALE_V4(frameVec(s, r, F_PREVIOUS + 2), Z(was4)), frameVec(s, r, F_PREVIOUS + 3)));
+    SpvId cw = MAX_F(W(clip), FLOAT(1e-5f)), pw = MAX_F(W(before), FLOAT(1e-5f));
+    SpvId vx = MUL_F(MUL_F(SUB_F(DIV_F(X(clip), cw), DIV_F(X(before), pw)), FLOAT(.5f)), W(frameVec(s, r, F_FOG)));
+    SpvId vy = MUL_F(MUL_F(SUB_F(DIV_F(Y(before), pw), DIV_F(Y(clip), cw)), FLOAT(.5f)), W(frameVec(s, r, F_EYE + 1)));
+#define UNIT(v) MIN_F(MAX_F(v, FLOAT(0.f)), FLOAT(1.f))
+    SpvId motion = vec3Of(s, UNIT(ADD_F(FLOAT(ARTF_VIEW_MOTION_STILL), MUL_F(vx, FLOAT(ARTF_VIEW_MOTION_SCALE)))), UNIT(ADD_F(FLOAT(ARTF_VIEW_MOTION_STILL), MUL_F(vy, FLOAT(ARTF_VIEW_MOTION_SCALE)))), FLOAT(ARTF_VIEW_MOTION_STILL));
+#undef UNIT
+    SpvId half = same3(s, .5f);
+    SpvId normals = ADD_V3(MUL_V3(in->n, half), half);
+    SpvId out = lit;
+    out = pick3(s, IS(ARTF_VIEW_BASE_COLOR), in->albedo, out);
+    out = pick3(s, IS(ARTF_VIEW_NORMALS), SQUARE(normals), out);
+    out = pick3(s, IS(ARTF_VIEW_ROUGHNESS), SQUARE(vec3Of(s, in->rough, in->rough, in->rough)), out);
+    out = pick3(s, IS(ARTF_VIEW_METALLIC), SQUARE(vec3Of(s, in->metal, in->metal, in->metal)), out);
+    out = pick3(s, IS(ARTF_VIEW_AMBIENT), in->around, out);
+    out = pick3(s, IS(ARTF_VIEW_EMISSIVE), in->emission, out);
+    out = pick3(s, IS(ARTF_VIEW_LOD), SQUARE(vec3Of(s, levelColor[0], levelColor[1], levelColor[2])), out);
+    out = pick3(s, IS(ARTF_VIEW_MESHLETS), SQUARE(viewColorSpv(s, in->meshlet)), out);
+    out = pick3(s, IS(ARTF_VIEW_INSTANCES), SQUARE(viewColorSpv(s, in->instance)), out);
+    out = pick3(s, IS(ARTF_VIEW_DEPTH), SQUARE(vec3Of(s, far, far, far)), out);
+    out = pick3(s, IS(ARTF_VIEW_MOTION), SQUARE(motion), out);
+    out = pick3(s, IS(ARTF_VIEW_LIGHTS), SQUARE(viewHeatSpv(s, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, in->lights))), out);
+#undef IS
+#undef SQUARE
+    return out;
+}
+
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant) {
     const bool hdr = variant & ARTF_SHADER_FLOATS, withProbes = variant & ARTF_SHADER_PROBES, walls = variant & ARTF_SHADER_WALLS, froxelsOn = hdr && variant & ARTF_SHADER_FROXELS;
     const bool coats = variant & ARTF_SHADER_COAT, softShadows = variant & ARTF_SHADER_SOFT;
+    const bool viewed = variant & ARTF_SHADER_VIEW, meshletIds = viewed && variant & ARTF_SHADER_MESHLETS;
     Spv b, *s = &b;
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    if (meshletIds) spvCapability(s, 2); /* Geometry: for PrimitiveId */
     spvExtension(s, "SPV_EXT_descriptor_indexing");
     Resources r;
     declare(s, &r, false);
@@ -1067,7 +1155,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         sampleMask = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, spvTypeArray(s, s->intType, 1, 0)), SPV_STORAGE_Input);
         spvDecorate(s, sampleMask, SPV_DECORATE_BuiltIn, 20 /* SampleMask */);
     }
-    if (lists || hdr) {
+    if (lists || hdr || viewed) {
         vInstance = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->uintType), SPV_STORAGE_Input);
         spvDecorate(s, vInstance, SPV_DECORATE_Location, 7);
         spvDecorate(s, vInstance, SPV_DECORATE_Flat, -1);
@@ -1076,10 +1164,20 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         listCounts = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 44);
         listFragments = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 45);
     }
-    if (cutout) {
+    if (cutout || viewed) {
+        /* (the mesh drawn, and above it how far it is in a fade) */
         vFade = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->uintType), SPV_STORAGE_Input);
         spvDecorate(s, vFade, SPV_DECORATE_Location, 6);
         spvDecorate(s, vFade, SPV_DECORATE_Flat, -1);
+    }
+    SpvId primitive = 0, meshletTable = 0;
+    if (meshletIds) {
+        primitive = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->intType), SPV_STORAGE_Input);
+        spvDecorate(s, primitive, SPV_DECORATE_BuiltIn, 7 /* PrimitiveId */);
+        spvDecorate(s, primitive, SPV_DECORATE_Flat, -1);
+        meshletTable = spvResource(s, blockOf(s, r.uintArray, false), SPV_STORAGE_StorageBuffer, 65);
+    }
+    if (cutout) {
         fragCoord = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->vec4), SPV_STORAGE_Input);
         spvDecorate(s, fragCoord, SPV_DECORATE_BuiltIn, SPV_BUILTIN_FragCoord);
         vOpacity = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->floatType), SPV_STORAGE_Input);
@@ -1114,6 +1212,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     Accumulators acc = {spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function)};
     SpvId ptrFnFloat = spvTypePointer(s, SPV_STORAGE_Function, s->floatType);
     SpvId shadowed = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
+    SpvId lightsSeen = viewed ? spvVariable(s, ptrFnFloat, SPV_STORAGE_Function) : 0; /* (in a view: how many lights reach it) */
     const GraphVars own = {spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function),
                            spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function)};
     SpvId counter = spvVariable(s, ptrFnUint, SPV_STORAGE_Function);
@@ -1130,6 +1229,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
 
     SpvId world = spvLoad(s, s->vec3, vWorld);
     SpvId n = NORMALIZE(spvLoad(s, s->vec3, vNormal));
+    if (viewed) spvStore(s, lightsSeen, FLOAT(0.f));
     SpvId front = 0;
     if (cutout) {
         /* (a back is lit as a front) */
@@ -1177,7 +1277,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         hole = spvOp2(s, 166 /* OpLogicalOr */, s->boolType, hole, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, isBlend, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, coverage, FLOAT(1.f / 255.f))));
         SpvId hiddenBack = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp1(s, SPV_OP_LogicalNot, s->boolType, front), spvOp1(s, SPV_OP_LogicalNot, s->boolType, isDouble));
         /* between two levels: as maskHoles */
-        SpvId fade = spvLoad(s, s->uintType, vFade), coord = spvLoad(s, s->vec4, fragCoord);
+        SpvId fade = spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, spvLoad(s, s->uintType, vFade), UINT(23)), coord = spvLoad(s, s->vec4, fragCoord);
 #define BITS_AND(a, b) spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, a, spvConstUint(s, b))
 #define BITS_UP(a, n) spvOp2(s, 196, s->uintType, a, spvConstUint(s, n))
 #define BITS_DOWN(a, n) spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, a, spvConstUint(s, n))
@@ -1444,6 +1544,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId invLength = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, MAX_F(d2, FLOAT(1e-8f))));
         SpvId radius = W(lightA);
         SpvId fade = MAX_F(SUB_F(FLOAT(1.f), DIV_F(d2, MUL_F(radius, radius))), FLOAT(0.f));
+        if (viewed) spvStore(s, lightsSeen, ADD_F(spvLoad(s, s->floatType, lightsSeen), spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, fade, FLOAT(0.f)), FLOAT(1.f), FLOAT(0.f))));
         SpvId toLight = SCALE_V3(d, invLength);
         SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(toLight, spvShuffle3(s, lightC))), W(lightC)), W(lightB));
         spot = MIN_F(MAX_F(spot, FLOAT(0.f)), FLOAT(1.f));
@@ -1525,6 +1626,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
             SpvId invLength = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, MAX_F(d2, FLOAT(1e-8f))));
             SpvId radius = W(lightA);
             SpvId fade = MAX_F(SUB_F(FLOAT(1.f), DIV_F(d2, MUL_F(radius, radius))), FLOAT(0.f));
+            if (viewed) spvStore(s, lightsSeen, ADD_F(spvLoad(s, s->floatType, lightsSeen), spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, fade, FLOAT(0.f)), FLOAT(1.f), FLOAT(0.f))));
             SpvId toLight = SCALE_V3(d, invLength);
             SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(toLight, spvShuffle3(s, lightC))), W(lightC)), W(lightB));
             spot = MIN_F(MAX_F(spot, FLOAT(0.f)), FLOAT(1.f));
@@ -1559,6 +1661,16 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     /* an unlit material: its color as it is, and its own light */
     SpvId unlit = spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, AS_UINT(W(m2)), UINT(ARTF_MATERIAL_UNLIT)), UINT(0));
     lit = pick3(s, unlit, ADD_V3(albedo, emission), lit);
+    if (viewed) {
+        /* what a view shows, in its place: its frame has no fog and no exposure */
+        SpvId instance = spvLoad(s, s->uintType, vInstance), meshWord = spvLoad(s, s->uintType, vFade), meshlet = instance;
+        if (meshletIds) {
+            SpvId first = spvLoad(s, s->uintType, bufferUintPtr(s, &r, meshletTable, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, meshWord, UINT((1u << 23) - 1))));
+            meshlet = spvLoad(s, s->uintType, bufferUintPtr(s, &r, meshletTable, ADD_U(first, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvLoad(s, s->intType, primitive)))));
+        }
+        const ViewInputs in = {albedo, n, rough, metal, aroundLit, emission, world, instance, meshWord, meshlet, spvLoad(s, s->floatType, lightsSeen)};
+        lit = viewLightSpv(s, &r, &in, lit);
+    }
     /* air, then film, as on the CPU */
     SpvId look = frameVec(s, &r, F_LOOK), fog = spvShuffle3(s, frameVec(s, &r, F_FOG));
     SpvId air = MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(world, spvShuffle3(s, frameVec(s, &r, F_CAMERA)))), Y(look));
@@ -1589,10 +1701,10 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         const SpvId surfaceParts[2] = {packSurfaceSpv(s, n, rough, metal, share), ADD_U(spvLoad(s, s->uintType, vInstance), UINT(1))};
         spvStore(s, outSurface, spvCompose(s, spvTypeVector(s, s->uintType, 2), surfaceParts, 2));
         spvEndMain(s);
-        const SpvId all[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, pixelCoord, vInstance};
-        SpvId hdrInterface[12];
+        const SpvId all[13] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, pixelCoord, vInstance, primitive};
+        SpvId hdrInterface[13];
         uint32_t used = 0;
-        for (int k = 0; k < 12; ++k)
+        for (int k = 0; k < 13; ++k)
             if (all[k]) hdrInterface[used++] = all[k];
         spvEntryPoint(s, SPV_MODEL_Fragment, main, hdrInterface, used);
         spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
@@ -1633,10 +1745,10 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     }
     spvEndMain(s);
 
-    const SpvId all[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, vOpacity, frontFacing, vFade, pixelCoord, vInstance, sampleMask};
-    SpvId interface[12];
+    const SpvId all[13] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, vOpacity, frontFacing, vFade, pixelCoord, vInstance, sampleMask, primitive};
+    SpvId interface[13];
     uint32_t used = 0;
-    for (int k = 0; k < 12; ++k)
+    for (int k = 0; k < 13; ++k)
         if (all[k]) interface[used++] = all[k];
     spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, used);
     spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
@@ -1718,6 +1830,38 @@ uint32_t* artfShaderShadowFragment(size_t* size, uint32_t maxTextures) {
 
     const SpvId interface[2] = {vUv, vMaterial};
     spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, 2);
+    spvExecutionMode(s, main, 7, 0, 0, 0, 0);
+    return finish(s, size);
+}
+
+/* ---- the overdraw view: each triangle that covers a pixel adds a step of artfViewHeat ---- */
+
+uint32_t* artfShaderOverdraw(size_t* size, bool hdr) {
+    (void)hdr; /* (light or the frame's colors, a step is the same: with floats, what shows is its square root) */
+    Spv b, *s = &b;
+    spvInit(s);
+    Resources r;
+    declare(s, &r, false);
+    SpvId vMaterial = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->uintType), SPV_STORAGE_Input);
+    spvDecorate(s, vMaterial, SPV_DECORATE_Location, 3);
+    spvDecorate(s, vMaterial, SPV_DECORATE_Flat, -1);
+    SpvId frontFacing = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->boolType), SPV_STORAGE_Input);
+    spvDecorate(s, frontFacing, SPV_DECORATE_BuiltIn, SPV_BUILTIN_FrontFacing);
+    SpvId outColor = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
+    spvDecorate(s, outColor, SPV_DECORATE_Location, 0);
+
+    SpvId main = spvBeginMain(s);
+    /* a back shows only where its material has two sides, as the CPU keeps it */
+    SpvId m2 = bufferVec(s, &r, r.materials, ADD_U(MUL_U(spvLoad(s, s->uintType, vMaterial), UINT(ARTF_MATERIAL_ROWS)), UINT(2)));
+    SpvId isDouble = spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, AS_UINT(W(m2)), UINT(ARTF_MATERIAL_DOUBLE)), UINT(0));
+    SpvId front = spvLoad(s, s->boolType, frontFacing);
+    spvKillIf(s, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp1(s, SPV_OP_LogicalNot, s->boolType, front), spvOp1(s, SPV_OP_LogicalNot, s->boolType, isDouble)));
+    const SpvId step[4] = {FLOAT(32.f / 255.f), FLOAT(8.f / 255.f), FLOAT(2.f / 255.f), FLOAT(0.f)};
+    spvStore(s, outColor, spvCompose(s, s->vec4, step, 4));
+    spvEndMain(s);
+
+    const SpvId interface[3] = {vMaterial, frontFacing, outColor};
+    spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, 3);
     spvExecutionMode(s, main, 7, 0, 0, 0, 0);
     return finish(s, size);
 }
