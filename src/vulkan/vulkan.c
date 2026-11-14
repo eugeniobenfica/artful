@@ -46,6 +46,7 @@ enum {
 };
 
 #define SLOTS 2            /* frames in flight */
+#define QUERIES (ARTF_PASS_TIMES + 1) /* timestamps of a slot: where its frame starts, and where each pass ends */
 #define MAX_TEXTURES 1024  /* in the one descriptor array, where the device allows; what is beyond draws white */
 #define MAX_SWAPCHAIN_IMAGES 8
 
@@ -69,6 +70,8 @@ typedef struct Slot {
     VkSemaphore acquired;
     VkDescriptorSet set;
     bool timed; /* its timestamps hold a frame */
+    const char* passNames[ARTF_PASS_TIMES]; /* the passes its timestamps end, after the first */
+    uint32_t passCount;
     GpuBuffer frame, instances, visible, indirect, template_, materials, overlayStaging, hole, fluid, layerList, trace;
     GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
     GpuBuffer decals;                  /* the decals that may show (63) */
@@ -164,6 +167,8 @@ typedef struct Vulkan {
     VkQueryPool timestamps;
     float timestampPeriod; /* nanoseconds a tick; 0: this device has no timestamps */
     double gpuMs;
+    ArtfPassTime passTimes[ARTF_PASS_TIMES]; /* of the last frame the GPU finished */
+    uint32_t passTimeCount;
 
     ArtfSurface native;
     VkSurfaceKHR surface;
@@ -221,6 +226,12 @@ typedef struct Vulkan {
     uint64_t graphScene;
     uint32_t graphCount;
     bool probes, walls, froxels, coats, softShadows; /* the scene's pixel shaders read probes, their maps, the fog's grid, coats: made again when that changes */
+    /* views (ArtfView): the scene's pixel shaders have them, and each triangle's meshlet; the overdraw view's pipelines,
+     * one for what is culled and one for both sides; and each triangle's meshlet, by mesh (binding 65) */
+    bool viewShaders, meshletShaders, primitiveIds;
+    VkPipeline overdrawPipelines[2];
+    GpuBuffer meshletIds;
+    uint64_t meshletIdsKey;
     /* shadow maps: all in one atlas of depth */
     VkRenderPass shadowPass;
     VkFramebuffer shadowFramebuffer;
@@ -763,7 +774,39 @@ static bool shadowAtlasMake(Vulkan* v, int width, int height) {
 
 static uint32_t shaderVariant(const Vulkan* v) {
     return (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->probes ? ARTF_SHADER_PROBES : 0u) | (v->probes && v->walls ? ARTF_SHADER_WALLS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u) |
-           (v->coats ? ARTF_SHADER_COAT : 0u) | (v->softShadows ? ARTF_SHADER_SOFT : 0u);
+           (v->coats ? ARTF_SHADER_COAT : 0u) | (v->softShadows ? ARTF_SHADER_SOFT : 0u) | (v->viewShaders ? ARTF_SHADER_VIEW : 0u) | (v->meshletShaders ? ARTF_SHADER_MESHLETS : 0u);
+}
+
+/* The overdraw view's: each triangle adds its step wherever it is, whatever is in front (artfShaderOverdraw). */
+static bool overdrawPipelinesMake(Vulkan* v) {
+    if (v->overdrawPipelines[0]) return true;
+    size_t size;
+    uint32_t* code = artfShaderOverdraw(&size, v->floats);
+    VkShaderModule fragment = shaderModule(v, code, size);
+    if (!fragment) return false;
+    const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
+    const VertexAttribute attributes[3] = {{0, 0, FORMAT_RGBA16_UNORM, 0}, {1, 0, FORMAT_RG16_SNORM, 8}, {2, 0, FORMAT_RG16_FLOAT, 12}};
+    const PipelineVertexInput vertexInput = {ST_PIPELINE_VERTEX_INPUT, NULL, 0, 1, &binding, 3, attributes};
+    const PipelineInputAssembly assembly = {ST_PIPELINE_INPUT_ASSEMBLY, NULL, 0, 3 /* triangle list */, 0};
+    const PipelineViewport viewport = {ST_PIPELINE_VIEWPORT, NULL, 0, 1, NULL, 1, NULL};
+    const PipelineRasterization rasterBack = {ST_PIPELINE_RASTERIZATION, NULL, 0, 0, 0, 0, 2 /* back */, 0 /* counter-clockwise */, 0, 0, 0, 0, 1.f};
+    const PipelineRasterization rasterNone = {ST_PIPELINE_RASTERIZATION, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.f};
+    const PipelineMultisample multisample = {ST_PIPELINE_MULTISAMPLE, NULL, 0, v->samples, 0, 0, NULL, 0, 0};
+    PipelineDepthStencil depthOff;
+    memset(&depthOff, 0, sizeof depthOff);
+    depthOff.sType = ST_PIPELINE_DEPTH_STENCIL;
+    const ColorBlendAttachment added = {1, 1 /* one */, 1 /* one */, 0, 0 /* zero */, 1 /* one: alpha stays */, 0, 15};
+    ColorBlendAttachment pair[2];
+    const PipelineColorBlend blend = blendOf(v, pair, added, false);
+    const int states[2] = {0, 1};
+    const PipelineDynamic dynamic = {ST_PIPELINE_DYNAMIC, NULL, 0, 2, states};
+    const PipelineShaderStage stages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, v->sceneVertexModule, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, fragment, "main", NULL}};
+    const GraphicsPipelineCreateInfo info[2] = {
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterBack, &multisample, &depthOff, &blend, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1},
+        {ST_GRAPHICS_PIPELINE, NULL, 0, 2, stages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blend, &dynamic, v->pipelineLayout, v->renderPass, 0, 0, -1}};
+    const bool ok = v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 2, info, NULL, v->overdrawPipelines) == VK_OK;
+    v->vkDestroyShaderModule(v->device, fragment, NULL);
+    return ok;
 }
 
 /* The pipeline of what is plain and solid, made again: when the probes come or go. */
@@ -969,20 +1012,23 @@ static bool pipelinesMake(Vulkan* v) {
         {56, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {57, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {58, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}, {59, DESCRIPTOR_COMBINED, 1, SHADER_COMPUTE, NULL}};
     /* (and with the ray tracing hardware, the top level) */
-    DescriptorSetLayoutBinding all[65];
+    DescriptorSetLayoutBinding all[66];
     uint32_t bindingCount = v->floats ? 64 : 54;
     memcpy(all, bindings, bindingCount * sizeof *all);
     if (v->rayQuery) {
         const DescriptorSetLayoutBinding top = {64, DESCRIPTOR_AS, 1, SHADER_COMPUTE, NULL};
         all[bindingCount++] = top;
     }
+    /* (the meshlets view's table: written when it is first asked for) */
+    const DescriptorSetLayoutBinding meshletIds = {65, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL};
+    all[bindingCount++] = meshletIds;
     const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, bindingCount, all};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     const PushConstantRange push[2] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}};
     const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 1, &v->setLayout, 2, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
-    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 54}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
+    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 55}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, v->rayQuery ? 4u : 3u, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -2523,6 +2569,15 @@ static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowF
  * where that depth is its own, so that only its nearest surface shows. */
 static void drawLayers(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene, uint32_t count) {
 #define PARTICLE(k) (scene->instances.items[v->layers.items[k].instance].flags & ARTF_INSTANCE_PARTICLE)
+    if (v->base.view == ARTF_VIEW_OVERDRAW) {
+        /* (each once, both sides: as they count on the CPU) */
+        v->vkCmdBindPipeline(c, 0, v->overdrawPipelines[1]);
+        for (uint32_t i = 0; i < count; ++i) {
+            const MeshRange* m = &v->meshes.items[v->layers.items[i].mesh];
+            v->vkCmdDrawIndexed(c, m->indexCount, 1, m->firstIndex, m->vertexOffset, layersAt(v) + i);
+        }
+        return;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         const MeshRange* m = &v->meshes.items[v->layers.items[i].mesh];
         if (PARTICLE(i)) {
@@ -2595,6 +2650,14 @@ static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, const ArtfFra
 
 /* ---- what comes after a frame in floats: post.c's order ---- */
 
+/* The end of a pass, on the GPU's clock: what it took is from the mark before. */
+static void passMark(Vulkan* v, VkCommandBuffer c, Slot* s, const char* name) {
+    if (!s->timed || s->passCount >= ARTF_PASS_TIMES) return;
+    const uint32_t slot = (uint32_t)(s - v->slots);
+    v->vkCmdWriteTimestamp(c, STAGE_BOTTOM, v->timestamps, slot * QUERIES + 1 + s->passCount);
+    s->passNames[s->passCount++] = name;
+}
+
 static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) {
     v->vkCmdBindPipeline(c, 1, v->postPipelines[pipeline]);
     v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &push);
@@ -2615,39 +2678,47 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     const uint32_t pixels = (uint32_t)v->width * (uint32_t)v->height;
     v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
     postStep(v, c, POST_GATHER, 0, pixels);
+    passMark(v, c, s, "gather");
     if (frame->post[0][2] > 0) {
         postStep(v, c, POST_OCCLUSION, 0, pixels);
         postStep(v, c, POST_OCCLUSION_BLUR, 0, pixels);
+        passMark(v, c, s, "ambient occlusion");
     }
     if (frame->post[1][0] > 0) {
         postStep(v, c, POST_REFLECTION, 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
         postStep(v, c, POST_REFLECTION_APPLY, 0, pixels);
+        passMark(v, c, s, "reflections");
     }
     if (frame->post[1][3] > 0) {
         postStep(v, c, POST_TEMPORAL, v->historyValid ? 1u : 0u, pixels);
         postCopy(v, c, &v->postScratch, &v->postLight);
         postCopy(v, c, &v->postLight, &v->postHistory);
         v->historyValid = true;
+        passMark(v, c, s, "temporal antialiasing");
     } else {
         v->historyValid = false;
     }
     if (frame->post[2][1] > 0 && frame->post[2][0] > 0) {
         postStep(v, c, POST_FOCUS, 0, pixels);
         postCopy(v, c, &v->postScratch, &v->postLight);
+        passMark(v, c, s, "depth of field");
     }
     if (frame->motionBlur > 0) {
         postStep(v, c, POST_MOTION_BLUR, 0, pixels);
         postCopy(v, c, &v->postScratch, &v->postLight);
+        passMark(v, c, s, "motion blur");
     }
     if (frame->grade[0][1] > 0) {
         postStep(v, c, POST_METER, v->exposureValid ? 1u : 0u, 1);
         v->exposureValid = true;
+        passMark(v, c, s, "auto exposure");
     } else {
         v->exposureValid = false;
     }
     if (frame->post[0][0] > 0) {
         for (uint32_t l = 0; l < 6; ++l) postStep(v, c, POST_BLOOM_DOWN, l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
         for (int l = 4; l >= 0; --l) postStep(v, c, POST_BLOOM_UP, (uint32_t)l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
+        passMark(v, c, s, "bloom");
     }
     memoryBarrier(v, c, STAGE_COMPUTE | STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
     RenderPassBeginInfo present = {ST_RENDER_PASS_BEGIN, NULL, v->presentPass, v->presentFramebuffers[image], *area, 0, NULL};
@@ -2662,6 +2733,34 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
         v->vkCmdDraw(c, 3, 1, 0, 0);
     }
     v->vkCmdEndRenderPass(c);
+    passMark(v, c, s, "tone map and out");
+}
+
+/* The meshlets view's table (binding 65): of each mesh, where its triangles start in it; then of each triangle, its
+ * meshlet, numbered as the CPU numbers them. A triangle is known by PrimitiveId, which counts from its draw's first:
+ * so the meshlets view draws whole meshes. Made when the view first asks, and again when meshes come or go. */
+static bool meshletIdsUp(Vulkan* v, const ArtfScene* scene) {
+    const uint64_t key = (scene->id * 1000003u) ^ ((uint64_t)scene->meshes.len * 7919u) ^ (scene->meshRemovals * 31u) ^ (scene->lodVersion << 40);
+    if (v->meshletIds.buffer && key == v->meshletIdsKey) return true;
+    v->vkDeviceWaitIdle(v->device);
+    size_t words = scene->meshes.len + 1;
+    for (size_t i = 0; i < scene->meshes.len; ++i) words += scene->meshes.items[i].indexCount / 3;
+    if ((VkDeviceSize)words * 4 > v->meshletIds.size) {
+        bufferFree(v, &v->meshletIds);
+        if (!bufferNew(v, &v->meshletIds, (VkDeviceSize)words * 8, BUFFER_STORAGE, true)) return false;
+        for (int i = 0; i < SLOTS; ++i) bindStorage(v, &v->slots[i], 65, &v->meshletIds);
+    }
+    uint32_t* out = v->meshletIds.mapped;
+    uint32_t at = (uint32_t)scene->meshes.len + 1;
+    for (size_t i = 0; i < scene->meshes.len; ++i) {
+        const ArtfMeshData* m = &scene->meshes.items[i];
+        out[i] = at;
+        for (uint32_t k = 0; k < m->meshletCount; ++k)
+            for (uint32_t t = 0; t < m->meshlets[k].triangleCount; ++t) out[at + m->meshlets[k].triangleOffset + t] = k;
+        at += m->indexCount / 3;
+    }
+    v->meshletIdsKey = key;
+    return true;
 }
 
 static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
@@ -2677,13 +2776,19 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     const bool probes = scene->indirect.on && scene->indirect.probes, walls = probes && !scene->indirect.desc.throughWalls;
     const bool fogGrid = v->floats && scene->post.volumetric > 0 && scene->fogDensity > 0;
     const bool coats = scene->layeredMaterials > 0, softShadows = scene->shadows.soft && scene->shadows.resolution > 0;
-    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels || coats != v->coats || softShadows != v->softShadows) {
+    /* a view: shaders that have them, for as long as one is asked */
+    const ArtfView view = v->base.view;
+    const bool viewShaders = view != ARTF_VIEW_LIT, meshletShaders = view == ARTF_VIEW_MESHLETS && v->primitiveIds;
+    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels || coats != v->coats || softShadows != v->softShadows || viewShaders != v->viewShaders ||
+        meshletShaders != v->meshletShaders) {
         v->vkDeviceWaitIdle(v->device);
         v->probes = probes;
         v->walls = walls;
         v->froxels = fogGrid;
         v->coats = coats;
         v->softShadows = softShadows;
+        v->viewShaders = viewShaders;
+        v->meshletShaders = meshletShaders;
         if (!scenePipelineMake(v) || !cutoutPipelinesMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
         v->graphCount = (uint32_t)scene->graphs.len;
     }
@@ -2696,7 +2801,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->graphCount = (uint32_t)scene->graphs.len;
     }
     v->graphScene = scene->id;
-    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE;
+    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !view; /* (a view is of triangles) */
     if (tracing && !syncTrace(v, scene)) return false;
 
     {
@@ -2711,10 +2816,17 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         return false;
     }
     const uint32_t slotIndex = (uint32_t)(v->frameNumber % SLOTS);
-    if (s->timed) {
-        uint64_t ticks[2];
+    if (s->timed && s->passCount) {
+        uint64_t ticks[QUERIES];
         /* (1: 64 bits; the fence says it is done) */
-        if (v->vkGetQueryPoolResults(v->device, v->timestamps, slotIndex * 2, 2, sizeof ticks, ticks, 8, 1) == VK_OK) v->gpuMs = (double)(ticks[1] - ticks[0]) * v->timestampPeriod * 1e-6;
+        if (v->vkGetQueryPoolResults(v->device, v->timestamps, slotIndex * QUERIES, s->passCount + 1, sizeof ticks, ticks, 8, 1) == VK_OK) {
+            v->gpuMs = (double)(ticks[s->passCount] - ticks[0]) * v->timestampPeriod * 1e-6;
+            for (uint32_t k = 0; k < s->passCount; ++k) {
+                v->passTimes[k].name = s->passNames[k];
+                v->passTimes[k].ms = (double)(ticks[k + 1] - ticks[k]) * v->timestampPeriod * 1e-6;
+            }
+            v->passTimeCount = s->passCount;
+        }
     }
 
     uint32_t image = 0;
@@ -2731,17 +2843,18 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
 
     ArtfFrameData frame;
     artfSceneFrame(scene, v->width, v->height, &frame);
-    if (v->floats) {
+    artfFrameForView(&frame, (int)view);
+    if (v->floats || view == ARTF_VIEW_MOTION) {
         /* the frame before, and with temporal antialiasing, a place within the pixel: as softDraw */
         float now[16];
         memcpy(now, frame.viewProj, sizeof now);
         if (v->hasPrevious) memcpy(frame.previous, v->previous, sizeof v->previous);
         memcpy(v->previous, now, sizeof now);
         v->hasPrevious = true;
-        if (scene->post.temporal) artfFrameJitter(&frame, v->postFrames++, v->width, v->height);
+        if (scene->post.temporal && !view) artfFrameJitter(&frame, v->postFrames++, v->width, v->height);
         if (tracing) frame.post[1][1] = 0; /* (fog that light goes through is drawn, not traced) */
-        /* how each instance moved, after the instances in this slot's buffer: for temporal antialiasing and motion blur */
-        if (scene->post.temporal || scene->post.motionBlur > 0) {
+        /* how each instance moved, after the instances in this slot's buffer: for temporal antialiasing and motion blur, and the view of it */
+        if (scene->post.temporal || scene->post.motionBlur > 0 || view == ARTF_VIEW_MOTION) {
             artfMotionStep(&v->motion, scene);
             frame.moving = v->motion.moving ? 1.f : 0.f;
             if (s->motionStep != v->motion.version || s->motionCount != v->motion.count || s->instanceVersion != scene->instanceVersion) {
@@ -2842,7 +2955,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
             out[i * 2 + 1] = v->layers.items[i].mesh;
         }
     }
-    const bool hole = scene->hole.on;
+    const bool hole = scene->hole.on && !view;
     ArtfHoleFrame holeFrame;
     if (hole) {
         uint32_t bloomPixels = 0;
@@ -2864,7 +2977,8 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
 
     VkCommandBuffer c = s->commands;
     /* (its descriptors change here: not once the set is bound) */
-    const bool sorted = layerCount && v->fragmentStores && !v->floats && (v->samples == 1 || v->sampleShading) && scene->features[ARTF_FEATURE_LAYERS_SORTED];
+    const bool overdraw = view == ARTF_VIEW_OVERDRAW;
+    const bool sorted = layerCount && v->fragmentStores && !v->floats && (v->samples == 1 || v->sampleShading) && scene->features[ARTF_FEATURE_LAYERS_SORTED] && !overdraw;
     if (sorted && !layerListsMake(v, scene)) return false;
     if (sorted) {
         /* (one call for all of them: what they add to the lists has no order) */
@@ -2880,17 +2994,21 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         }
     }
     const bool drawsInstances = !tracing && scene->instances.len;
-    const bool meshlets = drawsInstances && v->drawCounted && v->mostMeshlets && scene->features[ARTF_FEATURE_CONES];
+    /* (the meshlets view needs whole meshes: see meshletIdsUp) */
+    const bool meshlets = drawsInstances && v->drawCounted && v->mostMeshlets && scene->features[ARTF_FEATURE_CONES] && view != ARTF_VIEW_MESHLETS;
     if (drawsInstances && !stageMeshlets(v, s, meshlets)) return false;
     if (meshlets && !meshletPipelineMake(v)) return false;
     if (meshlets && scene->features[ARTF_FEATURE_OCCLUSION] && !meshletFlagsUp(v, scene)) return false;
+    if (overdraw && !overdrawPipelinesMake(v)) return false;
+    if (meshletShaders && !meshletIdsUp(v, scene)) return false;
     const CommandBufferBeginInfo begin = {ST_COMMAND_BUFFER_BEGIN, NULL, 1, NULL};
     v->vkResetCommandBuffer(c, 0);
     v->vkBeginCommandBuffer(c, &begin);
     s->timed = v->timestamps != 0;
+    s->passCount = 0;
     if (s->timed) {
-        v->vkCmdResetQueryPool(c, v->timestamps, slotIndex * 2, 2);
-        v->vkCmdWriteTimestamp(c, STAGE_TOP, v->timestamps, slotIndex * 2);
+        v->vkCmdResetQueryPool(c, v->timestamps, slotIndex * QUERIES, QUERIES);
+        v->vkCmdWriteTimestamp(c, STAGE_TOP, v->timestamps, slotIndex * QUERIES);
     }
     if (!uploadOverlay(v, s, c)) return false;
     runBones(v, c, s);
@@ -2901,7 +3019,9 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
 
     const uint32_t meshCount = (uint32_t)v->meshes.len, instanceCount = tracing ? 0 : (uint32_t)scene->instances.len;
-    const bool occlusion = instanceCount && scene->features[ARTF_FEATURE_OCCLUSION];
+    /* (overdraw writes no depth, so there is nothing to test against: it goes without) */
+    const bool occlusion = instanceCount && scene->features[ARTF_FEATURE_OCCLUSION] && !overdraw;
+    const VkPipeline solidPipeline = overdraw ? v->overdrawPipelines[0] : v->scenePipeline, cutoutPipeline = overdraw ? v->overdrawPipelines[1] : v->cutoutPipeline;
     const bool cutouts = !tracing && (scene->cutoutCount != 0 || scene->features[ARTF_FEATURE_LOD_FADE]);
     if (instanceCount) {
         /* the commands start with no copies; the shader adds those in view. (The barrier also takes
@@ -2926,9 +3046,16 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->vkCmdCopyBuffer(c, s->layerList.buffer, s->visible.buffer, 1, &copy);
         memoryBarrier(v, c, STAGE_TRANSFER, STAGE_VERTEX_SHADER, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
     }
+    passMark(v, c, s, "cull");
 
-    if (hole) traceHole(v, c, s, &holeFrame, holeApart);
-    if (shadowViews) drawShadows(v, c, s, &shadows, shadowViews, shadowChanged);
+    if (hole) {
+        traceHole(v, c, s, &holeFrame, holeApart);
+        passMark(v, c, s, "black hole");
+    }
+    if (shadowViews) {
+        drawShadows(v, c, s, &shadows, shadowViews, shadowChanged);
+        if (shadowChanged) passMark(v, c, s, "shadows");
+    }
     const bool froxels = v->floats && frame.post[1][1] > 0 && frame.look[1] > 0;
     if (froxels) {
         /* fog that light goes through: its grid, from the sun's maps, for what is drawn to read (after the frame before read it) */
@@ -2937,6 +3064,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         const uint32_t cells = (uint32_t)((v->width + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * (uint32_t)((v->height + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE);
         postStep(v, c, POST_FROXELS, 0, cells);
         memoryBarrier(v, c, STAGE_COMPUTE, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ);
+        passMark(v, c, s, "fog grid");
     }
     if (tracing) {
         /* (the frame before read and wrote what this one is about to) */
@@ -2953,6 +3081,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
             v->vkCmdDispatch(c, ((uint32_t)v->width + 7) / 8, ((uint32_t)v->height + 7) / 8, 1);
             if (scene->trace.desc.denoise) denoise(v, c, s);
             memoryBarrier(v, c, STAGE_COMPUTE, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ);
+            passMark(v, c, s, "trace");
         }
     }
 
@@ -2987,11 +3116,12 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         v->vkCmdDraw(c, 3, 1, 0, 0);
     }
-    if (instanceCount) drawCommands(v, c, s, v->scenePipeline, 0, meshCount);
+    if (instanceCount) drawCommands(v, c, s, solidPipeline, 0, meshCount);
     if (meshlets) v->vkCmdDrawIndexedIndirectCount(c, s->meshletCommands.buffer, 0, s->meshletState.buffer, MESHLET_DRAWN * 4, MESHLET_COMMANDS, 20);
-    if (cutouts) drawCommands(v, c, s, v->cutoutPipeline, meshCount * 2, meshCount);
+    if (cutouts) drawCommands(v, c, s, cutoutPipeline, meshCount * 2, meshCount);
     if (occlusion) {
         v->vkCmdEndRenderPass(c);
+        passMark(v, c, s, "scene, early");
         /* the pyramid, from what was just drawn */
         v->vkCmdBindPipeline(c, 1, v->hizFirstPipeline);
         v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
@@ -3009,19 +3139,23 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
             v->vkCmdDispatchIndirect(c, s->meshletState.buffer, (VkDeviceSize)meshletHalf(v) * 4);
         }
         memoryBarrier(v, c, STAGE_COMPUTE, STAGE_DRAW_INDIRECT | STAGE_VERTEX_SHADER, ACCESS_SHADER_WRITE, ACCESS_INDIRECT | ACCESS_SHADER_READ);
+        passMark(v, c, s, "occlusion");
         pass.renderPass = sorted || v->floats ? v->midPass : v->latePass;
         v->vkCmdBeginRenderPass(c, &pass, 0);
         v->vkCmdSetViewport(c, 0, 1, &viewport);
         v->vkCmdSetScissor(c, 0, 1, &area);
-        drawCommands(v, c, s, v->scenePipeline, meshCount, meshCount);
+        drawCommands(v, c, s, solidPipeline, meshCount, meshCount);
         if (meshlets) v->vkCmdDrawIndexedIndirectCount(c, s->meshletCommands.buffer, (VkDeviceSize)MESHLET_COMMANDS * 20, s->meshletState.buffer, ((VkDeviceSize)meshletHalf(v) + MESHLET_DRAWN) * 4, MESHLET_COMMANDS, 20);
-        if (cutouts) drawCommands(v, c, s, v->cutoutPipeline, meshCount * 3, meshCount);
+        if (cutouts) drawCommands(v, c, s, cutoutPipeline, meshCount * 3, meshCount);
     }
+    if (!v->floats) passMark(v, c, s, occlusion ? "scene, late" : "scene");
     if (v->floats) {
         /* what comes after reads the depth of what is solid: it is taken now, before layers write theirs */
         v->vkCmdEndRenderPass(c);
+        passMark(v, c, s, occlusion ? "scene, late" : "scene");
         v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         postStep(v, c, POST_GATHER, 1, (uint32_t)v->width * (uint32_t)v->height);
+        passMark(v, c, s, "depth for what follows");
         pass.renderPass = v->latePass;
         v->vkCmdBeginRenderPass(c, &pass, 0);
         v->vkCmdSetViewport(c, 0, 1, &viewport);
@@ -3056,6 +3190,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     } else if (layerCount) {
         drawLayers(v, c, scene, layerCount);
     }
+    if (layerCount) passMark(v, c, s, "layers");
     if (tracing && (v->traceDone || scene->trace.desc.denoise)) {
         v->vkCmdBindPipeline(c, 0, v->traceShowPipeline);
         v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
@@ -3068,7 +3203,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     v->vkCmdEndRenderPass(c);
     if (v->floats) postRecord(v, c, s, &frame, image, &viewport, &area);
-    if (s->timed) v->vkCmdWriteTimestamp(c, STAGE_BOTTOM, v->timestamps, slotIndex * 2 + 1);
+    else passMark(v, c, s, "overlay and out");
     v->vkEndCommandBuffer(c);
 
     const VkFlags waitStage = STAGE_COLOR;
@@ -3140,6 +3275,8 @@ static void vkStats(const ArtfRenderer* r, ArtfFrameStats* out) {
     out->traceSamples = v->traceDone;
     out->gpuMs = v->gpuMs;
     out->shadowMapsDrawn = v->shadowMapsDrawn;
+    out->passCount = v->passTimeCount;
+    memcpy(out->passes, v->passTimes, v->passTimeCount * sizeof *out->passes);
 }
 
 /* ---- start and end ---- */
@@ -3250,6 +3387,9 @@ static void vkFree(ArtfRenderer* r) {
         if (v->layerDepthPipeline) v->vkDestroyPipeline(v->device, v->layerDepthPipeline, NULL);
         if (v->layerPipeline) v->vkDestroyPipeline(v->device, v->layerPipeline, NULL);
         if (v->particlePipeline) v->vkDestroyPipeline(v->device, v->particlePipeline, NULL);
+        for (int i = 0; i < 2; ++i)
+            if (v->overdrawPipelines[i]) v->vkDestroyPipeline(v->device, v->overdrawPipelines[i], NULL);
+        bufferFree(v, &v->meshletIds);
         const VkPipeline holePipelines[5] = {v->holePipeline, v->bloomFirstPipeline, v->bloomNextPipeline, v->bloomUpPipeline, v->backdropPipeline};
         for (int i = 0; i < 5; ++i)
             if (holePipelines[i]) v->vkDestroyPipeline(v->device, holePipelines[i], NULL);
@@ -3449,6 +3589,7 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             v->rayQuery = rayQuery;
             v->sampleShading = features.features.sampleRateShading;
             v->independentBlend = features.features.independentBlend;
+            v->primitiveIds = features.features.geometryShader && !getenv("ARTFUL_NO_PRIMITIVE_ID"); /* (for the meshlets view) */
             v->takesEtc = features.features.textureCompressionETC2 && !getenv("ARTFUL_NO_BLOCKS");
             v->takesAstc = features.features.textureCompressionASTC_LDR && !getenv("ARTFUL_NO_BLOCKS");
             v->takesBc = features.features.textureCompressionBC && !getenv("ARTFUL_NO_BLOCKS");
@@ -3499,6 +3640,7 @@ static bool createDevice(Vulkan* v) {
     features.features.fragmentStoresAndAtomics = v->fragmentStores;
     features.features.sampleRateShading = v->sampleShading;
     features.features.independentBlend = v->independentBlend;
+    features.features.geometryShader = v->primitiveIds;
     const char* extensions[5];
     uint32_t extensionCount = 0;
     if (v->surface) extensions[extensionCount++] = "VK_KHR_swapchain";
@@ -3573,7 +3715,7 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
         goto failed;
     }
     if (timestampsThere && v->timestampPeriod > 0) {
-        const QueryPoolCreateInfo queries = {11 /* ST_QUERY_POOL */, NULL, 0, 2 /* timestamps */, SLOTS * 2, 0};
+        const QueryPoolCreateInfo queries = {11 /* ST_QUERY_POOL */, NULL, 0, 2 /* timestamps */, SLOTS * QUERIES, 0};
         if (v->vkCreateQueryPool(v->device, &queries, NULL, &v->timestamps) != VK_OK) v->timestamps = 0;
     }
 

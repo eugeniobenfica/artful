@@ -2,6 +2,7 @@
 #ifndef ARTFUL_SOFTWARE_INTERNAL_H
 #define ARTFUL_SOFTWARE_INTERNAL_H
 
+#include "render/rendererInternal.h"
 #include "scene/sceneInternal.h"
 #include "software/shadows.h"
 
@@ -134,6 +135,8 @@ typedef struct ArtfSoftFrame {
     /* the decals that may show (artfSceneDecals) */
     ArtfDecalData* decals;
     uint32_t decalCount;
+    int view;               /* what the frame shows (ArtfView) */
+    bool lightsApart;       /* lighting goes through its copy that is called (lightLanesCoated): sizedLights, or a view */
 } ArtfSoftFrame;
 
 /* ---- post.c ---- */
@@ -156,6 +159,7 @@ typedef struct ArtfSoftPost {
     int bloomW[ARTF_POST_BLOOM_LEVELS], bloomH[ARTF_POST_BLOOM_LEVELS];
     size_t bloomAt[ARTF_POST_BLOOM_LEVELS];
     int bloomLevel;
+    ArtfPassLog* log;    /* where each pass says what it took */
     float exposureLog;   /* auto exposure: where it has got to, in stops, */
     float exposureScale; /* and 2 to that */
     bool exposureValid;  /* false: it goes straight to what the next frame meters */

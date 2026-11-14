@@ -4159,6 +4159,185 @@ static void testTraceHardware(void) {
     artfRendererFree(gpu);
 }
 
+/* ---- views and what passes take ---- */
+
+/* What a view shows of a count (artfViewHeat), as a frame holds it: with floats, its square root. */
+static void heatBytes(uint32_t count, bool floats, int* out) {
+    float c[3];
+    artfViewHeat(count, c);
+    for (int k = 0; k < 3; ++k) out[k] = (int)((floats ? sqrtf(c[k]) : c[k]) * 255.f + .5f);
+}
+
+static bool rgbNear(uint32_t p, const int* rgb, int margin) {
+    return near_(CHANNEL(p, 16), rgb[0], margin) && near_(CHANNEL(p, 8), rgb[1], margin) && near_(CHANNEL(p, 0), rgb[2], margin);
+}
+
+/* Lighter levels, a layer, lights past the frame's sixteen and something that moves: what the views tell apart. */
+static ArtfScene* viewScene(ArtfInstance* moving) {
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true);
+    ArtfMaterialDesc floorDesc = {artfVec3(.6f, .6f, .6f), 0, .2f, .5f, artfVec3(0, 0, 0)};
+    ArtfTransform t = artfTransformAt(0, -1, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 40, 8), artfSceneAddMaterial(s, &floorDesc), &t);
+    ArtfMaterialDesc red = {artfVec3(.8f, .15f, .1f), 0, .7f, .3f, artfVec3(0, 0, 0)};
+    red.metallic = .6f;
+    ArtfMaterialDesc glow = {artfVec3(.1f, .3f, .2f), 0, 0, 1, artfVec3(.05f, .4f, .1f)};
+    const ArtfMaterial redMaterial = artfSceneAddMaterial(s, &red), glowMaterial = artfSceneAddMaterial(s, &glow);
+    const ArtfMesh sphere = artfSceneAddSphere(s, 1, 48, 64);
+    for (int i = 0; i < 5; ++i) addAt(s, sphere, i & 1 ? glowMaterial : redMaterial, -3.f + (float)i * 1.6f, 0, -(float)i * 6.f, 1);
+    *moving = addAt(s, artfSceneAddTorus(s, .7f, .25f, 48, 24), glowMaterial, 1.5f, .3f, 2.f, 1);
+    artfInstanceSetOpacity(s, addAt(s, artfSceneAddCube(s, 1.2f), redMaterial, -1.2f, 0, 2.2f, 1), .5f);
+    for (int i = 0; i < 24; ++i) artfSceneAddLight(s, artfVec3(-6.f + (float)i * .5f, -.5f, 1.f - (float)(i % 5) * 3.f), artfVec3(.4f, .3f, .2f), 2.5f);
+    setCamera(s, 0, 1.5f, 7, 0, 0, -2);
+    return s;
+}
+
+/* Each view (ArtfView) drawn: what was asked for comes out, on each backend and with a frame in floats; the two
+ * backends agree; and a view put back leaves the picture as it was, to the byte. */
+static void testViews(void) {
+    uint32_t* frame = artfMalloc(W * H * 4);
+    uint32_t* frames[2][2][ARTF_VIEW_COUNT];
+    memset(frames, 0, sizeof frames);
+    CHECK(!strcmp(artfViewName(ARTF_VIEW_BASE_COLOR), "base-color") && !artfViewName(ARTF_VIEW_COUNT));
+    ArtfView named = ARTF_VIEW_LIT;
+    CHECK(artfViewFromName("overdraw", &named) && named == ARTF_VIEW_OVERDRAW && !artfViewFromName("lit up", &named));
+    for (int backend = 0; backend < 2; ++backend)
+        for (int floats = 0; floats < 2; ++floats) {
+            ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+            o.hdr = floats;
+            ArtfRenderer* r = artfRendererNew(&o);
+            if (!r) continue;
+            /* a square facing the eye at 5, with values that are whole bytes as they show */
+            ArtfScene* s = plainScene();
+            ArtfMaterialDesc d = {artfVec3(.36f, .64f, .04f), 0, 0, .6f, artfVec3(.36f, 0, 0)};
+            d.metallic = .2f;
+            const ArtfInstance square = addAt(s, addSquare(s, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu), artfSceneAddMaterial(s, &d), 0, 0, 0, 1);
+            for (int i = 0; i < 3; ++i) artfSceneAddLight(s, artfVec3((float)i - 1.f, 0, 1), artfVec3(1, 1, 1), 10.f);
+            artfSceneAddLight(s, artfVec3(0, 0, -30), artfVec3(1, 1, 1), 5.f); /* (out of reach) */
+            float c[3];
+            int colors[ARTF_VIEW_COUNT][3];
+            const int base[3] = {153, 204, 51};
+            memcpy(colors[ARTF_VIEW_BASE_COLOR], base, sizeof base);
+            memcpy(colors[ARTF_VIEW_AMBIENT], base, sizeof base); /* (a sky and ground of 1: what all around gives is the color) */
+            const int normal[3] = {128, 128, 255}, rough[3] = {153, 153, 153}, metal[3] = {51, 51, 51}, own[3] = {153, 0, 0}, white[3] = {255, 255, 255}, depth[3] = {170, 170, 170}, still[3] = {128, 128, 128};
+            memcpy(colors[ARTF_VIEW_NORMALS], normal, sizeof normal);
+            memcpy(colors[ARTF_VIEW_ROUGHNESS], rough, sizeof rough);
+            memcpy(colors[ARTF_VIEW_METALLIC], metal, sizeof metal);
+            memcpy(colors[ARTF_VIEW_EMISSIVE], own, sizeof own);
+            memcpy(colors[ARTF_VIEW_LOD], white, sizeof white);
+            memcpy(colors[ARTF_VIEW_DEPTH], depth, sizeof depth); /* (10 / (10 + 5)) */
+            memcpy(colors[ARTF_VIEW_MOTION], still, sizeof still);
+            artfViewColor(0, c);
+            for (int k = 0; k < 3; ++k) colors[ARTF_VIEW_INSTANCES][k] = colors[ARTF_VIEW_MESHLETS][k] = (int)(c[k] * 255.f + .5f);
+            heatBytes(1, floats, colors[ARTF_VIEW_OVERDRAW]);
+            artfViewHeat(3, c);
+            for (int k = 0; k < 3; ++k) colors[ARTF_VIEW_LIGHTS][k] = (int)(c[k] * 255.f + .5f);
+            const int black[3] = {0, 0, 0};
+            for (int v = ARTF_VIEW_BASE_COLOR; v < ARTF_VIEW_COUNT; ++v) {
+                artfRendererSetView(r, (ArtfView)v);
+                CHECK(artfRendererView(r) == (ArtfView)v);
+                drawInto(r, s, frame);
+                const uint32_t at = frame[(H / 2) * W + W / 2 + 12], behind = frame[2 * W + 2];
+                const bool good = rgbNear(at, colors[v], 1) && rgbNear(behind, black, 0);
+                if (!good) printf("%s%s, view %s: %d %d %d, behind %06x\n", backend ? "GPU" : "CPU", floats ? " in floats" : "", artfViewName((ArtfView)v), CHANNEL(at, 16), CHANNEL(at, 8), CHANNEL(at, 0), behind & 0xFFFFFF);
+                CHECK(good);
+            }
+            /* motion: the square goes right, so red is past grey; up and down, nothing */
+            artfRendererSetView(r, ARTF_VIEW_MOTION);
+            const ArtfTransform right = artfTransformAt(.1f, 0, 0, 1);
+            artfInstanceSetTransform(s, square, &right);
+            drawOnce(r, s, frame);
+            const uint32_t went = frame[(H / 2) * W + W / 2 + 12];
+            printf("%s%s, a square going right 3.7 pixels: red %d, green %d\n", backend ? "GPU" : "CPU", floats ? " in floats" : "", CHANNEL(went, 16), CHANNEL(went, 8));
+            CHECK(CHANNEL(went, 16) > 145 && CHANNEL(went, 16) < 170 && near_(CHANNEL(went, 8), 128, 1));
+            artfSceneFree(s);
+
+            /* a fuller scene, each view, for the two backends to agree on */
+            ArtfInstance moving;
+            s = viewScene(&moving);
+            for (int v = 0; v < ARTF_VIEW_COUNT; ++v) {
+                artfRendererSetView(r, (ArtfView)v);
+                drawInto(r, s, frame);
+                const ArtfTransform t = artfTransformAt(1.6f, .3f, 2.f, 1);
+                if (v == ARTF_VIEW_MOTION) {
+                    artfInstanceSetTransform(s, moving, &t);
+                    drawOnce(r, s, frame);
+                }
+                frames[backend][floats][v] = artfMalloc(W * H * 4);
+                memcpy(frames[backend][floats][v], frame, W * H * 4);
+            }
+            /* back to the picture: what it was, to the byte, as if no view had been */
+            artfRendererSetView(r, ARTF_VIEW_LIT);
+            drawInto(r, s, frame);
+            artfSceneFree(s);
+            artfRendererFree(r);
+            r = artfRendererNew(&o);
+            s = viewScene(&moving);
+            const ArtfTransform t = artfTransformAt(1.6f, .3f, 2.f, 1);
+            artfInstanceSetTransform(s, moving, &t);
+            uint32_t* fresh = artfMalloc(W * H * 4);
+            drawInto(r, s, fresh);
+            CHECK(!memcmp(frame, fresh, W * H * 4));
+            artfFree(fresh);
+            artfSceneFree(s);
+            artfRendererFree(r);
+        }
+    for (int floats = 0; floats < 2; ++floats) {
+        if (!frames[1][floats][0]) break;
+        for (int v = 1; v < ARTF_VIEW_COUNT; ++v) {
+            const double apart = differentShare(frames[0][floats][v], frames[1][floats][v], 24);
+            if (apart > .002) printf("the view %s%s, the GPU against the CPU: %.3f%% of pixels apart\n", artfViewName((ArtfView)v), floats ? " in floats" : "", apart * 100);
+            CHECK(apart < .01);
+        }
+        /* (and not all the same picture; the spheres far away are lighter levels) */
+        CHECK(differentShare(frames[0][floats][ARTF_VIEW_INSTANCES], frames[0][floats][ARTF_VIEW_MESHLETS], 24) > .01);
+        int lighter = 0;
+        for (int i = 0; i < W * H; ++i) {
+            const uint32_t p = frames[0][floats][ARTF_VIEW_LOD][i];
+            lighter += CHANNEL(p, 16) == 64 && CHANNEL(p, 0) == 64 && CHANNEL(p, 8) == 255;
+        }
+        CHECK(lighter > 0);
+    }
+    for (int i = 0; i < 2 * 2 * ARTF_VIEW_COUNT; ++i) artfFree((&frames[0][0][0])[i]);
+    artfFree(frame);
+}
+
+/* What each pass took: listed, in order, adding up to the frame. */
+static void testPassTimes(void) {
+    uint32_t* frame = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend)
+        for (int floats = 0; floats < 2; ++floats) {
+            ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+            o.hdr = floats;
+            ArtfRenderer* r = artfRendererNew(&o);
+            if (!r) continue;
+            ArtfScene* s = richScene();
+            const ArtfShadowDesc shadows = {512, 0, false};
+            artfSceneSetShadows(s, &shadows);
+            const ArtfPostDesc post = {.bloom = .5f, .occlusion = 1};
+            artfSceneSetPost(s, &post);
+            drawInto(r, s, frame);
+            ArtfFrameStats st;
+            artfRendererStats(r, &st);
+            double sum = 0;
+            bool named = st.passCount > 0 && st.passCount <= ARTF_PASS_TIMES, scene = false, bloom = false;
+            for (uint32_t k = 0; k < st.passCount; ++k) {
+                named = named && st.passes[k].name && st.passes[k].ms >= 0;
+                if (!st.passes[k].name) continue;
+                sum += st.passes[k].ms;
+                scene |= !strcmp(st.passes[k].name, backend ? "scene" : "tiles");
+                bloom |= !strcmp(st.passes[k].name, "bloom");
+            }
+            const double whole = backend ? st.gpuMs : st.cpuMs;
+            printf("%s%s: %u passes, %.3f ms of %.3f\n", backend ? "GPU" : "CPU", floats ? " in floats" : "", st.passCount, sum, whole);
+            CHECK(named && scene && bloom == (bool)floats);
+            CHECK(whole > 0 && sum <= whole * 1.001 + .001 && sum >= whole * .9 - .05);
+            artfSceneFree(s);
+            artfRendererFree(r);
+        }
+    artfFree(frame);
+}
+
 /* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
  * next to nothing, though a probe outside is nearer to it than one inside. */
 static void testProbesWalls(void) {
@@ -5328,6 +5507,8 @@ int main(void) {
     testParticleForces();
     testTerrainLayers();
     testTraceHardware();
+    testViews();
+    testPassTimes();
     testProbesWalls();
     testExtraShadows();
     testFloatsSamples();

@@ -44,6 +44,7 @@ typedef struct Software {
     float previous[16];   /* the frame before's viewProj */
     ArtfMotion motion;    /* how each instance moved */
     bool hasPrevious;
+    ArtfPassLog passes;   /* of the last frame */
 } Software;
 
 #ifdef ARTFUL_HAVE_AVX2
@@ -466,9 +467,11 @@ static void drawWithOcclusion(Software* s, uint32_t count) {
     artfPoolRun(s->pool, geometryJob, s, ARTF_CHUNKS);
 
     /* (also with nothing drawn yet: an opaque overlay hides what is under it all the same) */
+    artfPassMark(&s->passes, "geometry, early");
     s->hiddenCount = 0;
     artfPoolRun(s->pool, depthJob, s, (uint32_t)(f->tilesX * f->tilesY));
     artfPoolRun(s->pool, occlusionGroup, s, ARTF_CHUNKS);
+    artfPassMark(&s->passes, "occlusion");
     for (uint32_t i = 0; i < late; ++i) {
         if (s->hidden[early + i]) ++s->hiddenCount;
         else f->visible[f->visibleCount++] = s->candidates[i];
@@ -575,21 +578,27 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     ArtfSoftFrame* f = &s->f;
     const double t0 = artfNowMs();
     f->scene = scene;
+    artfPassStart(&s->passes);
+    s->post.log = &s->passes;
     artfSceneDecodeTextures(scene);
     artfScenePosesApply(scene);
     artfSceneFaceParticles(scene);
     artfSceneFrame(scene, f->width, f->height, &f->data);
-    if (f->post) {
+    /* a view: its frame (nothing after it), and the copy of lighting that has views */
+    const ArtfView view = s->base.view;
+    f->view = (int)view;
+    artfFrameForView(&f->data, (int)view);
+    if (f->post || view == ARTF_VIEW_MOTION) {
         /* the frame before, and with temporal antialiasing, a place within the pixel */
         float now[16];
         memcpy(now, f->data.viewProj, sizeof now);
         if (s->hasPrevious) memcpy(f->data.previous, s->previous, sizeof s->previous);
         memcpy(s->previous, now, sizeof now);
         s->hasPrevious = true;
-        if (scene->post.temporal) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
-        /* how each instance moved: for temporal antialiasing and motion blur */
+        if (scene->post.temporal && !view) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
+        /* how each instance moved: for temporal antialiasing and motion blur, and the view of it */
         f->motion = NULL;
-        if (scene->post.temporal || scene->post.motionBlur > 0) {
+        if (scene->post.temporal || scene->post.motionBlur > 0 || view == ARTF_VIEW_MOTION) {
             artfMotionStep(&s->motion, scene);
             /* (nothing moved: the view alone says where each pixel was) */
             f->motion = s->motion.moving ? s->motion.motion : NULL;
@@ -610,9 +619,11 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     f->nearW = scene->camera.near_;
     f->sizedLights = false;
     for (uint32_t i = 0; i < f->data.lightCount; ++i) f->sizedLights |= f->data.lightSizes[i] > 0;
+    f->lightsApart = f->sizedLights || view != ARTF_VIEW_LIT;
     if (!f->decals) f->decals = artfMalloc(ARTF_MAX_DECALS * sizeof *f->decals);
     f->decalCount = artfSceneDecals(scene, &f->data, f->height, f->decals);
-    const bool occlusion = scene->features[ARTF_FEATURE_OCCLUSION];
+    /* (overdraw counts what is behind as well: it goes without, as on the GPU) */
+    const bool occlusion = scene->features[ARTF_FEATURE_OCCLUSION] && view != ARTF_VIEW_OVERDRAW;
     const float* bg = f->data.background;
     f->background = (uint32_t)(artfClampf(bg[3], 0, 1) * 255.f + .5f) << 24 | (uint32_t)(artfClampf(bg[0], 0, 1) * 255.f + .5f) << 16 | (uint32_t)(artfClampf(bg[1], 0, 1) * 255.f + .5f) << 8 | (uint32_t)(artfClampf(bg[2], 0, 1) * 255.f + .5f);
     f->solidCount = UINT32_MAX;
@@ -631,7 +642,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         s->hidden = artfMalloc(s->visibleCapacity);
     }
     /* each group writes from where its instances start: the list has holes until it is packed */
-    f->tracing = scene->trace.desc.mode != ARTF_TRACE_NONE;
+    f->tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !view; /* (a view is of triangles) */
     f->postFog = f->post && !f->tracing && f->data.post[1][1] > 0 && f->data.look[1] > 0;
     for (uint32_t g = 0; g < ARTF_CHUNKS; ++g) {
         s->groups[g] = f->visible + (size_t)count * g / ARTF_CHUNKS;
@@ -654,6 +665,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     f->visibleCount = visible;
     const double t1 = artfNowMs();
+    artfPassMark(&s->passes, "prepare and cull");
 
     s->hiddenCount = 0;
     if (f->tracing) {
@@ -661,7 +673,9 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         countMeshlets(f, 0);
         artfPoolRun(s->pool, geometryJob, s, ARTF_CHUNKS);
         f->solidCount = 0;
+        artfPassMark(&s->passes, "geometry");
         drawTraced(s, scene);
+        artfPassMark(&s->passes, "trace");
     } else if (occlusion) {
         drawWithOcclusion(s, count);
     } else {
@@ -669,17 +683,29 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         countMeshlets(f, 0);
         artfPoolRun(s->pool, geometryJob, s, ARTF_CHUNKS);
     }
-    if (!f->tracing) addLayers(s, scene);
+    if (!f->tracing) {
+        artfPassMark(&s->passes, "geometry");
+        addLayers(s, scene);
+        if (f->visibleCount > f->solidCount) artfPassMark(&s->passes, "geometry of layers");
+    }
     f->shadows = !f->tracing && scene->shadows.resolution ? artfShadowMapsDraw(s->shadowMaps, scene, &f->data) : NULL;
-    if (f->postFog) artfSoftFroxels(&s->post, f);
+    if (f->shadows) artfPassMark(&s->passes, "shadows");
+    if (f->postFog) {
+        artfSoftFroxels(&s->post, f);
+        artfPassMark(&s->passes, "fog grid");
+    }
     const double t2 = artfNowMs();
 
-    f->hole = scene->hole.on;
-    if (f->hole) drawHole(s, scene);
+    f->hole = scene->hole.on && !view;
+    if (f->hole) {
+        drawHole(s, scene);
+        artfPassMark(&s->passes, "black hole");
+    }
     const double tHole = artfNowMs();
 
     memset(s->tilesSkipped, 0, sizeof s->tilesSkipped);
     artfPoolRun(s->pool, tileJob, s, (uint32_t)(f->tilesX * f->tilesY));
+    artfPassMark(&s->passes, "tiles");
     if (f->post) artfSoftPostRun(&s->post, f, s->pixels);
     const double t3 = artfNowMs();
 
@@ -714,6 +740,8 @@ static void softStats(const ArtfRenderer* r, ArtfFrameStats* out) {
     out->traceSamples = s->f.tracing ? (s->denoising ? s->traceCounted : s->f.traceDone) : 0;
     for (int i = 0; i < ARTF_CHUNKS; ++i) out->trianglesBinned += (uint32_t)s->f.chunks[i].tris.len;
     for (int i = 0; i < 16; ++i) out->tilesSkipped += s->tilesSkipped[i];
+    out->passCount = s->passes.count;
+    memcpy(out->passes, s->passes.passes, s->passes.count * sizeof *out->passes);
 }
 
 static void softFree(ArtfRenderer* r) {

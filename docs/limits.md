@@ -77,6 +77,15 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   radian high. A file's lights end at a radius, as Artful's do, and are not the square law: as bright as it at a
   quarter of their reach. Each material has one set of texture coordinates, moved by the transform of its first
   texture. Transmission is drawn as blending, and bends light only when traced.
+- Views (`artfRendererSetView`) show what is drawn as triangles: tracing and a black hole are left out while one is
+  asked, and so is everything after the frame. Overdraw counts each triangle that covers a pixel, holes and what is
+  hidden included, without occlusion; the GPU and the CPU round slivers in their own ways, so in a crowd of small
+  things (`city`) 2% of pixels differ by a step. The meshlets view needs geometry shaders on Vulkan (`PrimitiveId`), and
+  draws whole meshes while it is on; without them it shows instances. Light complexity counts the lights whose reach a
+  point is in, not their cones or shadows. Motion is what instances and the eye did, not what bones bend. Metal shows
+  only the picture. Making a view's shaders, on the GPU, takes that frame a moment.
+- What passes take on the GPU is between timestamps at the bottom of the pipe: where a GPU runs passes side by side,
+  one's time can hold part of another's. They are of the last frame the GPU finished, two behind.
 - Metal leaves out everything since 0.4: its shaders were not made again, and read the records they did.
 - **Metal has never been run.** It was written without a Mac: CI builds it on macOS and puts its shaders through
   Apple's compiler, and no more than that is known. So it is chosen only by name. It needs Metal 3; it leaves out

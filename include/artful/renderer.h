@@ -114,6 +114,50 @@ bool artfRendererReadPixels(ArtfRenderer* r, uint32_t* dst);
  * NULL for the others. Handing this to a presenter costs no copy. */
 uint32_t* artfRendererPixels(ArtfRenderer* r);
 
+/* What a frame shows, for those who build with Artful: the picture as it is, or one thing that went into it, as a
+ * color. Both backends draw each the same, but for what the notes say. Nothing that comes after the frame is done in
+ * a view but the lit one (bloom, exposure, fog and the rest), what is behind the scene is black, and what is traced
+ * or a black hole is drawn as triangles are. Off, a view costs nothing. */
+typedef enum ArtfView {
+    ARTF_VIEW_LIT,        /* the picture */
+    ARTF_VIEW_BASE_COLOR, /* what a surface is made of: its color, after textures, vertex colors and decals */
+    ARTF_VIEW_NORMALS,    /* which way it faces, in the world, after its normal map: x, y, z as red, green, blue */
+    ARTF_VIEW_ROUGHNESS,  /* grey */
+    ARTF_VIEW_METALLIC,   /* grey */
+    ARTF_VIEW_AMBIENT,    /* the light from all around (sky and ground, the environment or the probes) as it shows */
+    ARTF_VIEW_EMISSIVE,   /* the surface's own light */
+    ARTF_VIEW_LOD,        /* which level of detail is drawn: white, red, green, blue for 0 to 3 */
+    ARTF_VIEW_MESHLETS,   /* a color for each meshlet of a mesh (Vulkan: with geometry shaders; else as instances) */
+    ARTF_VIEW_INSTANCES,  /* a color for each instance */
+    /* How many triangles cover each pixel, whatever is in front: a red that goes to yellow and white. The CPU draws
+     * each pixel once, so this is the work its rasterizer does there, and the GPU's overdraw. With a frame in floats
+     * the square root of it shows. */
+    ARTF_VIEW_OVERDRAW,
+    ARTF_VIEW_DEPTH,      /* how far along the view: white at the eye, grey at 10 units, black far away */
+    /* How far each pixel moved since the frame before, by the eye's motion and its instance's: red for x and green
+     * for y (down), grey (128) where it stood still, and a 32nd of the way to white or black for each pixel it went */
+    ARTF_VIEW_MOTION,
+    ARTF_VIEW_LIGHTS,     /* how many lights reach each point, of the frame's own and of the lists past them: as overdraw */
+    ARTF_VIEW_COUNT
+} ArtfView;
+
+/* "lit", "base-color", "normals", ...; NULL past the last. */
+const char* artfViewName(ArtfView view);
+/* From such a name; false: there is none. */
+bool artfViewFromName(const char* name, ArtfView* out);
+/* From the next frame on. Metal draws only the lit one. */
+void artfRendererSetView(ArtfRenderer* r, ArtfView view);
+ArtfView artfRendererView(const ArtfRenderer* r);
+
+/* A pass of a frame and what it took, in ms. On Vulkan, from timestamps, for the last frame the GPU has finished; on
+ * the CPU, from the clock, for the last frame. The name is the library's own and stays. */
+typedef struct ArtfPassTime {
+    const char* name;
+    double ms;
+} ArtfPassTime;
+
+#define ARTF_PASS_TIMES 32
+
 /* What the last frame cost. */
 typedef struct ArtfFrameStats {
     double cpuMs;             /* inside artfRendererDraw */
@@ -128,6 +172,10 @@ typedef struct ArtfFrameStats {
     uint32_t traceSamples;    /* tracing: what each pixel has gathered so far */
     double gpuMs;             /* Vulkan: what the GPU took, for the last frame it has finished */
     uint32_t shadowMapsDrawn; /* Vulkan and software: the others stayed as they were */
+    /* Vulkan and software: the passes of the frame in order, each with what it took. On Vulkan they add up to gpuMs;
+     * on the CPU, to cpuMs. Only what was done this frame is listed. */
+    uint32_t passCount;
+    ArtfPassTime passes[ARTF_PASS_TIMES];
 } ArtfFrameStats;
 
 void artfRendererStats(const ArtfRenderer* r, ArtfFrameStats* out);

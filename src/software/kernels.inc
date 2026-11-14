@@ -597,6 +597,7 @@ struct ShadeContext {
     float A[3], B[3], C[3];
     float wp[3][3], nrm[3][3], uv[3][2];
     float col[3][4];  /* in linear light, and alpha */
+    uint32_t who[8];  /* in a view: what it is colored by (viewWho), for each lane of a block */
 };
 
 /* Pixels waiting for their light: they may come from many triangles of one material. Nothing is
@@ -605,6 +606,7 @@ struct ShadeContext {
 typedef struct LitBatch {
     _Alignas(32) float nx[8], ny[8], nz[8], wx[8], wy[8], wz[8], u[8], v[8], r[8], g[8], b[8], a[8], tx[8], ty[8], tz[8], bx[8], by[8], bz[8];
     uint16_t at[8];
+    uint32_t who[8]; /* in a view: as ShadeContext's */
     int count;
     int level;
     uint32_t lights;
@@ -715,6 +717,65 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lan
     return out;
 }
 
+/* What a view shows of eight pixels (ArtfView), as light: the frame shows its square root. As the GPU's pixel shader,
+ * in the same order. who: of each pixel, what it is colored by (viewWho); lights: how many reach it. */
+static Lanes3 viewLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const Lanes3* base, Lanes3 n, V8F rough, V8F metal, const Lanes3* around, const Lanes3* own, Lanes3 world,
+                        const uint32_t* who, V8F lights) {
+    const V8F half = v8fSet(.5f);
+    Lanes3 d = {rough, rough, rough};
+    _Alignas(32) float lw[3][8], out[3][8], counts[8];
+    switch (f->view) {
+    case ARTF_VIEW_BASE_COLOR: return *base;
+    case ARTF_VIEW_AMBIENT: return *around;
+    case ARTF_VIEW_EMISSIVE: return *own;
+    case ARTF_VIEW_NORMALS:
+        d.x = v8fAdd(v8fMul(n.x, half), half);
+        d.y = v8fAdd(v8fMul(n.y, half), half);
+        d.z = v8fAdd(v8fMul(n.z, half), half);
+        break;
+    case ARTF_VIEW_ROUGHNESS: break;
+    case ARTF_VIEW_METALLIC: d.x = d.y = d.z = metal; break;
+    default:
+        v8fStore(lw[0], world.x); v8fStore(lw[1], world.y); v8fStore(lw[2], world.z);
+        v8fStore(counts, lights);
+        for (int i = 0; i < 8; ++i) {
+            float c[3] = {0, 0, 0};
+            const float x = lw[0][i], y = lw[1][i], z = lw[2][i];
+            const float* m = frame->viewProj;
+            if (f->view == ARTF_VIEW_LOD) artfViewLevel(who[i], c);
+            else if (f->view == ARTF_VIEW_MESHLETS || f->view == ARTF_VIEW_INSTANCES) artfViewColor(who[i], c);
+            else if (f->view == ARTF_VIEW_LIGHTS) artfViewHeat((uint32_t)counts[i], c);
+            else if (f->view == ARTF_VIEW_DEPTH) {
+                const float w = m[3] * x + m[7] * y + m[11] * z + m[15];
+                c[0] = c[1] = c[2] = ARTF_VIEW_DEPTH_HALF / (ARTF_VIEW_DEPTH_HALF + artfMaxf(w, 0.f));
+            } else if (f->view == ARTF_VIEW_MOTION) {
+                /* where it is, and where it was: through its instance's motion and the frame before's view */
+                float p[3] = {x, y, z};
+                if (f->motion) {
+                    const float* k = f->motion + (size_t)who[i] * 12;
+                    for (int r = 0; r < 3; ++r) p[r] = k[r * 4] * x + k[r * 4 + 1] * y + k[r * 4 + 2] * z + k[r * 4 + 3];
+                }
+                const float* q = frame->previous;
+                const float cw = artfMaxf(m[3] * x + m[7] * y + m[11] * z + m[15], 1e-5f), pw = artfMaxf(q[3] * p[0] + q[7] * p[1] + q[11] * p[2] + q[15], 1e-5f);
+                const float nx = (m[0] * x + m[4] * y + m[8] * z + m[12]) / cw, ny = (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw;
+                const float px = (q[0] * p[0] + q[4] * p[1] + q[8] * p[2] + q[12]) / pw, py = (q[1] * p[0] + q[5] * p[1] + q[9] * p[2] + q[13]) / pw;
+                /* (in pixels, y down) */
+                const float vx = (nx - px) * .5f * frame->fog[3], vy = (py - ny) * .5f * frame->eye[1][3];
+                c[0] = artfClampf(ARTF_VIEW_MOTION_STILL + vx * ARTF_VIEW_MOTION_SCALE, 0, 1);
+                c[1] = artfClampf(ARTF_VIEW_MOTION_STILL + vy * ARTF_VIEW_MOTION_SCALE, 0, 1);
+                c[2] = ARTF_VIEW_MOTION_STILL;
+            }
+            for (int k = 0; k < 3; ++k) out[k][i] = c[k];
+        }
+        d.x = v8fLoad(out[0]);
+        d.y = v8fLoad(out[1]);
+        d.z = v8fLoad(out[2]);
+        break;
+    }
+    const Lanes3 light = {v8fMul(d.x, d.x), v8fMul(d.y, d.y), v8fMul(d.z, d.z)};
+    return light;
+}
+
 /* The color of eight pixels. A light out of reach adds exactly nothing, so which lights are looked
  * at changes the time this takes, never the pixels. */
 /* (reflecting is read only where shiny, coating only where coated: GCC cannot see that through the lanes, and zeroing
@@ -726,8 +787,10 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lan
 /* coated: a clear coat or sheen. It is made twice, with and without (lightLanes): what has neither pays nothing for
  * them, not even the registers. */
 V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
-                              bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent, const bool coated, const bool sized) {
+                              bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent, const uint32_t* who, const bool coated, const bool sized,
+                              const bool viewed) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
+    V8F lightsHere = zero; /* (in a view: how many lights reach each pixel) */
     const bool shiny = material->specular > 0 || material->metallic > 0 || material->graph;
     const ArtfMaterialMore* more = &f->scene->materialsMore.items[material - f->scene->materials.items];
     Lanes3 n = normalize3(rawN);
@@ -972,6 +1035,7 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         V8F invLength = v8fDiv(v8fSet(1.f), v8fSqrt(v8fMax(d2, v8fSet(1e-8f))));
         Lanes3 toLight = {v8fMul(d.x, invLength), v8fMul(d.y, invLength), v8fMul(d.z, invLength)};
         V8F fade = v8fMax(v8fSub(v8fSet(1.f), v8fMul(d2, v8fSet(1.f / (L->radius * L->radius)))), zero);
+        if (viewed) lightsHere = v8fAdd(lightsHere, v8fSelect(v8fGt(fade, zero), zero, one));
         Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
@@ -991,6 +1055,7 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         Lanes3 toLight = {v8fMul(d.x, invLength), v8fMul(d.y, invLength), v8fMul(d.z, invLength)};
         V8F fade = v8fMax(v8fSub(v8fSet(1.f), v8fMul(d2, v8fSet(1.f / (L->radius * L->radius)))), zero);
         if (v8iSigns(v8fGt(fade, zero)) == 0) continue; /* (none of the eight is in reach) */
+        if (viewed) lightsHere = v8fAdd(lightsHere, v8fSelect(v8fGt(fade, zero), zero, one));
         Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
@@ -1004,7 +1069,7 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
                   v8fAdd(v8fAdd(v8fMul(albedo.z, diffuse.z), highlight.z), own.z)};
     /* (what came from all around, for ambient occlusion: only a frame in floats reads it) */
     Lanes3 aroundLit = {zero, zero, zero};
-    if (f->post || coated) {
+    if (f->post || coated || viewed) {
         aroundLit.x = v8fAdd(v8fMul(albedo.x, aroundDiffuse.x), aroundHighlight.x);
         aroundLit.y = v8fAdd(v8fMul(albedo.y, aroundDiffuse.y), aroundHighlight.y);
         aroundLit.z = v8fAdd(v8fMul(albedo.z, aroundDiffuse.z), aroundHighlight.z);
@@ -1026,6 +1091,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         lit.y = v8fAdd(baseColor.y, own.y);
         lit.z = v8fAdd(baseColor.z, own.z);
     }
+    /* (in a view, what it shows: the frame for one has no fog or exposure) */
+    if (viewed && f->view) lit = viewLanes(f, frame, &baseColor, n, rough, metal, &aroundLit, &own, world, who, lightsHere);
     if (frame->look[1] > 0 && !f->postFog) {
         Lanes3 fromEye = {v8fSub(world.x, v8fSet(frame->cameraPos[0])), v8fSub(world.y, v8fSet(frame->cameraPos[1])), v8fSub(world.z, v8fSet(frame->cameraPos[2]))};
         /* (with no exp, whose bits differ from one C library to the next) */
@@ -1085,16 +1152,17 @@ __declspec(noinline)
 __attribute__((noinline))
 #endif
 static LitOut lightLanesCoated(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
-                               bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent) {
-    return lightLanesAs(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent,
-                        artfMaterialLayered(&f->scene->materialsMore.items[material - f->scene->materials.items]), true);
+                               bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent, const uint32_t* who) {
+    return lightLanesAs(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent, who,
+                        artfMaterialLayered(&f->scene->materialsMore.items[material - f->scene->materials.items]), true, f->view != ARTF_VIEW_LIT);
 }
 
+/* (lightsApart: lights with a size, or a view: what the plain copy does not have to look at) */
 static LitOut lightLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const ArtfMaterialData* material, const ArtfTextureData* textures, const ArtfTextureData* texture, uint32_t lights, const uint32_t* extra, int level, Lanes3 rawN, Lanes3 world, V8F u, V8F v,
-                      bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent) {
-    if (f->sizedLights || artfMaterialLayered(&f->scene->materialsMore.items[material - f->scene->materials.items]))
-        return lightLanesCoated(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent);
-    return lightLanesAs(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent, false, false);
+                      bool colored, bool layered, Lanes3 tint, V8F alpha, const Lanes3* tangent, const Lanes3* bitangent, const uint32_t* who) {
+    if (f->lightsApart || artfMaterialLayered(&f->scene->materialsMore.items[material - f->scene->materials.items]))
+        return lightLanesCoated(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent, who);
+    return lightLanesAs(f, frame, material, textures, texture, lights, extra, level, rawN, world, u, v, colored, layered, tint, alpha, tangent, bitangent, who, false, false, false);
 }
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
@@ -1109,6 +1177,7 @@ static void batchFlush(LitBatch* b, const ArtfSoftFrame* f, uint32_t* color) {
         b->u[i] = b->u[0]; b->v[i] = b->v[0];
         if (b->colored) { b->r[i] = b->r[0]; b->g[i] = b->g[0]; b->b[i] = b->b[0]; b->a[i] = b->a[0]; }
         if (b->bumpy) { b->tx[i] = b->tx[0]; b->ty[i] = b->ty[0]; b->tz[i] = b->tz[0]; b->bx[i] = b->bx[0]; b->by[i] = b->by[0]; b->bz[i] = b->bz[0]; }
+        if (f->view) b->who[i] = b->who[0];
     }
     Lanes3 n = {v8fLoad(b->nx), v8fLoad(b->ny), v8fLoad(b->nz)}, world = {v8fLoad(b->wx), v8fLoad(b->wy), v8fLoad(b->wz)};
     const V8F one = v8fSet(1.f);
@@ -1127,7 +1196,7 @@ static void batchFlush(LitBatch* b, const ArtfSoftFrame* f, uint32_t* color) {
         tangent.x = v8fLoad(b->tx); tangent.y = v8fLoad(b->ty); tangent.z = v8fLoad(b->tz);
         bitangent.x = v8fLoad(b->bx); bitangent.y = v8fLoad(b->by); bitangent.z = v8fLoad(b->bz);
     }
-    const LitOut lit = lightLanes(f, frame, b->material, b->textures, b->texture, b->lights, b->extra, b->level, n, world, v8fLoad(b->u), v8fLoad(b->v), b->colored, b->layered, tint, alpha, &tangent, &bitangent);
+    const LitOut lit = lightLanes(f, frame, b->material, b->textures, b->texture, b->lights, b->extra, b->level, n, world, v8fLoad(b->u), v8fLoad(b->v), b->colored, b->layered, tint, alpha, &tangent, &bitangent, b->who);
     v8iStore(colors, lit.color);
     for (int i = 0; i < b->count; ++i) color[b->at[i]] = colors[i];
     if (f->post) {
@@ -1159,8 +1228,24 @@ static int mipAt(const ShadeContext* s, float x, float y) {
     return mipLevel(artfMaxf(dudx * dudx + dvdx * dvdx, dudy * dudy + dvdy * dvdy), texture->mipCount);
 }
 
+/* In a view, what a triangle is colored by: its level of detail, its meshlet in its mesh, or its instance (for motion
+ * too, which follows the instance). */
+static uint32_t viewWho(const ArtfSoftFrame* f, const ArtfRasterTri* t) {
+    const ArtfVisible* v = &f->visible[t->instance];
+    if (f->view == ARTF_VIEW_MESHLETS) return (t->triangle & ~ARTF_TRI_BACK) >> 7;
+    if (f->view != ARTF_VIEW_LOD) return v->index;
+    const ArtfMeshData* base = &f->scene->meshes.items[v->instance->mesh];
+    for (uint32_t k = 0; k < base->lodCount; ++k)
+        if (v->mesh == &f->scene->meshes.items[base->lods[k]]) return k + 1;
+    return 0;
+}
+
 static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRasterTri* t, int ox, int oy) {
     const ArtfVisible* v = &f->visible[t->instance];
+    if (f->view) {
+        const uint32_t who = viewWho(f, t);
+        for (int i = 0; i < 8; ++i) s->who[i] = who;
+    }
     const ArtfMeshData* mesh = v->mesh;
     const ArtfMeshlet* l = &mesh->meshlets[(t->triangle & ~ARTF_TRI_BACK) >> 7];
     const uint8_t* local = mesh->meshletTriangles + ((size_t)l->triangleOffset + (t->triangle & 127)) * 3;
@@ -1173,7 +1258,7 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
     s->originX = ox;
     s->originY = oy;
     s->texture = material->texture ? &f->scene->textures.items[material->texture] : NULL;
-    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || material->graph || f->decalCount || f->postFog;
+    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || material->graph || f->decalCount || f->postFog || f->view;
     s->bumpy = material->normalMap != 0;
     const ArtfTextureData* textures = f->scene->textures.items;
     s->sizing = s->texture ? s->texture : material->normalMap ? &textures[material->normalMap] : material->surfaceMap ? &textures[material->surfaceMap] : material->occlusionMap ? &textures[material->occlusionMap] : NULL;
@@ -1360,7 +1445,7 @@ static void shadeTriangle(ArtfSoftFrame* f, LitBatch* batch, const ArtfRasterTri
                     alpha = v8fMul(alpha, LERP(col, 3));
                 }
                 Lanes3 tangent = {v8fSet(s.tangent[0]), v8fSet(s.tangent[1]), v8fSet(s.tangent[2])}, bitangent = {v8fSet(s.bitangent[0]), v8fSet(s.bitangent[1]), v8fSet(s.bitangent[2])};
-                storeLit(f, color + y * ARTF_TILE + x, lightLanes(f, frame, s.material, f->scene->textures.items, s.texture, s.lights, batch->extra, mipAt(&s, (float)x + 3.5f, fy), n, world, LERP(uv, 0), LERP(uv, 1), s.colored, s.layered, tint, alpha, &tangent, &bitangent));
+                storeLit(f, color + y * ARTF_TILE + x, lightLanes(f, frame, s.material, f->scene->textures.items, s.texture, s.lights, batch->extra, mipAt(&s, (float)x + 3.5f, fy), n, world, LERP(uv, 0), LERP(uv, 1), s.colored, s.layered, tint, alpha, &tangent, &bitangent, s.who));
 #undef LERP
                 continue;
             }
@@ -1398,6 +1483,7 @@ static void shadeTriangle(ArtfSoftFrame* f, LitBatch* batch, const ArtfRasterTri
                 }
 #undef LERP
                 batch->at[i] = (uint16_t)(y * ARTF_TILE + x + lane);
+                if (f->view) batch->who[i] = s.who[0];
                 batch->lights |= s.lights;
                 if ((batch->count = i + 1) == 8) batchFlush(batch, f, color);
             }
@@ -1629,6 +1715,55 @@ static void resolveSamples(const ArtfSoftFrame* f, ArtfWorker* w) {
     }
 }
 
+/* The overdraw view (ArtfView): in place of shading, how many triangles cover each sample, solid and layers, whatever
+ * is in front of them; as light where the frame is in floats. The same edges as rasterize, one sample at a time. */
+static void overdrawTile(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, int th) {
+    uint16_t counts[ARTF_TILE_PIXELS];
+    for (int k = 0; k < f->samples; ++k) {
+        memset(counts, 0, sizeof counts);
+        const int sx = f->samples > 1 ? sampleX[k] : 0, sy = f->samples > 1 ? sampleY[k] : 0;
+        for (int list = 0; list < 2; ++list) {
+            const ArtfRasterTri* const* tris = list ? w->layers.items : w->tris.items;
+            const size_t count = list ? w->layers.len : w->tris.len;
+            for (size_t i = 0; i < count; ++i) {
+                const ArtfRasterTri* t = tris[i];
+                const int x0 = artfMaxi(t->minX - ox, 0), x1 = artfMini(t->maxX - ox, tw - 1), y0 = artfMaxi(t->minY - oy, 0), y1 = artfMini(t->maxY - oy, th - 1);
+                for (int y = y0; y <= y1; ++y)
+                    for (int x = x0; x <= x1; ++x) {
+                        const int64_t px = (int64_t)(ox + x) * 16 + 8 + sx, py = (int64_t)(oy + y) * 16 + 8 + sy;
+                        int inside = 1;
+                        for (int e = 0; e < 3 && inside; ++e) {
+                            const int j = e == 2 ? 0 : e + 1;
+                            const int64_t dx = (int64_t)t->x[j] - t->x[e], dy = (int64_t)t->y[j] - t->y[e];
+                            const bool topLeft = dy < 0 || (dy == 0 && dx > 0);
+                            inside = dx * (py - t->y[e]) - dy * (px - t->x[e]) - (topLeft ? 0 : 1) >= 0;
+                        }
+                        counts[y * ARTF_TILE + x] = (uint16_t)(counts[y * ARTF_TILE + x] + inside);
+                    }
+            }
+        }
+        uint32_t* color = w->color + (size_t)k * ARTF_TILE_PIXELS;
+        for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) {
+            _Alignas(32) float heat[3][8];
+            _Alignas(32) uint32_t bytes[8];
+            for (int j = 0; j < 8; ++j) {
+                float c[3];
+                artfViewHeat(counts[i + j], c);
+                for (int m = 0; m < 3; ++m) heat[m][j] = c[m];
+                bytes[j] = 0xFF000000u | (uint32_t)(c[0] * 255.f + .5f) << 16 | (uint32_t)(c[1] * 255.f + .5f) << 8 | (uint32_t)(c[2] * 255.f + .5f);
+            }
+            if (!f->post) {
+                v8iStore(color + i, v8iLoad((const uint32_t*)bytes));
+                continue;
+            }
+            const Lanes3 light = {v8fLoad(heat[0]), v8fLoad(heat[1]), v8fLoad(heat[2])};
+            v8iStore(color + i, pack9e5(light));
+            v8fStore((float*)(color + ARTF_POST_ALPHA + i), v8fSet(1.f));
+            v8iStore(color + ARTF_POST_SURFACE + i, v8iSet(0));
+        }
+    }
+}
+
 static ArtfTileClass classifyTile(const ArtfSoftFrame* f, int ox, int oy, int tw, int th) {
     if (!f->overlay || ox >= f->overlayWidth || oy >= f->overlayHeight) return ARTF_TILE_EMPTY;
     const int ow = artfMini(tw, f->overlayWidth - ox), oh = artfMini(th, f->overlayHeight - oy);
@@ -1828,7 +1963,9 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         }
     }
 
-    if (w->tris.len) {
+    if (f->view == ARTF_VIEW_OVERDRAW) {
+        overdrawTile(f, w, ox, oy, tw, th);
+    } else if (w->tris.len) {
         /* the triangles that still show after all the others */
         for (int k = 0; k < f->samples; ++k) {
             const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
@@ -1867,7 +2004,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
             }
         }
     }
-    if (w->layers.len) {
+    if (w->layers.len && f->view != ARTF_VIEW_OVERDRAW) {
         if (f->scene->features[ARTF_FEATURE_LAYERS_SORTED] && !f->post) drawLayersSorted(f, w, ox, oy, tw, th);
         else drawLayers(f, w, ox, oy, tw, th);
     }

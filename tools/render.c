@@ -19,6 +19,9 @@
  *                 [--sun x y z]: where the sun shines, as a direction; [--sky [haze]]: a sky from the sun
  *                 [--fog-height base falloff]: fog that light goes through thins with height
  *                 [--indirect]: light that bounces, from probes, every frame; [--through-walls]: lighter, and it leaks
+ *                 [--view lit|base-color|normals|roughness|metallic|ambient|emissive|lod|meshlets|instances|overdraw|depth|
+ *                 motion|lights]: what the frame shows (ArtfView); [--passes]: with --frames, what each pass of the
+ *                 last frame took
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
  *
@@ -403,6 +406,8 @@ int main(int argc, char** argv) {
     o.noVsync = true;
     const char *out = NULL, *sceneName = "spheres";
     int frames = 0, fieldSide = 100;
+    ArtfView view = ARTF_VIEW_LIT;
+    bool passes = false;
     HoleOptions hole = {0, 0, 74.1f, 3.44f, 0, 19.f, 1.f, .6f, 0, 0, -1.f, 1, false, 0, .9f, -1.f, -1000.f, -1000.f}; /* (the eye of the film's own pictures) */
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -453,6 +458,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--sun") && i + 3 < argc) { for (int k = 0; k < 3; ++k) sunAt[k] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--fog-height") && i + 2 < argc) { fogHeight[0] = (float)atof(argv[++i]); fogHeight[1] = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--model") && i + 1 < argc) model = argv[++i];
+        else if (!strcmp(a, "--view") && i + 1 < argc) {
+            if (!artfViewFromName(argv[++i], &view)) { fprintf(stderr, "no view called %s\n", argv[i]); return 2; }
+        }
+        else if (!strcmp(a, "--passes")) passes = true;
         else if (!strcmp(a, "--trace") && i + 1 < argc) trace.mode = !strcmp(argv[++i], "paths") ? ARTF_TRACE_PATHS : ARTF_TRACE_RAYS;
         else if (!strcmp(a, "--trace-samples") && i + 1 < argc) traceSamples = atoi(argv[++i]);
         else if (!strcmp(a, "--bounces") && i + 1 < argc) trace.bounces = atoi(argv[++i]);
@@ -482,6 +491,7 @@ int main(int argc, char** argv) {
     ArtfRenderer* r = artfRendererNew(&o);
     if (!r) { fputs("that backend cannot run here\n", stderr); return 1; }
     printf("%s, %d x %d\n", artfRendererDescription(r), o.width, o.height);
+    artfRendererSetView(r, view);
 
     const double t0 = artfNowMs();
     const bool isHole = !strcmp(sceneName, "blackhole");
@@ -612,6 +622,14 @@ int main(int argc, char** argv) {
         printf("%d frames: %.3f ms a frame (%.0f fps)", frames, total / frames, 1000.0 * frames / total);
         if (gpu) printf(", %.3f ms of it on the CPU at best, %.3f ms on the GPU the last frame\n", best, st.gpuMs);
         else printf(", best %.3f ms\n  cull %.3f, geometry %.3f, lens %.3f, tiles %.3f ms; %u instances drawn, %u hidden, %u triangles binned\n", best, cull / frames, geometry / frames, lens / frames, raster / frames, st.instancesDrawn, st.instancesHidden, st.trianglesBinned);
+        if (passes) {
+            /* (on the GPU, the last frame it finished) */
+            double sum = 0;
+            for (uint32_t k = 0; k < st.passCount; ++k) sum += st.passes[k].ms;
+            printf("  %s, by pass:\n", gpu ? "the GPU" : "the CPU");
+            for (uint32_t k = 0; k < st.passCount; ++k) printf("    %-24s %8.3f ms  %5.1f%%\n", st.passes[k].name, st.passes[k].ms, sum > 0 ? st.passes[k].ms * 100.0 / sum : 0.0);
+            printf("    %-24s %8.3f ms\n", "all", sum);
+        }
     }
     if (out) {
         uint32_t* pixels = malloc((size_t)o.width * o.height * 4);

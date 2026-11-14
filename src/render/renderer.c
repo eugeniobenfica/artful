@@ -76,3 +76,22 @@ void artfRendererStats(const ArtfRenderer* r, ArtfFrameStats* out) {
     memset(out, 0, sizeof *out);
     r->vt->stats(r, out);
 }
+
+/* ---- what a frame shows ---- */
+
+static const char* const viewNames[ARTF_VIEW_COUNT] = {"lit", "base-color", "normals", "roughness", "metallic", "ambient", "emissive",
+                                                        "lod", "meshlets", "instances", "overdraw", "depth", "motion", "lights"};
+
+const char* artfViewName(ArtfView view) { return (unsigned)view < ARTF_VIEW_COUNT ? viewNames[view] : NULL; }
+
+bool artfViewFromName(const char* name, ArtfView* out) {
+    for (int i = 0; i < ARTF_VIEW_COUNT; ++i)
+        if (name && !strcmp(name, viewNames[i])) {
+            *out = (ArtfView)i;
+            return true;
+        }
+    return false;
+}
+
+void artfRendererSetView(ArtfRenderer* r, ArtfView view) { r->view = (unsigned)view < ARTF_VIEW_COUNT ? view : ARTF_VIEW_LIT; }
+ArtfView artfRendererView(const ArtfRenderer* r) { return r->view; }

@@ -669,35 +669,47 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
     p->f = f;
     p->pixels = pixels;
     const ArtfFrameData* d = &f->data;
+    ArtfPassLog* log = p->log;
     if (d->post[0][2] > 0) {
         rows(p, p->height, occlusionRow);
         rows(p, p->height, occlusionBlurRow);
+        if (log) artfPassMark(log, "ambient occlusion");
     }
     if (d->post[1][0] > 0) {
         rows(p, p->bloomH[0], reflectionRow);
         rows(p, p->height, reflectionApplyRow);
+        if (log) artfPassMark(log, "reflections");
     }
     if (d->post[1][3] > 0) {
         rows(p, p->height, temporalRow);
         copyScratch(p);
         for (int c = 0; c < 3; ++c) memcpy(p->history[c], f->postLight[c], (size_t)p->width * p->height * 4);
         p->historyValid = true;
+        if (log) artfPassMark(log, "temporal antialiasing");
     } else {
         p->historyValid = false;
     }
     if (d->post[2][1] > 0 && d->post[2][0] > 0) {
         rows(p, p->height, focusRow);
         copyScratch(p);
+        if (log) artfPassMark(log, "depth of field");
     }
     if (d->motionBlur > 0) {
         rows(p, p->height, blurRow);
         copyScratch(p);
+        if (log) artfPassMark(log, "motion blur");
     }
-    if (d->grade[0][1] > 0) meter(p);
-    else p->exposureValid = false;
+    if (d->grade[0][1] > 0) {
+        meter(p);
+        if (log) artfPassMark(log, "auto exposure");
+    } else {
+        p->exposureValid = false;
+    }
     if (d->post[0][0] > 0) {
         for (p->bloomLevel = 0; p->bloomLevel < ARTF_POST_BLOOM_LEVELS; ++p->bloomLevel) rows(p, p->bloomH[p->bloomLevel], bloomDownRow);
         for (p->bloomLevel = ARTF_POST_BLOOM_LEVELS - 2; p->bloomLevel >= 0; --p->bloomLevel) rows(p, p->bloomH[p->bloomLevel], bloomUpRow);
+        if (log) artfPassMark(log, "bloom");
     }
     rows(p, p->height, finalRow);
+    if (log) artfPassMark(log, "tone map and out");
 }
