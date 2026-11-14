@@ -524,10 +524,21 @@ typedef struct Surface {
     float rough, a2, k, ndv, open;
     float f0[3], mirror[3]; /* what it reflects head on, and toward the eye */
     float emissive[3];
-    /* a clear coat and sheen (ArtfMaterialMore): how much coat, its lobe; what the coat leaves of what is under it;
-     * the sheen's color, as much as the coat leaves of it */
-    float coat, coatA2, coatK, under, sheen[3];
+    /* past glTF's core (ArtfMaterialMore): what it has (ARTF_MORE_); how much coat, its lobe and normal; what the coat
+     * leaves of what is under it; the sheen's color and 1 / its alpha, and the color of what comes from under the
+     * surface, as much as the coat leaves of them; 1 / how far that goes, by log2; highlights drawn out, as Reflecting
+     * in kernels.inc; what its inside takes, traced */
+    uint32_t flags;
+    float coat, coatA2, coatK, coatNdv, coatNormal[3], under, sheen[3], sheenInverse, subsurface[3], reach;
+    bool aniso;
+    float along[3], across[3], scale;
+    const float* absorb;
 } Surface;
+
+static inline void normalize3(float* a) {
+    const float l = 1.f / sqrtf(artfMaxf(dot3(a, a), 1e-30f));
+    for (int k = 0; k < 3; ++k) a[k] *= l;
+}
 
 void artfTexelAt(const ArtfTextureData* t, float u, float v, float* out) { artfTexelAtLevel(t, t->residentMip, u, v, out); }
 
@@ -565,10 +576,11 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     /* normals go by the inverse's transpose; the same with the color's channels and alpha, by weight */
     const float* k = inst->toObject;
     float on[3] = {a->n[0] * wa + b->n[0] * wb + c->n[0] * wc, a->n[1] * wa + b->n[1] * wb + c->n[1] * wc, a->n[2] * wa + b->n[2] * wb + c->n[2] * wc};
-    if (m->normalMap) {
+    const ArtfMaterialMore* more = &s->materialsMore.items[inst->material];
+    const float plain[3] = {on[0], on[1], on[2]};
+    float tangent[3] = {0, 0, 0}, bitangent[3] = {0, 0, 0}, ts = 0, bs = 0;
+    if (m->normalMap || ARTF_MORE_TANGENT(more)) {
         /* where u and v go on the triangle, in the object: as in kernels.inc */
-        float bumps[4], tangent[3], bitangent[3];
-        artfTexelAt(&textures[m->normalMap], u, v, bumps);
         const float du1 = b->u - a->u, dv1 = b->v - a->v, du2 = c->u - a->u, dv2 = c->v - a->v;
         const float det = du1 * dv2 - du2 * dv1, inv = det != 0 ? 1.f / det : 0.f;
         for (int i = 0; i < 3; ++i) {
@@ -576,7 +588,13 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
             tangent[i] = (e1 * dv2 - e2 * dv1) * inv;
             bitangent[i] = (e2 * du1 - e1 * du2) * inv;
         }
-        const float tl = dot3(tangent, tangent), bl = dot3(bitangent, bitangent), ts = tl > 0 ? 1.f / sqrtf(tl) : 0.f, bs = bl > 0 ? 1.f / sqrtf(bl) : 0.f;
+        const float tl = dot3(tangent, tangent), bl = dot3(bitangent, bitangent);
+        ts = tl > 0 ? 1.f / sqrtf(tl) : 0.f;
+        bs = bl > 0 ? 1.f / sqrtf(bl) : 0.f;
+    }
+    if (m->normalMap) {
+        float bumps[4];
+        artfTexelAt(&textures[m->normalMap], u, v, bumps);
         const float x = (bumps[2] * 2.f - 1.f) * m->normalScale, y = (1.f - bumps[1] * 2.f) * m->normalScale, z = bumps[0] * 2.f - 1.f;
         for (int i = 0; i < 3; ++i) on[i] = tangent[i] * ts * x + bitangent[i] * bs * y + on[i] * z;
     }
@@ -646,28 +664,87 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     out->k = plusOne * plusOne * .125f;
     out->ndv = artfMaxf(-dot3(out->normal, d), 1e-4f);
     const float y = 1.f - out->ndv, y2 = y * y, far = y2 * y2 * y;
+    const uint32_t flags = m->flags & ARTF_MATERIAL_UNLIT ? more->flags & ARTF_MORE_VOLUME : more->flags;
+    out->flags = flags;
+    out->absorb = more->absorb;
+    for (int i = 0; i < 3; ++i) out->f0[i] = .04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f) * notMetal + albedo[i] * metal;
+    if (flags & ARTF_MORE_IRIDESCENCE) artfIridescence(out->f0, out->ndv, more->iridescence, more->iridescenceIor, more->iridescenceThickness);
     for (int i = 0; i < 3; ++i) {
-        out->f0[i] = .04f * m->specular * notMetal + albedo[i] * metal;
         out->mirror[i] = out->shiny ? out->f0[i] + (artfMaxf(1.f - out->rough, out->f0[i]) - out->f0[i]) * far : 0.f;
         out->albedo[i] = albedo[i] * notMetal;
     }
-    /* a coat over all that, and sheen under it: the coat takes what its Fresnel reflects, and what is under keeps the
-     * rest, mirror included; the coat mirrors as smoothly as it is */
-    const ArtfMaterialMore* more = &s->materialsMore.items[inst->material];
+    out->aniso = false;
+    if (flags & ARTF_MORE_ANISOTROPY) {
+        /* highlights drawn out, as in kernels.inc: the way u grows, into the world (by the inverse of toObject), square
+         * to the normal, turned as asked */
+        const float* r0 = k;
+        const float* r1 = k + 4;
+        const float* r2 = k + 8;
+        const float c12[3] = {r1[1] * r2[2] - r1[2] * r2[1], r1[2] * r2[0] - r1[0] * r2[2], r1[0] * r2[1] - r1[1] * r2[0]};
+        const float c20[3] = {r2[1] * r0[2] - r2[2] * r0[1], r2[2] * r0[0] - r2[0] * r0[2], r2[0] * r0[1] - r2[1] * r0[0]};
+        const float c01[3] = {r0[1] * r1[2] - r0[2] * r1[1], r0[2] * r1[0] - r0[0] * r1[2], r0[0] * r1[1] - r0[1] * r1[0]};
+        const float sign = r0[0] * c12[0] + r0[1] * c12[1] + r0[2] * c12[2] < 0 ? -1.f : 1.f;
+        float t[3];
+        for (int i = 0; i < 3; ++i) t[i] = (c12[i] * tangent[0] + c20[i] * tangent[1] + c01[i] * tangent[2]) * sign;
+        const float along = dot3(out->normal, t);
+        for (int i = 0; i < 3; ++i) t[i] -= out->normal[i] * along;
+        normalize3(t);
+        const float* nn = out->normal;
+        const float bt[3] = {nn[1] * t[2] - nn[2] * t[1], nn[2] * t[0] - nn[0] * t[2], nn[0] * t[1] - nn[1] * t[0]};
+        const float cs = more->anisotropyDirection[0], sn = more->anisotropyDirection[1], alpha = out->rough * out->rough;
+        const float il = 1.f / (alpha + (1.f - alpha) * more->anisotropy * more->anisotropy), iw = 1.f / artfMaxf(alpha, 1e-4f);
+        for (int i = 0; i < 3; ++i) {
+            out->along[i] = (t[i] * cs + bt[i] * sn) * il;
+            out->across[i] = (bt[i] * cs - t[i] * sn) * iw;
+        }
+        out->scale = il * iw;
+        out->aniso = true;
+    }
+    /* a coat over all that, and sheen and what comes from under it beneath that: the coat takes what its Fresnel
+     * reflects, and what is under keeps the rest, mirror included; the coat mirrors as smoothly as it is */
     out->coat = 0;
     out->under = 1.f;
-    for (int i = 0; i < 3; ++i) out->sheen[i] = 0;
-    if (artfMaterialLayered(more) && !(m->flags & ARTF_MATERIAL_UNLIT)) {
-        const float a = more->coatRoughness * more->coatRoughness, plus = more->coatRoughness + 1.f;
-        out->coat = more->coat;
+    for (int i = 0; i < 3; ++i) {
+        out->sheen[i] = out->subsurface[i] = 0;
+        out->coatNormal[i] = out->normal[i];
+    }
+    if (flags & ARTF_MORE_DRAWN) {
+        float coat = more->coat, coatRough = more->coatRoughness, sheenRough = more->sheenRoughness, sheen[3] = {more->sheen[0], more->sheen[1], more->sheen[2]};
+        if (flags & ARTF_MORE_MAPS) {
+            float texel[4];
+            if (more->coatMap) { artfTexelAt(&textures[more->coatMap], u, v, texel); coat *= texel[2]; }
+            if (more->coatRoughnessMap) { artfTexelAt(&textures[more->coatRoughnessMap], u, v, texel); coatRough = artfMaxf(coatRough * texel[1], .045f); }
+            if (more->sheenMap) {
+                artfTexelAt(&textures[more->sheenMap], u, v, texel);
+                for (int i = 0; i < 3; ++i) sheen[i] *= texel[2 - i] * texel[2 - i];
+            }
+            if (more->sheenRoughnessMap) { artfTexelAt(&textures[more->sheenRoughnessMap], u, v, texel); sheenRough = artfMaxf(sheenRough * texel[3], .07f); }
+            if (more->coatNormalMap) {
+                /* (bent from the surface as it is, not as its own normal map bends it) */
+                artfTexelAt(&textures[more->coatNormalMap], u, v, texel);
+                const float x = (texel[2] * 2.f - 1.f) * more->coatNormalScale, yy = (1.f - texel[1] * 2.f) * more->coatNormalScale, z = texel[0] * 2.f - 1.f;
+                float co[3];
+                for (int i = 0; i < 3; ++i) co[i] = tangent[i] * ts * x + bitangent[i] * bs * yy + plain[i] * z;
+                float cn[3] = {k[0] * co[0] + k[4] * co[1] + k[8] * co[2], k[1] * co[0] + k[5] * co[1] + k[9] * co[2], k[2] * co[0] + k[6] * co[1] + k[10] * co[2]};
+                normalize3(cn);
+                for (int i = 0; i < 3; ++i) out->coatNormal[i] = out->front ? cn[i] : -cn[i];
+            }
+        }
+        const float a = coatRough * coatRough, plus = coatRough + 1.f;
+        const float coatNv = artfMaxf(-dot3(out->coatNormal, d), 1e-4f), cy = 1.f - coatNv, coatFar = cy * cy * cy * cy * cy;
+        out->coat = coat;
         out->coatA2 = a * a;
         out->coatK = plus * plus * .125f;
-        out->under = 1.f - more->coat * (.04f + .96f * far);
-        const float coatMirror = .04f + (artfMaxf(1.f - more->coatRoughness, .04f) - .04f) * far;
+        out->coatNdv = coatNv;
+        out->under = 1.f - coat * (.04f + .96f * coatFar);
+        out->sheenInverse = 1.f / (sheenRough * sheenRough);
+        out->reach = 1.44269504f / more->subsurfaceRadius;
+        const float coatMirror = .04f + (artfMaxf(1.f - coatRough, .04f) - .04f) * coatFar;
         for (int i = 0; i < 3; ++i) {
             out->albedo[i] *= out->under;
-            out->mirror[i] = out->mirror[i] * out->under + more->coat * coatMirror;
-            out->sheen[i] = more->sheen[i] * notMetal * out->under;
+            out->mirror[i] = out->mirror[i] * out->under + coat * coatMirror;
+            out->sheen[i] = flags & ARTF_MORE_SHEEN ? sheen[i] * notMetal * out->under : 0.f;
+            out->subsurface[i] = flags & ARTF_MORE_SUBSURFACE ? more->subsurface[i] * notMetal * out->under : 0.f;
         }
         out->shiny = true;
     }
@@ -696,11 +773,6 @@ static void randomInBall(uint32_t* state, float* out) {
         if (dot3(out, out) <= 1.f) return;
     }
     out[0] = out[1] = out[2] = 0;
-}
-
-static inline void normalize3(float* a) {
-    const float l = 1.f / sqrtf(artfMaxf(dot3(a, a), 1e-30f));
-    for (int k = 0; k < 3; ++k) a[k] *= l;
 }
 
 static inline float reachOf(const float* p) { return 1e-4f * (1.f + artfMaxf(fabsf(p[0]), artfMaxf(fabsf(p[1]), fabsf(p[2])))); }
@@ -738,17 +810,105 @@ static void lightFrom(const ArtfScene* s, const float* p, const float* view, con
         const float seen = (m->ndv * rest + m->k) * (ndl * rest + m->k);
         const float lit = m->a2 / (d * d) * ndl * m->material->specular / (seen * 4.f);
         const float y = 1.f - vdh, far = y * y * y * y * y;
-        for (int k = 0; k < 3; ++k) highlight[k] = (m->f0[k] + (1.f - m->f0[k]) * far) * lit * m->under;
-        if (m->coat > 0) {
-            /* the coat's own lobe: of no color, F0 .04 */
-            const float dc = ndh * ndh * (m->coatA2 - 1.f) + 1.f, restC = 1.f - m->coatK;
-            const float seenC = (m->ndv * restC + m->coatK) * (ndl * restC + m->coatK);
-            const float coat = m->coat * m->coatA2 / (dc * dc) * ndl / (seenC * 4.f) * (.04f + .96f * far);
-            for (int k = 0; k < 3; ++k) highlight[k] += coat;
-        }
-        for (int k = 0; k < 3; ++k) highlight[k] += m->sheen[k] * ndl * far;
+        for (int k = 0; k < 3; ++k) highlight[k] = (m->f0[k] + (1.f - m->f0[k]) * far) * lit;
     }
     for (int k = 0; k < 3; ++k) light[k] += path[k] * color[k] * strength * through * (m->albedo[k] * ndl + highlight[k]);
+}
+
+/* The same with what lies past glTF's core (Surface.flags), and for a light whose diffuse light is this share of
+ * its highlight's (a rectangle's, to the side): the coat's lobe, sheen (artfCharlie), highlights drawn out, and light
+ * under the surface, as addExtras in kernels.inc. What comes through from behind is found by a ray inside, toward the
+ * light: how far it goes in there, and then what stands in the way. */
+static void lightFromMore(const ArtfScene* s, const float* p, const float* view, const Surface* m, const float* toLight, float limit, float strength, float share, const float* color, const float* path, float* light) {
+    const float ndl = dot3(m->normal, toLight);
+    const bool under = (m->flags & ARTF_MORE_SUBSURFACE) != 0;
+    if ((ndl <= 0 && !under) || strength <= 0) return;
+    float sum[3] = {0, 0, 0};
+    const float lit = artfMaxf(ndl, 0);
+    const float through = ndl > 0 ? lightThrough(s, p, toLight, limit) : 0.f;
+    if (through > 0) {
+        float highlight[3] = {0, 0, 0};
+        if (m->shiny && ndl > 0) {
+            float half[3] = {view[0] + toLight[0], view[1] + toLight[1], view[2] + toLight[2]};
+            normalize3(half);
+            const float ndh = artfMaxf(dot3(m->normal, half), 0), vdh = artfMaxf(dot3(view, half), 0);
+            float distribution;
+            if (m->aniso) {
+                const float x = dot3(m->along, half), yy = dot3(m->across, half), q = x * x + yy * yy + ndh * ndh;
+                distribution = m->scale / (q * q);
+            } else {
+                const float d = ndh * ndh * (m->a2 - 1.f) + 1.f;
+                distribution = m->a2 / (d * d);
+            }
+            const float rest = 1.f - m->k, seen = (m->ndv * rest + m->k) * (ndl * rest + m->k);
+            const float base = distribution * ndl * m->material->specular / (seen * 4.f);
+            const float y = 1.f - vdh, far = y * y * y * y * y;
+            for (int k = 0; k < 3; ++k) highlight[k] = (m->f0[k] + (1.f - m->f0[k]) * far) * base * m->under;
+            if (m->coat > 0) {
+                /* the coat's own lobe: of no color, F0 .04, by its own normal */
+                const float cndl = dot3(m->coatNormal, toLight), cndh = artfMaxf(dot3(m->coatNormal, half), 0);
+                if (cndl > 0) {
+                    const float dc = cndh * cndh * (m->coatA2 - 1.f) + 1.f, restC = 1.f - m->coatK;
+                    const float seenC = (m->coatNdv * restC + m->coatK) * (cndl * restC + m->coatK);
+                    const float coat = m->coat * m->coatA2 / (dc * dc) * cndl / (seenC * 4.f) * (.04f + .96f * far);
+                    for (int k = 0; k < 3; ++k) highlight[k] += coat;
+                }
+            }
+            if (m->flags & ARTF_MORE_SHEEN) {
+                const float sheen = artfCharlie(ndh, ndl, m->ndv, m->sheenInverse) * ndl;
+                for (int k = 0; k < 3; ++k) highlight[k] += m->sheen[k] * sheen;
+            }
+        }
+        const float wrap = under ? artfMaxf(ndl + .5f, 0) / 1.5f - lit : 0.f;
+        for (int k = 0; k < 3; ++k) sum[k] = through * ((m->albedo[k] * lit + m->subsurface[k] * wrap) * share + highlight[k]);
+    }
+    if (under && ndl < 0) {
+        /* from just under the surface, toward the light: what is inside, then what is past it */
+        float o[3], inside = 0;
+        const float reach = reachOf(p);
+        for (int k = 0; k < 3; ++k) o[k] = p[k] - m->normal[k] * reach * 3.f;
+        Hit h;
+        if (closest(&s->trace, o, toLight, limit, true, &h)) inside = h.t;
+        float exit[3];
+        for (int k = 0; k < 3; ++k) exit[k] = o[k] + toLight[k] * (inside + reach);
+        const float behind = lightThrough(s, exit, toLight, limit - inside) * artfExp2Fast(-inside * m->reach) * -ndl;
+        for (int k = 0; k < 3; ++k) sum[k] += m->subsurface[k] * behind * share;
+    }
+    for (int k = 0; k < 3; ++k) light[k] += path[k] * color[k] * strength * sum[k];
+}
+
+/* A light with a shape or a profile (artfLightSetShape, artfLightSetProfile): each path sees another point of the tube
+ * or the rectangle, so its shadows go soft; a rectangle lights only the side it faces, and its diffuse light less to the
+ * side; the profile goes by the way from its middle. ball: this path's point in a ball. */
+static void shapedFrom(const ArtfScene* s, const ArtfFrameData* f, uint32_t i, uint32_t* state, const float* ball, const float* p, const float* view, const Surface* m, const float* path, float* light) {
+    const ArtfLightData* L = &f->lights[i];
+    const float(*shape)[4] = f->lightShapes[i];
+    const float* u = shape[0];
+    const float* facing = shape[1];
+    const float size = f->lightSizes[i];
+    float to[3];
+    for (int k = 0; k < 3; ++k) to[k] = L->position[k] + ball[k] * size - p[k];
+    if (shape[0][3] > 0) {
+        const float along = (randomOf(state) * 2.f - 1.f) * shape[0][3];
+        if (shape[1][3] > 0) {
+            const float across = (randomOf(state) * 2.f - 1.f) * shape[1][3];
+            const float side[3] = {facing[1] * u[2] - facing[2] * u[1], facing[2] * u[0] - facing[0] * u[2], facing[0] * u[1] - facing[1] * u[0]};
+            for (int k = 0; k < 3; ++k) to[k] = L->position[k] + u[k] * along + side[k] * across - p[k];
+        } else {
+            for (int k = 0; k < 3; ++k) to[k] += u[k] * along;
+        }
+    }
+    const float d2 = dot3(to, to), distance = sqrtf(artfMaxf(d2, 1e-8f));
+    const float fade = artfMaxf(1.f - d2 / (L->radius * L->radius), 0);
+    for (int k = 0; k < 3; ++k) to[k] /= distance;
+    const float share = shape[1][3] > 0 ? -dot3(to, facing) : 1.f;
+    if (share <= 0) return;
+    /* (its cone and profile from its middle) */
+    float middle[3] = {p[0] - L->position[0], p[1] - L->position[1], p[2] - L->position[2]};
+    normalize3(middle);
+    float strength = fade * fade * artfClampf((dot3(middle, L->direction) - L->spotCut) * L->spotScale, 0, 1);
+    if (shape[2][3] > 0) strength *= artfProfileAt(s->lightProfile[(int)shape[2][3] - 1], shape[2], shape[3], middle);
+    lightFromMore(s, p, view, m, to, distance, strength, share, L->color, path, light);
 }
 
 /* What bones did to where a ray landed, from the object to the world: the inverse of what takes it back. */
@@ -801,6 +961,9 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         for (int k = 0; k < 3; ++k) p[k] = o[k] + d[k] * h.t;
         const float reach = reachOf(p);
         travelled += h.t;
+        /* (what came from inside a thing that takes some light as it goes: KHR_materials_volume) */
+        if (!m.front && m.flags & ARTF_MORE_VOLUME)
+            for (int k = 0; k < 3; ++k) path[k] *= artfExp2Fast(-m.absorb[k] * h.t);
         if (randomOf(&state) >= m.alpha) {
             /* it goes through: for a path as much of the time as the surface is not there, bent if the
              * surface bends it, or turned back when it comes out too flat */
@@ -842,10 +1005,15 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             float toSun[3];
             for (int k = 0; k < 3; ++k) toSun[k] = f->toSun[k] + ball[k] * f->look[2];
             normalize3(toSun);
-            lightFrom(s, lifted, view, &m, toSun, 3e37f, 1.f, f->sunColor, path, light);
+            if (m.flags & ARTF_MORE_DRAWN) lightFromMore(s, lifted, view, &m, toSun, 3e37f, 1.f, 1.f, f->sunColor, path, light);
+            else lightFrom(s, lifted, view, &m, toSun, 3e37f, 1.f, f->sunColor, path, light);
         }
         for (uint32_t i = 0; i < f->lightCount; ++i) {
             const ArtfLightData* L = &f->lights[i];
+            if (artfLightShaped(f, i)) {
+                shapedFrom(s, f, i, &state, ball, lifted, view, &m, path, light);
+                continue;
+            }
             /* (a light with a size: each path sees another point of it, so its shadows go soft) */
             const float size = f->lightSizes[i];
             float to[3] = {L->position[0] + ball[0] * size - lifted[0], L->position[1] + ball[1] * size - lifted[1], L->position[2] + ball[2] * size - lifted[2]};
@@ -853,7 +1021,8 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             const float fade = artfMaxf(1.f - d2 / (L->radius * L->radius), 0);
             for (int k = 0; k < 3; ++k) to[k] /= distance;
             const float spot = artfClampf((-dot3(to, L->direction) - L->spotCut) * L->spotScale, 0, 1);
-            lightFrom(s, lifted, view, &m, to, distance, fade * fade * spot, L->color, path, light);
+            if (m.flags & ARTF_MORE_DRAWN) lightFromMore(s, lifted, view, &m, to, distance, fade * fade * spot, 1.f, L->color, path, light);
+            else lightFrom(s, lifted, view, &m, to, distance, fade * fade * spot, L->color, path, light);
         }
         const float dn = dot3(d, m.normal);
         float mirror[3];

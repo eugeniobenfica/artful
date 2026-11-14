@@ -146,17 +146,31 @@ typedef struct ArtfMaterialData {
 
 enum { ARTF_MATERIAL_MASK = 1, ARTF_MATERIAL_BLEND = 2, ARTF_MATERIAL_DOUBLE = 4, ARTF_MATERIAL_UNLIT = 8 };
 
-/* What a material has past glTF's core: a clear coat and sheen. Apart from ArtfMaterialData, whose layout Metal's
- * shaders were made for: on the GPU these follow all of those, in the same buffer (ArtfFrameData.materials says
- * where). */
+/* What a material has past glTF's core: a clear coat, sheen, and the rest of glTF's extensions that light reads. Apart
+ * from ArtfMaterialData, whose layout Metal's shaders were made for: on the GPU these follow all of those, in the same
+ * buffer (ArtfFrameData.materials says where). Textures are 0 when there are none: white. */
 typedef struct ArtfMaterialMore {
-    float coat, coatRoughness, pad0, pad1;
-    float sheen[3], pad2;
+    float coat, coatRoughness, sheenRoughness;
+    uint32_t flags;                     /* ARTF_MORE_: what it has */
+    float sheen[3], subsurfaceRadius;
+    uint32_t coatMap, coatRoughnessMap, coatNormalMap, sheenMap;
+    uint32_t sheenRoughnessMap;
+    float coatNormalScale, anisotropy, iridescence;
+    float specularColor[3], iridescenceIor;  /* specularColor: 1 when it has none */
+    float anisotropyDirection[2], iridescenceThickness, pad0; /* the direction: its cosine and sine */
+    float subsurface[3], pad1;
+    float absorb[3], pad2;              /* traced, through its inside: kept is 2^-(absorb x distance) */
 } ArtfMaterialMore;
-#define ARTF_MATERIAL_MORE_ROWS 2
-/* Burley's sheen has no 1 / pi, as Lambert's light has: lights here have pi taken out, so it is put back in its color. */
-#define ARTF_SHEEN_SCALE 3.14159265f
-ARTF_INLINE bool artfMaterialLayered(const ArtfMaterialMore* m) { return m->coat > 0 || m->sheen[0] > 0 || m->sheen[1] > 0 || m->sheen[2] > 0; }
+#define ARTF_MATERIAL_MORE_ROWS 8
+enum {
+    ARTF_MORE_COAT = 1, ARTF_MORE_SHEEN = 2, ARTF_MORE_SPECULAR = 4, ARTF_MORE_ANISOTROPY = 8, ARTF_MORE_IRIDESCENCE = 16,
+    ARTF_MORE_SUBSURFACE = 32, ARTF_MORE_MAPS = 64 /* the coat's or sheen's textures */, ARTF_MORE_VOLUME = 128,
+    ARTF_MORE_DRAWN = 127 /* what drawing reads: all but the volume, which is traced */
+};
+/* It needs where u and v go: a coat's normal map, or highlights drawn out. */
+#define ARTF_MORE_TANGENT(m) ((m)->coatNormalMap || ((m)->flags & ARTF_MORE_ANISOTROPY))
+ARTF_INLINE bool artfMaterialLayered(const ArtfMaterialMore* m) { return (m->flags & ARTF_MORE_DRAWN) != 0; }
+
 
 /* A material of the program's own: steps on four floats, each reading those before it (graph.c). */
 #define ARTF_GRAPH_NODES 256
@@ -285,10 +299,20 @@ typedef struct ArtfFrameData {
     float cullScale;
     float moving;       /* 1: something moved since the frame before, and the GPU has how (ArtfMotion); 0: the view alone */
     float cullPad[2];
+    /* Of each light the frame holds, four rows: a shape's way along and half its length (0: none); which way a
+     * rectangle faces, and half its width (0: a tube); where its profile's vertical angles start, and its handle's number
+     * + 1 if it has one (0: none); where horizontal ones start. */
+    float lightShapes[ARTF_FRAME_LIGHTS][4][4];
 } ArtfFrameData;
 
 /* A ball of this radius, this far from the eye, is too small to draw (ArtfFrameData.cullScale). */
 ARTF_INLINE bool artfTooSmall(const ArtfFrameData* f, float radius, float distance) { return f->cullScale > 0 && radius * f->cullScale < distance; }
+/* How wide a light the frame holds is, for soft shadows: its ball and the most of its shape. */
+ARTF_INLINE float artfLightSoftSize(const ArtfFrameData* f, uint32_t i) { return f->lightSizes[i] + artfMaxf(f->lightShapes[i][0][3], f->lightShapes[i][1][3]); }
+/* Of the lights a frame of the scene holds, one has a shape or a profile (lights.c). */
+bool artfSceneShapedLights(const ArtfScene* s);
+/* It has a shape or a profile. */
+ARTF_INLINE bool artfLightShaped(const ArtfFrameData* f, uint32_t i) { return f->lightShapes[i][0][3] > 0 || f->lightShapes[i][2][3] > 0; }
 
 
 /* log2 and 2^x by bits and polynomials, the same on every processor and in the shaders: for metering, where a few
@@ -341,6 +365,149 @@ ARTF_INLINE float artfSinFast(float x) {
     return x * (1.f - x2 * (.16666667f - x2 * (.0083333333f - x2 * (.00019841270f - x2 * .0000027557319f))));
 }
 ARTF_INLINE float artfCosFast(float x) { return artfSinFast(x + 1.57079633f); }
+/* acos and atan2 by polynomials (Abramowitz and Stegun's 4.4.45, within 7e-5; a fit of atan within 1e-5), the same in
+ * the shaders: for a light's profile. */
+ARTF_INLINE float artfAcosFast(float x) {
+    const float a = artfMinf(fabsf(x), 1.f);
+    const float r = sqrtf(1.f - a) * (1.5707288f + a * (-.2121144f + a * (.0742610f - a * .0187293f)));
+    return x < 0 ? 3.14159265f - r : r;
+}
+ARTF_INLINE float artfAtan2Fast(float y, float x) {
+    const float ax = fabsf(x), ay = fabsf(y), big = artfMaxf(ax, ay), small = artfMinf(ax, ay);
+    const float z = small / artfMaxf(big, 1e-30f), z2 = z * z;
+    float r = z * (.99997726f + z2 * (-.33262347f + z2 * (.19354346f + z2 * (-.11643287f + z2 * (.05265332f - z2 * .01172120f)))));
+    r = ay > ax ? 1.57079633f - r : r;
+    r = x < 0 ? 3.14159265f - r : r;
+    return y < 0 ? -r : r;
+}
+
+/* A light's profile (artfLightSetProfile): vertical angles from 0 to 180 degrees, ends included, in rows by horizontal
+ * angles from 0 to 360. */
+#define ARTF_PROFILE_V 96
+#define ARTF_PROFILE_H 16
+#define ARTF_PROFILE_FLOATS (ARTF_PROFILE_V * ARTF_PROFILE_H)
+/* What it gives toward dir, from the light: axis is where vertical angles start, ref where horizontal ones do;
+ * bilinear, round and round. */
+ARTF_INLINE float artfProfileAt(const float* table, const float* axis, const float* ref, const float* dir) {
+    const float side[3] = {axis[1] * ref[2] - axis[2] * ref[1], axis[2] * ref[0] - axis[0] * ref[2], axis[0] * ref[1] - axis[1] * ref[0]};
+    const float x = artfAcosFast(dir[0] * axis[0] + dir[1] * axis[1] + dir[2] * axis[2]) * ((float)(ARTF_PROFILE_V - 1) / 3.14159265f);
+    float y = artfAtan2Fast(dir[0] * side[0] + dir[1] * side[1] + dir[2] * side[2], dir[0] * ref[0] + dir[1] * ref[1] + dir[2] * ref[2]) * ((float)ARTF_PROFILE_H / 6.28318531f);
+    y = y < 0 ? y + (float)ARTF_PROFILE_H : y;
+    const float fx = artfMinf(floorf(x), (float)(ARTF_PROFILE_V - 2)), fy = floorf(y), tx = x - fx, ty = y - fy;
+    const int i = (int)fx, j0 = (int)fy % ARTF_PROFILE_H, j1 = (j0 + 1) % ARTF_PROFILE_H;
+    const float* r0 = table + j0 * ARTF_PROFILE_V + i;
+    const float* r1 = table + j1 * ARTF_PROFILE_V + i;
+    const float a = r0[0] + (r0[1] - r0[0]) * tx, b = r1[0] + (r1[1] - r1[0]) * tx;
+    return a + (b - a) * ty;
+}
+
+/* A light with a shape (artfLightSetShape), for a surface at p facing n, seen along view (toward the eye), this rough.
+ * shape: along and half its length; facing and half its width (0: a tube). ball: a tube's radius. Out: toward its
+ * point nearest p, which its diffuse light comes from, and that light's share (a rectangle's light goes one way, and
+ * less to the side); toward its point nearest the mirror ray, which its highlight comes from, and what that keeps as it
+ * is spread over as long and as wide as the shape looks (Karis, 2013); the square of the distance to the first point,
+ * which its light fades with. */
+typedef struct ArtfShapeLit { float toDiffuse[3], diffuse, toHighlight[3], highlight, distance2; } ArtfShapeLit;
+ARTF_INLINE void artfShapeLight(const float* shape, const float* center, float ball, const float* p, const float* n, const float* view, float rough, ArtfShapeLit* out) {
+    const float* u = shape;
+    const float* f = shape + 4;
+    const float hl = shape[3], hw = shape[7];
+    const float d[3] = {center[0] - p[0], center[1] - p[1], center[2] - p[2]};
+    const float side[3] = {f[1] * u[2] - f[2] * u[1], f[2] * u[0] - f[0] * u[2], f[0] * u[1] - f[1] * u[0]};
+    const float along = artfClampf(-(d[0] * u[0] + d[1] * u[1] + d[2] * u[2]), -hl, hl);
+    const float across = hw > 0 ? artfClampf(-(d[0] * side[0] + d[1] * side[1] + d[2] * side[2]), -hw, hw) : 0.f;
+    const float before = -(d[0] * f[0] + d[1] * f[1] + d[2] * f[2]); /* how far p is in front of a rectangle */
+    float q[3], h[3];
+    for (int k = 0; k < 3; ++k) q[k] = d[k] + u[k] * along + side[k] * across;
+    const float q2 = artfMaxf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2], 1e-8f), qi = 1.f / sqrtf(q2);
+    for (int k = 0; k < 3; ++k) out->toDiffuse[k] = q[k] * qi;
+    out->diffuse = hw > 0 ? artfMaxf(before, 0) * qi : 1.f;
+    out->distance2 = q2;
+    const float twice = 2.f * (n[0] * view[0] + n[1] * view[1] + n[2] * view[2]);
+    const float r[3] = {n[0] * twice - view[0], n[1] * twice - view[1], n[2] * twice - view[2]};
+    if (hw > 0) {
+        /* where the mirror ray meets the rectangle's plane, kept on it; the nearest point when it goes away */
+        const float toward = r[0] * f[0] + r[1] * f[1] + r[2] * f[2];
+        const float t = toward < -1e-4f ? before / -toward : 0.f;
+        float e[3];
+        for (int k = 0; k < 3; ++k) e[k] = r[k] * t - d[k];
+        const float a = toward < -1e-4f ? artfClampf(e[0] * u[0] + e[1] * u[1] + e[2] * u[2], -hl, hl) : along;
+        const float b = toward < -1e-4f ? artfClampf(e[0] * side[0] + e[1] * side[1] + e[2] * side[2], -hw, hw) : across;
+        for (int k = 0; k < 3; ++k) h[k] = d[k] + u[k] * a + side[k] * b;
+    } else {
+        /* the point of the line nearest the mirror ray, then of the ball around it */
+        float l0[3], ld[3];
+        for (int k = 0; k < 3; ++k) {
+            l0[k] = d[k] - u[k] * hl;
+            ld[k] = u[k] * (2.f * hl);
+        }
+        const float rl = r[0] * ld[0] + r[1] * ld[1] + r[2] * ld[2], r0 = r[0] * l0[0] + r[1] * l0[1] + r[2] * l0[2];
+        const float t = artfClampf((r0 * rl - (l0[0] * ld[0] + l0[1] * ld[1] + l0[2] * ld[2])) / artfMaxf(ld[0] * ld[0] + ld[1] * ld[1] + ld[2] * ld[2] - rl * rl, 1e-8f), 0, 1);
+        for (int k = 0; k < 3; ++k) h[k] = l0[k] + ld[k] * t;
+        const float hr = h[0] * r[0] + h[1] * r[1] + h[2] * r[2];
+        float c[3];
+        for (int k = 0; k < 3; ++k) c[k] = r[k] * hr - h[k];
+        const float share = artfMinf(ball / artfMaxf(sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]), 1e-6f), 1.f);
+        for (int k = 0; k < 3; ++k) h[k] += c[k] * share;
+    }
+    const float distance = sqrtf(artfMaxf(h[0] * h[0] + h[1] * h[1] + h[2] * h[2], 1e-8f)), hi = 1.f / distance;
+    for (int k = 0; k < 3; ++k) out->toHighlight[k] = h[k] * hi;
+    const float a = rough * rough, longer = artfMinf(a + hl * .5f * hi, 1.f);
+    const float wider = artfMinf(a + (hw > 0 ? hw : ball) * .5f * hi, 1.f);
+    out->highlight = a / longer * (hw > 0 ? a / wider : (a / wider) * (a / wider));
+    out->highlight = hw > 0 && before <= 0 ? 0.f : out->highlight;
+}
+
+/* The same for a light that may have no shape: a ball's or a point's, as nearestOfBall in kernels.inc. */
+ARTF_INLINE void artfLightPlace(const float* shape, const float* center, float ball, const float* p, const float* n, const float* view, float rough, ArtfShapeLit* out) {
+    if (shape[3] > 0) {
+        artfShapeLight(shape, center, ball, p, n, view, rough, out);
+        return;
+    }
+    const float d[3] = {center[0] - p[0], center[1] - p[1], center[2] - p[2]};
+    const float d2 = artfMaxf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2], 1e-8f), inv = 1.f / sqrtf(d2);
+    for (int k = 0; k < 3; ++k) out->toDiffuse[k] = out->toHighlight[k] = d[k] * inv;
+    out->diffuse = out->highlight = 1.f;
+    out->distance2 = d2;
+    if (ball > 0) {
+        const float twice = 2.f * (n[0] * view[0] + n[1] * view[1] + n[2] * view[2]);
+        const float r[3] = {n[0] * twice - view[0], n[1] * twice - view[1], n[2] * twice - view[2]};
+        const float along = d[0] * r[0] + d[1] * r[1] + d[2] * r[2];
+        float c[3], h[3];
+        for (int k = 0; k < 3; ++k) c[k] = r[k] * along - d[k];
+        const float share = artfMinf(ball / artfMaxf(sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]), 1e-6f), 1.f);
+        for (int k = 0; k < 3; ++k) h[k] = d[k] + c[k] * share;
+        const float hi = 1.f / sqrtf(artfMaxf(h[0] * h[0] + h[1] * h[1] + h[2] * h[2], 1e-12f));
+        for (int k = 0; k < 3; ++k) out->toHighlight[k] = h[k] * hi;
+        const float a = rough * rough, kept = a / artfMinf(a + ball * .5f * inv, 1.f);
+        out->highlight = kept * kept;
+    }
+}
+
+/* What a thin film makes of what a surface reflects head on, seen at cos (n . v): two beams, off its top and its
+ * bottom, at red, green and blue's wavelengths, as much as amount says. */
+ARTF_INLINE void artfIridescence(float* f0, float cos, float amount, float ior, float thickness) {
+    const float sin2 = (1.f - cos * cos) / (ior * ior), inside = sqrtf(artfMaxf(1.f - sin2, 0));
+    const float r12 = (1.f - ior) / (1.f + ior);
+    static const float waves[3] = {1.f / 650.f, 1.f / 510.f, 1.f / 475.f};
+    for (int k = 0; k < 3; ++k) {
+        const float root = sqrtf(artfClampf(f0[k], 0, .99f)), under = (1.f + root) / (1.f - root);
+        const float r23 = (ior - under) / (ior + under);
+        const float twice = 2.f * r12 * r23 * artfCosFast(12.5663706f * ior * thickness * inside * waves[k]);
+        const float both = (r12 * r12 + r23 * r23 + twice) / (1.f + r12 * r12 * r23 * r23 + twice);
+        f0[k] += (both - f0[k]) * amount;
+    }
+}
+
+/* Sheen, Charlie's (Estevez and Kulla, 2017): its distribution, with pi put back as lights here have it taken out,
+ * times Neubelt's visibility. inverse: 1 / its alpha. */
+ARTF_INLINE float artfCharlie(float ndh, float ndl, float ndv, float inverse) {
+    const float sin2 = artfMaxf(1.f - ndh * ndh, 1e-7f);
+    const float d = (2.f + inverse) * artfExp2Fast(artfLog2Fast(sin2) * .5f * inverse) * .5f;
+    return d / (4.f * (ndl + ndv - ndl * ndv) + 1e-4f);
+}
+/* What sheen takes from all around, of what lights a surface: a fit by eye to the integral of the above. */
+ARTF_INLINE float artfSheenAround(float far, float rough) { return .14f * rough + (.5f - .2f * rough) * far; }
 
 #define ARTF_METER_X 32 /* auto exposure's grid */
 #define ARTF_METER_Y 18
@@ -512,7 +679,8 @@ struct ArtfScene {
     ARTF_VEC(ArtfTextureData) textures;     /* 0 is white */
     ARTF_VEC(ArtfMaterialData) materials;   /* 0 is grey */
     ARTF_VEC(ArtfMaterialMore) materialsMore; /* one for each of those */
-    uint32_t layeredMaterials;              /* of those, how many have a coat or sheen */
+    uint32_t layeredMaterials;              /* of those, how many have what drawing reads of them (ARTF_MORE_DRAWN) */
+    uint32_t moreMaterials;                 /* and how many have anything (tracing reads all) */
     ARTF_VEC(ArtfInstanceData) instances;   /* dense, in no order */
     ARTF_VEC(uint32_t) instanceHandles;     /* of each dense instance */
     ARTF_VEC(uint32_t) handleSlots;         /* of each handle's number - 1: dense index, or the next free number */
@@ -544,6 +712,9 @@ struct ArtfScene {
     ArtfShadowDesc shadows;
     bool lightCasts[ARTF_MAX_LIGHTS];
     float lightSize[ARTF_MAX_LIGHTS]; /* the radius of the ball of light; 0: a point */
+    float lightShape[ARTF_MAX_LIGHTS][8]; /* along and half its length, facing and half its width (artfLightSetShape) */
+    float* lightProfile[ARTF_MAX_LIGHTS]; /* ARTF_PROFILE_FLOATS (artfLightSetProfile), or NULL */
+    uint64_t profileVersion;              /* a profile changed */
     float backgroundAlpha, exposure, fogDensity, sunSize;
     float fogBase, fogFalloff; /* fog by height */
     float cullSize;            /* artfSceneSetCullSize's pixels */

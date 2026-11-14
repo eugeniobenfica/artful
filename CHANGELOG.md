@@ -21,13 +21,31 @@
   under it: 0.54 of 255 from it drawn still, on average); and **motion blur** (`ArtfPostDesc.motionBlur`, the share of
   a frame the shutter is open) spreads it along the way it went, eight points, at most 32 pixels. What bones bend
   moves as its instance does.
-- **Clear coat and sheen**: `ArtfMaterialDesc.clearcoat`, `clearcoatRoughness` and `sheen`, and glTF's
-  `KHR_materials_clearcoat` and `KHR_materials_sheen` (their factors; their textures are logged and left out). The coat
-  is a second lobe of no color, F0 .04, with its own roughness, over the sky, the picture of all around and every
-  light; what it reflects is taken from what is under it. Sheen is Burley's: the fifth power of 1 - l.h. Drawn on both
-  backends and traced on both. They live apart from the material record Metal's shaders read, after all of them in the
-  same buffer; on the GPU only scenes that have them build the shaders that read them, and on the CPU what has neither
-  goes through a copy of the lighting without them.
+- **Clear coat and sheen**: `ArtfMaterialDesc.clearcoat`, `clearcoatRoughness`, `sheen` and `sheenRoughness`, their
+  textures (`clearcoatMap`, `clearcoatRoughnessMap`, `clearcoatNormalMap`, `sheenMap`, `sheenRoughnessMap`), and glTF's
+  `KHR_materials_clearcoat` and `KHR_materials_sheen` with theirs. The coat is a second lobe of no color, F0 .04, with
+  its own roughness and normal, over the sky, the picture of all around and every light; what it reflects is taken from
+  what is under it. Sheen is Charlie's (Estevez and Kulla), with Neubelt's visibility, its power by `artfExp2Fast` and
+  `artfLog2Fast` on both backends. Drawn on both backends and traced on both. They live apart from the material record
+  Metal's shaders read, after all of them in the same buffer; on the GPU only scenes that have them build the shaders
+  that read them, and on the CPU what has neither goes through a copy of the lighting without them.
+- **More of glTF's materials**, drawn and traced on both backends: `specularColor` (`KHR_materials_specular`),
+  highlights drawn out along a direction (`anisotropy`, `anisotropyRotation`: `KHR_materials_anisotropy`, Trowbridge
+  and Reitz's with two alphas), a thin film's colors (`iridescence`, `iridescenceIor`, `iridescenceThickness`:
+  `KHR_materials_iridescence`, two beams at three wavelengths), and, traced, what the inside of glass takes of each color
+  (`attenuation`, `attenuationDistance`: `KHR_materials_volume`). Their factors; their own textures are logged and left
+  out.
+- **Light under the surface**, for skin, wax and marble: `ArtfMaterialDesc.subsurface` and `subsurfaceRadius`. Drawn,
+  light wraps past where the surface turns from it, and comes through thin parts from behind, by how far it went inside
+  past what the light's shadow map met first: a thin plate with the sun behind it shows 146 of 255 where it showed 26.
+  Traced, a ray inside toward each light finds how thick the thing is.
+- **Lights with a shape**: `artfLightSetShape`, as Unreal's rect lights and source length. A tube, or a rectangle that
+  lights one side; diffuse light from the nearest point of it, highlights from the point nearest the mirror ray, made
+  as long and wide as the shape looks with their light kept (Karis's): on a smooth floor a tube's highlight is 3.5 times
+  as wide as a point's. Traced, paths aim at points of the shape, so shadows go soft. **Profiles**: `artfIesDecode` reads
+  an IES file (LM-63, its symmetries, tilted lamps), and `artfLightSetProfile` gives a light that table, by the angle
+  from its direction and round it, drawn and traced. For the sixteen lights a frame holds. The frame's block grows to
+  168 rows; the GPU's profiles go in the lights' buffer.
 - **A sky from the sun**: `artfSceneSetSky`. Air (Rayleigh), haze (Mie) and ozone scatter and take the sun's light,
   once, along each direction from a point above the ground, with Bruneton's and Hillaire's constants: blue overhead by
   day, orange and red toward a low sun, and the ground below lit through the air. It becomes the scene's light from all
@@ -50,12 +68,14 @@
   leaning at random, kept off what is steep, the same for the same seed.
 - `artful-render`: `--tone`, `--auto-exposure`, `--temperature`, `--tint`, `--saturation`, `--contrast`, `--vignette`,
   `--chromatic`, `--motion-blur`, `--sun`, `--sky`, `--fog-height`, `--soft-shadows`, `--sun-size`, `--hardware`.
-- The frame's block grows to 104 rows. Metal's shaders were not made again (SPIRV-Cross was not at hand): they read
-  the records they did, and leave all of the above out.
+- The frame's block grows to 104 rows, then 168. Metal's shaders were not made again (SPIRV-Cross was not at
+  hand): they read the records they did, and leave all of the above out.
 - Cost, where none of it is used, measured against 0.4 on a Ryzen with a Radeon RX 9060 XT, best of several runs at
   1920 x 1080: the CPU within 2% (`spheres`, `heavy`, `city`, `outdoors` in floats with temporal antialiasing); the
   GPU within 1% on `city`, 4% on `spheres` (0.008 ms), 4% on `outdoors` in floats (0.11 ms), most of that the surface
-  target being two words a pixel.
+  target being two words a pixel. Shapes, profiles and the materials past glTF's core, unused, against the commit before
+  them: the same within the noise of a shared machine (CPU `spheres` 2.08 ms against 2.13 at best, `city` 22.7 against
+  22.9; GPU `heavy` 0.118 against 0.119, `city` 1.31 against 1.32).
 - Fixed: `artfRendererReadPixels` on Vulkan read the frame from memory the CPU does not cache (on a discrete card
   with resizable BAR, the GPU's own), through a buffer made again each time: 60 to 120 ms for a frame of 1051 x 754
   on a Radeon RX 9060 XT, where the GPU drew it in 0.2. It now reads it from cached memory, through a buffer kept

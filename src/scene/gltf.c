@@ -579,17 +579,45 @@ static ArtfMaterial materialOf(Loader* l, const Json* m) {
         d.transparency = artfMaxf(d.transparency, artfClampf(through, 0, 1));
         d.ior = index >= 1.f ? index : 1.5f;
     }
-    /* a clear layer over it, and sheen: their factors (their textures are left out, and logged) */
+    /* a clear layer over it, and sheen, with their textures */
     const Json* coat = member(l, extensions, "KHR_materials_clearcoat");
     d.clearcoat = (float)numberOf(l, coat, "clearcoatFactor", 0);
     d.clearcoatRoughness = (float)numberOf(l, coat, "clearcoatRoughnessFactor", 0);
+    d.clearcoatMap = textureOf(l, member(l, coat, "clearcoatTexture"));
+    d.clearcoatRoughnessMap = textureOf(l, member(l, coat, "clearcoatRoughnessTexture"));
+    d.clearcoatNormalMap = textureOf(l, member(l, coat, "clearcoatNormalTexture"));
     const Json* sheen = member(l, extensions, "KHR_materials_sheen");
     float sheenColor[3] = {0, 0, 0};
     readNumbers(l, member(l, sheen, "sheenColorFactor"), sheenColor, 3);
     d.sheen = artfVec3(sheenColor[0], sheenColor[1], sheenColor[2]);
-    if (member(l, coat, "clearcoatTexture") || member(l, coat, "clearcoatRoughnessTexture") || member(l, coat, "clearcoatNormalTexture") ||
-        member(l, sheen, "sheenColorTexture") || member(l, sheen, "sheenRoughnessTexture"))
-        artfLog("artful: glTF: a clear coat's or sheen's textures are left out: their factors are kept");
+    d.sheenRoughness = (float)numberOf(l, sheen, "sheenRoughnessFactor", 0);
+    d.sheenMap = textureOf(l, member(l, sheen, "sheenColorTexture"));
+    d.sheenRoughnessMap = textureOf(l, member(l, sheen, "sheenRoughnessTexture"));
+    /* what a dielectric reflects head on, of a color: its factor is in that color (0 would be white here) */
+    const Json* specular = member(l, extensions, "KHR_materials_specular");
+    if (specular) {
+        float tint[3] = {1, 1, 1};
+        readNumbers(l, member(l, specular, "specularColorFactor"), tint, 3);
+        const float factor = (float)numberOf(l, specular, "specularFactor", 1);
+        d.specularColor = artfVec3(artfMaxf(tint[0] * factor, 1e-6f), artfMaxf(tint[1] * factor, 1e-6f), artfMaxf(tint[2] * factor, 1e-6f));
+    }
+    /* what its inside takes, traced */
+    const Json* volume = member(l, extensions, "KHR_materials_volume");
+    float attenuation[3] = {1, 1, 1};
+    readNumbers(l, member(l, volume, "attenuationColor"), attenuation, 3);
+    d.attenuation = artfVec3(attenuation[0], attenuation[1], attenuation[2]);
+    d.attenuationDistance = (float)numberOf(l, volume, "attenuationDistance", 0);
+    /* a thin film: as thick as it says at most, where no texture says less */
+    const Json* film = member(l, extensions, "KHR_materials_iridescence");
+    d.iridescence = (float)numberOf(l, film, "iridescenceFactor", 0);
+    d.iridescenceIor = (float)numberOf(l, film, "iridescenceIor", 1.3);
+    d.iridescenceThickness = (float)numberOf(l, film, "iridescenceThicknessMaximum", 400);
+    const Json* drawn = member(l, extensions, "KHR_materials_anisotropy");
+    d.anisotropy = (float)numberOf(l, drawn, "anisotropyStrength", 0);
+    d.anisotropyRotation = (float)numberOf(l, drawn, "anisotropyRotation", 0);
+    if (member(l, specular, "specularTexture") || member(l, specular, "specularColorTexture") || member(l, film, "iridescenceTexture") ||
+        member(l, film, "iridescenceThicknessTexture") || member(l, drawn, "anisotropyTexture") || member(l, volume, "thicknessTexture"))
+        artfLog("artful: glTF: textures of specular, iridescence, anisotropy or volume are left out: their factors are kept");
     return artfSceneAddMaterial(l->scene, &d);
 }
 
@@ -1244,7 +1272,9 @@ static bool openJson(Loader* l, const char* text, size_t size) {
         for (const Json* e = nodeAt(l, required->first); e; e = nodeAt(l, e->next))
             if (!stringIs(e, "KHR_mesh_quantization") && !stringIs(e, "KHR_texture_transform") && !stringIs(e, "KHR_materials_emissive_strength") &&
                 !stringIs(e, "EXT_meshopt_compression") && !stringIs(e, "KHR_materials_unlit") && !stringIs(e, "KHR_materials_ior") &&
-                !stringIs(e, "KHR_materials_transmission") && !stringIs(e, "KHR_materials_clearcoat") && !stringIs(e, "KHR_materials_sheen")) {
+                !stringIs(e, "KHR_materials_transmission") && !stringIs(e, "KHR_materials_clearcoat") && !stringIs(e, "KHR_materials_sheen") &&
+                !stringIs(e, "KHR_materials_specular") && !stringIs(e, "KHR_materials_volume") && !stringIs(e, "KHR_materials_iridescence") &&
+                !stringIs(e, "KHR_materials_anisotropy")) {
                 artfLog("artful: glTF: the file requires %.*s, which cannot be read here", e->kind == J_STRING ? (int)e->length : 0, e->text);
                 return 0;
             }

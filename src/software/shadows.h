@@ -24,6 +24,10 @@ const ArtfShadowSource* artfShadowMapsDraw(ArtfShadowMaps* m, const ArtfScene* s
 /* size: how wide the light is, for soft shadows (ArtfShadowDesc.soft): the sun's angle, a lamp's radius; 0: sharp. */
 float artfShadowOfSun(const ArtfShadowSource* s, const float* eye, const float* world, const float* normal, float size);
 float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world, const float* normal, float size);
+/* How far light from the sun, or a light of the frame's, goes inside what it meets first to get to a place, from the
+ * depth its map keeps: for light under a surface. Less than 0: its maps do not say. */
+float artfShadowThroughSun(const ArtfShadowSource* s, const float* eye, const float* world);
+float artfShadowThroughLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world);
 /* Of the k-th light past the frame's own (artfSceneExtraLights's order). */
 float artfShadowOfExtra(const ArtfShadowSource* s, uint32_t k, const float* position, const float* world, const float* normal);
 

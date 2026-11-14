@@ -126,7 +126,7 @@ typedef struct ArtfSoftFrame {
     uint32_t* postSurface;
     uint32_t* postInstance; /* the scene's instance + 1 that shows, of what is solid; 0: none */
     const float* motion;    /* with motion followed: of each instance, from where it is to where it was (ArtfMotion) */
-    bool sizedLights;       /* of the frame's lights, one has a size (artfLightSetSize) */
+    bool sizedLights;       /* of the frame's lights, one has a size, a shape or a profile (artfLightSetSize, artfLightSetShape) */
     /* lights past the frame's own, and of each tile, which of them reach it (artfSceneLightTiles) */
     ArtfLightData* extra;
     uint32_t extraCount;

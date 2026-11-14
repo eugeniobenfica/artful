@@ -220,7 +220,7 @@ typedef struct Vulkan {
     VkShaderModule sceneVertexModule; /* kept: a scene's graphs make new pipelines */
     uint64_t graphScene;
     uint32_t graphCount;
-    bool probes, walls, froxels, coats, softShadows; /* the scene's pixel shaders read probes, their maps, the fog's grid, coats: made again when that changes */
+    bool probes, walls, froxels, coats, softShadows, shapes; /* the scene's pixel shaders read probes, their maps, the fog's grid, coats, lights' shapes: made again when that changes */
     /* shadow maps: all in one atlas of depth */
     VkRenderPass shadowPass;
     VkFramebuffer shadowFramebuffer;
@@ -234,6 +234,7 @@ typedef struct Vulkan {
      * level over the traced instances, in their order (binding 64). */
     bool rayQuery;        /* the device has acceleration structures and ray queries, and they are on */
     bool traceHardware;   /* the trace pipeline goes through them */
+    bool traceMore;       /* the trace pipeline reads materials past glTF's core and lights' shapes */
     GpuBuffer rtPositions, rtIndices, rtInstances, rtScratch, rtBottom, rtTop;
     VkAccelerationStructureKHR* rtBottoms;
     uint32_t rtBottomCount;
@@ -763,7 +764,7 @@ static bool shadowAtlasMake(Vulkan* v, int width, int height) {
 
 static uint32_t shaderVariant(const Vulkan* v) {
     return (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->probes ? ARTF_SHADER_PROBES : 0u) | (v->probes && v->walls ? ARTF_SHADER_WALLS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u) |
-           (v->coats ? ARTF_SHADER_COAT : 0u) | (v->softShadows ? ARTF_SHADER_SOFT : 0u);
+           (v->coats ? ARTF_SHADER_COAT : 0u) | (v->softShadows ? ARTF_SHADER_SOFT : 0u) | (v->shapes ? ARTF_SHADER_SHAPES : 0u);
 }
 
 /* The pipeline of what is plain and solid, made again: when the probes come or go. */
@@ -1834,7 +1835,8 @@ static bool syncTrace(Vulkan* v, ArtfScene* scene) {
     artfSceneTraceSync(scene);
     const ArtfTrace* t = &scene->trace;
     const bool guides = t->desc.denoise, hardware = t->desc.hardware && v->rayQuery;
-    if (v->tracePipeline && (v->traceGuides != guides || v->traceHardware != hardware)) {
+    const bool more = scene->moreMaterials > 0 || artfSceneShapedLights(scene);
+    if (v->tracePipeline && (v->traceGuides != guides || v->traceHardware != hardware || v->traceMore != more)) {
         v->vkDeviceWaitIdle(v->device);
         v->vkDestroyPipeline(v->device, v->tracePipeline, NULL);
         v->tracePipeline = 0;
@@ -1843,8 +1845,9 @@ static bool syncTrace(Vulkan* v, ArtfScene* scene) {
         size_t size;
         v->traceGuides = guides;
         v->traceHardware = hardware;
+        v->traceMore = more;
         if (hardware) artfLog("artful: rays go through the ray tracing hardware");
-        uint32_t* code = artfShaderTrace(&size, v->maxTextures, scene->graphs.items, (uint32_t)scene->graphs.len, guides, hardware);
+        uint32_t* code = artfShaderTrace(&size, v->maxTextures, scene->graphs.items, (uint32_t)scene->graphs.len, guides, hardware, more);
         VkShaderModule module = shaderModule(v, code, size);
         if (!module) return false;
         const ComputePipelineCreateInfo info = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
@@ -2677,13 +2680,15 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     const bool probes = scene->indirect.on && scene->indirect.probes, walls = probes && !scene->indirect.desc.throughWalls;
     const bool fogGrid = v->floats && scene->post.volumetric > 0 && scene->fogDensity > 0;
     const bool coats = scene->layeredMaterials > 0, softShadows = scene->shadows.soft && scene->shadows.resolution > 0;
-    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels || coats != v->coats || softShadows != v->softShadows) {
+    const bool shapes = artfSceneShapedLights(scene);
+    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels || coats != v->coats || softShadows != v->softShadows || shapes != v->shapes) {
         v->vkDeviceWaitIdle(v->device);
         v->probes = probes;
         v->walls = walls;
         v->froxels = fogGrid;
         v->coats = coats;
         v->softShadows = softShadows;
+        v->shapes = shapes;
         if (!scenePipelineMake(v) || !cutoutPipelinesMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
         v->graphCount = (uint32_t)scene->graphs.len;
     }
@@ -2758,6 +2763,10 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     /* the decals that may show, straight into this slot's buffer (its fence was waited for) */
     frame.indirect[1][3] = (float)artfSceneDecals(scene, &frame, v->height, s->decals.mapped);
     memcpy(s->frame.mapped, &frame, sizeof frame);
+    /* the frame's lights' profiles, past those past them in their buffer (shaders.c's profileAt) */
+    for (uint32_t k = 0; k < frame.lightCount; ++k)
+        if (frame.lightShapes[k][2][3] > 0)
+            memcpy((char*)s->extraLights.mapped + ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + (size_t)k * ARTF_PROFILE_FLOATS * sizeof(float), scene->lightProfile[(int)frame.lightShapes[k][2][3] - 1], ARTF_PROFILE_FLOATS * sizeof(float));
     if (!syncLights(v, s, scene, &frame) || !syncIndirect(v, s, scene, &frame)) return false;
     syncSlot(v, s, scene);
     uint32_t layerCount = 0, traceAdding = 0;
@@ -3583,7 +3592,7 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     for (int i = 0; i < SLOTS; ++i) {
         Slot* s = &v->slots[i];
         if (!bufferNew(v, &s->frame, sizeof(ArtfFrameData), BUFFER_UNIFORM, true)) goto failed;
-        if (!bufferNew(v, &s->extraLights, (VkDeviceSize)ARTF_MAX_LIGHTS * sizeof(ArtfLightData), BUFFER_STORAGE, true)) goto failed;
+        if (!bufferNew(v, &s->extraLights, (VkDeviceSize)ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + ARTF_FRAME_LIGHTS * ARTF_PROFILE_FLOATS * sizeof(float), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->decals, (VkDeviceSize)ARTF_MAX_DECALS * sizeof(ArtfDecalData), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->tileLights, 4, BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->probes, 16, BUFFER_STORAGE, true)) goto failed;

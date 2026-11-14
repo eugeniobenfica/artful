@@ -7,8 +7,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   has neither limit.
 - Antialiasing is four samples, or none, and it smooths edges only: what a texture or a highlight does
   inside a triangle is not sampled again. There is no upscaling: the frame is drawn at its size.
-- When tracing, a light is a point unless it has a size (`artfLightSetSize`), and those past the sixteen are points;
-  glass has no Fresnel of its own, nor color. It reads textures in their largest mipmap. Black holes stay behind
+- When tracing, a light is a point unless it has a size or a shape (`artfLightSetSize`, `artfLightSetShape`), and those
+  past the sixteen are points; glass has no Fresnel of its own, and its color (`attenuation`) is taken from paths, not
+  from shadow rays: the shadow of green glass is grey. It reads textures in their largest mipmap. Black holes stay behind
   everything and do not bend what is traced. Without `denoise`, a scene that moves starts over each frame; with it,
   what was hidden starts with no history, and is soft for some frames.
 - The ray tracing hardware (`ArtfTraceDesc.hardware`) builds every mesh's bottom level again whenever meshes change,
@@ -41,20 +42,35 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   work. What it gives reflections is as rough as the probes are: a mirror shows its color, not what it would see.
 - Particles are stepped on the calling thread, one instance each; they are not traced, unless the whole frame is.
   They bounce on a flat ground only, not on what the scene holds, and their wind is noise, not a fluid.
-- A clear coat and sheen are their factors: their textures, and sheen's roughness, are not read. Sheen is Burley's
-  rim, not the Charlie lobe glTF's sample viewer draws. The coat has the surface's own normal.
+- Past glTF's core: what sheen takes from all around is a fit by eye to Charlie's lobe, not its integral, and nothing
+  makes up for the light sheen takes from under it. The coat's normal map has a scale of 1. Of
+  `KHR_materials_specular`, `_iridescence`, `_anisotropy` and `_volume`, the factors are read and the textures left out
+  (and logged): a film is as thick as its maximum, and drawn out highlights go one way over the whole material. A thin
+  film is two beams at three wavelengths, seen along the normal, not Belcour and Barla's model; what comes from all
+  around is reflected as if the surface were not drawn out. `specularColor` tints what a dielectric reflects head on,
+  not at grazing angles.
+- Light under the surface is a cheap model when drawing: light wraps half a radian past where the surface turns from
+  it, and comes through from behind as much as what it went through leaves, by the depth in the light's shadow map;
+  so only the sun and the sixteen lights with shadows bring light through, and from what is first in their way, not
+  from how thick the thing itself is. Traced, a ray inside toward each light finds how thick it is, and the wrap stops
+  where the surface turns from the light. Neither blurs light across the surface, as diffusion would.
+- Lights' sizes, shapes and profiles count for the sixteen lights the frame holds. A shape's light reaches as far from
+  each point of it as a point's would; a rectangle's highlight comes from where the mirror ray meets it, not from its
+  integral over the lobe (no LTC), and its shadow map is drawn from its middle; its barn doors are not there. A
+  profile is 96 x 16, by its own steps (2 degrees down, 22.5 round): a very narrow beam is softened. IES files of
+  photometry type C are read as such; A and B are read as if they were C, and a lamp's tilt is left out. Soft shadows
+  (`ArtfShadowDesc.soft`) take 50 reads a pixel and light; their penumbra is at most 12 texels wide, and lights past the
+  sixteen and fog that light goes through keep sharp ones.
 - A sky (`artfSceneSetSky`) scatters light once: twilight, which comes of light scattered more than once, is darker
   than a real one. It is a picture of all around, so its sun is not a disc in it, and it is made again, in tens of
   milliseconds, when the sun moves. Fog by height thins fog that light goes through, not the plain fog.
-- Lights' sizes count for the sixteen lights the frame holds. Soft shadows (`ArtfShadowDesc.soft`) take 50 reads a
-  pixel and light; their penumbra is at most 12 texels wide, and lights past the sixteen and fog that light goes
-  through keep sharp ones.
 - What is too small to see (`artfSceneSetCullSize`) goes by an instance's bounding ball: a long thin thing seen end on
   counts as large.
 - A terrain's layers are a material in C, with one set of texture coordinates; what is scattered over it is placed
   once, and does not follow if the heights change.
-- On the GPU, turning probes, their walls or fog that light goes through on or off makes the scene's pixel shaders
-  again: that frame waits for them.
+- On the GPU, turning probes, their walls, fog that light goes through, the first material past glTF's core or the
+  first light with a shape or a profile on or off makes the scene's pixel shaders again, and its tracing shader: that
+  frame waits for them.
 - Decals are tested against each drawn pixel, all of those in view: dozens are cheap, hundreds cost. They go on what is
   solid, not on what blends, and read one mipmap, chosen for the box's distance.
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual
