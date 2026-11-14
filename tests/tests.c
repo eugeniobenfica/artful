@@ -4468,8 +4468,80 @@ static ArtfScene* viewScene(ArtfInstance* moving) {
     return s;
 }
 
+/* What the kernels do after the frame (grading, temporal antialiasing, upscaling, with something that moves): the same
+ * bytes on every instruction set, with any number of threads. */
+static void testPostKernels(void) {
+    uint32_t* frame = artfMalloc(W * H * 4);
+    float* swapped = swapLut(9, true);
+    static const struct { int threads; ArtfSimd simd; } runs[] = {{1, ARTF_SIMD_AUTO}, {4, ARTF_SIMD_AUTO}, {1, ARTF_SIMD_PORTABLE}, {3, ARTF_SIMD_128}};
+    for (int scaled = 0; scaled < 2; ++scaled) {
+        uint64_t reference = 0;
+        for (size_t i = 0; i < ARTF_COUNT(runs); ++i) {
+            ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, runs[i].threads, false);
+            o.simd = runs[i].simd;
+            o.hdr = true;
+            o.renderScale = scaled ? .6f : 0;
+            ArtfRenderer* r = artfRendererNew(&o);
+            ArtfInstance moving;
+            ArtfScene* s = viewScene(&moving);
+            const ArtfPostDesc all = {.bloom = .1f, .temporal = true, .lift = {.03f, 0, .02f}, .gamma = {1.2f, 1.1f, .9f}, .gain = {1, .95f, .9f},
+                                      .shadows = {.9f, 1, 1.2f}, .highlights = {1.1f, 1, .9f}, .lut = swapped, .lutSize = 9, .lutAmount = .7f, .grain = .3f, .flare = .5f};
+            artfSceneSetPost(s, &all);
+            for (int f = 0; f < 4; ++f) {
+                const ArtfTransform t = artfTransformAt(1.5f + .1f * (float)f, .3f, 2.f, 1);
+                artfInstanceSetTransform(s, moving, &t);
+                CHECK(artfRendererDraw(r, s));
+            }
+            CHECK(artfRendererReadPixels(r, frame));
+            const uint64_t h = hashOf(frame, (size_t)W * H);
+            if (!i) reference = h;
+            CHECK(h == reference);
+            artfSceneFree(s);
+            artfRendererFree(r);
+        }
+    }
+    artfFree(swapped);
+    artfFree(frame);
+}
+
 /* Each view (ArtfView) drawn: what was asked for comes out, on each backend and with a frame in floats; the two
  * backends agree; and a view put back leaves the picture as it was, to the byte. */
+/* Vulkan's pixel shaders of another variant, made off the frame: a view asked for after the first frame comes a few
+ * frames later, and after artfRendererWarm the frame is the one that waiting for them makes. */
+static void testShadersAhead(void) {
+    ArtfRenderer* r = artfRendererNew(&(ArtfRendererOptions){.backend = ARTF_BACKEND_VULKAN, .width = W, .height = H});
+    if (!r) return;
+    ArtfScene* s = plainScene();
+    ArtfMaterialDesc d = {artfVec3(.36f, .64f, .04f), 0, 0, .6f, artfVec3(.36f, 0, 0)};
+    addAt(s, addSquare(s, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu), artfSceneAddMaterial(s, &d), 0, 0, 0, 1);
+    artfSceneAddLight(s, artfVec3(0, 0, 1), artfVec3(1, 1, 1), 10.f);
+    uint32_t* waited = artfMalloc(W * H * 4);
+    uint32_t* ahead = artfMalloc(W * H * 4);
+    drawInto(r, s, waited);
+    artfRendererSetView(r, ARTF_VIEW_NORMALS);
+    drawInto(r, s, waited); /* (artfVulkanShadersWait: made before the frame) */
+    artfRendererSetView(r, ARTF_VIEW_LIT);
+    drawInto(r, s, ahead);
+    artfVulkanShadersWait = false;
+    artfRendererSetView(r, ARTF_VIEW_NORMALS);
+    double longest = 0;
+    for (int i = 0; i < 3; ++i) {
+        const double t0 = artfNowMs();
+        CHECK(artfRendererDraw(r, s));
+        const double took = artfNowMs() - t0;
+        if (took > longest) longest = took;
+    }
+    artfRendererWarm(r);
+    drawInto(r, s, ahead);
+    printf("pixel shaders made off the frame: the longest frame after asking for a view %.2f ms\n", longest);
+    CHECK(!memcmp(waited, ahead, W * H * 4));
+    artfVulkanShadersWait = true;
+    artfFree(waited);
+    artfFree(ahead);
+    artfSceneFree(s);
+    artfRendererFree(r);
+}
+
 static void testViews(void) {
     uint32_t* frame = artfMalloc(W * H * 4);
     uint32_t* frames[2][2][ARTF_VIEW_COUNT];
@@ -7410,6 +7482,8 @@ static void testBlackHole(void) {
 }
 
 int main(void) {
+    /* (a feature asked for is drawn on the next frame, as each test expects; testShadersAhead checks the other way) */
+    artfVulkanShadersWait = true;
     testPacking();
     testMeshlets();
     testInstances();
@@ -7521,6 +7595,8 @@ int main(void) {
     testMeshStreaming(ARTF_BACKEND_VULKAN);
     testTraceHardware();
     testViews();
+    testShadersAhead();
+    testPostKernels();
     testPassTimes();
     testOrthographic();
     testPick();

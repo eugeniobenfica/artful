@@ -910,6 +910,7 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
     f->post = o->hdr;
     s->renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
     s->post.pool = s->pool;
+    s->post.kernels = s->kernels;
     const size_t planes = (size_t)ARTF_TILE_PIXELS * 4 * f->samples;
     /* (with a frame in floats, each color has its alpha and surface after it: see storeLit) */
     const size_t colors = f->post ? (size_t)ARTF_TILE_PIXELS * 4 * 12 : planes;

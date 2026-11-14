@@ -460,8 +460,8 @@ static void viewBackOf(ArtfSoftPost* p) {
     }
 }
 
-static void temporalRow(ArtfSoftPost* p, int y) {
-    for (int x = 0; x < p->width; ++x) {
+POST_INLINE void temporalPixel(ArtfSoftPost* p, int x, int y) {
+    {
         const size_t i = (size_t)y * p->width + x;
         float lo[3] = {3e38f, 3e38f, 3e38f}, hi[3] = {-3e38f, -3e38f, -3e38f};
         for (int dy = -1; dy <= 1; ++dy)
@@ -484,6 +484,21 @@ static void temporalRow(ArtfSoftPost* p, int y) {
     }
 }
 
+/* Through the kernels, eight pixels at a time, where they can (temporalLanes: in perspective, away from the sides, and
+ * where no pixel went by its vertices); here, a pixel at a time, where they cannot. The same bytes either way. */
+static void temporalRow(ArtfSoftPost* p, int y) {
+    enum { STRETCH = 2048 };
+    uint8_t done[STRETCH / 8];
+    const bool lanes = !artfOrtho(&p->f->data) && !p->mapped;
+    for (int from = 0; from < p->width; from += STRETCH) {
+        const int to = artfMini(from + STRETCH, p->width);
+        memset(done, 0, sizeof done);
+        if (lanes) p->kernels->temporal(p, y, from, to, done);
+        for (int x = from; x < to; ++x)
+            if (!done[(x - from) >> 3]) temporalPixel(p, x, y);
+    }
+}
+
 /* ---- upscaling: the scene drawn smaller, made whole at the frame's size ----
  *
  * Each frame the scene's samples land elsewhere within its pixels (the jitter), so that over 16 frames they cover the
@@ -492,26 +507,8 @@ static void temporalRow(ArtfSoftPost* p, int y) {
  * antialiasing does, and kept within what the nearest sample's neighbours show). Where nothing was before, or without
  * temporal antialiasing, it is the scene read between its pixels. Alpha is read between them too. */
 
-/* Of each of the scene's pixels, the least and most of each color around it, three by three. */
-static void boxRow(ArtfSoftPost* p, int y) {
-    const int sw = p->sceneW, sh = p->sceneH;
-    float* const* light = p->f->postLight;
-    const size_t rows[3] = {(size_t)artfMaxi(y - 1, 0) * sw, (size_t)y * sw, (size_t)artfMini(y + 1, sh - 1) * sw};
-    for (int x = 0; x < sw; ++x) {
-        const int xs[3] = {artfMaxi(x - 1, 0), x, artfMini(x + 1, sw - 1)};
-        for (int c = 0; c < 3; ++c) {
-            float lo = 3e38f, hi = -3e38f;
-            for (int r = 0; r < 3; ++r)
-                for (int k = 0; k < 3; ++k) {
-                    const float v = light[c][rows[r] + xs[k]];
-                    lo = artfMinf(lo, v);
-                    hi = artfMaxf(hi, v);
-                }
-            p->box[c][(size_t)y * sw + x] = lo;
-            p->box[3 + c][(size_t)y * sw + x] = hi;
-        }
-    }
-}
+/* Of each of the scene's pixels, the least and most of each color around it, three by three: in the kernels (boxLanes). */
+static void boxRow(ArtfSoftPost* p, int y) { p->kernels->box(p, y); }
 
 static void upscaleRow(ArtfSoftPost* p, int y) {
     const ArtfFrameData* f = &p->f->data;
@@ -527,7 +524,15 @@ static void upscaleRow(ArtfSoftPost* p, int y) {
     const size_t row0 = (size_t)artfClampi(y0, 0, sh - 1) * sw, row1 = (size_t)artfClampi(y0 + 1, 0, sh - 1) * sw;
     /* (each sample's height from the center, in pixels of the frame; nearer than one counts) */
     const float oy0 = fy / ry, oy1 = (1.f - fy) / ry;
+    /* (with the history, through the kernels eight pixels at a time where they can: upscaleLanes, the same bytes) */
+    enum { STRETCH = 2048 };
+    uint8_t done[STRETCH / 8];
     for (int x = 0; x < p->width; ++x) {
+        if (!(x % STRETCH)) {
+            memset(done, 0, sizeof done);
+            if (temporal && !artfOrtho(f)) p->kernels->upscale(p, y, x, artfMini(x + STRETCH, p->width), done);
+        }
+        if (done[(x % STRETCH) >> 3]) continue;
         const size_t i = (size_t)y * p->width + x;
         /* the center, among the scene's samples: index i's sample is there when i is u */
         const float u = ((float)x + .5f) * rx - .5f + jx;
@@ -857,147 +862,190 @@ static inline void toneNeutral(float* c) {
 }
 
 /* Lens flare: what blooms, again at three places mirrored across the middle, each its own color, fading as it goes from
- * the middle to the frame's edges (and gone past them). dx, dy: from the middle to the pixel's center. */
+ * the middle to the frame's edges (and gone past them). */
 static const float flareScale[3] = {1.f, .5f, 1.8f};
 static const float flareTint[3][3] = {{1.f, .7f, .4f}, {.4f, .7f, 1.f}, {.7f, 1.f, .6f}};
 
-static inline void flareAt(const ArtfSoftPost* p, float dx, float dy, float* out) {
-    const float cx = (float)p->width * .5f, cy = (float)p->height * .5f;
-    for (int c = 0; c < 3; ++c) out[c] = 0;
-    for (int g = 0; g < 3; ++g) {
-        const float k = flareScale[g];
-        const float ax = dx * k / cx, ay = dy * k / cy;
-        const float fade = artfMaxf(1.f - ax * ax, 0) * artfMaxf(1.f - ay * ay, 0);
-        const float gx = (cx - dx * k) * .5f - .5f, gy = (cy - dy * k) * .5f - .5f;
-        /* (tap's arithmetic, for the three planes at once) */
-        const int w = p->bloomW[0], h = p->bloomH[0];
-        const float x = artfClampf(gx, 0, (float)(w - 1)), y = artfClampf(gy, 0, (float)(h - 1));
-        const int x0 = (int)x, y0 = (int)y, x1 = artfMini(x0 + 1, w - 1), y1 = artfMini(y0 + 1, h - 1);
-        const float fx = x - (float)x0, fy = y - (float)y0;
-        const size_t i00 = (size_t)y0 * w + x0, i01 = (size_t)y0 * w + x1, i10 = (size_t)y1 * w + x0, i11 = (size_t)y1 * w + x1;
-        for (int c = 0; c < 3; ++c) {
-            const float* plane = p->bloom[c];
-            const float top = plane[i00] + (plane[i01] - plane[i00]) * fx, bottom = plane[i10] + (plane[i11] - plane[i10]) * fx;
-            const float tinted = flareTint[g][c] * fade;
-            out[c] += tinted * (top + (bottom - top) * fy);
+/* Where the last pass reads bloom's first level depends on a column alone, or on a row alone: for each, of bloom itself
+ * (0) and of the three ghosts, the two texels around it (rows as offsets), how far between, and the ghost's fade along
+ * that side. Worked out once for a size, as tap and the flare did at each pixel, with the same arithmetic. */
+typedef struct ArtfPostCut { int at0[4], at1[4]; float t[4], fade[4]; } ArtfPostCut;
+
+static void cutAt(ArtfPostCut* c, int g, float s, int size, int step) {
+    s = artfClampf(s, 0, (float)(size - 1));
+    const int s0 = (int)s;
+    c->at0[g] = s0 * step;
+    c->at1[g] = artfMini(s0 + 1, size - 1) * step;
+    c->t[g] = s - (float)s0;
+}
+
+static void postCuts(ArtfSoftPost* p, int frameWidth, int frameHeight) {
+    p->cutX = artfMalloc((size_t)frameWidth * sizeof *p->cutX);
+    p->cutY = artfMalloc((size_t)frameHeight * sizeof *p->cutY);
+    for (int side = 0; side < 2; ++side) {
+        const int n = side ? frameHeight : frameWidth, size = side ? p->bloomH[0] : p->bloomW[0], step = side ? p->bloomW[0] : 1;
+        ArtfPostCut* cuts = side ? p->cutY : p->cutX;
+        const float middle = (float)n * .5f;
+        for (int i = 0; i < n; ++i) {
+            ArtfPostCut* c = &cuts[i];
+            cutAt(c, 0, ((float)i + .5f) * .5f - .5f, size, step);
+            c->fade[0] = 1.f;
+            const float d = (float)i + .5f - middle;
+            for (int g = 0; g < 3; ++g) {
+                const float k = flareScale[g], a = d * k / middle;
+                c->fade[g + 1] = artfMaxf(1.f - a * a, 0);
+                cutAt(c, g + 1, (middle - d * k) * .5f - .5f, size, step);
+            }
         }
     }
 }
 
-/* What is done in what a screen shows, last: lift, gamma and gain, the color wheels, the look-up table, the grain. */
-static inline void gradeShown(const ArtfSoftPost* p, const ArtfFrameData* f, float* c, int x, int y) {
-    if (f->grade2[0][3] > 0) {
-        for (int k = 0; k < 3; ++k) {
-            const float o = f->grade2[2][k] * (c[k] + f->grade2[0][k] * (1.f - c[k]));
-            c[k] = f->grade2[1][k] == 1 ? o : o > 0 ? artfExp2Fast(artfLog2Fast(o) * f->grade2[1][k]) : 0.f;
-        }
-        const float l = artfClampf(.2126f * c[0] + .7152f * c[1] + .0722f * c[2], 0, 1);
-        const float dark = (1.f - l) * (1.f - l), middle = 2.f * l * (1.f - l), bright = l * l;
-        for (int k = 0; k < 3; ++k) c[k] = artfClampf(c[k] * (dark * f->grade2[3][k] + middle * f->grade2[4][k] + bright * f->grade2[5][k]), 0, 1);
-    }
-    const int n = (int)f->grade2[3][3];
-    if (n >= 2 && p->f->scene->lut) {
-        const float* lut = p->f->scene->lut;
-        int at[3];
-        float t[3];
-        for (int k = 0; k < 3; ++k) {
-            const float q = artfClampf(c[k], 0, 1) * (float)(n - 1);
-            at[k] = artfMini((int)q, n - 2);
-            t[k] = q - (float)at[k];
-        }
-        const size_t i000 = (size_t)3 * (((size_t)at[2] * n + at[1]) * n + at[0]), dy = (size_t)3 * n, dz = (size_t)3 * n * n;
-        const float amount = f->grade2[4][3];
-        for (int k = 0; k < 3; ++k) {
-            const float* q = lut + i000 + k;
-            const float a = q[0] + (q[3] - q[0]) * t[0], b = q[dy] + (q[dy + 3] - q[dy]) * t[0];
-            const float d = q[dz] + (q[dz + 3] - q[dz]) * t[0], e = q[dz + dy] + (q[dz + dy + 3] - q[dz + dy]) * t[0];
-            const float near_ = a + (b - a) * t[1], far = d + (e - d) * t[1];
-            const float looked = near_ + (far - near_) * t[2];
-            c[k] = artfClampf(c[k] + (looked - c[k]) * amount, 0, 1);
-        }
-    }
-    const float grain = f->grade2[1][3];
-    if (grain > 0) {
-        const uint32_t h = hash((uint32_t)y * (uint32_t)p->width + (uint32_t)x + hash((uint32_t)f->grade2[2][3]));
-        const float noise = (float)(h >> 8) * (1.f / 16777216.f) - .5f;
-        for (int k = 0; k < 3; ++k) c[k] = artfClampf(c[k] + noise * grain * (.0625f + .75f * c[k] * (1.f - c[k])), 0, 1);
-    }
+/* Bilinear in a plane of bloom's first level, between the cuts of a column and a row (tap's arithmetic). */
+POST_INLINE float cutTap(const float* plane, const ArtfPostCut* cx, const ArtfPostCut* cy, int g) {
+    const float a = plane[cy->at0[g] + cx->at0[g]], b = plane[cy->at0[g] + cx->at1[g]];
+    const float c = plane[cy->at1[g] + cx->at0[g]], d = plane[cy->at1[g] + cx->at1[g]];
+    const float top = a + (b - a) * cx->t[g], bottom = c + (d - c) * cx->t[g];
+    return top + (bottom - top) * cy->t[g];
 }
+
+/* What does not change along a row of the last pass. */
+typedef struct FinalRow {
+    const ArtfSoftFrame* sf;
+    const ArtfPostCut* cutY;
+    float exposure, bloom, flare, saturation, contrast, vignette, chromatic, balance[3];
+    float cx, cy, corner, apart, dy;
+    int curve;
+    bool balanced;
+} FinalRow;
+
+/* A pixel's light as a screen shows it, before grading, and its alpha. */
+POST_INLINE void finalShown(const ArtfSoftPost* p, const FinalRow* r, int x, int y, float* shown, float* alphaOut) {
+    const ArtfSoftFrame* sf = r->sf;
+    const size_t i = (size_t)y * p->width + x;
+    const float alpha = artfClampf(sf->postLight[3][i], 0, 1);
+    const float dx = (float)x + .5f - r->cx, dy = r->dy;
+    float v[3];
+    for (int c = 0; c < 3; ++c) v[c] = sf->postLight[c][i];
+    if (r->chromatic > 0) {
+        v[0] = tap(sf->postLight[0], p->width, p->height, (float)x + dx * r->apart, (float)y + dy * r->apart);
+        v[2] = tap(sf->postLight[2], p->width, p->height, (float)x - dx * r->apart, (float)y - dy * r->apart);
+    }
+    for (int c = 0; c < 3; ++c) {
+        if (alpha > 0) v[c] /= alpha;
+        if (r->exposure > 0) v[c] *= r->exposure;
+        if (r->bloom > 0) v[c] += cutTap(p->bloom[c], &p->cutX[x], r->cutY, 0) * r->bloom / artfMaxf(alpha, 1e-3f);
+    }
+    if (r->flare > 0) {
+        /* (a ghost whose fade is 0 here would add 0 times what bloom holds, which is finite: nothing) */
+        float ghosts[3] = {0, 0, 0};
+        const ArtfPostCut *cx = &p->cutX[x], *cy = r->cutY;
+        for (int g = 1; g < 4; ++g) {
+            const float fade = cx->fade[g] * cy->fade[g];
+            if (fade == 0) continue;
+            for (int c = 0; c < 3; ++c) ghosts[c] += flareTint[g - 1][c] * fade * cutTap(p->bloom[c], cx, cy, g);
+        }
+        for (int c = 0; c < 3; ++c) v[c] += ghosts[c] * r->flare / artfMaxf(alpha, 1e-3f);
+    }
+    if (r->balanced)
+        for (int c = 0; c < 3; ++c) v[c] *= r->balance[c];
+    if (r->saturation != 0) {
+        const float grey = .2126f * v[0] + .7152f * v[1] + .0722f * v[2];
+        for (int c = 0; c < 3; ++c) v[c] = grey + (v[c] - grey) * (1.f + r->saturation);
+    }
+    if (r->vignette > 0) {
+        const float q = 1.f + r->vignette * (dx * dx + dy * dy) * r->corner, keep = 1.f / (q * q);
+        for (int c = 0; c < 3; ++c) v[c] *= keep;
+    }
+    for (int c = 0; c < 3; ++c) v[c] = v[c] > 0 ? artfMinf(v[c], 65504.f) : 0.f; /* (and not a number: nothing) */
+    if (r->exposure > 0) {
+        if (r->curve == ARTF_TONE_NEUTRAL) toneNeutral(v);
+        for (int c = 0; c < 3; ++c) {
+            if (r->curve == ARTF_TONE_ACES) v[c] = v[c] * (v[c] * 2.51f + .03f) / (v[c] * (v[c] * 2.43f + .59f) + .14f);
+            else if (r->curve == ARTF_TONE_REINHARD) v[c] = v[c] / (1.f + v[c]);
+        }
+    }
+    for (int c = 0; c < 3; ++c) {
+        shown[c] = sqrtf(artfClampf(v[c], 0, 1));
+        if (r->contrast != 0) shown[c] = artfClampf(.5f + (shown[c] - .5f) * (1.f + r->contrast), 0, 1);
+    }
+    *alphaOut = alpha;
+}
+
+/* A pixel out to the frame, with the overlay over it. */
+POST_INLINE void finalOut(const ArtfSoftPost* p, int x, int y, const float* shown, float alpha) {
+    uint32_t out = (uint32_t)(alpha * 255.f + .5f) << 24;
+    for (int c = 0; c < 3; ++c) out |= (uint32_t)(shown[c] * alpha * 255.f + .5f) << (16 - 8 * c);
+    if (p->overlay && x < p->overlayWidth && y < p->overlayHeight) {
+        const uint32_t s = p->overlay[(size_t)y * p->overlayStride + x];
+        if (s) {
+            const uint32_t rest = 255 - (s >> 24);
+            uint32_t blended = 0;
+            for (int c = 0; c < 32; c += 8) {
+                uint32_t t = ((out >> c) & 255) * rest + 128;
+                blended |= ((t + (t >> 8)) >> 8) << c;
+            }
+            out = s + blended;
+        }
+    }
+    p->pixels[(size_t)y * p->width + x] = out;
+}
+
+/* Exposure, the lens flare, the tone curve; then, in what a screen shows, grading: lift, gamma and gain, the color
+ * wheels, the look-up table and the grain, which the kernels do eight pixels at a time (gradeLanes), a stretch of the
+ * row at once. */
+enum { FINAL_STRETCH = 256 };
 
 static void finalRow(ArtfSoftPost* p, int y) {
     const ArtfSoftFrame* sf = p->f;
     const ArtfFrameData* f = &sf->data;
-    const float exposure = exposureOf(p), bloom = f->post[0][0];
-    const int bw = p->bloomW[0], bh = p->bloomH[0];
-    const int curve = (int)f->grade[0][0];
-    const float saturation = f->grade[1][2], contrast = f->grade[1][3];
-    const float temperature = f->grade[2][0], tint = f->grade[2][1], vignette = f->grade[2][2], chromatic = f->grade[2][3];
-    const float balance[3] = {1.f + .2f * temperature, 1.f - .2f * tint, 1.f - .2f * temperature};
-    const bool balanced = temperature != 0 || tint != 0;
-    const bool graded = f->grade2[0][3] > 0 || f->grade2[3][3] > 0 || f->grade2[1][3] > 0;
-    const float flare = f->grade2[5][3];
+    FinalRow r;
+    r.sf = sf;
+    r.cutY = &p->cutY[y];
+    r.exposure = exposureOf(p);
+    r.bloom = f->post[0][0];
+    r.curve = (int)f->grade[0][0];
+    r.saturation = f->grade[1][2];
+    r.contrast = f->grade[1][3];
+    const float temperature = f->grade[2][0], tint = f->grade[2][1];
+    r.vignette = f->grade[2][2];
+    r.chromatic = f->grade[2][3];
+    r.balance[0] = 1.f + .2f * temperature;
+    r.balance[1] = 1.f - .2f * tint;
+    r.balance[2] = 1.f - .2f * temperature;
+    r.balanced = temperature != 0 || tint != 0;
+    r.flare = f->grade2[5][3];
     /* (from the middle, as a share of the way to a corner) */
-    const float cx = (float)p->width * .5f, cy = (float)p->height * .5f, corner = 1.f / (cx * cx + cy * cy);
-    const float apart = chromatic * sqrtf(corner), dy = (float)y + .5f - cy;
-    for (int x = 0; x < p->width; ++x) {
-        const size_t i = (size_t)y * p->width + x;
-        const float alpha = artfClampf(sf->postLight[3][i], 0, 1);
-        const float dx = (float)x + .5f - cx;
-        uint32_t out = (uint32_t)(alpha * 255.f + .5f) << 24;
-        float v[3];
-        for (int c = 0; c < 3; ++c) v[c] = sf->postLight[c][i];
-        if (chromatic > 0) {
-            v[0] = tap(sf->postLight[0], p->width, p->height, (float)x + dx * apart, (float)y + dy * apart);
-            v[2] = tap(sf->postLight[2], p->width, p->height, (float)x - dx * apart, (float)y - dy * apart);
+    r.cx = (float)p->width * .5f;
+    r.cy = (float)p->height * .5f;
+    r.corner = 1.f / (r.cx * r.cx + r.cy * r.cy);
+    r.apart = r.chromatic * sqrtf(r.corner);
+    r.dy = (float)y + .5f - r.cy;
+    const bool graded = f->grade2[0][3] > 0 || f->grade2[3][3] > 0 || f->grade2[1][3] > 0;
+    if (!graded) {
+        for (int x = 0; x < p->width; ++x) {
+            float shown[3], alpha;
+            finalShown(p, &r, x, y, shown, &alpha);
+            finalOut(p, x, y, shown, alpha);
         }
-        for (int c = 0; c < 3; ++c) {
-            if (alpha > 0) v[c] /= alpha;
-            if (exposure > 0) v[c] *= exposure;
-            if (bloom > 0) v[c] += tap(p->bloom[c], bw, bh, ((float)x + .5f) * .5f - .5f, ((float)y + .5f) * .5f - .5f) * bloom / artfMaxf(alpha, 1e-3f);
+        return;
+    }
+    _Alignas(32) float planes[3][FINAL_STRETCH];
+    float alphas[FINAL_STRETCH];
+    float* const c[3] = {planes[0], planes[1], planes[2]};
+    const uint32_t seed = hash((uint32_t)f->grade2[2][3]);
+    for (int from = 0; from < p->width; from += FINAL_STRETCH) {
+        const int n = artfMini(FINAL_STRETCH, p->width - from), lanes = (n + 7) & ~7;
+        for (int x = 0; x < n; ++x) {
+            float shown[3];
+            finalShown(p, &r, from + x, y, shown, &alphas[x]);
+            for (int k = 0; k < 3; ++k) planes[k][x] = shown[k];
         }
-        if (flare > 0) {
-            float ghosts[3];
-            flareAt(p, dx, dy, ghosts);
-            for (int c = 0; c < 3; ++c) v[c] += ghosts[c] * flare / artfMaxf(alpha, 1e-3f);
+        for (int x = n; x < lanes; ++x) planes[0][x] = planes[1][x] = planes[2][x] = 0;
+        p->kernels->grade(f, sf->scene->lut, c, lanes, (uint32_t)y * (uint32_t)p->width + (uint32_t)from + seed);
+        for (int x = 0; x < n; ++x) {
+            const float shown[3] = {planes[0][x], planes[1][x], planes[2][x]};
+            finalOut(p, from + x, y, shown, alphas[x]);
         }
-        if (balanced)
-            for (int c = 0; c < 3; ++c) v[c] *= balance[c];
-        if (saturation != 0) {
-            const float grey = .2126f * v[0] + .7152f * v[1] + .0722f * v[2];
-            for (int c = 0; c < 3; ++c) v[c] = grey + (v[c] - grey) * (1.f + saturation);
-        }
-        if (vignette > 0) {
-            const float q = 1.f + vignette * (dx * dx + dy * dy) * corner, keep = 1.f / (q * q);
-            for (int c = 0; c < 3; ++c) v[c] *= keep;
-        }
-        for (int c = 0; c < 3; ++c) v[c] = v[c] > 0 ? artfMinf(v[c], 65504.f) : 0.f; /* (and not a number: nothing) */
-        if (exposure > 0) {
-            if (curve == ARTF_TONE_NEUTRAL) toneNeutral(v);
-            for (int c = 0; c < 3; ++c) {
-                if (curve == ARTF_TONE_ACES) v[c] = v[c] * (v[c] * 2.51f + .03f) / (v[c] * (v[c] * 2.43f + .59f) + .14f);
-                else if (curve == ARTF_TONE_REINHARD) v[c] = v[c] / (1.f + v[c]);
-            }
-        }
-        float shown[3];
-        for (int c = 0; c < 3; ++c) {
-            shown[c] = sqrtf(artfClampf(v[c], 0, 1));
-            if (contrast != 0) shown[c] = artfClampf(.5f + (shown[c] - .5f) * (1.f + contrast), 0, 1);
-        }
-        if (graded) gradeShown(p, f, shown, x, y);
-        for (int c = 0; c < 3; ++c) out |= (uint32_t)(shown[c] * alpha * 255.f + .5f) << (16 - 8 * c);
-        if (p->overlay && x < p->overlayWidth && y < p->overlayHeight) {
-            const uint32_t s = p->overlay[(size_t)y * p->overlayStride + x];
-            if (s) {
-                const uint32_t rest = 255 - (s >> 24);
-                uint32_t blended = 0;
-                for (int c = 0; c < 32; c += 8) {
-                    uint32_t t = ((out >> c) & 255) * rest + 128;
-                    blended |= ((t + (t >> 8)) >> 8) << c;
-                }
-                out = s + blended;
-            }
-        }
-        p->pixels[i] = out;
     }
 }
 
@@ -1049,6 +1097,7 @@ void artfSoftPostSize(ArtfSoftPost* p, int width, int height, int frameWidth, in
         at += (size_t)w * h;
     }
     for (int c = 0; c < 3; ++c) p->bloom[c] = artfCalloc(at + 1, 4);
+    postCuts(p, frameWidth, frameHeight);
     p->historyValid = false;
 }
 
@@ -1085,6 +1134,9 @@ void artfSoftPostFree(ArtfSoftPost* p) {
     }
     artfFree(p->froxels);
     p->froxels = NULL;
+    artfFree(p->cutX);
+    artfFree(p->cutY);
+    p->cutX = p->cutY = NULL;
     artfFree(p->occlusion);
     p->occlusion = NULL;
     p->width = p->height = p->sceneW = p->sceneH = p->frameW = p->frameH = 0;

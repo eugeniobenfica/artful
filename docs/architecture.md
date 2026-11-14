@@ -357,6 +357,15 @@ shader gathers both, with depth taken between the solid pass and the layers', in
 | Depth of field | every pixel | 24 points of a disc as wide as the circle of confusion; what is sharper and behind does not spread over what is in front. |
 | Bloom | a pyramid | What is past the threshold, after exposure, down six halves with a tent and back up. |
 
+On the GPU light, the second light and the history are three buffers alike, and no pass copies one into another: which
+plays which part is a descriptor set of their own (set 1, one of 27, each a way of giving the parts to the buffers), so
+what a pass wrote becomes the light by binding another, and what temporal antialiasing or upscaling wrote is the history
+for the frame after as it is, while the passes after it go between the other two (`postSwap`). That took two copies of
+the frame out of each frame with temporal antialiasing: 1.60 to 1.13 ms on a Radeon RX 9060 XT at 1920 x 1080. On the
+CPU temporal antialiasing and upscaling go through the kernels eight pixels at a time where they can (`temporalLanes`,
+`upscaleLanes`, `boxLanes`: in perspective, away from the frame's sides, and where no pixel went by its vertices), and a
+pixel at a time where they cannot, with the same arithmetic: 5.8 to 2.6 ms and 6.6 to 4.2 ms.
+
 Exposure and tone mapping come last, then the overlay, which on the GPU is drawn in a pass of its own over the frame.
 With four samples a pixel the light is their mean, and what comes after reads the first sample's depth and surface,
 on both backends. Layers in a frame in floats go by their centers, not by each pixel's depth.
@@ -404,6 +413,17 @@ with the same arithmetic in the same order as `artfIndirectAt`, so the bytes are
 The GPU makes its pixel shaders with what the scene uses: probes, their maps, the fog's grid. A branch that is never
 taken still holds registers, and fewer pixels run at once for it: with all of them, `--scene spheres` took 10% longer.
 When one of them is turned on or off, the shaders are made again, as they are for new materials in C.
+
+Making them takes the driver a third of a second, cold, and no frame waits for that. After the first frame, a change of
+variant (probes, their walls, the fog's grid, a coat, soft shadows, shapes, a view) starts a thread that makes the five
+pipelines the scene's two pixel shaders go into (`shaderJobStart`), from a copy of the materials in C; frames go on
+with the pipelines they have, and so without the feature, and the frame after it is done takes the new ones. What can
+only be drawn with its variant (shadows from rays, which take the sixteen lights' maps away) or depends on the scene's
+materials in C is made before its frame, as the first frame's are. Either way an old pipeline is not destroyed at once,
+which would need the device idle, but when the slot that drew with it last has been waited for (`pipelineRetire`). A
+feature turned on mid-run thus shows a few frames late; `artfRendererWarm` waits for what is being made, and the tests
+make every variant before its frame (`artfVulkanShadersWait`). Turning soft shadows on in a scene of 100 spheres at
+1920 x 1080 took its frame 360 ms, with the driver's cache cold, and 2 ms warm; now 0.7 ms either way.
 
 ## Particles and terrain
 
@@ -480,6 +500,15 @@ wheels, each as much as a pixel's luminance l makes it shadow, middle or highlig
 GPU the table lives past auto exposure's state in bloom's buffer, copied there from a buffer the CPU writes when it
 is another, so no binding is spent on it. The lens flare reads bloom's last level again at three places mirrored
 across the middle, each its own color, gone at the frame's edges.
+
+On the CPU the look is what made the last pass long: a gamma is a log2 and a 2^x for each channel of each pixel. So
+`finalRow` works out each pixel's light as a screen shows it into a stretch of 256, and the kernels grade the stretch
+eight pixels at a time (`gradeLanes`: lift, gamma and gain, the wheels, the table by gathers, the grain's hash), each
+ternary a select, so the bytes are those of one pixel at a time, on every instruction set. Where bloom and the flare
+read bloom's first level depends on a column alone and on a row alone, so it is worked out once for a size
+(`postCuts`), and a ghost that has faded to nothing is not read. At 1920 x 1080 with AVX2 and 16 threads: gamma
+and the wheels went from 7.2 ms more than a frame without to 0.9, the table from 3.8 to 1.5, grain from 1.6 to 0.1,
+bloom from 5.4 to 3.1 and the flare over it from 4.9 to 2.5.
 
 ## What moves
 
@@ -609,7 +638,13 @@ counter-clockwise, as the trees have them, which is the hardware's own way with 
 what has two sides; everything is opaque to the hardware, as what shows through is the path's business.
 
 What bones or targets move each frame has its bottom level built again, in place, alone: the rest stay, and the top
-level is built again over them. The hardware's refit (an update of a level built to allow it) was tried, and on a
+level is built again over them.
+
+Instances that move change only the top level, and what the trees keep of them (their top, and the table of instances).
+Those are each slot's own: once the slot's fence is waited for, its instances are written where the GPU reads them, and
+the top level is built in the frame's own commands, before anything reads it (`slotTopSync`), into a structure with room
+for half as many again, made anew only when they outgrow it. So nothing waits for the device: with 100 of 400 spheres
+moving every frame, shadows from rays took a frame 3.0 ms, 1.5 of it on the CPU, and take 1.7, 0.08 on the CPU. The hardware's refit (an update of a level built to allow it) was tried, and on a
 Radeon RX 9060 XT it left shadows of what was not there, where building again draws as a level built from nothing does
 (`testTracedMoved`).
 

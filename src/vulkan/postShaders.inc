@@ -1,8 +1,9 @@
 /* artful — what comes after a frame in floats, on the GPU: post.c's passes, as compute shaders, with the same
  * arithmetic. Part of shaders.c.
  *
- * Bindings: 50 light (four floats a pixel, premultiplied), 51 depth (1 / w), 52 surface (packSurface's word),
- * 53 a second light, 54 the frame before's, 55 occlusion, 56 the grid of froxels (light the air adds, what it leaves),
+ * Bindings: in set 1, 0 light (four floats a pixel, premultiplied), 1 a second light, 2 the frame before's (three buffers
+ * that change parts in place of being copied: vulkan.c's postSwap); in set 0, 51 depth (1 / w), 52 surface (packSurface's
+ * word), 55 occlusion, 56 the grid of froxels (light the air adds, what it leaves),
  * 57 bloom's levels, one after the other, then auto exposure's state and the look-up table; 58 and 59 what the scene
  * drew, light and surface, as images; 69 motion blur's velocities, of each pixel, then the largest of each tile and of
  * its neighbours. The push constant says a pass's level. Each invocation is a pixel, 64 at a time.
@@ -26,16 +27,24 @@ typedef struct Post {
 
 static SpvId postExp2(Spv* s, SpvId x); /* (below) */
 static SpvId postBuffer(Spv* s, Post* p, SpvId array, uint32_t binding) { return spvResource(s, blockOf(s, array, true), SPV_STORAGE_StorageBuffer, binding); }
+/* Light, the second light and the history: in set 1, by the part each plays (the renderer gives the parts to its three
+ * buffers in turn, in place of copying) */
+static SpvId postRole(Spv* s, Post* p, uint32_t part) {
+    const SpvId id = spvVariable(s, spvTypePointer(s, SPV_STORAGE_StorageBuffer, blockOf(s, p->r.vec4Array, true)), SPV_STORAGE_StorageBuffer);
+    spvDecorate(s, id, SPV_DECORATE_DescriptorSet, 1);
+    spvDecorate(s, id, SPV_DECORATE_Binding, (int)part);
+    return id;
+}
 
 static void postDeclare(Spv* s, Post* p) {
     memset(p, 0, sizeof *p);
     declare(s, &p->r, false);
     SpvId floats = p->r.floatArray;
-    p->light = postBuffer(s, p, p->r.vec4Array, 50);
+    p->light = postRole(s, p, 0);
     p->depth = postBuffer(s, p, floats, 51);
     p->surface = postBuffer(s, p, p->r.uintArray, 52);
-    p->scratch = postBuffer(s, p, p->r.vec4Array, 53);
-    p->history = postBuffer(s, p, p->r.vec4Array, 54);
+    p->scratch = postRole(s, p, 1);
+    p->history = postRole(s, p, 2);
     p->occlusion = postBuffer(s, p, floats, 55);
     p->fog = postBuffer(s, p, p->r.vec4Array, 56);
     p->bloom = postBuffer(s, p, p->r.vec4Array, 57);

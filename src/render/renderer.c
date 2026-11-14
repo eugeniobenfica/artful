@@ -70,6 +70,13 @@ bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene) {
     if (drawn && artfSceneFeature(scene, ARTF_FEATURE_OCCLUSION_AUTO)) tryOcclusion(r, scene);
     return drawn;
 }
+void artfRendererWarm(ArtfRenderer* r) {
+#ifdef ARTFUL_VULKAN
+    if (r && r->backend == ARTF_BACKEND_VULKAN) artfVulkanWarm(r);
+#else
+    (void)r;
+#endif
+}
 bool artfRendererReadPixels(ArtfRenderer* r, uint32_t* dst) { return r->vt->readPixels(r, dst); }
 uint32_t* artfRendererPixels(ArtfRenderer* r) { return r->vt->pixels(r); }
 void artfRendererStats(const ArtfRenderer* r, ArtfFrameStats* out) {

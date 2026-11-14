@@ -185,3 +185,46 @@ void artfPoolRun(ArtfPool* p, ArtfJobFn fn, void* user, uint32_t count) {
     runLoop(p, 0);
     while (atomic_load_explicit(&p->active, memory_order_acquire) != 0) spinPause();
 }
+
+/* ---- a task: one call on a thread of its own ---- */
+
+struct ArtfTask {
+    Thread thread;
+    bool started; /* a thread to join: without one, the call was made at once */
+    void (*fn)(void* user);
+    void* user;
+    atomic_bool done;
+};
+
+static void taskRun(ArtfTask* t) {
+    t->fn(t->user);
+    atomic_store_explicit(&t->done, true, memory_order_release);
+}
+#ifdef _WIN32
+static DWORD WINAPI taskMain(void* t) { taskRun(t); return 0; }
+#else
+static void* taskMain(void* t) { taskRun(t); return NULL; }
+#endif
+
+ArtfTask* artfTaskStart(void (*fn)(void* user), void* user) {
+    ArtfTask* t = ARTF_NEW(ArtfTask);
+    t->fn = fn;
+    t->user = user;
+    atomic_init(&t->done, false);
+#ifdef _WIN32
+    t->thread = CreateThread(NULL, 0, taskMain, t, 0, NULL);
+    t->started = t->thread != NULL;
+#else
+    t->started = pthread_create(&t->thread, NULL, taskMain, t) == 0;
+#endif
+    if (!t->started) taskRun(t);
+    return t;
+}
+
+bool artfTaskDone(ArtfTask* t) { return atomic_load_explicit(&t->done, memory_order_acquire); }
+
+void artfTaskJoin(ArtfTask* t) {
+    if (!t) return;
+    if (t->started) threadJoin(t->thread);
+    artfFree(t);
+}
