@@ -90,7 +90,7 @@ static void testPacking(void) {
         CHECK(found);
     }
     artfSceneFree(s);
-    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 112 * 16);
+    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 113 * 16);
 }
 
 static void testMeshlets(void) {
@@ -4934,6 +4934,245 @@ static void testPick(void) {
     artfSceneFree(s);
 }
 
+/* A Vulkan renderer as on a device with no ray tracing hardware. */
+static ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o) {
+#ifdef _WIN32
+    _putenv("ARTFUL_NO_RAY_QUERY=1");
+#else
+    setenv("ARTFUL_NO_RAY_QUERY", "1", 1);
+#endif
+    ArtfRenderer* r = artfRendererNew(o);
+#ifdef _WIN32
+    _putenv("ARTFUL_NO_RAY_QUERY=");
+#else
+    unsetenv("ARTFUL_NO_RAY_QUERY");
+#endif
+    return r;
+}
+
+/* A floor, a cube over it, a pane over it that lets half the light through, a light that casts, and the sun. */
+static ArtfScene* tracedScene(float sunSize, float lampSize) {
+    ArtfScene* s = plainScene();
+    artfSceneSetSun(s, artfVec3(.3f, -1, .2f), artfVec3(1.2f, 1.2f, 1.2f));
+    artfSceneSetSunSize(s, sunSize);
+    artfSceneSetAmbient(s, artfVec3(.05f, .05f, .05f), artfVec3(.05f, .05f, .05f));
+    setCamera(s, 0, 4, 6, 0, 0, 0);
+    ArtfMaterialDesc grey = artfMaterialDefaults();
+    grey.baseColor = artfVec3(.6f, .6f, .6f);
+    addAt(s, artfSceneAddPlane(s, 20, 1), artfSceneAddMaterial(s, &grey), 0, -1, 0, 1);
+    addAt(s, artfSceneAddCube(s, 1), whiteMaterial(s), -1, 0, 0, 1);
+    const ArtfTransform flat = artfTransformTrs(artfVec3(1.5f, .5f, 0), artfQuatAxisAngle(artfVec3(1, 0, 0), -1.5708f), artfVec3(1, 1, 1));
+    const ArtfInstance pane = artfSceneAddInstance(s, addSquare(s, 0, 0, 0, 0), whiteMaterial(s), &flat);
+    artfInstanceSetOpacity(s, pane, .5f);
+    const ArtfLight lamp = artfSceneAddLight(s, artfVec3(1.5f, 2.5f, 0), artfVec3(.8f, .8f, .8f), 9);
+    artfLightSetShadow(s, lamp, true);
+    artfLightSetSize(s, lamp, lampSize);
+    return s;
+}
+
+/* Shadows from rays (ArtfShadowDesc.traced): exact, through what shows through as much as it is not there, as the
+ * tracer's own; soft by the lights' sizes; the same on the CPU, on the GPU through the ray tracing hardware, and on a GPU
+ * without; and with them off again, the bytes as before. */
+static void testTracedShadows(void) {
+    const ArtfShadowDesc maps = {2048, 20, false, false}, traced = {0, 0, false, true};
+    {
+        /* where the trees say: under the cube nothing of the sun, under the pane half, in the open all of it */
+        ArtfScene* s = tracedScene(0, 0);
+        artfSceneSetShadows(s, &traced);
+        artfSceneTraceSync(s);
+        ArtfFrameData f;
+        artfSceneFrame(s, W, H, &f);
+        const float up[3] = {0, 1, 0}, underCube[3] = {-.7f, -1, .2f}, underPane[3] = {1.95f, -1, .3f}, open[3] = {3, -1, -3}, belowLamp[3] = {1.5f, -1, 0};
+        const float a = artfTracedShadow(s, &f, underCube, up, -1), b = artfTracedShadow(s, &f, underPane, up, -1), c = artfTracedShadow(s, &f, open, up, -1);
+        const float d = artfTracedShadow(s, &f, belowLamp, up, 0);
+        printf("shadows from rays: under a cube %.3f of the sun, under a pane of half %.3f, in the open %.3f; under the pane, of the lamp %.3f\n", a, b, c, d);
+        CHECK(a == 0 && c == 1 && fabsf(b - .5f) < .01f && fabsf(d - .5f) < .01f);
+        CHECK(f.tracedCasts == (ARTF_TRACED_SUN | 1u) && f.traced == ARTF_TRACED_SHADOWS);
+        artfSceneFree(s);
+    }
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* frames[3][2];
+    for (int k = 0; k < 3; ++k) frames[k][0] = frames[k][1] = NULL;
+    bool hardware = false;
+    artfSetLog(sawHardware, &hardware);
+    for (int backend = 0; backend < 3; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = backend == 2 ? gpuWithoutRayQueries(&o) : artfRendererNew(&o);
+        if (!r) continue;
+        const char* name = backend == 0 ? "CPU" : backend == 1 ? "GPU" : "GPU without ray queries";
+        ArtfScene* s = tracedScene(0, 0);
+        /* against maps: the same shadows, but at their edges */
+        artfSceneSetShadows(s, &maps);
+        drawInto(r, s, a);
+        artfSceneSetShadows(s, &traced);
+        drawInto(r, s, b);
+        const double apart = differentShare(a, b, 24);
+        printf("%s, shadows from rays against maps: %.2f%% of pixels apart\n", name, apart * 100);
+        CHECK(apart < .03);
+        uint32_t** hard = &frames[0][backend > 0];
+        if (backend < 2) {
+            *hard = artfMalloc(W * H * 4);
+            memcpy(*hard, b, W * H * 4);
+        } else if (*hard) {
+            const double rq = differentShare(*hard, b, 24);
+            printf("shadows from rays on the GPU, through the trees against the hardware: %.2f%% of pixels apart\n", rq * 100);
+            CHECK(rq < .005);
+        }
+        /* off again: as they were, to the byte */
+        artfSceneSetShadows(s, &maps);
+        drawInto(r, s, b);
+        CHECK(differentShare(a, b, 0) == 0);
+        artfSceneFree(s);
+        /* soft: the light's size and the sun's make their shadows wider */
+        for (int sun = 0; sun < 2; ++sun) {
+            ArtfScene* bulb = bulbScene(.5f);
+            if (sun) {
+                artfSceneRemoveLight(bulb, 1);
+                artfSceneSetSun(bulb, artfVec3(.3f, -1, .4f), artfVec3(1.5f, 1.5f, 1.5f));
+                artfSceneSetSunSize(bulb, .25f);
+            } else {
+                artfLightSetShadow(bulb, 1, true);
+            }
+            artfSceneSetShadows(bulb, &traced);
+            drawInto(r, bulb, b);
+            if (sun) artfSceneSetSunSize(bulb, 0);
+            else artfLightSetSize(bulb, 1, 0);
+            drawInto(r, bulb, a);
+            printf("%s, soft shadows from rays, from %s: %d pixels between light and shadow, %d sharp\n", name, sun ? "the sun" : "a light", greyCount(b), greyCount(a));
+            CHECK(greyCount(b) > greyCount(a) + 100);
+            uint32_t** kept = &frames[1 + sun][backend > 0];
+            if (backend < 2) {
+                *kept = artfMalloc(W * H * 4);
+                memcpy(*kept, b, W * H * 4);
+            } else if (*kept) {
+                const double rq = differentShare(*kept, b, 24);
+                printf("soft shadows from rays on the GPU, through the trees against the hardware: %.2f%% of pixels apart\n", rq * 100);
+                CHECK(rq < .005);
+            }
+            artfSceneFree(bulb);
+        }
+        artfRendererFree(r);
+    }
+    artfSetLog(NULL, NULL);
+    for (int k = 0; k < 3; ++k) {
+        if (frames[k][0] && frames[k][1]) {
+            const double apart = differentShare(frames[k][0], frames[k][1], 24);
+            printf("shadows from rays%s, the GPU against the CPU: %.2f%% of pixels apart\n", k == 0 ? "" : k == 1 ? ", soft from a light" : ", soft from the sun", apart * 100);
+            CHECK(apart < .01);
+        }
+        artfFree(frames[k][0]);
+        artfFree(frames[k][1]);
+    }
+    printf(hardware ? "(shadows from rays went through the ray tracing hardware)\n" : "(no ray tracing hardware here)\n");
+    artfFree(a);
+    artfFree(b);
+}
+
+/* What bones bend has its bottom level built again each frame it moves, alone, and that draws as building all does: a
+ * strip bent over a floor, its shadow from rays, posed step by step on one GPU, and at the end drawn by another that
+ * builds all at once. (The hardware's refit did not: see rtRebuildMoved in vulkan.c.) */
+static void testTracedMoved(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* stepped = artfRendererNew(&o);
+    ArtfRenderer* fresh = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* c = artfMalloc(W * H * 4);
+    const ArtfShadowDesc traced = {0, 0, false, true};
+    ArtfScene* s = plainScene();
+    artfSceneSetSun(s, artfVec3(.5f, -1, -.4f), artfVec3(1.2f, 1.2f, 1.2f));
+    artfSceneSetAmbient(s, artfVec3(.05f, .05f, .05f), artfVec3(.05f, .05f, .05f));
+    setCamera(s, 0, 3, 5, 0, .5f, 0);
+    addAt(s, artfSceneAddPlane(s, 20, 1), whiteMaterial(s), 0, 0, 0, 1);
+    const ArtfInstance strip = addAt(s, addStrip(s), whiteMaterial(s), 0, 0, 0, 1);
+    artfSceneSetShadows(s, &traced);
+    if (stepped && fresh && cpu) {
+        for (int step = 0; step <= 6; ++step) {
+            bendStrip(s, strip, .15f * (float)step);
+            CHECK(artfRendererDraw(stepped, s));
+            CHECK(artfRendererDraw(cpu, s));
+        }
+        drawInto(stepped, s, a);
+        drawInto(fresh, s, b);
+        drawInto(cpu, s, c);
+        const double apart = differentShare(a, b, 0), cpuApart = differentShare(b, c, 24);
+        printf("shadows from rays of what bones bend, built again as it moved, against built whole at once: %.3f%% of pixels apart; the GPU against the CPU: %.2f%%\n", apart * 100, cpuApart * 100);
+        CHECK(apart == 0);
+        CHECK(cpuApart < .01);
+        /* and it was bent: the shadow is not where it was */
+        bendStrip(s, strip, 0);
+        drawInto(fresh, s, c);
+        CHECK(differentShare(b, c, 24) > .002);
+    }
+    artfSceneFree(s);
+    artfRendererFree(stepped);
+    artfRendererFree(fresh);
+    artfRendererFree(cpu);
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+}
+
+/* How much redder than green a part of the frame is. */
+static double rednessOf(const uint32_t* f, int x0, int y0, int x1, int y1) {
+    double sum = 0;
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x) sum += (double)CHANNEL(f[y * W + x], 16) - (double)CHANNEL(f[y * W + x], 8);
+    return sum / ((double)(x1 - x0) * (y1 - y0));
+}
+
+/* Reflections from rays (ArtfPostDesc.tracedReflections): a mirror floor shows a red wall above the frame, which the
+ * march across the frame cannot; the same on the CPU and the GPU, with ray tracing hardware and without. */
+static void testTracedReflections(void) {
+    ArtfScene* s = plainScene();
+    artfSceneSetSun(s, artfVec3(0, -1, -.3f), artfVec3(.3f, .3f, .3f));
+    artfSceneSetAmbient(s, artfVec3(.1f, .1f, .1f), artfVec3(.1f, .1f, .1f));
+    setCamera(s, 0, 2, 6, 0, 0, 0);
+    ArtfMaterialDesc mirror = artfMaterialDefaults();
+    mirror.baseColor = artfVec3(.9f, .9f, .9f);
+    mirror.metallic = 1;
+    mirror.roughness = .05f;
+    addAt(s, artfSceneAddPlane(s, 40, 1), artfSceneAddMaterial(s, &mirror), 0, 0, 0, 1);
+    ArtfMaterialDesc red = artfMaterialDefaults();
+    red.baseColor = artfVec3(0, 0, 0);
+    red.emissive = artfVec3(3, 0, 0);
+    const ArtfTransform wall = artfTransformTrs(artfVec3(0, 10, -6), artfQuatIdentity(), artfVec3(8, 4, 1));
+    artfSceneAddInstance(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &red), &wall);
+    addAt(s, artfSceneAddSphere(s, .6f, 16, 24), whiteMaterial(s), 1.5f, .6f, 1, 1);
+    uint32_t* frames[3] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    uint32_t* marched = artfMalloc(W * H * 4);
+    bool drawn[3] = {false, false, false};
+    for (int backend = 0; backend < 3; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = backend == 2 ? gpuWithoutRayQueries(&o) : artfRendererNew(&o);
+        if (!r) continue;
+        ArtfPostDesc post = {.reflections = 1};
+        artfSceneSetPost(s, &post);
+        drawInto(r, s, marched);
+        post.tracedReflections = true;
+        artfSceneSetPost(s, &post);
+        drawInto(r, s, frames[backend]);
+        drawn[backend] = true;
+        const double before = rednessOf(marched, 120, 160, 200, 195), after = rednessOf(frames[backend], 120, 160, 200, 195);
+        printf("%s, a wall above the frame in a mirror floor: red over green %.1f marched across the frame, %.1f from rays\n", backend == 0 ? "CPU" : backend == 1 ? "GPU" : "GPU without ray queries", before, after);
+        CHECK(after > before + 30);
+        artfRendererFree(r);
+    }
+    for (int k = 1; k < 3; ++k)
+        if (drawn[0] && drawn[k]) {
+            const double apart = differentShare(frames[0], frames[k], 24);
+            printf("reflections from rays, the GPU%s against the CPU: %.2f%% of pixels apart\n", k == 2 ? " without ray queries" : "", apart * 100);
+            CHECK(apart < .01);
+        }
+    artfSceneFree(s);
+    for (int k = 0; k < 3; ++k) artfFree(frames[k]);
+    artfFree(marched);
+}
+
 /* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
  * next to nothing, though a probe outside is nearer to it than one inside. */
 static void testProbesWalls(void) {
@@ -6109,6 +6348,9 @@ int main(void) {
     testPassTimes();
     testOrthographic();
     testPick();
+    testTracedShadows();
+    testTracedReflections();
+    testTracedMoved();
     testProbesWalls();
     testExtraShadows();
     testFloatsSamples();

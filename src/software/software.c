@@ -660,6 +660,10 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     /* each group writes from where its instances start: the list has holes until it is packed */
     f->tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !view; /* (a view is of triangles) */
     f->postFog = f->post && !f->tracing && f->data.post[1][1] > 0 && f->data.look[1] > 0;
+    /* shadows and reflections from rays: what they read, kept up to date as instances move (not when all is traced) */
+    if (f->tracing || !f->post) f->data.traced &= ~(uint32_t)ARTF_TRACED_REFLECTIONS;
+    if (f->tracing) f->data.traced = f->data.tracedCasts = 0;
+    if (f->data.traced) artfSceneTraceSync(scene);
     for (uint32_t g = 0; g < ARTF_CHUNKS; ++g) {
         s->groups[g] = f->visible + (size_t)count * g / ARTF_CHUNKS;
         s->groupCounts[g] = 0;

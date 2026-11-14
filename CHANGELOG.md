@@ -34,6 +34,24 @@
   instances, 16 ms for the first pick, then 10,000 picks in 9 ms. A pick between frames leaves what moved
   for the next frame's filter to see.
 - `artful-render`: `--ortho height`.
+- **Shadows and reflections from rays, while drawing**, as Unreal's hardware ray traced ones. `ArtfShadowDesc.traced`:
+  the sun and the sixteen lights take their shadows from rays through tracing's trees, or the GPU's ray tracing
+  hardware where it has some (ray queries in the pixel shader), in place of maps: exact, through what shows through as
+  much as it is not there (`lightThrough`, the tracer's own), soft by the sun's size and the lights' with four rays a
+  pixel over a pattern of 2 x 2 pixels that turns each frame with temporal antialiasing. `ArtfPostDesc.tracedReflections`:
+  a ray along each mirror in place of the march across the frame, so what is off the frame or behind something shows,
+  lit simply (its color and what it reflects under light from all around, the sun and the sixteen lights, with no
+  shadows, and its own light), straying with roughness. The same picture on both backends, and on a GPU without ray
+  tracing hardware (the pixel shader and the pass walk the trees): 0.06% of pixels apart, CPU against GPU, and 0.00%
+  through the hardware against the trees. The trees and the top level are kept up to date while drawing as instances
+  move, without particles. Off by default: a scene that asks for neither builds nothing and draws the same bytes.
+  `artful-render --traced-shadows --traced-reflections`.
+- **The ray tracing hardware**, better: a mesh that bones or targets move has its bottom level built again alone, each
+  frame it moves, where every mesh's was before (the hardware's refit was tried, and left shadows of what was not
+  there: see `docs/limits.md`); a mesh's first triangle comes from the table of instances, not a custom index of 24
+  bits, so a traced scene is no longer held to 16 million triangles; and fronts are counter-clockwise as the hardware has
+  them with no flag. The flag the top level had turned them, so eye rays saw backs: `testTraceHardware` did not see it,
+  as the samples it compared were gathered before the hardware was asked for, and now that changes the picture's key.
 - **The ray tracing hardware**: `ArtfTraceDesc.hardware`. Where the GPU has acceleration structures and ray queries
   (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`), a ray goes through them in place of the trees the compute
   shader walks: a bottom level for each mesh traced, from the same triangles, and the top over the traced instances,

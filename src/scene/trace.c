@@ -227,7 +227,7 @@ static void buildTop(ArtfScene* s) {
         o.material = d->material;
         o.opacity = (float)d->opacity * (1.f / 65535.f);
         /* (what bends light must be met on the way out, too) */
-        o.twoSided = s->materials.items[d->material].flags & ARTF_MATERIAL_DOUBLE || s->materials.items[d->material].ior > 0 ? 1 : 0;
+        o.twoSided = (s->materials.items[d->material].flags & ARTF_MATERIAL_DOUBLE || s->materials.items[d->material].ior > 0 ? 1u : 0u) | t->ranges.items[d->mesh].firstTriangle << 1;
         const ArtfTraceNode* root = &t->nodes.items[o.root];
         Box b;
         boxEmpty(&b);
@@ -416,8 +416,8 @@ uint64_t artfSceneTraceKey(const ArtfScene* s, const ArtfFrameData* frame) {
     const uint8_t* p = (const uint8_t*)frame;
     for (size_t i = 0; i < offsetof(ArtfFrameData, hiz); ++i)
         if (i < offsetof(ArtfFrameData, hizLevels) || i >= offsetof(ArtfFrameData, lights)) h = (h ^ p[i]) * 1099511628211ull;
-    const uint64_t versions[9] = {s->trace.desc.denoise, s->id, s->textureVersion, s->instanceVersion, s->structureVersion, s->materialVersion, (uint64_t)s->trace.desc.mode, (uint64_t)s->trace.desc.bounces, s->environmentVersion};
-    for (int i = 0; i < 9; ++i) h = (h ^ versions[i]) * 1099511628211ull;
+    const uint64_t versions[10] = {s->trace.desc.denoise, s->trace.desc.hardware, s->id, s->textureVersion, s->instanceVersion, s->structureVersion, s->materialVersion, (uint64_t)s->trace.desc.mode, (uint64_t)s->trace.desc.bounces, s->environmentVersion};
+    for (int i = 0; i < 10; ++i) h = (h ^ versions[i]) * 1099511628211ull;
     for (size_t i = offsetof(ArtfFrameData, look); i < sizeof *frame; ++i) h = (h ^ p[i]) * 1099511628211ull;
     for (uint32_t i = 0; i < frame->lightCount; ++i) {
         const uint8_t* l = (const uint8_t*)&frame->lights[i];
@@ -467,7 +467,7 @@ static void hitMesh(const ArtfTrace* t, const ArtfTraceInstance* inst, uint32_t 
                 const float p[3] = {d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]};
                 const float det = dot3(e1, p);
                 /* (counter-clockwise from the front is above 0: a back that does not show is not there) */
-                if (inst->twoSided || bothSides ? det == 0 : det <= 0) continue;
+                if (inst->twoSided & 1 || bothSides ? det == 0 : det <= 0) continue;
                 const float id = 1.f / det;
                 const float s[3] = {o[0] - a[0], o[1] - a[1], o[2] - a[2]};
                 const float u = dot3(s, p) * id;
@@ -935,6 +935,113 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         out[k] += covered ? seen : 0.f;
     }
     out[3] += covered ? 1.f : 0.f;
+}
+
+/* ---- rays while drawing: shadows and reflections (ArtfShadowDesc.traced, ArtfPostDesc.tracedReflections) ----
+ *
+ * The rasterizer's pixel asks the trees what is toward a light, or along its mirror: the same arithmetic as the GPU's
+ * (tracedShadowSpv and artfShaderPostReflectionTraced in shaders.c), so that both draw the same. */
+
+/* (four by four; the radii those of even shells of the ball, each four through all of it) */
+const float artfTracedBall[16][3] = {
+    {.1819f, .1819f, .1819f},   {.3782f, -.3782f, -.3782f}, {-.4677f, .4677f, -.4677f}, {-.5317f, -.5317f, .5317f},
+    {-.2621f, -.2621f, -.2621f}, {-.4047f, .4047f, .4047f}, {.4850f, -.4850f, .4850f},   {.5456f, .5456f, -.5456f},
+    {.4401f, 0, -.3112f},        {-.6050f, 0, -.4279f},     {0, .7095f, .5018f},          {0, -.7904f, .5589f},
+    {-.4923f, 0, .3482f},        {.6344f, 0, .4486f},       {0, -.7316f, -.5174f},        {0, .8083f, -.5716f}};
+
+uint32_t artfTracedPlace(const ArtfFrameData* f, const float* p) {
+    const float* m = f->viewProj;
+    const float cx = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+    const float cy = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+    const float cw = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+    const float inv = 1.f / artfMaxf(cw, 1e-6f);
+    const float x = artfClampf((cx * inv * .5f + .5f) * f->eye[0][3], -1e6f, 1e6f), y = artfClampf((.5f - cy * inv * .5f) * f->eye[1][3], -1e6f, 1e6f);
+    const uint32_t ix = (uint32_t)(int32_t)floorf(x), iy = (uint32_t)(int32_t)floorf(y);
+    return ((ix & 1u) + (iy & 1u) * 2u + f->tracedFrame) & 3u;
+}
+
+/* Off the surface, along its normal: by more with distance, as what is drawn far away may be a lighter level than the
+ * trees hold. */
+static void tracedLift(const ArtfFrameData* f, const float* p, const float* n, float* out) {
+    const float e[3] = {p[0] - f->cameraPos[0], p[1] - f->cameraPos[1], p[2] - f->cameraPos[2]};
+    const float lift = reachOf(p) + sqrtf(dot3(e, e)) * 1e-3f;
+    for (int k = 0; k < 3; ++k) out[k] = p[k] + n[k] * lift;
+}
+
+float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light) {
+    float o[3];
+    tracedLift(f, p, n, o);
+    const float size = light < 0 ? f->look[2] : f->lightSizes[light];
+    const uint32_t rays = size > 0 ? artfMaxi((int)f->tracedRays, 1) : 1u, first = artfTracedPlace(f, p) * 4u;
+    float sum = 0;
+    for (uint32_t k = 0; k < rays; ++k) {
+        const float* b = artfTracedBall[(first + k) & 15u];
+        float to[3], limit = 3e37f;
+        if (light < 0) {
+            for (int i = 0; i < 3; ++i) to[i] = f->toSun[i] + b[i] * size;
+            normalize3(to);
+        } else {
+            const float* at = f->lights[light].position;
+            for (int i = 0; i < 3; ++i) to[i] = at[i] + b[i] * size - o[i];
+            limit = sqrtf(artfMaxf(dot3(to, to), 1e-8f));
+            const float inv = 1.f / limit;
+            for (int i = 0; i < 3; ++i) to[i] *= inv;
+        }
+        sum += lightThrough(s, o, to, limit);
+    }
+    return sum / (float)rays;
+}
+
+bool artfTracedReflection(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, const float* v, float rough, uint32_t point, float* out) {
+    float o[3], d[3], mirror[3];
+    tracedLift(f, p, n, o);
+    const float vn = dot3(v, n), stray = rough * rough;
+    const float* b = artfTracedBall[point & 15u];
+    for (int k = 0; k < 3; ++k) {
+        mirror[k] = v[k] - 2.f * vn * n[k];
+        d[k] = mirror[k] + b[k] * stray;
+    }
+    normalize3(d);
+    /* (not into the surface) */
+    if (dot3(d, n) <= 0) memcpy(d, mirror, sizeof d);
+    for (int step = 0; step < 4; ++step) {
+        Hit h;
+        if (!closest(&s->trace, o, d, 3e37f, false, &h)) return false;
+        Surface m;
+        surfaceAt(s, &h, o, d, &m);
+        float q[3];
+        for (int k = 0; k < 3; ++k) q[k] = o[k] + d[k] * h.t;
+        if (m.alpha < .5f) {
+            /* (what is mostly not there is gone through) */
+            const float reach = reachOf(q);
+            for (int k = 0; k < 3; ++k) o[k] = q[k] + d[k] * reach;
+            continue;
+        }
+        /* its color under light from all around, the sun and the frame's lights, with no shadows; and its own light */
+        float lit[3];
+        if (f->sky[3] > 0 && s->environment) {
+            artfEnvSample(s->environment, ARTF_ENV_DIFFUSE, m.normal[0], m.normal[1], m.normal[2], lit);
+            for (int k = 0; k < 3; ++k) lit[k] *= f->sky[3] * m.open;
+        } else {
+            const float up = m.normal[1] * .5f + .5f;
+            for (int k = 0; k < 3; ++k) lit[k] = (f->ground[k] + (f->sky[k] - f->ground[k]) * up) * m.open;
+        }
+        const float sun = artfMaxf(dot3(m.normal, f->toSun), 0);
+        for (int k = 0; k < 3; ++k) lit[k] += f->sunColor[k] * sun;
+        for (uint32_t i = 0; i < f->lightCount; ++i) {
+            const ArtfLightData* L = &f->lights[i];
+            float to[3] = {L->position[0] - q[0], L->position[1] - q[1], L->position[2] - q[2]};
+            const float d2 = dot3(to, to), inv = 1.f / sqrtf(artfMaxf(d2, 1e-8f));
+            for (int k = 0; k < 3; ++k) to[k] *= inv;
+            const float fade = artfMaxf(1.f - d2 / (L->radius * L->radius), 0);
+            const float spot = artfClampf((-dot3(to, L->direction) - L->spotCut) * L->spotScale, 0, 1);
+            const float amount = artfMaxf(dot3(m.normal, to), 0) * fade * fade * spot;
+            for (int k = 0; k < 3; ++k) lit[k] += L->color[k] * amount;
+        }
+        for (int k = 0; k < 3; ++k) out[k] = m.emissive[k] + (m.albedo[k] + m.f0[k]) * lit[k];
+        return true;
+    }
+    return false;
 }
 
 /* ---- light that bounced: probes ----

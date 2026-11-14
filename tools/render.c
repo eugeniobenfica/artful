@@ -5,7 +5,8 @@
  *                 [--antialias]: four samples a pixel  [--clear]: no background, and a PNG with alpha
  *                 [--ortho height]: the camera is orthographic, its view this tall in the world
  *                 [--shadows side]: the sun casts shadows, in maps of that side; [--soft-shadows]: as wide as the
- *                 sun is, [--sun-size radians]
+ *                 sun is, [--sun-size radians]; [--traced-shadows]: shadows from rays, through the trees or the GPU's ray
+ *                 tracing hardware, for the sun and the sixteen lights (with --shadows, the rest keep maps)
  *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room
  *                 [--trace rays|paths] [--trace-samples n]: light followed along rays, for n samples a
  *                 pixel, gathered over frames (1 to start with); [--bounces n]; [--denoise]; [--hardware]: through the
@@ -13,7 +14,8 @@
  *                 [--environment file.hdr]: light from all around, from a picture of it; [--environment-light x];
  *                 [--show-environment]: it is the background too; [--scene-exposure x]
  *                 [--hdr]: the frame in floats, and then: [--glow x] [--glow-threshold t] [--occlusion x]
- *                 [--occlusion-radius r] [--reflections x] [--volumetric x] [--scattering g] [--temporal]
+ *                 [--occlusion-radius r] [--reflections x] [--traced-reflections]: from rays, not marched across the frame
+ *                 [--volumetric x] [--scattering g] [--temporal]
  *                 [--focus distance --aperture pixels] [--fog density r g b]
  *                 [--tone aces|neutral|reinhard|none] [--auto-exposure] [--temperature x] [--tint x]
  *                 [--saturation x] [--contrast x] [--vignette x] [--chromatic pixels] [--motion-blur shutter]
@@ -404,7 +406,7 @@ int main(int argc, char** argv) {
     const char* model = NULL;
     int shadowSide = 0;
     const char* environment = NULL;
-    bool softShadows = false;
+    bool softShadows = false, tracedShadows = false;
     float sunSize = -1;
     float environmentLight = 1.f, sceneExposure = 0, skyHaze = -1, fogHeight[2] = {0, 0}, sunAt[3] = {0, 0, 0};
     bool showEnvironment = false;
@@ -442,6 +444,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--hardware")) trace.hardware = true;
         else if (!strcmp(a, "--shadows") && i + 1 < argc) shadowSide = atoi(argv[++i]);
         else if (!strcmp(a, "--soft-shadows")) softShadows = true;
+        else if (!strcmp(a, "--traced-shadows")) tracedShadows = true;
+        else if (!strcmp(a, "--traced-reflections")) post.tracedReflections = true;
         else if (!strcmp(a, "--sun-size") && i + 1 < argc) sunSize = (float)atof(argv[++i]);
         else if (!strcmp(a, "--environment") && i + 1 < argc) environment = argv[++i];
         else if (!strcmp(a, "--environment-light") && i + 1 < argc) environmentLight = (float)atof(argv[++i]);
@@ -604,8 +608,8 @@ int main(int argc, char** argv) {
         printf("environment of %d x %d made into maps in %.1f ms\n", w, h, artfNowMs() - e0);
         artfFree(rgb);
     }
-    if (shadowSide) {
-        const ArtfShadowDesc shadows = {shadowSide, 0, softShadows};
+    if (shadowSide || tracedShadows) {
+        const ArtfShadowDesc shadows = {shadowSide, 0, softShadows, tracedShadows};
         artfSceneSetShadows(s, &shadows);
     }
     if (trace.mode) {

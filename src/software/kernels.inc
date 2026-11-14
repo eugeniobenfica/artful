@@ -669,6 +669,20 @@ static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
     return v8fLoad(out);
 }
 
+/* The same from rays (ArtfShadowDesc.traced), one by one; a place the light cannot reach anyway is not asked: its
+ * light is nothing, whatever it says (strength, of each lane: 0 there). */
+static V8F tracedLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n, V8F strength) {
+    _Alignas(32) float wx[8], wy[8], wz[8], nx[8], ny[8], nz[8], reach[8], out[8];
+    v8fStore(wx, world.x); v8fStore(wy, world.y); v8fStore(wz, world.z);
+    v8fStore(nx, n.x); v8fStore(ny, n.y); v8fStore(nz, n.z);
+    v8fStore(reach, strength);
+    for (int i = 0; i < 8; ++i) {
+        const float p[3] = {wx[i], wy[i], wz[i]}, normal[3] = {nx[i], ny[i], nz[i]};
+        out[i] = reach[i] > 0 ? artfTracedShadow(f->scene, &f->data, p, normal, light) : 1.f;
+    }
+    return v8fLoad(out);
+}
+
 /* Light that bounced, at eight places: artfIndirectAt's arithmetic, in the same order, eight at a time. */
 /* mirror: also, into reflected, what the same probes give toward that direction, for what a surface reflects. */
 static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lanes3* mirror, Lanes3* reflected) {
@@ -1051,7 +1065,9 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
 
     if (frame->sunColor[0] > 0 || frame->sunColor[1] > 0 || frame->sunColor[2] > 0) {
         Lanes3 toSun = {v8fSet(frame->toSun[0]), v8fSet(frame->toSun[1]), v8fSet(frame->toSun[2])};
-        const V8F sunShadow = f->shadows ? shadowLanes(f, -1, world, n) : v8fSet(1.f);
+        const V8F sunShadow = frame->tracedCasts & ARTF_TRACED_SUN ? tracedLanes(f, -1, world, n, dot3(n, toSun))
+                              : f->shadows                       ? shadowLanes(f, -1, world, n)
+                                                                 : v8fSet(1.f);
         addLight(n, view, toSun, sunShadow, frame->sunColor, shiny, &reflecting, &diffuse, &highlight);
         if (coated) addLayers(n, view, toSun, sunShadow, frame->sunColor, &coating, &coatLight, &sheenLight);
     }
@@ -1067,7 +1083,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
-        if (f->shadows && f->shadows->frame->lights[i][0]) spot = v8fMul(spot, shadowLanes(f, (int)i, world, n));
+        if (frame->tracedCasts >> i & 1) spot = v8fMul(spot, tracedLanes(f, (int)i, world, n, v8fMul(fade, spot)));
+        else if (f->shadows && f->shadows->frame->lights[i][0]) spot = v8fMul(spot, shadowLanes(f, (int)i, world, n));
         if (sized && frame->lightSizes[i] > 0) addBall(n, view, d, toLight, frame->lightSizes[i], rough, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
         else
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
@@ -1289,7 +1306,7 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
     s->originX = ox;
     s->originY = oy;
     s->texture = material->texture ? &f->scene->textures.items[material->texture] : NULL;
-    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || material->graph || f->decalCount || f->postFog || f->view;
+    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || frame->tracedCasts || material->graph || f->decalCount || f->postFog || f->view;
     s->bumpy = material->normalMap != 0;
     const ArtfTextureData* textures = f->scene->textures.items;
     s->sizing = s->texture ? s->texture : material->normalMap ? &textures[material->normalMap] : material->surfaceMap ? &textures[material->surfaceMap] : material->occlusionMap ? &textures[material->occlusionMap] : NULL;

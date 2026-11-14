@@ -390,6 +390,13 @@ typedef struct ArtfShadowDesc {
      * map around each pixel, and its distance says how wide the penumbra is there: 50 reads in place of 9. Lights
      * past the sixteen, and fog that light goes through, keep sharp ones. */
     bool soft;
+    /* Shadows from rays, as Unreal's ray traced shadows, for the sun and the sixteen lights: each pixel asks the
+     * scene's trees (or the GPU's ray tracing hardware) whether anything is between it and the light, and what shows
+     * through lets light through as much as it is not there. Exact, with no map; soft by the sun's size and the
+     * lights' (four rays a pixel for a light with a size, in a pattern over each 2 x 2 pixels that turns each frame
+     * with temporal antialiasing). They take no maps: with resolution 0, lights past the sixteen and fog that light
+     * goes through have no shadows, and with a resolution they keep their maps. */
+    bool traced;
 } ArtfShadowDesc;
 
 /* NULL: none. The sun casts; other lights do when asked. */
@@ -580,6 +587,11 @@ typedef struct ArtfPostDesc {
     float lutAmount;        /* how much of it: 0: all */
     float grain;            /* film grain, new each frame, the same on both backends: 0 to 1 (.3 is plain to see) */
     float flare;            /* lens flare: what blooms, again as ghosts mirrored across the middle; with bloom */
+    /* Reflections from rays in place of the march across the frame, as Unreal's ray traced reflections: what smooth
+     * surfaces mirror is what a ray finds in the scene, off the frame too, lit simply (its color under the sun and
+     * the sixteen lights with no shadows, its own light, and light from all around); rougher, the ray strays as far.
+     * It takes `reflections` as how much. */
+    bool tracedReflections;
 } ArtfPostDesc;
 
 /* Decodes a .cube file (Adobe's and Resolve's 3D look-up tables) into lutSize^3 RGB triples, red the fastest, for

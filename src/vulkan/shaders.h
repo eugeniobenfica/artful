@@ -26,7 +26,9 @@ enum { ARTF_SHADER_FLOATS = 1, ARTF_SHADER_PROBES = 2, ARTF_SHADER_WALLS = 4 /* 
        ARTF_SHADER_COAT = 16 /* materials with a clear coat or sheen */, ARTF_SHADER_SOFT = 32 /* soft shadows */,
        /* what a view shows (ArtfView, the frame's view); and with it, each triangle's meshlet, by its number (geometry
         * shaders' PrimitiveId) in a table (binding 65) */
-       ARTF_SHADER_VIEW = 64, ARTF_SHADER_MESHLETS = 128 };
+       ARTF_SHADER_VIEW = 64, ARTF_SHADER_MESHLETS = 128,
+
+       ARTF_SHADER_TRACED = 256 /* shadows from rays, through the trees */, ARTF_SHADER_RAY_QUERY = 512 /* and those through the ray tracing hardware */ };
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant);
 /* The overdraw view: a step of a count, added up (as artfViewHeat's); what is a back that is not to show is left. */
 uint32_t* artfShaderOverdraw(size_t* size, bool hdr);
@@ -61,6 +63,8 @@ uint32_t* artfShaderPostOcclusion(size_t* size);
 uint32_t* artfShaderPostOcclusionBlur(size_t* size);
 uint32_t* artfShaderPostReflection(size_t* size);
 uint32_t* artfShaderPostReflectionApply(size_t* size);
+/* Reflections from rays (ArtfPostDesc.tracedReflections), through the trees or, with hardware, the top level. */
+uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware);
 uint32_t* artfShaderPostFroxels(size_t* size);
 /* Fog that light goes through, over what is behind the scene (with the overlay's vertices). */
 uint32_t* artfShaderFogBackdrop(size_t* size);
