@@ -79,6 +79,7 @@ void artfSceneFree(ArtfScene* s) {
     artfFree(s->lut);
     artfFree(s->indirect.probes);
     artfFree(s->indirect.next);
+    for (int i = 0; i < ARTF_MAX_LIGHTS; ++i) artfFree(s->lightProfile[i]);
     artfFluidFree(s->hole.fluid);
     artfScaleFree(s->scale);
     artfFree(s);
@@ -628,9 +629,50 @@ static ArtfMaterialData materialData(const ArtfScene* s, const ArtfMaterialDesc*
     return m;
 }
 
-static ArtfMaterialMore materialMore(const ArtfMaterialDesc* d) {
-    ArtfMaterialMore m = {artfClampf(d->clearcoat, 0, 1), artfClampf(d->clearcoatRoughness, .045f, 1.f), 0, 0,
-                          {artfMaxf(d->sheen.x, 0) * ARTF_SHEEN_SCALE, artfMaxf(d->sheen.y, 0) * ARTF_SHEEN_SCALE, artfMaxf(d->sheen.z, 0) * ARTF_SHEEN_SCALE}, 0};
+static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc* d) {
+    ArtfMaterialMore m;
+    memset(&m, 0, sizeof m);
+    const uint32_t count = (uint32_t)s->textures.len;
+#define MAP(t) ((t) < count ? (t) : 0u)
+    m.coat = artfClampf(d->clearcoat, 0, 1);
+    m.coatRoughness = artfClampf(d->clearcoatRoughness, .045f, 1.f);
+    m.sheenRoughness = artfClampf(d->sheenRoughness, .07f, 1.f);
+    m.sheen[0] = artfMaxf(d->sheen.x, 0);
+    m.sheen[1] = artfMaxf(d->sheen.y, 0);
+    m.sheen[2] = artfMaxf(d->sheen.z, 0);
+    m.coatMap = MAP(d->clearcoatMap);
+    m.coatRoughnessMap = MAP(d->clearcoatRoughnessMap);
+    m.coatNormalMap = MAP(d->clearcoatNormalMap);
+    m.sheenMap = MAP(d->sheenMap);
+    m.sheenRoughnessMap = MAP(d->sheenRoughnessMap);
+#undef MAP
+    m.coatNormalScale = 1.f;
+    m.flags = (m.coat > 0 ? ARTF_MORE_COAT : 0u) | (m.sheen[0] > 0 || m.sheen[1] > 0 || m.sheen[2] > 0 ? ARTF_MORE_SHEEN : 0u);
+    if (m.flags && (m.coatMap || m.coatRoughnessMap || m.coatNormalMap || m.sheenMap || m.sheenRoughnessMap)) m.flags |= ARTF_MORE_MAPS;
+    const bool tinted = d->specularColor.x > 0 || d->specularColor.y > 0 || d->specularColor.z > 0;
+    m.specularColor[0] = tinted ? artfClampf(d->specularColor.x, 0, 25) : 1.f;
+    m.specularColor[1] = tinted ? artfClampf(d->specularColor.y, 0, 25) : 1.f;
+    m.specularColor[2] = tinted ? artfClampf(d->specularColor.z, 0, 25) : 1.f;
+    if (tinted && (m.specularColor[0] != 1.f || m.specularColor[1] != 1.f || m.specularColor[2] != 1.f)) m.flags |= ARTF_MORE_SPECULAR;
+    m.anisotropy = artfClampf(d->anisotropy, 0, 1);
+    m.anisotropyDirection[0] = artfCosFast(d->anisotropyRotation);
+    m.anisotropyDirection[1] = artfSinFast(d->anisotropyRotation);
+    if (m.anisotropy > 0) m.flags |= ARTF_MORE_ANISOTROPY;
+    m.iridescence = artfClampf(d->iridescence, 0, 1);
+    m.iridescenceIor = d->iridescenceIor >= 1.f ? d->iridescenceIor : 1.3f;
+    m.iridescenceThickness = d->iridescenceThickness > 0 ? d->iridescenceThickness : 400.f;
+    if (m.iridescence > 0) m.flags |= ARTF_MORE_IRIDESCENCE;
+    m.subsurface[0] = artfMaxf(d->subsurface.x, 0);
+    m.subsurface[1] = artfMaxf(d->subsurface.y, 0);
+    m.subsurface[2] = artfMaxf(d->subsurface.z, 0);
+    m.subsurfaceRadius = d->subsurfaceRadius > 0 ? d->subsurfaceRadius : .05f;
+    if (m.subsurface[0] > 0 || m.subsurface[1] > 0 || m.subsurface[2] > 0) m.flags |= ARTF_MORE_SUBSURFACE;
+    if (d->attenuationDistance > 0 && (d->attenuation.x > 0 || d->attenuation.y > 0 || d->attenuation.z > 0)) {
+        /* (what is kept after a distance: 2^(log2(color) x distance / theirs)) */
+        const float c[3] = {d->attenuation.x, d->attenuation.y, d->attenuation.z};
+        for (int k = 0; k < 3; ++k) m.absorb[k] = c[k] > 0 && c[k] < 1.f ? -artfLog2Fast(c[k]) / d->attenuationDistance : c[k] >= 1.f ? 0.f : 64.f / d->attenuationDistance;
+        if (m.absorb[0] > 0 || m.absorb[1] > 0 || m.absorb[2] > 0) m.flags |= ARTF_MORE_VOLUME;
+    }
     return m;
 }
 
@@ -658,9 +700,10 @@ ArtfMaterialDesc artfMaterialDefaults(void) {
 ArtfMaterial artfSceneAddMaterial(ArtfScene* s, const ArtfMaterialDesc* desc) {
     ArtfMaterialData m = materialData(s, desc);
     artfVecPush(&s->materials, m);
-    const ArtfMaterialMore more = materialMore(desc);
+    const ArtfMaterialMore more = materialMore(s, desc);
     artfVecPush(&s->materialsMore, more);
     s->layeredMaterials += artfMaterialLayered(&more);
+    s->moreMaterials += more.flags != 0;
     ++s->materialVersion;
     return (ArtfMaterial)(s->materials.len - 1);
 }
@@ -671,8 +714,10 @@ void artfMaterialSet(ArtfScene* s, ArtfMaterial m, const ArtfMaterialDesc* desc)
     s->materials.items[m] = materialData(s, desc);
     memcpy(s->materials.items[m].params, old.params, sizeof old.params);
     s->layeredMaterials -= artfMaterialLayered(&s->materialsMore.items[m]);
-    s->materialsMore.items[m] = materialMore(desc);
+    s->moreMaterials -= s->materialsMore.items[m].flags != 0;
+    s->materialsMore.items[m] = materialMore(s, desc);
     s->layeredMaterials += artfMaterialLayered(&s->materialsMore.items[m]);
+    s->moreMaterials += s->materialsMore.items[m].flags != 0;
     ++s->materialVersion;
     if (old.flags == s->materials.items[m].flags && old.graph == s->materials.items[m].graph) return;
     for (size_t i = 0; i < s->instances.len; ++i)
@@ -992,6 +1037,8 @@ void artfSceneRemoveLight(ArtfScene* s, ArtfLight l) {
     if (l && l <= ARTF_MAX_LIGHTS) {
         s->lightOn[l - 1] = false;
         s->lightSize[l - 1] = 0;
+        memset(s->lightShape[l - 1], 0, sizeof s->lightShape[l - 1]);
+        if (s->lightProfile[l - 1]) artfLightSetProfile(s, l, NULL, 0, 0);
     }
 }
 
@@ -1449,6 +1496,18 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
         if (s->lightOn[i]) {
             out->lightSizes[out->lightCount] = s->lightSize[i];
             if (s->lightCasts[i]) out->tracedCasts |= 1u << out->lightCount;
+            float(*shape)[4] = out->lightShapes[out->lightCount];
+            memcpy(shape[0], s->lightShape[i], 8 * sizeof(float));
+            if (s->lightProfile[i]) {
+                /* (vertical angles start where it points, or straight down; horizontal ones at +x, or +y for a light along x) */
+                const float* d = s->lights[i].direction;
+                const bool pointed = d[0] != 0 || d[1] != 0 || d[2] != 0;
+                const ArtfVec3 axis = pointed ? artfVec3(d[0], d[1], d[2]) : artfVec3(0, -1, 0);
+                const ArtfVec3 start = fabsf(axis.x) > .9f ? artfVec3(0, 1, 0) : artfVec3(1, 0, 0);
+                const ArtfVec3 ref = artfVec3Normalize(artfVec3Sub(start, artfVec3Scale(axis, artfVec3Dot(start, axis))));
+                const float rows[2][4] = {{axis.x, axis.y, axis.z, (float)(i + 1)}, {ref.x, ref.y, ref.z, 0}};
+                memcpy(shape[2], rows, sizeof rows);
+            }
             out->lights[out->lightCount++] = s->lights[i];
         }
     if (s->environment) {

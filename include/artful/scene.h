@@ -226,6 +226,25 @@ typedef struct ArtfMaterialDesc {
     /* Light that grazing angles catch, as on velvet, felt or dust (glTF's KHR_materials_sheen, its color): a rim of
      * this color, strongest where the eye or the light skims the surface. 0: none */
     ArtfVec3 sheen;
+    float sheenRoughness;      /* how wide that rim is, 0 to 1, as glTF's (Charlie's distribution): 0 is a thin one */
+    /* Their textures, as glTF's: the coat's amount (red) and roughness (green), a normal map of its own, sheen's color
+     * (its bytes, as a base color texture's) and roughness (alpha). 0: none */
+    ArtfTexture clearcoatMap, clearcoatRoughnessMap, clearcoatNormalMap, sheenMap, sheenRoughnessMap;
+    ArtfVec3 specularColor;    /* what it reflects head on, if not metal, against white (KHR_materials_specular); 0: white */
+    /* Highlights drawn out along a direction, as on brushed metal (KHR_materials_anisotropy): 0 to 1, and that
+     * direction, in radians from the way u grows on the surface. */
+    float anisotropy, anisotropyRotation;
+    /* The colors of a thin film over it, as on soap or oil (KHR_materials_iridescence): 0 to 1; the film's index (0:
+     * 1.3) and thickness in nanometres (0: 400). */
+    float iridescence, iridescenceIor, iridescenceThickness;
+    /* Traced, what light keeps of each color through its inside (KHR_materials_volume): this much after this far.
+     * 0: it keeps all */
+    ArtfVec3 attenuation;
+    float attenuationDistance;
+    /* Light that goes under the surface and comes out around where it went in, and through thin parts: skin, wax,
+     * marble. Its color (0: none), and how far it goes, in the scene's units (0: .05). */
+    ArtfVec3 subsurface;
+    float subsurfaceRadius;
 } ArtfMaterialDesc;
 
 /* White, not metal, half rough: fields set by name on this stay right when the struct grows. */
@@ -384,6 +403,21 @@ void artfSceneRemoveLight(ArtfScene* s, ArtfLight l);
  * traced, its shadows go soft with distance. For the sixteen lights the frame holds: those past them stay points.
  * 0: a point. */
 void artfLightSetSize(ArtfScene* s, ArtfLight l, float radius);
+/* Gives it a shape, as Unreal's rect lights and source length: with width 0, a tube as long as length along `along`
+ * through its position, as thick as artfLightSetSize says; with a width, a rectangle length x width around its
+ * position, whose light goes only to the side `facing` says (along is made square to facing). Its light reaches as far
+ * from all of it; highlights are as long and as wide as it looks (Karis's nearest point); traced, its shadows go soft.
+ * For the sixteen lights the frame holds. length 0: a ball or a point again. */
+void artfLightSetShape(ArtfScene* s, ArtfLight l, ArtfVec3 along, ArtfVec3 facing, float length, float width);
+/* How much light goes each way, as a lamp's maker measured it: vertical angles evenly from 0 to 180 degrees, ends
+ * included, 0 being the light's direction (a spot's) or straight down; rows of those for horizontal angles evenly from
+ * 0 to 360, from +x round toward +z (or from +y, for a light along x); one row: the same all around. Light times this.
+ * Resampled to 96 x 16. For the sixteen lights the frame holds. NULL: none. */
+void artfLightSetProfile(ArtfScene* s, ArtfLight l, const float* table, int vertical, int horizontal);
+/* Reads an IES file (LM-63) into such a table, its brightest 1: 181 vertical angles, a degree apart, and 1 row for a
+ * light that is the same all around, 72 (5 degrees apart) for one that is not. The caller owns it (artfFree). NULL: it is
+ * not one. */
+float* artfIesDecode(const void* data, size_t size, int* vertical, int* horizontal);
 
 /* ---- the view ---- */
 

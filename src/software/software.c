@@ -668,7 +668,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     f->nearW = artfOrtho(&f->data) ? .5f : scene->camera.near_; /* (orthographic: w is 1, and depth is cut instead) */
     f->sizedLights = false;
-    for (uint32_t i = 0; i < f->data.lightCount; ++i) f->sizedLights |= f->data.lightSizes[i] > 0;
+    for (uint32_t i = 0; i < f->data.lightCount; ++i) f->sizedLights |= f->data.lightSizes[i] > 0 || artfLightShaped(&f->data, i);
     f->lightsApart = f->sizedLights || view != ARTF_VIEW_LIT;
     if (!f->decals) f->decals = artfMalloc(ARTF_MAX_DECALS * sizeof *f->decals);
     f->decalCount = artfSceneDecals(scene, &f->data, f->height, f->decals);

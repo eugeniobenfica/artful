@@ -23,12 +23,13 @@ uint32_t* artfShaderSceneVertex(size_t* size);
 /* What a scene's pixel shader holds beside the rest: a frame in floats, light from probes (what costs its registers, so
  * that a scene without probes does not pay for them). */
 enum { ARTF_SHADER_FLOATS = 1, ARTF_SHADER_PROBES = 2, ARTF_SHADER_WALLS = 4 /* the probes' maps of how far they see */, ARTF_SHADER_FROXELS = 8,
-       ARTF_SHADER_COAT = 16 /* materials with a clear coat or sheen */, ARTF_SHADER_SOFT = 32 /* soft shadows */,
+       ARTF_SHADER_COAT = 16 /* materials with a clear coat, sheen or more past glTF's core (ArtfMaterialMore) */, ARTF_SHADER_SOFT = 32 /* soft shadows */,
        /* what a view shows (ArtfView, the frame's view); and with it, each triangle's meshlet, by its number (geometry
         * shaders' PrimitiveId) in a table (binding 65) */
        ARTF_SHADER_VIEW = 64, ARTF_SHADER_MESHLETS = 128,
 
-       ARTF_SHADER_TRACED = 256 /* shadows from rays, through the trees */, ARTF_SHADER_RAY_QUERY = 512 /* and those through the ray tracing hardware */ };
+       ARTF_SHADER_TRACED = 256 /* shadows from rays, through the trees */, ARTF_SHADER_RAY_QUERY = 512 /* and those through the ray tracing hardware */,
+       ARTF_SHADER_SHAPES = 1024 /* lights with a shape or a profile */ };
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant);
 /* The overdraw view: a step of a count, added up (as artfViewHeat's); what is a back that is not to show is left. */
 uint32_t* artfShaderOverdraw(size_t* size, bool hdr);
@@ -39,7 +40,8 @@ uint32_t* artfShaderShadowFragment(size_t* size, uint32_t maxTextures);
 uint32_t* artfShaderOverlayVertex(size_t* size);
 /* Tracing: a sample more for each pixel; and what was gathered, shown over what is there. */
 /* hardware: rays through the ray tracing hardware (binding 64, the top level), not the trees */
-uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides, bool hardware);
+/* more: materials past glTF's core, lights with a shape or a profile (the scene has some) */
+uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides, bool hardware, bool more);
 /* Taking out noise: time; a pass of the filter in space; and back to light. */
 uint32_t* artfShaderSkin(size_t* size);
 /* Emitters of many: each particle moved by the steps its emitter made, then an instance of the quad facing the eye. */

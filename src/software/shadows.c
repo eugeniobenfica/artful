@@ -392,6 +392,47 @@ float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* 
     return lampShadow(s, s->frame->lights[light][0], position, world, normal, size);
 }
 
+/* From a view's map, how far a place is past what the light meets first there, along the light: the nearest texel. */
+static float depthThrough(const ArtfShadowSource* s, uint32_t index, const float* p, bool sun) {
+    const ArtfShadowView* view = &s->frame->views[index];
+    const float* m = view->m;
+    const float w = m[12] * p[0] + m[13] * p[1] + m[14] * p[2] + m[15];
+    if (w <= 0) return -1.f;
+    const int side = (int)view->size[0];
+    const float iw = 1.f / w;
+    const float x = (m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3]) * iw, y = (m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7]) * iw;
+    const float depth = (m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11]) * iw;
+    const float u = (x * .5f + .5f) * (float)side, v = (y * .5f + .5f) * (float)side;
+    if (!(u >= 0 && v >= 0 && u < (float)side && v < (float)side)) return -1.f;
+    const float there = s->atlas[(size_t)((int)view->info[1] + (int)v) * s->width + (int)view->info[0] + (int)u];
+    if (sun) return artfMaxf(depth - there, 0) / sqrtf(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+    /* (as lookUpSoft: depth is a + b / w) */
+    const float a = (m[8] * m[12] + m[9] * m[13] + m[10] * m[14]) / (m[12] * m[12] + m[13] * m[13] + m[14] * m[14]), b = m[11] - a * m[15];
+    return artfMaxf(w - b / artfMinf(there - a, -1e-12f), 0);
+}
+
+float artfShadowThroughSun(const ArtfShadowSource* s, const float* eye, const float* world) {
+    const ArtfShadowFrame* f = s->frame;
+    if (!f->sun[0]) return -1.f;
+    const float dx = world[0] - eye[0], dy = world[1] - eye[1], dz = world[2] - eye[2];
+    const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+    uint32_t cascade = 0;
+    while (cascade < f->sun[1] && distance >= f->splits[cascade]) ++cascade;
+    return cascade < f->sun[1] ? depthThrough(s, f->sun[0] - 1 + cascade, world, true) : -1.f;
+}
+
+float artfShadowThroughLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world) {
+    const uint32_t word = s->frame->lights[light][0];
+    if (!word) return -1.f;
+    uint32_t view = (word & 255) - 1;
+    const float dx = world[0] - position[0], dy = world[1] - position[1], dz = world[2] - position[2];
+    if (word >> 8 == 6) {
+        const float ax = fabsf(dx), ay = fabsf(dy), az = fabsf(dz);
+        view += ax >= ay && ax >= az ? (dx > 0 ? 0u : 1u) : ay >= az ? (dy > 0 ? 2u : 3u) : (dz > 0 ? 4u : 5u);
+    }
+    return depthThrough(s, view, world, false);
+}
+
 float artfShadowOfExtra(const ArtfShadowSource* s, uint32_t k, const float* position, const float* world, const float* normal) {
     return k < ARTF_SHADOW_EXTRA ? lampShadow(s, s->frame->extra[k][0], position, world, normal, 0) : 1.f;
 }

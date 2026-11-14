@@ -489,12 +489,58 @@ that way. When nothing moved, neither reads it.
 
 ## A clear coat and sheen
 
-A coat is a second highlight, as addLight's but of no color, F0 .04 and its own roughness, on top of everything: what
-its Fresnel reflects toward the eye is taken from what is under it, sheen included. Sheen is Burley's: the fifth power
-of 1 - l.h, which a grazing light or eye brings out, with pi put back as Lambert's light has it taken out. They are kept
-apart from `ArtfMaterialData` (Metal's shaders read that one as it was), after all of them in the material buffer; the
-GPU builds the shaders that read them only for a scene that has some, and the CPU has a copy of its lighting with them
-and one without, so that what has neither pays nothing, registers included.
+A coat is a second highlight, as addLight's but of no color, F0 .04 and its own roughness and normal, on top of
+everything: what its Fresnel reflects toward the eye is taken from what is under it, sheen included. Sheen is Charlie's
+(Estevez and Kulla): a distribution of sin(h)^(1 / alpha), with Neubelt's visibility, pi put back as Lambert's light has
+it taken out; the power is 2^(log2 x / alpha), by `artfExp2Fast` and `artfLog2Fast`, the same on the CPU and the GPU.
+From all around it takes a share of what lights the surface, by a fit to its lobe. Their textures are read where the
+material's are.
+
+They are kept apart from `ArtfMaterialData` (Metal's shaders read that one as it was), in `ArtfMaterialMore`, eight rows
+after all of them in the material buffer, with the rest of what glTF's extensions say; the GPU builds the shaders that
+read them only for a scene that has some (`ARTF_SHADER_COAT`, and a tracing shader of their own), and the CPU has a copy
+of its lighting with them and one without, so that what has none pays nothing, registers included.
+
+## More of glTF's materials
+
+**A specular color** tints what a dielectric reflects head on. **Highlights drawn out** (anisotropy) are Trowbridge and
+Reitz's distribution with two alphas, along and across a direction turned from where u grows: glTF's alpha mixed
+toward 1 along it. Where u grows is worked out as for normal maps: from the triangle on the CPU and in tracing, from
+how the coordinates change between pixels on the GPU. **A thin film** (iridescence) takes the place of what the
+surface reflects head on: two beams, off the film's top and its bottom, add or cancel at red, green and blue's
+wavelengths by how far apart they go, seen along the normal; Schlick's Fresnel goes on from there. Its cosine is
+`artfCosFast`'s polynomial on both sides. **What glass takes**, traced: a path that comes out of a thing keeps
+2^-(absorb x the distance it went inside) of each color, absorb being -log2 of the color it keeps over the distance
+that keeps it.
+
+## Light under the surface
+
+Skin, wax and marble let light in, and give it back elsewhere. Drawn, that is two cheap things for each light. It
+wraps: (n.l + .5) / 1.5 in place of n.l, so light goes half a radian past where the surface turns from it, the more
+the closer to that edge, in the color under the surface. And it comes through from behind: where the light is behind
+the surface, as much as is left of it after the way it went inside, 2^-(thickness / radius), thickness being how far
+this place is past what the light's shadow map says it met first. That is the sun's maps and the sixteen lights';
+both backends read the map's texel the same way (`artfShadowThroughSun`, `depthThroughOf`). Traced, a ray from just
+under the surface toward the light finds how thick the thing is, and a shadow ray from where it comes out what stands
+past it.
+
+## Lights with a shape, and profiles
+
+A tube is a line with a ball around it; a rectangle has a length, a width, and a side it lights. Their diffuse light
+comes from their point nearest the place, as far as the light reaches from it, and a rectangle's less to the side as
+it faces away (its cosine there); their highlight from their point nearest the mirror ray: on a tube, the point of
+the line nearest it, then the ball's; on a rectangle, where the ray meets its plane, kept on it. That highlight is made
+longer, and wider, by as much as the shape looks long and wide, and dimmer by as much (Karis, 2013), so that its light
+in all is a point's. It is `artfShapeLight`, one function in C that the CPU calls lane by lane, and the shaders as the
+same arithmetic. Traced, each path aims at a point of the tube or the rectangle, so shadows go soft. Shadow maps are
+drawn from the middle, and soft shadows are as wide as the shape is long.
+
+A profile, from an IES file (`artfIesDecode`), is a table of how much light goes each way: by the angle from the light's
+direction (or down), and round it. It is kept as 96 x 16, read bilinearly; the angles come from polynomials for acos
+and atan2 (`artfAcosFast`, `artfAtan2Fast`), so the CPU and the GPU agree. The GPU's tables go in the lights' buffer, past
+those past the sixteen; the frame says, for each of its lights, its shape and where its profile starts. Lights with
+neither pay nothing: the CPU's lights with a size, a shape or a profile go through the copy of its lighting that has
+them, and the GPU's through shaders built for a scene that has some (`ARTF_SHADER_SHAPES`).
 
 ## A sky
 

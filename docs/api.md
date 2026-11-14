@@ -53,7 +53,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneSetResidency`, `artfTextureSetResidentMip` | Who decides what stays on the GPU: you, you with help, or Artful. |
 | `ArtfResidencyDesc.meshes`, `artfMeshSetResidentLevel`, `artfSceneAddMeshStreamed` | Meshes' levels too, by distance and a budget; a mesh read again when it is wanted. |
 | `artfSceneBuildHlod`, `artfSceneAddHlod`, `artfSceneClearHlod` | Far away, many as one: cubes of instances merged into a lighter mesh each. |
-| `artfSceneAddMaterial`, `artfMaterialSet` | Color, metal, roughness, emission, alpha, two sides, refraction, normal maps, unlit, a clear coat, sheen. |
+| `artfSceneAddMaterial`, `artfMaterialSet` | Color, metal, roughness, emission, alpha, two sides, refraction, normal maps, unlit, a clear coat and sheen with their textures, a specular color, highlights drawn out, a thin film, light under the surface, and what glass takes inside, traced. |
 | `artfGraphNew`, `artfExprMul` and the rest, `artfSceneAddGraph`, `artfMaterialSetParam` | Materials written in C. |
 | `artfSceneAddInstance`, `artfSceneRemoveInstance` | A mesh placed in the world. |
 | `artfInstanceSetTransform`, `SetMaterial`, `SetOpacity` | Changing one. |
@@ -71,6 +71,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneSetSky` | Light from all around from the sun: a sky of air and haze, red at sunset, and the sun's own color through it; light scattered more than once, the sun drawn, and a layer of clouds (`ArtfCloudDesc`), if asked. |
 | `artfSceneAddLight`, `artfLightSet`, `artfLightSetSpot`, `artfSceneRemoveLight` | Point lights and spots, up to 1024; the first 16 may cast shadows, and 32 more each frame. |
 | `artfLightSetSize` | A light as wide as a bulb: wider highlights, and soft shadows. |
+| `artfLightSetShape` | A tube or a rectangle in place of the bulb: long and wide highlights, light from all of it, soft shadows. |
+| `artfLightSetProfile`, `artfIesDecode` | How much light goes each way, as a lamp's IES file says. |
 | `artfSceneSetIndirect` | Light that bounced, from probes, every frame; walls stop it unless `throughWalls`. |
 | `artfSceneSetPost` | With `ArtfRendererOptions.hdr`: bloom, ambient occlusion, reflections (marched across the frame, or from rays with `tracedReflections`), fog that light goes through, temporal antialiasing that follows what moves, depth of field, motion blur; then auto exposure, a choice of tone curve, white balance, saturation, contrast, vignette and chromatic aberration. |
 | `artfSceneSetExposure` | Film: bright light rolls off to white. |
