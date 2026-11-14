@@ -48,9 +48,26 @@ static void rows(ArtfSoftPost* p, int count, RowFn fn) {
 
 /* ---- where a pixel is ---- */
 
+/* floor, for what is above -2^20: no call to a library */
+static inline int floorInt(float x) {
+    const int i = (int)x;
+    return i - (x < (float)i);
+}
+
+
+/* Where depth, surface and instance are for a pixel: itself, or once upscaled, the scene's pixel whose sample (moved
+ * within it by the jitter) is nearest its center. */
+static inline size_t planeAt(const ArtfSoftPost* p, int x, int y) {
+    if (!p->mapped) return (size_t)y * p->width + x;
+    const float* jitter = p->f->data.post[2];
+    const int sx = artfClampi(floorInt(((float)x + .5f) * p->ratioX + jitter[2]), 0, p->sceneW - 1);
+    const int sy = artfClampi(floorInt(((float)y + .5f) * p->ratioY - jitter[3]), 0, p->sceneH - 1);
+    return (size_t)sy * p->sceneW + sx;
+}
+
 /* Distance along the view, from what the tiles keep (1 / w); 0 where nothing is. */
 static inline float distanceAt(const ArtfSoftPost* p, int x, int y) {
-    const float d = p->f->postDepth[(size_t)y * p->width + x];
+    const float d = p->f->postDepth[planeAt(p, x, y)];
     return d > 0 ? 1.f / d : 0.f;
 }
 
@@ -190,7 +207,7 @@ static void occlusionBlurRow(ArtfSoftPost* p, int y) {
 static void reflectionRow(ArtfSoftPost* p, int hy) {
     const ArtfFrameData* f = &p->f->data;
     const float strength = f->post[1][0];
-    const int hw = p->bloomW[0];
+    const int hw = p->halfW;
     for (int hx = 0; hx < hw; ++hx) {
         const int x = artfMini(hx * 2, p->width - 1), y = artfMini(hy * 2, p->height - 1);
         const size_t i = (size_t)y * p->width + x, half = (size_t)hy * hw + hx;
@@ -267,7 +284,7 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
 }
 
 static void reflectionApplyRow(ArtfSoftPost* p, int y) {
-    const int hw = p->bloomW[0], hh = p->bloomH[0];
+    const int hw = p->halfW, hh = p->halfH;
     for (int x = 0; x < p->width; ++x) {
         const size_t i = (size_t)y * p->width + x;
         const float fx = ((float)x + .5f) * .5f - .5f, fy = ((float)y + .5f) * .5f - .5f;
@@ -301,7 +318,7 @@ static void froxelRow(ArtfSoftPost* p, int j) {
             const float d0 = far * a * a, d1 = far * b * b, t = (d0 + d1) * .5f;
             float q[3];
             for (int c = 0; c < 3; ++c) q[c] = f->cameraPos[c] + dir[c] * t;
-            const float sun = p->f->shadows ? artfShadowOfSun(p->f->shadows, f->cameraPos, q, f->toSun, 0) : 1.f;
+            const float sun = p->f->shadows ? artfShadowOfSun(p->f->shadows, f->cameraPos, q, f->toSun, 0, -1) : 1.f;
             const float stepThrough = through(density * artfFogHeight(f, q[1]) * (d1 - d0) * along), taken = left * (1.f - stepThrough);
             for (int c = 0; c < 3; ++c) light[c] += taken * (f->sunColor[c] * sun * phase * 12.566371f + f->fog[c]);
             left *= stepThrough;
@@ -314,6 +331,9 @@ static void froxelRow(ArtfSoftPost* p, int j) {
 
 void artfSoftFroxels(ArtfSoftPost* p, ArtfSoftFrame* f) {
     p->f = f;
+    p->width = p->sceneW;
+    p->height = p->sceneH;
+    p->mapped = false;
     f->froxels = p->froxels;
     f->froxelsX = p->froxelsX;
     f->froxelsY = p->froxelsY;
@@ -351,14 +371,35 @@ void artfFroxelAt(const ArtfSoftFrame* f, float sx, float sy, float w, float* ou
 
 /* ---- temporal antialiasing ---- */
 
-/* Where the surface at a pixel was in the frame before, in pixels: by its depth and how its instance moved, or for
- * what is far, by the view alone. false: it was behind the eye. */
+/* Where the surface at a pixel was in the frame before, in pixels: by its depth and how its instance moved, or what a
+ * pose bent by where its vertices were; or for what is far, by the view alone. false: it was behind the eye. Once
+ * upscaled, a pixel of the frame shown, which has no jitter. */
 POST_INLINE bool wasAt(const ArtfSoftPost* p, int x, int y, float* sx, float* sy) {
     const ArtfFrameData* f = &p->f->data;
-    const float d = distanceAt(p, x, y);
+    const size_t at_ = planeAt(p, x, y);
+    const float depth = p->f->postDepth[at_], d = depth > 0 ? 1.f / depth : 0.f;
+    const uint32_t who = d > 0 && p->f->motion ? p->f->postInstance[at_] : 0;
+    const float jx = p->mapped ? 0.f : f->post[2][2], jy = p->mapped ? 0.f : f->post[2][3];
+    if (who & ARTF_MOTION_VECTOR) {
+        /* (in the scene's pixels: so many more of the frame's) */
+        float dx, dy;
+        artfMotionUnpack(who, &dx, &dy);
+        *sx = (float)x - jx + dx / (p->mapped ? p->ratioX : 1.f);
+        *sy = (float)y + jy + dy / (p->mapped ? p->ratioY : 1.f);
+        return dx < 4095.f; /* (where it was is not known: artfMotionPack's most) */
+    }
+    if (p->mapped && !who) {
+        /* the view alone, at the frame's size: the view before through the eye along this pixel, times 1 / w */
+        const float* m = p->viewBack;
+        const float z = depth > 0 ? depth : 1e-4f, fx = (float)x, fy = (float)y;
+        const float cx = m[0] * z + m[4] + m[8] * fx + m[12] * fy, cy = m[1] * z + m[5] + m[9] * fx + m[13] * fy, cw = m[3] * z + m[7] + m[11] * fx + m[15] * fy;
+        if (cw <= 1e-5f * z) return false;
+        *sx = (cx / cw * .5f + .5f) * (float)p->width - .5f;
+        *sy = (.5f - cy / cw * .5f) * (float)p->height - .5f;
+        return true;
+    }
     float at[3], w;
-    worldAt(f, p->width, p->height, (float)x - f->post[2][2], (float)y + f->post[2][3], d > 0 ? d : 1e4f, at);
-    const uint32_t who = d > 0 && p->f->motion ? p->f->postInstance[(size_t)y * p->width + x] : 0;
+    worldAt(f, p->width, p->height, (float)x - jx, (float)y + jy, d > 0 ? d : 1e4f, at);
     if (who) {
         const float* m = p->f->motion + (size_t)(who - 1) * 12;
         float was[3];
@@ -366,6 +407,24 @@ POST_INLINE bool wasAt(const ArtfSoftPost* p, int x, int y, float* sx, float* sy
         memcpy(at, was, sizeof was);
     }
     return project(f->previous, at, p->width, p->height, sx, sy, &w);
+}
+
+/* For wasAt at the frame's size: of the view before, by columns, what the eye's place gives; then what a pixel's
+ * direction gives at (0, 0), and for each x and each y. A point d along is the first over d plus the rest, all times d. */
+static void viewBackOf(ArtfSoftPost* p) {
+    const ArtfFrameData* f = &p->f->data;
+    const float* m = f->previous;
+    const float sx = 2.f / (float)p->width, sy = 2.f / (float)p->height;
+    float dirs[3][3];
+    for (int k = 0; k < 3; ++k) {
+        dirs[0][k] = f->eye[2][k] + (.5f * sx - 1.f) * f->eye[0][k] + (1.f - .5f * sy) * f->eye[1][k];
+        dirs[1][k] = sx * f->eye[0][k];
+        dirs[2][k] = -sy * f->eye[1][k];
+    }
+    for (int r = 0; r < 4; ++r) {
+        p->viewBack[r] = m[r] * f->cameraPos[0] + m[4 + r] * f->cameraPos[1] + m[8 + r] * f->cameraPos[2] + m[12 + r];
+        for (int k = 0; k < 3; ++k) p->viewBack[4 + k * 4 + r] = m[r] * dirs[k][0] + m[4 + r] * dirs[k][1] + m[8 + r] * dirs[k][2];
+    }
 }
 
 static void temporalRow(ArtfSoftPost* p, int y) {
@@ -392,9 +451,115 @@ static void temporalRow(ArtfSoftPost* p, int y) {
     }
 }
 
-/* ---- motion blur: eight points along the way each pixel went, as long as the shutter was open (at most 32 pixels) ---- */
+/* ---- upscaling: the scene drawn smaller, made whole at the frame's size ----
+ *
+ * Each frame the scene's samples land elsewhere within its pixels (the jitter), so that over 16 frames they cover the
+ * frame's pixels. A pixel of the frame takes, from the samples of this frame near its center (within a pixel of the
+ * frame: all are among the four around it), as much as their nearness gives, over what it had (followed as temporal
+ * antialiasing does, and kept within what the nearest sample's neighbours show). Where nothing was before, or without
+ * temporal antialiasing, it is the scene read between its pixels. Alpha is read between them too. */
 
-static void blurRow(ArtfSoftPost* p, int y) {
+/* Of each of the scene's pixels, the least and most of each color around it, three by three. */
+static void boxRow(ArtfSoftPost* p, int y) {
+    const int sw = p->sceneW, sh = p->sceneH;
+    float* const* light = p->f->postLight;
+    const size_t rows[3] = {(size_t)artfMaxi(y - 1, 0) * sw, (size_t)y * sw, (size_t)artfMini(y + 1, sh - 1) * sw};
+    for (int x = 0; x < sw; ++x) {
+        const int xs[3] = {artfMaxi(x - 1, 0), x, artfMini(x + 1, sw - 1)};
+        for (int c = 0; c < 3; ++c) {
+            float lo = 3e38f, hi = -3e38f;
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) {
+                    const float v = light[c][rows[r] + xs[k]];
+                    lo = artfMinf(lo, v);
+                    hi = artfMaxf(hi, v);
+                }
+            p->box[c][(size_t)y * sw + x] = lo;
+            p->box[3 + c][(size_t)y * sw + x] = hi;
+        }
+    }
+}
+
+static void upscaleRow(ArtfSoftPost* p, int y) {
+    const ArtfFrameData* f = &p->f->data;
+    const float rx = p->ratioX, ry = p->ratioY, jx = f->post[2][2], jy = f->post[2][3];
+    const int sw = p->sceneW, sh = p->sceneH;
+    const bool temporal = f->post[1][3] > 0 && p->historyValid;
+    /* (a sample right on a center is worth this much of the pixel: as much as a tenth of a pixel of the scene's size) */
+    const float gain = .1f / (rx * ry);
+    float* const* light = p->f->postLight;
+    const float v = ((float)y + .5f) * ry - .5f - jy;
+    const int y0 = floorInt(v);
+    const float fy = v - (float)y0;
+    const size_t row0 = (size_t)artfClampi(y0, 0, sh - 1) * sw, row1 = (size_t)artfClampi(y0 + 1, 0, sh - 1) * sw;
+    /* (each sample's height from the center, in pixels of the frame; nearer than one counts) */
+    const float oy0 = fy / ry, oy1 = (1.f - fy) / ry;
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        /* the center, among the scene's samples: index i's sample is there when i is u */
+        const float u = ((float)x + .5f) * rx - .5f + jx;
+        const int x0 = floorInt(u);
+        const float fx = u - (float)x0;
+        const size_t q[4] = {row0 + artfClampi(x0, 0, sw - 1), row0 + artfClampi(x0 + 1, 0, sw - 1), row1 + artfClampi(x0, 0, sw - 1), row1 + artfClampi(x0 + 1, 0, sw - 1)};
+        const float weights[4] = {(1.f - fx) * (1.f - fy), fx * (1.f - fy), (1.f - fx) * fy, fx * fy};
+        p->scratch[3][i] = light[3][q[0]] * weights[0] + light[3][q[1]] * weights[1] + light[3][q[2]] * weights[2] + light[3][q[3]] * weights[3];
+        float sx, sy;
+        if (!temporal || !wasAt(p, x, y, &sx, &sy) || sx < 0 || sy < 0 || sx > p->width - 1 || sy > p->height - 1) {
+            for (int c = 0; c < 3; ++c) p->scratch[c][i] = light[c][q[0]] * weights[0] + light[c][q[1]] * weights[1] + light[c][q[2]] * weights[2] + light[c][q[3]] * weights[3];
+            continue;
+        }
+        const float ox0 = fx / rx, ox1 = (1.f - fx) / rx;
+        const float d2[4] = {ox0 * ox0 + oy0 * oy0, ox1 * ox1 + oy0 * oy0, ox0 * ox0 + oy1 * oy1, ox1 * ox1 + oy1 * oy1};
+        float near[4], sum = 0;
+        for (int k = 0; k < 4; ++k) {
+            near[k] = d2[k] < 1.f ? (1.f - d2[k]) * (1.f - d2[k]) : 0.f;
+            sum += near[k];
+        }
+        const float share = artfMinf(sum * gain, 1.f), each = sum > 0 ? 1.f / sum : 0.f;
+        const size_t nearest = (fy < .5f ? row0 : row1) + artfClampi(fx < .5f ? x0 : x0 + 1, 0, sw - 1);
+        for (int c = 0; c < 3; ++c) {
+            const float was = artfClampf(tap(p->history[c], p->width, p->height, sx, sy), p->box[c][nearest], p->box[3 + c][nearest]);
+            const float now = (light[c][q[0]] * near[0] + light[c][q[1]] * near[1] + light[c][q[2]] * near[2] + light[c][q[3]] * near[3]) * each;
+            p->scratch[c][i] = was + (now - was) * share;
+        }
+    }
+}
+
+/* ---- sharpening, after temporal antialiasing: each pixel away from the mean of its four neighbours, within them ---- */
+
+static void sharpenRow(ArtfSoftPost* p, int y) {
+    const float amount = p->f->data.output[2];
+    float* const* light = p->f->postLight;
+    const int up = artfMaxi(y - 1, 0), down = artfMini(y + 1, p->height - 1);
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        const size_t n[4] = {(size_t)up * p->width + x, (size_t)down * p->width + x, (size_t)y * p->width + artfMaxi(x - 1, 0), (size_t)y * p->width + artfMini(x + 1, p->width - 1)};
+        for (int c = 0; c < 3; ++c) {
+            const float here = light[c][i];
+            float lo = here, hi = here, sum = 0;
+            for (int k = 0; k < 4; ++k) {
+                const float there = light[c][n[k]];
+                lo = artfMinf(lo, there);
+                hi = artfMaxf(hi, there);
+                sum += there;
+            }
+            p->scratch[c][i] = artfClampf(here + (here - sum * .25f) * amount, lo, hi);
+        }
+    }
+}
+
+/* ---- motion blur: McGuire et al.'s reconstruction (2012) ----
+ *
+ * Each pixel's velocity, as far as the shutter was open (at most 32 pixels), and of each tile of 16 the largest, and
+ * of each tile and its eight neighbours the largest: what can reach a pixel. A pixel then takes 12 points along that,
+ * each by whether it is in front of the pixel and moving over it, or behind it while the pixel moves over it, or both
+ * moving: so what is still and in front is not smeared over by what moves behind it, nor smeared over it. */
+
+#define BLUR_TILE 16
+#define BLUR_REACH 32.f
+#define BLUR_TAPS 12
+
+static void velocityRow(ArtfSoftPost* p, int y) {
     const float shutter = p->f->data.motionBlur;
     for (int x = 0; x < p->width; ++x) {
         const size_t i = (size_t)y * p->width + x;
@@ -403,24 +568,94 @@ static void blurRow(ArtfSoftPost* p, int y) {
             vx = ((float)x - sx) * shutter;
             vy = ((float)y - sy) * shutter;
             const float length = vx * vx + vy * vy;
-            if (length > 32.f * 32.f) {
-                const float scale = 32.f / sqrtf(length);
+            if (length > BLUR_REACH * BLUR_REACH) {
+                const float scale = BLUR_REACH / sqrtf(length);
                 vx *= scale;
                 vy *= scale;
             }
         }
-        if (vx * vx + vy * vy < .25f) {
-            for (int c = 0; c < 3; ++c) p->scratch[c][i] = p->f->postLight[c][i];
+        p->velocity[0][i] = vx;
+        p->velocity[1][i] = vy;
+    }
+}
+
+/* (a row of tiles) */
+static void tileMostRow(ArtfSoftPost* p, int ty) {
+    for (int tx = 0; tx < p->blurTilesX; ++tx) {
+        float most = -1, mx = 0, my = 0;
+        const int x1 = artfMini((tx + 1) * BLUR_TILE, p->width), y1 = artfMini((ty + 1) * BLUR_TILE, p->height);
+        for (int y = ty * BLUR_TILE; y < y1; ++y)
+            for (int x = tx * BLUR_TILE; x < x1; ++x) {
+                const size_t i = (size_t)y * p->width + x;
+                const float vx = p->velocity[0][i], vy = p->velocity[1][i], l = vx * vx + vy * vy;
+                if (l > most) {
+                    most = l;
+                    mx = vx;
+                    my = vy;
+                }
+            }
+        p->tileMost[0][(size_t)ty * p->blurTilesX + tx] = mx;
+        p->tileMost[1][(size_t)ty * p->blurTilesX + tx] = my;
+    }
+}
+
+static void nearMostRow(ArtfSoftPost* p, int ty) {
+    for (int tx = 0; tx < p->blurTilesX; ++tx) {
+        float most = -1, mx = 0, my = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const size_t t = (size_t)artfClampi(ty + dy, 0, p->blurTilesY - 1) * p->blurTilesX + artfClampi(tx + dx, 0, p->blurTilesX - 1);
+                const float vx = p->tileMost[0][t], vy = p->tileMost[1][t], l = vx * vx + vy * vy;
+                if (l > most) {
+                    most = l;
+                    mx = vx;
+                    my = vy;
+                }
+            }
+        p->nearMost[0][(size_t)ty * p->blurTilesX + tx] = mx;
+        p->nearMost[1][(size_t)ty * p->blurTilesX + tx] = my;
+    }
+}
+
+/* a in front of b, softly: 1 in front, 0 when farther by a fiftieth of the distance */
+static inline float inFront(float a, float b) { return artfClampf(1.f - (a - b) / (.02f * artfMinf(a, b) + 1e-3f), 0, 1); }
+static inline float cone(float d, float reach) { return artfClampf(1.f - d / reach, 0, 1); }
+static inline float cylinder(float d, float reach) {
+    const float t = artfClampf((d - .95f * reach) / (.1f * reach), 0, 1);
+    return 1.f - t * t * (3.f - 2.f * t);
+}
+
+static void blurRow(ArtfSoftPost* p, int y) {
+    float* const* light = p->f->postLight;
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        const size_t t = (size_t)(y / BLUR_TILE) * p->blurTilesX + x / BLUR_TILE;
+        const float nx = p->nearMost[0][t], ny = p->nearMost[1][t];
+        if (nx * nx + ny * ny < .25f) {
+            for (int c = 0; c < 3; ++c) p->scratch[c][i] = light[c][i];
             continue;
         }
-        for (int c = 0; c < 3; ++c) {
-            float sum = 0;
-            for (int k = 0; k < 8; ++k) {
-                const float along = ((float)k + .5f) * .125f - .5f;
-                sum += tap(p->f->postLight[c], p->width, p->height, (float)x + vx * along, (float)y + vy * along);
-            }
-            p->scratch[c][i] = sum * .125f;
+        const float hereX = p->velocity[0][i], hereY = p->velocity[1][i];
+        const float reach = artfMaxf(sqrtf(hereX * hereX + hereY * hereY), .5f) * .5f;
+        float z = distanceAt(p, x, y);
+        if (z <= 0) z = 1e6f;
+        float weight = .5f / reach, sum[3];
+        for (int c = 0; c < 3; ++c) sum[c] = light[c][i] * weight;
+        const float jitter = (float)(hash((uint32_t)(y * p->width + x)) & 255) / 256.f - .5f;
+        for (int k = 0; k < BLUR_TAPS; ++k) {
+            const float along = ((float)k + .5f + jitter) / BLUR_TAPS - .5f;
+            const int qx = artfClampi(floorInt((float)x + nx * along + .5f), 0, p->width - 1), qy = artfClampi(floorInt((float)y + ny * along + .5f), 0, p->height - 1);
+            const size_t q = (size_t)qy * p->width + qx;
+            const float dx = (float)(qx - x), dy = (float)(qy - y), d = sqrtf(dx * dx + dy * dy);
+            const float thereX = p->velocity[0][q], thereY = p->velocity[1][q];
+            const float reachThere = artfMaxf(sqrtf(thereX * thereX + thereY * thereY), .5f) * .5f;
+            float zThere = distanceAt(p, qx, qy);
+            if (zThere <= 0) zThere = 1e6f;
+            const float a = inFront(zThere, z) * cone(d, reachThere) + inFront(z, zThere) * cone(d, reach) + cylinder(d, reachThere) * cylinder(d, reach) * 2.f;
+            weight += a;
+            for (int c = 0; c < 3; ++c) sum[c] += light[c][q] * a;
         }
+        for (int c = 0; c < 3; ++c) p->scratch[c][i] = sum[c] / weight;
     }
 }
 
@@ -599,8 +834,8 @@ static void finalRow(ArtfSoftPost* p, int y) {
             if (contrast != 0) shown = artfClampf(.5f + (shown - .5f) * (1.f + contrast), 0, 1);
             out |= (uint32_t)(shown * alpha * 255.f + .5f) << (16 - 8 * c);
         }
-        if (sf->overlay && x < sf->overlayWidth && y < sf->overlayHeight) {
-            const uint32_t s = sf->overlay[(size_t)y * sf->overlayStride + x];
+        if (p->overlay && x < p->overlayWidth && y < p->overlayHeight) {
+            const uint32_t s = p->overlay[(size_t)y * p->overlayStride + x];
             if (s) {
                 const uint32_t rest = 255 - (s >> 24);
                 uint32_t blended = 0;
@@ -615,30 +850,45 @@ static void finalRow(ArtfSoftPost* p, int y) {
     }
 }
 
-static void copyScratch(ArtfSoftPost* p) {
-    for (int c = 0; c < 3; ++c) {
+/* What a pass wrote becomes the light. (Right after temporal antialiasing the light is the history itself, which was
+ * not copied: the next pass writes into what the history was before.) */
+static void copyScratch(ArtfSoftPost* p, int planes) {
+    for (int c = 0; c < planes; ++c) {
         float* t = p->f->postLight[c];
         p->f->postLight[c] = p->scratch[c];
+        if (c < 3 && t == p->history[c]) {
+            t = p->spare[c];
+            p->spare[c] = NULL;
+        }
         p->scratch[c] = t;
     }
 }
 
-void artfSoftPostSize(ArtfSoftPost* p, int width, int height) {
-    if (p->width == width && p->height == height) return;
+void artfSoftPostSize(ArtfSoftPost* p, int width, int height, int frameWidth, int frameHeight) {
+    if (p->sceneW == width && p->sceneH == height && p->frameW == frameWidth && p->frameH == frameHeight) return;
     artfSoftPostFree(p);
-    p->width = width;
-    p->height = height;
-    const size_t pixels = (size_t)width * height;
-    for (int c = 0; c < 3; ++c) {
-        p->scratch[c] = artfMalloc(pixels * 4);
-        p->history[c] = artfMalloc(pixels * 4);
-    }
-    p->occlusion = artfMalloc(pixels * 4);
+    p->width = p->sceneW = width;
+    p->height = p->sceneH = height;
+    p->frameW = frameWidth;
+    p->frameH = frameHeight;
+    p->ratioX = (float)width / (float)frameWidth;
+    p->ratioY = (float)height / (float)frameHeight;
+    p->halfW = (width + 1) / 2;
+    p->halfH = (height + 1) / 2;
+    /* (light ends at the frame's size: what is upscaled takes the scene's planes' place) */
+    const size_t pixels = (size_t)frameWidth * frameHeight;
+    const bool scaled = width != frameWidth || height != frameHeight;
+    for (int c = 0; c < 4; ++c) p->scratch[c] = c < 3 || scaled ? artfMalloc(pixels * 4) : NULL;
+    for (int c = 0; c < 6 && scaled; ++c) p->box[c] = artfMalloc((size_t)width * height * 4);
+    for (int c = 0; c < 3; ++c) p->history[c] = artfMalloc(pixels * 4);
+    p->occlusion = artfMalloc((size_t)width * height * 4);
     p->froxelsX = (width + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE;
     p->froxelsY = (height + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE;
     p->froxels = artfMalloc((size_t)p->froxelsX * p->froxelsY * ARTF_FROXEL_SLICES * 16);
+    p->blurTilesX = (frameWidth + BLUR_TILE - 1) / BLUR_TILE;
+    p->blurTilesY = (frameHeight + BLUR_TILE - 1) / BLUR_TILE;
     size_t at = 0;
-    int w = width, h = height;
+    int w = frameWidth, h = frameHeight;
     for (int l = 0; l < ARTF_POST_BLOOM_LEVELS; ++l) {
         w = artfMaxi((w + 1) / 2, 1);
         h = artfMaxi((h + 1) / 2, 1);
@@ -651,47 +901,98 @@ void artfSoftPostSize(ArtfSoftPost* p, int width, int height) {
     p->historyValid = false;
 }
 
+/* Motion blur's planes, the first time a frame asks. */
+static void blurPlanes(ArtfSoftPost* p) {
+    if (p->velocity[0]) return;
+    const size_t pixels = (size_t)p->frameW * p->frameH, tiles = (size_t)p->blurTilesX * p->blurTilesY;
+    for (int c = 0; c < 2; ++c) {
+        p->velocity[c] = artfMalloc(pixels * 4);
+        p->tileMost[c] = artfMalloc(tiles * 4);
+        p->nearMost[c] = artfMalloc(tiles * 4);
+    }
+}
+
 void artfSoftPostFree(ArtfSoftPost* p) {
-    for (int c = 0; c < 3; ++c) {
+    for (int c = 0; c < 4; ++c) {
         artfFree(p->scratch[c]);
+        p->scratch[c] = NULL;
+    }
+    for (int c = 0; c < 3; ++c) {
         artfFree(p->history[c]);
         artfFree(p->bloom[c]);
-        p->scratch[c] = p->history[c] = p->bloom[c] = NULL;
+        p->history[c] = p->bloom[c] = NULL;
+    }
+    for (int c = 0; c < 6; ++c) {
+        artfFree(p->box[c]);
+        p->box[c] = NULL;
+    }
+    for (int c = 0; c < 2; ++c) {
+        artfFree(p->velocity[c]);
+        artfFree(p->tileMost[c]);
+        artfFree(p->nearMost[c]);
+        p->velocity[c] = p->tileMost[c] = p->nearMost[c] = NULL;
     }
     artfFree(p->froxels);
     p->froxels = NULL;
     artfFree(p->occlusion);
     p->occlusion = NULL;
-    p->width = p->height = 0;
+    p->width = p->height = p->sceneW = p->sceneH = p->frameW = p->frameH = 0;
 }
 
 void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
     p->f = f;
     p->pixels = pixels;
+    p->width = p->sceneW;
+    p->height = p->sceneH;
+    p->mapped = false;
     const ArtfFrameData* d = &f->data;
     if (d->post[0][2] > 0) {
         rows(p, p->height, occlusionRow);
         rows(p, p->height, occlusionBlurRow);
     }
     if (d->post[1][0] > 0) {
-        rows(p, p->bloomH[0], reflectionRow);
+        rows(p, p->halfH, reflectionRow);
         rows(p, p->height, reflectionApplyRow);
     }
-    if (d->post[1][3] > 0) {
+    const bool scaled = p->sceneW != p->frameW || p->sceneH != p->frameH;
+    if (scaled) {
+        /* from here on, the frame's size */
+        p->width = p->frameW;
+        p->height = p->frameH;
+        p->mapped = true;
+        viewBackOf(p);
+        if (d->post[1][3] > 0 && p->historyValid) rows(p, p->sceneH, boxRow);
+        rows(p, p->height, upscaleRow);
+        copyScratch(p, 4);
+    } else if (d->post[1][3] > 0) {
         rows(p, p->height, temporalRow);
-        copyScratch(p);
-        for (int c = 0; c < 3; ++c) memcpy(p->history[c], f->postLight[c], (size_t)p->width * p->height * 4);
+        copyScratch(p, 3);
+    }
+    if (d->post[1][3] > 0) {
+        /* (the light is kept as it is, for the frame after: what was kept before is free) */
+        for (int c = 0; c < 3; ++c) {
+            p->spare[c] = p->history[c];
+            p->history[c] = f->postLight[c];
+        }
         p->historyValid = true;
     } else {
         p->historyValid = false;
     }
+    if (d->output[2] > 0 && (scaled || d->post[1][3] > 0)) {
+        rows(p, p->height, sharpenRow);
+        copyScratch(p, 3);
+    }
     if (d->post[2][1] > 0 && d->post[2][0] > 0) {
         rows(p, p->height, focusRow);
-        copyScratch(p);
+        copyScratch(p, 3);
     }
     if (d->motionBlur > 0) {
+        blurPlanes(p);
+        rows(p, p->height, velocityRow);
+        rows(p, p->blurTilesY, tileMostRow);
+        rows(p, p->blurTilesY, nearMostRow);
         rows(p, p->height, blurRow);
-        copyScratch(p);
+        copyScratch(p, 3);
     }
     if (d->grade[0][1] > 0) meter(p);
     else p->exposureValid = false;
@@ -700,4 +1001,9 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
         for (p->bloomLevel = ARTF_POST_BLOOM_LEVELS - 2; p->bloomLevel >= 0; --p->bloomLevel) rows(p, p->bloomH[p->bloomLevel], bloomUpRow);
     }
     rows(p, p->height, finalRow);
+    /* (the tiles of the next frame must not write over the history) */
+    for (int c = 0; c < 3; ++c) {
+        if (f->postLight[c] == p->history[c]) f->postLight[c] = p->spare[c];
+        p->spare[c] = NULL;
+    }
 }

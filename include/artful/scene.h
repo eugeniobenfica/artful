@@ -525,8 +525,12 @@ typedef struct ArtfPostDesc {
     float chromatic;        /* red and blue part toward the edges, as a cheap lens's: how far, in pixels, at a corner */
     /* Motion blur: what moved since the frame before is spread along the way it went, the eye's own motion too, as a
      * film's shutter does. This is the share of a frame the shutter is open: .5 is a film camera's. Temporal
-     * antialiasing follows what moves by the same measure. Instances are followed; what bones bend is not. */
+     * antialiasing follows what moves by the same measure: instances, and what bones and targets bend, by its
+     * vertices. What is still and in front stays sharp over what moves behind it (McGuire et al.'s reconstruction). */
     float motionBlur;
+    /* After temporal antialiasing or upscaling (ArtfRendererOptions.renderScale): edges brought back, 0 to 1, each
+     * pixel away from its neighbours, never past them. */
+    float sharpen;
 } ArtfPostDesc;
 
 /* NULL: none. */

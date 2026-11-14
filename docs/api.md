@@ -29,6 +29,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfRendererDraw` | A frame. false: the device is lost, make a new renderer. |
 | `artfRendererReadPixels`, `artfRendererPixels` | The frame, in memory. |
 | `artfRendererResize` | A new size. |
+| `ArtfRendererOptions.renderScale` | With `hdr`: the scene drawn smaller and upscaled, with temporal antialiasing as TSR does. |
 | `artfSetLog` | Why something did not work. |
 
 ## What is in a scene

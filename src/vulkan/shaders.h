@@ -15,7 +15,8 @@ typedef enum ArtfCullPhase {
 uint32_t* artfShaderCull(size_t* size, ArtfCullPhase phase);
 /* A level of the depth pyramid, from the level below, or from the depth buffer of that many samples. */
 uint32_t* artfShaderHiz(size_t* size, bool fromDepth, int samples);
-uint32_t* artfShaderSceneVertex(size_t* size);
+/* motion: where what a pose bent was a frame ago, from binding 65 (a frame in floats) */
+uint32_t* artfShaderSceneVertex(size_t* size, bool motion);
 /* cutout: for what plain solid surfaces are not: holes, backs and alpha. It leaves pixels, which the plain
  * one must not, so that a GPU can test depth before it. */
 /* lists: how many samples a pixel has, if a layer's pixels go to their pixel's list, for artfShaderLayerResolve, and not
@@ -66,5 +67,9 @@ uint32_t* artfShaderPostBloomUp(size_t* size);
 uint32_t* artfShaderPostFinal(size_t* size);
 uint32_t* artfShaderPostMeter(size_t* size); /* auto exposure, one invocation */
 uint32_t* artfShaderPostMotionBlur(size_t* size);
+uint32_t* artfShaderPostVelocity(size_t* size);  /* motion blur's: each pixel's, */
+uint32_t* artfShaderPostTileMost(size_t* size);  /* the largest of each tile (push 0), of its neighbours (push 1) */
+uint32_t* artfShaderPostUpscale(size_t* size);   /* the scene drawn smaller, made whole */
+uint32_t* artfShaderPostSharpen(size_t* size);
 
 #endif

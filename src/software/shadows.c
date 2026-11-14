@@ -308,11 +308,20 @@ static float lookUp(const ArtfShadowSource* s, uint32_t index, const float* p) {
     return (float)lit * (1.f / 9.f);
 }
 
+/* With temporal antialiasing, fewer reads, which the frames gather: 2 x 2 to find what is in the way and 3 x 3 to
+ * filter, each in the middle of a square of the area, moved within it by one of 16 places (4 x 4) from one pixel to
+ * the next and one frame to the next. Reads on few rows: what costs is the rows of the map, more than the reads. */
+int artfShadowTurn(int x, int y, uint32_t frame) {
+    static const uint8_t pattern[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+    return (int)((pattern[(y & 3) * 4 + (x & 3)] + frame * 7u) & 15u);
+}
+
 /* As lookUp, as soft as the light is wide (Fernando, 2005): of 25 texels around the place, spread over 12, those in the
  * way give their mean depth; how far that is from the place, against how far from the light, says how wide the
  * penumbra is (for the sun, its angle times the distance), in texels, from 1 to 12; 25 texels over that width are each
- * in or out. sun: the view looks along parallel lines, so depth is distance. */
-static float lookUpSoft(const ArtfShadowSource* s, uint32_t index, const float* p, float size, bool sun) {
+ * in or out. sun: the view looks along parallel lines, so depth is distance. turn: -1 for that; else the 13 reads, moved
+ * so. */
+static float lookUpSoft(const ArtfShadowSource* s, uint32_t index, const float* p, float size, bool sun, int turn) {
     const ArtfShadowView* view = &s->frame->views[index];
     const float* m = view->m;
     const float w = m[12] * p[0] + m[13] * p[1] + m[14] * p[2] + m[15];
@@ -325,15 +334,30 @@ static float lookUpSoft(const ArtfShadowSource* s, uint32_t index, const float* 
     if (!(u >= 0 && v >= 0 && u < (float)side && v < (float)side)) return 1.f;
     const int ox = (int)view->info[0], oy = (int)view->info[1];
     float blockers = 0, count = 0;
-    for (int dy = -2; dy <= 2; ++dy)
-        for (int dx = -2; dx <= 2; ++dx) {
-            const int tx = artfClampi((int)(u + (float)dx * 3.f), 0, side - 1), ty = artfClampi((int)(v + (float)dy * 3.f), 0, side - 1);
-            const float there = s->atlas[(size_t)(oy + ty) * s->width + ox + tx];
-            if (there < depth) {
-                blockers += there;
-                count += 1.f;
+    /* (where within its square each read is, this frame) */
+    const float jx = turn < 0 ? 0.f : ((float)(turn & 3) + .5f) * .25f - .5f, jy = turn < 0 ? 0.f : ((float)(turn >> 2) + .5f) * .25f - .5f;
+    if (turn >= 0) {
+        for (int dy = 0; dy < 2; ++dy) {
+            const float* row = s->atlas + (size_t)(oy + artfClampi((int)(v + ((float)dy - .5f + jy) * 6.f), 0, side - 1)) * s->width + ox;
+            for (int dx = 0; dx < 2; ++dx) {
+                const float there = row[artfClampi((int)(u + ((float)dx - .5f + jx) * 6.f), 0, side - 1)];
+                if (there < depth) {
+                    blockers += there;
+                    count += 1.f;
+                }
             }
         }
+    } else {
+        for (int dy = -2; dy <= 2; ++dy)
+            for (int dx = -2; dx <= 2; ++dx) {
+                const int tx = artfClampi((int)(u + (float)dx * 3.f), 0, side - 1), ty = artfClampi((int)(v + (float)dy * 3.f), 0, side - 1);
+                const float there = s->atlas[(size_t)(oy + ty) * s->width + ox + tx];
+                if (there < depth) {
+                    blockers += there;
+                    count += 1.f;
+                }
+            }
+    }
     if (count == 0) return 1.f;
     const float blocker = blockers / count;
     float spread;
@@ -348,6 +372,14 @@ static float lookUpSoft(const ArtfShadowSource* s, uint32_t index, const float* 
     }
     spread = artfClampf(spread, 1.f, 12.f) * .5f;
     int lit = 0;
+    if (turn >= 0) {
+        const float cell = spread * (4.f / 3.f);
+        for (int dy = 0; dy < 3; ++dy) {
+            const float* row = s->atlas + (size_t)(oy + artfClampi((int)(v + ((float)dy - 1.f + jy) * cell), 0, side - 1)) * s->width + ox;
+            for (int dx = 0; dx < 3; ++dx) lit += depth <= row[artfClampi((int)(u + ((float)dx - 1.f + jx) * cell), 0, side - 1)];
+        }
+        return (float)lit * (1.f / 9.f);
+    }
     for (int dy = -2; dy <= 2; ++dy)
         for (int dx = -2; dx <= 2; ++dx) {
             const int tx = artfClampi((int)(u + (float)dx * spread), 0, side - 1), ty = artfClampi((int)(v + (float)dy * spread), 0, side - 1);
@@ -356,7 +388,7 @@ static float lookUpSoft(const ArtfShadowSource* s, uint32_t index, const float* 
     return (float)lit * (1.f / 25.f);
 }
 
-float artfShadowOfSun(const ArtfShadowSource* s, const float* eye, const float* world, const float* normal, float size) {
+float artfShadowOfSun(const ArtfShadowSource* s, const float* eye, const float* world, const float* normal, float size, int turn) {
     const ArtfShadowFrame* f = s->frame;
     if (!f->sun[0]) return 1.f;
     const float dx = world[0] - eye[0], dy = world[1] - eye[1], dz = world[2] - eye[2];
@@ -369,11 +401,11 @@ float artfShadowOfSun(const ArtfShadowSource* s, const float* eye, const float* 
     /* (what the light only grazes needs lifting more: a texel covers more depth there) */
     const float lift = f->views[view].info[2] * 2.f / artfMaxf(normal[0] * toSun[0] + normal[1] * toSun[1] + normal[2] * toSun[2], .15f);
     const float p[3] = {world[0] + normal[0] * lift, world[1] + normal[1] * lift, world[2] + normal[2] * lift};
-    return size > 0 ? lookUpSoft(s, view, p, size, true) : lookUp(s, view, p);
+    return size > 0 ? lookUpSoft(s, view, p, size, true, turn) : lookUp(s, view, p);
 }
 
 /* A lamp's shadow, from its word: first view + 1, and views << 8. */
-static float lampShadow(const ArtfShadowSource* s, uint32_t word, const float* position, const float* world, const float* normal, float size) {
+static float lampShadow(const ArtfShadowSource* s, uint32_t word, const float* position, const float* world, const float* normal, float size, int turn) {
     if (!word) return 1.f;
     uint32_t view = (word & 255) - 1;
     const float dx = world[0] - position[0], dy = world[1] - position[1], dz = world[2] - position[2];
@@ -385,13 +417,13 @@ static float lampShadow(const ArtfShadowSource* s, uint32_t word, const float* p
     const float distance = sqrtf(dx * dx + dy * dy + dz * dz), facing = -(normal[0] * dx + normal[1] * dy + normal[2] * dz) / artfMaxf(distance, 1e-6f);
     const float lift = s->frame->views[view].info[2] * distance * 2.f / artfMaxf(facing, .15f);
     const float p[3] = {world[0] + normal[0] * lift, world[1] + normal[1] * lift, world[2] + normal[2] * lift};
-    return size > 0 ? lookUpSoft(s, view, p, size, false) : lookUp(s, view, p);
+    return size > 0 ? lookUpSoft(s, view, p, size, false, turn) : lookUp(s, view, p);
 }
 
-float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world, const float* normal, float size) {
-    return lampShadow(s, s->frame->lights[light][0], position, world, normal, size);
+float artfShadowOfLight(const ArtfShadowSource* s, uint32_t light, const float* position, const float* world, const float* normal, float size, int turn) {
+    return lampShadow(s, s->frame->lights[light][0], position, world, normal, size, turn);
 }
 
 float artfShadowOfExtra(const ArtfShadowSource* s, uint32_t k, const float* position, const float* world, const float* normal) {
-    return k < ARTF_SHADOW_EXTRA ? lampShadow(s, s->frame->extra[k][0], position, world, normal, 0) : 1.f;
+    return k < ARTF_SHADOW_EXTRA ? lampShadow(s, s->frame->extra[k][0], position, world, normal, 0, -1) : 1.f;
 }

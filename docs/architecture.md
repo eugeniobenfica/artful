@@ -327,6 +327,8 @@ shader gathers both, with depth taken between the solid pass and the layers', in
 | Ambient occlusion | every pixel | Eight points in a hemisphere around the normal, turned by a 4 x 4 pattern and tested against depth; blurred over 4 x 4 by depth; taken only from the share of light that came from all around. |
 | Reflections | half the pixels | The mirror ray projected once and walked as a line across the frame, 1 / w even along it, in 24 steps closer near the start; a hit is a step from in front to behind, near enough. What it shows takes the place of what the surface was lit with from all around in that direction (the picture, or the sky's two colors), by Fresnel, smoothness and the frame's edges: where it finds nothing, that light stays. Then taken up to every pixel. |
 | Temporal antialiasing | every pixel | The eye moves within a pixel by Halton's (2, 3) points; each pixel goes back to where it was by its depth and the frame before's view, and what it finds there is kept within what this frame shows around it, nine to one. |
+| Upscaling | the frame's pixels | With `renderScale`, in place of the above: of the four samples around a pixel's center, those within a pixel of the frame give as much as their nearness, over what it had (followed, and kept within the nearest sample's neighbours); from here on all is the frame's size, and depth and surface are read at the nearest sample. |
+| Motion blur | every pixel | McGuire et al.'s: velocities, the largest of each tile of 16 and of its neighbours, then 12 points along that, each weighed by whether it is in front and moves over the pixel, or is behind while the pixel moves, or both. |
 | Depth of field | every pixel | 24 points of a disc as wide as the circle of confusion; what is sharper and behind does not spread over what is in front. |
 | Bloom | a pyramid | What is past the threshold, after exposure, down six halves with a tent and back up. |
 
@@ -432,9 +434,17 @@ invocation meters before bloom reads it.
 
 Each renderer keeps, by instance handle, where each instance was at its last frame (`motion.c`): from that, for each,
 the matrix that takes a point from where it is to where it was. The CPU's tiles leave which instance shows at each
-pixel beside its depth; the GPU's scene pass writes it beside the surface word, as a second word. Temporal antialiasing
-then takes a pixel back through its instance's matrix and the frame before's view, and motion blur spreads it along
-that way. When nothing moved, neither reads it.
+pixel beside its depth; the GPU's scene pass writes it beside the surface word, as a second word, which the target
+has only while temporal antialiasing or motion blur is on (its passes and pipelines are made again when that changes).
+Temporal antialiasing then takes a pixel back through its instance's matrix and the frame before's view, and motion
+blur spreads it along that way. When nothing moved, neither reads it.
+
+What a pose bent goes by its vertices. On the CPU, the motion keeps, of each instance that bends, where its mesh's
+vertices were at the last step, and the tile works out, at each of its pixels, where the point it shows was: its
+triangle's corners where they were, through the instance as it was and the view before. On the GPU what the vertex
+buffer held is copied before the bones and targets move it, and the vertex shader passes the same down to the pixels,
+which interpolate it. Either way the second word is then that place, from where the pixel is, in quarter pixels
+(`ARTF_MOTION_VECTOR`), and the instance's top bit says so.
 
 ## A clear coat and sheen
 
@@ -463,6 +473,11 @@ Soft shadows look in the map around a pixel for what is in the way (25 texels ov
 and from how far that is from the pixel, against how far from the light, the penumbra's width: for the sun, its angle
 times the distance; for a lamp, its size times how much nearer the blocker is (Fernando's PCSS). 25 texels over that
 width are each in or out.
+
+With temporal antialiasing that is 13 reads: 2 x 2 to look and 3 x 3 to filter, each in the middle of its square of the
+area and moved within it to one of 16 places, by a 4 x 4 pattern over the pixels that turns each frame; the frames
+gather them. Reads on rows of the map cost more than reads: a disc turned at random reads a row each, so these keep
+to five.
 
 ## The ray tracing hardware
 

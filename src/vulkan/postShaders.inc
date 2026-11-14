@@ -3,8 +3,13 @@
  *
  * Bindings: 50 light (four floats a pixel, premultiplied), 51 depth (1 / w), 52 surface (packSurface's word),
  * 53 a second light, 54 the frame before's, 55 occlusion, 56 the grid of froxels (light the air adds, what it leaves),
- * 57 bloom's levels, one after the other; 58 and 59 what the scene drew, light and surface, as images. The push
- * constant says a pass's level. Each invocation is a pixel, 64 at a time. */
+ * 57 bloom's levels, one after the other; 58 and 59 what the scene drew, light and surface, as images; 66 motion
+ * blur's velocities, of each pixel, then the largest of each tile and of its neighbours. The push constant says a
+ * pass's level. Each invocation is a pixel, 64 at a time.
+ *
+ * With the scene drawn smaller (ArtfRendererOptions.renderScale), depth, surface and occlusion keep the scene's size,
+ * as does the light until it is upscaled; from then on the light is the frame's size, and a pixel finds depth and
+ * surface at the scene's sample nearest its center, as post.c's planeAt. */
 
 #define POST_BLOOM_LEVELS 6 /* as ARTF_POST_BLOOM_LEVELS */
 
@@ -12,7 +17,11 @@ typedef struct Post {
     Resources r;
     SpvId light, depth, surface, scratch, history, occlusion, fog, bloom;
     SpvId uvec3, global, push;
-    SpvId width, height, widthF, heightF;
+    SpvId width, height, widthF, heightF;  /* of the light, in this pass */
+    /* of depth and surface, the scene's; once upscaled, the scene's size over the frame's, and the jitter to find a
+     * pixel's sample by (none when the two are the same size); and what wasAt takes out of a pixel's place */
+    SpvId sceneW, sceneH, sceneWF, sceneHF, ratioX, ratioY, mapX, mapY, ownX, ownY;
+    bool frameSize; /* this pass is at the frame's size (postFrameSizes) */
 } Post;
 
 static SpvId postExp2(Spv* s, SpvId x); /* (below) */
@@ -39,12 +48,38 @@ static void postDeclare(Spv* s, Post* p) {
     p->push = spvVariable(s, spvTypePointer(s, SPV_STORAGE_PushConstant, pushBlock), SPV_STORAGE_PushConstant);
 }
 
-/* After spvBeginMain: the frame's size. */
+/* After spvBeginMain: the scene's size. */
 static void postSizes(Spv* s, Post* p) {
     p->widthF = W(frameVec(s, &p->r, F_FOG));
     p->heightF = W(frameVec(s, &p->r, F_EYE + 1));
     p->width = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, p->widthF);
     p->height = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, p->heightF);
+    p->sceneW = p->width;
+    p->sceneH = p->height;
+    p->sceneWF = p->widthF;
+    p->sceneHF = p->heightF;
+    SpvId jitter = frameVec(s, &p->r, F_POST + 2);
+    p->ownX = Z(jitter);
+    p->ownY = W(jitter);
+}
+
+/* Or the frame's: for what comes after upscaling, which finds depth and surface at the scene's size. */
+static void postFrameSizes(Spv* s, Post* p) {
+    postSizes(s, p);
+    SpvId output = frameVec(s, &p->r, F_OUTPUT);
+    p->frameSize = true;
+    p->widthF = X(output);
+    p->heightF = Y(output);
+    p->width = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, p->widthF);
+    p->height = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, p->heightF);
+    p->ratioX = DIV_F(p->sceneWF, p->widthF);
+    p->ratioY = DIV_F(p->sceneHF, p->heightF);
+    SpvId scaled = spvOp2(s, 166 /* OpLogicalOr */, s->boolType, spvOp2(s, 182 /* OpFOrdNotEqual */, s->boolType, p->sceneWF, p->widthF), spvOp2(s, 182, s->boolType, p->sceneHF, p->heightF));
+    SpvId jitter = frameVec(s, &p->r, F_POST + 2);
+    p->mapX = PICK_F(scaled, Z(jitter), FLOAT(0.f));
+    p->mapY = PICK_F(scaled, W(jitter), FLOAT(0.f));
+    p->ownX = PICK_F(scaled, FLOAT(0.f), Z(jitter));
+    p->ownY = PICK_F(scaled, FLOAT(0.f), W(jitter));
 }
 
 static SpvId postPush(Spv* s, Post* p) { return spvLoad(s, s->uintType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_PushConstant, s->uintType), p->push, &p->r.zero, 1)); }
@@ -77,10 +112,22 @@ static SpvId postBegin(Spv* s, Post* p, SpvId* i, SpvId* x, SpvId* y, SpvId* mer
     return *i;
 }
 
+/* Where a pixel's depth and surface are (whole numbers, clamped): itself, or at the frame's size, the scene's pixel
+ * whose sample is nearest its center. */
+static SpvId postPlane(Spv* s, Post* p, SpvId xf, SpvId yf) {
+    if (!p->frameSize) {
+        SpvId x = P_TOU(P_CLAMP(xf, FLOAT(0.f), SUB_F(p->widthF, FLOAT(1.f)))), y = P_TOU(P_CLAMP(yf, FLOAT(0.f), SUB_F(p->heightF, FLOAT(1.f))));
+        return ADD_U(MUL_U(y, p->width), x);
+    }
+    SpvId x = FLOOR_F(ADD_F(MUL_F(ADD_F(xf, FLOAT(.5f)), p->ratioX), p->mapX)), y = FLOOR_F(SUB_F(MUL_F(ADD_F(yf, FLOAT(.5f)), p->ratioY), p->mapY));
+    x = P_TOU(P_CLAMP(x, FLOAT(0.f), SUB_F(p->sceneWF, FLOAT(1.f))));
+    y = P_TOU(P_CLAMP(y, FLOAT(0.f), SUB_F(p->sceneHF, FLOAT(1.f))));
+    return ADD_U(MUL_U(y, p->sceneW), x);
+}
+
 /* Distance along the view at a pixel (whole numbers, clamped); 0 where nothing is. */
 static SpvId postDistance(Spv* s, Post* p, SpvId xf, SpvId yf) {
-    SpvId x = P_TOU(P_CLAMP(xf, FLOAT(0.f), SUB_F(p->widthF, FLOAT(1.f)))), y = P_TOU(P_CLAMP(yf, FLOAT(0.f), SUB_F(p->heightF, FLOAT(1.f))));
-    SpvId d = postFloat(s, p, p->depth, ADD_U(MUL_U(y, p->width), x));
+    SpvId d = postFloat(s, p, p->depth, postPlane(s, p, xf, yf));
     return PICK_F(P_MORE(d, FLOAT(0.f)), DIV_F(FLOAT(1.f), MAX_F(d, FLOAT(1e-30f))), FLOAT(0.f));
 }
 
@@ -351,6 +398,7 @@ POST_FINISH()
 /* ---- fog that light goes through: the grid of froxels, as froxelRow, before the frame is drawn ---- */
 POST_MAIN(artfShaderPostFroxels)
     Shadows shadows;
+    memset(&shadows, 0, sizeof shadows);
     SpvId shadowImage, shadowSampled = spvTypeSampledImage2D(s, &shadowImage);
     shadows.block = spvResource(s, blockOf(s, spvTypeArray(s, s->vec4, S_ROWS, 16), true), SPV_STORAGE_Uniform, 24);
     shadows.atlas = spvResource(s, shadowSampled, SPV_STORAGE_UniformConstant, 25);
@@ -429,52 +477,194 @@ POST_MAIN(artfShaderPostFroxels)
     spvLabel(s, done);
 POST_FINISH()
 
-/* As post.c's wasAt: where the surface at a pixel was in the frame before, by its depth and how its instance moved. */
-static void postWasAt(Spv* s, Post* p, SpvId i, SpvId xf, SpvId yf, SpvId* sx, SpvId* sy, SpvId* ok) {
-    SpvId d = postDistance(s, p, xf, yf);
-    SpvId jitter = frameVec(s, &p->r, F_POST + 2);
-    SpvId at = postWorld(s, p, SUB_F(xf, Z(jitter)), ADD_F(yf, W(jitter)), PICK_F(P_MORE(d, FLOAT(0.f)), d, FLOAT(1e4f)));
+/* As post.c's wasAt: where the surface at a pixel was in the frame before, by its depth and how its instance moved, or
+ * for what a pose bent, by where its vertices were (ARTF_MOTION_VECTOR's word). */
+static void postWasAt(Spv* s, Post* p, SpvId xf, SpvId yf, SpvId* sx, SpvId* sy, SpvId* ok) {
+    SpvId plane = postPlane(s, p, xf, yf);
+    SpvId depth = postFloat(s, p, p->depth, plane);
+    SpvId d = PICK_F(P_MORE(depth, FLOAT(0.f)), DIV_F(FLOAT(1.f), MAX_F(depth, FLOAT(1e-30f))), FLOAT(0.f));
+    SpvId ax = SUB_F(xf, p->ownX), ay = ADD_F(yf, p->ownY);
+    SpvId at = postWorld(s, p, ax, ay, PICK_F(P_MORE(d, FLOAT(0.f)), d, FLOAT(1e4f)));
     /* (only when something moved: what stood still is read for nothing) */
     SpvId moving = P_AND(P_MORE(Y(frameVec(s, &p->r, F_CULL)), FLOAT(0.f)), P_MORE(d, FLOAT(0.f)));
     SpvId before = s->block, merge;
     spvIfBegin(s, moving, &merge);
-    SpvId who = postUint(s, p, p->surface, ADD_U(MUL_U(p->width, p->height), i));
-    /* (the motion, after the instances: three rows each) */
+    SpvId who = postUint(s, p, p->surface, ADD_U(MUL_U(p->sceneW, p->sceneH), plane));
+    /* (the motion, after the instances: four rows each) */
     SpvId instances = AS_UINT(Y(frameVec(s, &p->r, F_COUNTS)));
-    SpvId row = ADD_U(MUL_U(instances, UINT(4)), MUL_U(SUB_U(spvGlsl2(s, 41 /* UMax */, s->uintType, who, UINT(1)), UINT(1)), UINT(3)));
+    SpvId row = ADD_U(MUL_U(instances, UINT(4)), MUL_U(SUB_U(spvGlsl2(s, 41 /* UMax */, s->uintType, AND_U(who, UINT(0x7FFFFFFFu)), UINT(1)), UINT(1)), UINT(4)));
     SpvId m0 = bufferVec(s, &p->r, p->r.instances, row), m1 = bufferVec(s, &p->r, p->r.instances, ADD_U(row, UINT(1))), m2 = bufferVec(s, &p->r, p->r.instances, ADD_U(row, UINT(2)));
     SpvId at4 = vec4Of(s, at, FLOAT(1.f));
     SpvId was = pick3(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, who, UINT(0)), vec3Of(s, DOT4(m0, at4), DOT4(m1, at4), DOT4(m2, at4)), at);
+    /* (a vector, in quarter pixels of the scene's size: as artfMotionUnpack) */
+    SpvId vector = spvOp2(s, SPV_OP_INotEqual, s->boolType, AND_U(who, UINT(ARTF_MOTION_VECTOR)), UINT(0));
+    SpvId dx = MUL_F(SUB_F(TO_F(AND_U(who, UINT(32767))), FLOAT(16384.f)), FLOAT(.25f)), dy = MUL_F(SUB_F(TO_F(AND_U(SHR_U(who, 15), UINT(32767))), FLOAT(16384.f)), FLOAT(.25f));
+    SpvId vx = p->frameSize ? ADD_F(ax, DIV_F(dx, p->ratioX)) : ADD_F(ax, dx), vy = p->frameSize ? ADD_F(ay, DIV_F(dy, p->ratioY)) : ADD_F(ay, dy);
+    SpvId known = P_LESS(dx, FLOAT(4095.f));
     SpvId movedFrom = s->block;
     spvIfEnd(s, merge);
     at = spvPhi(s, s->vec3, was, movedFrom, at, before);
-    SpvId w;
-    postProject(s, p, F_PREVIOUS, at, sx, sy, &w, ok);
+    SpvId isVector = spvPhi(s, s->boolType, vector, movedFrom, spvConstBool(s, false), before);
+    vx = spvPhi(s, s->floatType, vx, movedFrom, FLOAT(0.f), before);
+    vy = spvPhi(s, s->floatType, vy, movedFrom, FLOAT(0.f), before);
+    known = spvPhi(s, s->boolType, known, movedFrom, spvConstBool(s, true), before);
+    SpvId w, px, py, pok;
+    postProject(s, p, F_PREVIOUS, at, &px, &py, &w, &pok);
+    *sx = PICK_F(isVector, vx, px);
+    *sy = PICK_F(isVector, vy, py);
+    *ok = spvSelect(s, s->boolType, isVector, known, pok);
 }
 
-/* ---- motion blur: as blurRow, into the second light ---- */
-POST_MAIN(artfShaderPostMotionBlur)
+/* ---- motion blur: as post.c's velocityRow, tileMostRow, nearMostRow and blurRow ---- */
+
+#define POST_BLUR_TILE 16 /* as post.c's */
+#define POST_BLUR_REACH 32.f
+#define POST_BLUR_TAPS 12
+
+/* Motion blur's buffer (66): velocities, two floats a pixel; then the largest of each tile, and of each tile's
+ * neighbours. */
+static SpvId postBlurBuffer(Spv* s, Post* p) { return postBuffer(s, p, p->r.floatArray, 66); }
+static void postBlurTiles(Spv* s, Post* p, SpvId* tilesX, SpvId* tilesY) {
+    *tilesX = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(POST_BLUR_TILE - 1)), UINT(POST_BLUR_TILE));
+    *tilesY = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(POST_BLUR_TILE - 1)), UINT(POST_BLUR_TILE));
+}
+static SpvId postPair(Spv* s, Post* p, SpvId buffer, SpvId at) {
+    const SpvId parts[2] = {postFloat(s, p, buffer, at), postFloat(s, p, buffer, ADD_U(at, UINT(1)))};
+    return spvCompose(s, s->vec2, parts, 2);
+}
+static void postPairPut(Spv* s, Post* p, SpvId buffer, SpvId at, SpvId x, SpvId y) {
+    spvStore(s, postPtr(s, p, buffer, s->floatType, at), x);
+    spvStore(s, postPtr(s, p, buffer, s->floatType, ADD_U(at, UINT(1))), y);
+}
+
+POST_MAIN(artfShaderPostVelocity)
+    SpvId blur = postBlurBuffer(s, p);
     SpvId main = spvBeginMain(s);
-    postSizes(s, p);
+    postFrameSizes(s, p);
     SpvId i, x, y, merge;
     postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
     SpvId xf = TO_F(x), yf = TO_F(y);
     SpvId sx, sy, ok;
-    postWasAt(s, p, i, xf, yf, &sx, &sy, &ok);
+    postWasAt(s, p, xf, yf, &sx, &sy, &ok);
     SpvId shutter = W(frameVec(s, &p->r, F_MATERIALS));
     SpvId vx = PICK_F(ok, MUL_F(SUB_F(xf, sx), shutter), FLOAT(0.f)), vy = PICK_F(ok, MUL_F(SUB_F(yf, sy), shutter), FLOAT(0.f));
     SpvId length = ADD_F(MUL_F(vx, vx), MUL_F(vy, vy));
-    SpvId scale = PICK_F(P_MORE(length, FLOAT(32.f * 32.f)), DIV_F(FLOAT(32.f), SQRT_F(MAX_F(length, FLOAT(1e-12f)))), FLOAT(1.f));
-    vx = MUL_F(vx, scale);
-    vy = MUL_F(vy, scale);
-    SpvId sum = same3(s, 0.f);
-    for (int k = 0; k < 8; ++k) {
-        const float along = ((float)k + .5f) * .125f - .5f;
-        sum = ADD_V3(sum, spvShuffle3(s, postTap(s, p, p->light, UINT(0), p->width, p->height, ADD_F(xf, MUL_F(vx, FLOAT(along))), ADD_F(yf, MUL_F(vy, FLOAT(along))))));
+    SpvId scale = PICK_F(P_MORE(length, FLOAT(POST_BLUR_REACH * POST_BLUR_REACH)), DIV_F(FLOAT(POST_BLUR_REACH), SQRT_F(MAX_F(length, FLOAT(1e-12f)))), FLOAT(1.f));
+    postPairPut(s, p, blur, MUL_U(i, UINT(2)), MUL_F(vx, scale), MUL_F(vy, scale));
+POST_FINISH()
+
+/* The largest of a tile (push 0) or of a tile and its neighbours (push 1): one invocation a tile. */
+POST_MAIN(artfShaderPostTileMost)
+    SpvId blur = postBlurBuffer(s, p);
+    SpvId main = spvBeginMain(s);
+    SpvId ptrFn2 = spvTypePointer(s, SPV_STORAGE_Function, s->vec2), ptrFnF = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptrFnU = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
+    SpvId mostVar = spvVariable(s, ptrFn2, SPV_STORAGE_Function), lengthVar = spvVariable(s, ptrFnF, SPV_STORAGE_Function), counter = spvVariable(s, ptrFnU, SPV_STORAGE_Function);
+    postFrameSizes(s, p);
+    SpvId tilesX, tilesY;
+    postBlurTiles(s, p, &tilesX, &tilesY);
+    SpvId t, tx, ty, merge;
+    postBegin(s, p, &t, &tx, &ty, &merge, tilesX, tilesY);
+    SpvId neighbours = spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0));
+    SpvId pixels2 = MUL_U(MUL_U(p->width, p->height), UINT(2)), tiles2 = MUL_U(MUL_U(tilesX, tilesY), UINT(2));
+    const SpvId zero2[2] = {FLOAT(0.f), FLOAT(0.f)};
+    spvStore(s, mostVar, spvCompose(s, s->vec2, zero2, 2));
+    spvStore(s, lengthVar, FLOAT(-1.f));
+    spvStore(s, counter, UINT(0));
+    /* (a tile's pixels, or the nine tiles around: whichever there are, in order, the first largest kept) */
+    SpvId count = spvSelect(s, s->uintType, neighbours, UINT(9), UINT(POST_BLUR_TILE * POST_BLUR_TILE));
+    SpvId header = spvNewId(s), test = spvNewId(s), body = spvNewId(s), next = spvNewId(s), done = spvNewId(s);
+    spvBranch(s, header);
+    spvLabel(s, header);
+    spvLoopMerge(s, done, next);
+    spvBranch(s, test);
+    spvLabel(s, test);
+    SpvId k = spvLoad(s, s->uintType, counter);
+    spvBranchIf(s, P_LESS_U(k, count), body, done);
+    spvLabel(s, body);
+    {
+        /* a pixel of the tile */
+        SpvId px = ADD_U(MUL_U(tx, UINT(POST_BLUR_TILE)), spvOp2(s, SPV_OP_UMod, s->uintType, k, UINT(POST_BLUR_TILE)));
+        SpvId py = ADD_U(MUL_U(ty, UINT(POST_BLUR_TILE)), spvOp2(s, SPV_OP_UDiv, s->uintType, k, UINT(POST_BLUR_TILE)));
+        SpvId inside = P_AND(P_LESS_U(px, p->width), P_LESS_U(py, p->height));
+        SpvId pixelAt = MUL_U(ADD_U(MUL_U(spvGlsl2(s, 38, s->uintType, py, SUB_U(p->height, UINT(1))), p->width), spvGlsl2(s, 38, s->uintType, px, SUB_U(p->width, UINT(1)))), UINT(2));
+        /* or a tile around, clamped to the frame's */
+        SpvId nx = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvGlsl2(s, 42 /* SMax */, s->intType, spvOp2(s, SPV_OP_ISub, s->intType, spvOp1(s, SPV_OP_Bitcast, s->intType, ADD_U(tx, spvOp2(s, SPV_OP_UMod, s->uintType, k, UINT(3)))), spvConstInt(s, 1)), spvConstInt(s, 0)));
+        SpvId ny = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvGlsl2(s, 42, s->intType, spvOp2(s, SPV_OP_ISub, s->intType, spvOp1(s, SPV_OP_Bitcast, s->intType, ADD_U(ty, spvOp2(s, SPV_OP_UDiv, s->uintType, k, UINT(3)))), spvConstInt(s, 1)), spvConstInt(s, 0)));
+        nx = spvGlsl2(s, 38, s->uintType, nx, SUB_U(tilesX, UINT(1)));
+        ny = spvGlsl2(s, 38, s->uintType, ny, SUB_U(tilesY, UINT(1)));
+        SpvId tileAt = ADD_U(pixels2, MUL_U(ADD_U(MUL_U(ny, tilesX), nx), UINT(2)));
+        SpvId v = postPair(s, p, blur, spvSelect(s, s->uintType, neighbours, tileAt, pixelAt));
+        SpvId l = spvOp2(s, SPV_OP_Dot, s->floatType, v, v);
+        SpvId larger = P_AND(spvOp2(s, 166, s->boolType, neighbours, inside), P_MORE(l, spvLoad(s, s->floatType, lengthVar)));
+        SpvId kept = spvLoad(s, s->vec2, mostVar);
+        const SpvId chosen[2] = {PICK_F(larger, spvExtract(s, s->floatType, v, 0), spvExtract(s, s->floatType, kept, 0)), PICK_F(larger, spvExtract(s, s->floatType, v, 1), spvExtract(s, s->floatType, kept, 1))};
+        spvStore(s, mostVar, spvCompose(s, s->vec2, chosen, 2));
+        spvStore(s, lengthVar, PICK_F(larger, l, spvLoad(s, s->floatType, lengthVar)));
     }
+    spvBranch(s, next);
+    spvLabel(s, next);
+    spvStore(s, counter, ADD_U(spvLoad(s, s->uintType, counter), UINT(1)));
+    spvBranch(s, header);
+    spvLabel(s, done);
+    SpvId most = spvLoad(s, s->vec2, mostVar);
+    SpvId out = ADD_U(ADD_U(pixels2, spvSelect(s, s->uintType, neighbours, tiles2, UINT(0))), MUL_U(t, UINT(2)));
+    postPairPut(s, p, blur, out, spvExtract(s, s->floatType, most, 0), spvExtract(s, s->floatType, most, 1));
+POST_FINISH()
+
+/* a in front of b, softly; a cone's and a cylinder's reach: as post.c's */
+static SpvId postInFront(Spv* s, SpvId a, SpvId b) { return P_CLAMP(SUB_F(FLOAT(1.f), DIV_F(SUB_F(a, b), ADD_F(MUL_F(FLOAT(.02f), MIN_F(a, b)), FLOAT(1e-3f)))), FLOAT(0.f), FLOAT(1.f)); }
+static SpvId postCone(Spv* s, SpvId d, SpvId reach) { return P_CLAMP(SUB_F(FLOAT(1.f), DIV_F(d, reach)), FLOAT(0.f), FLOAT(1.f)); }
+static SpvId postCylinder(Spv* s, SpvId d, SpvId reach) {
+    SpvId t = P_CLAMP(DIV_F(SUB_F(d, MUL_F(FLOAT(.95f), reach)), MUL_F(FLOAT(.1f), reach)), FLOAT(0.f), FLOAT(1.f));
+    return SUB_F(FLOAT(1.f), MUL_F(MUL_F(t, t), SUB_F(FLOAT(3.f), MUL_F(FLOAT(2.f), t))));
+}
+
+POST_MAIN(artfShaderPostMotionBlur)
+    SpvId blur = postBlurBuffer(s, p);
+    SpvId main = spvBeginMain(s);
+    postFrameSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    SpvId xf = TO_F(x), yf = TO_F(y);
+    SpvId tilesX, tilesY;
+    postBlurTiles(s, p, &tilesX, &tilesY);
+    SpvId pixels2 = MUL_U(MUL_U(p->width, p->height), UINT(2)), tiles2 = MUL_U(MUL_U(tilesX, tilesY), UINT(2));
+    SpvId tile = ADD_U(MUL_U(spvOp2(s, SPV_OP_UDiv, s->uintType, y, UINT(POST_BLUR_TILE)), tilesX), spvOp2(s, SPV_OP_UDiv, s->uintType, x, UINT(POST_BLUR_TILE)));
+    SpvId reachAll = postPair(s, p, blur, ADD_U(ADD_U(pixels2, tiles2), MUL_U(tile, UINT(2))));
+    SpvId nx = spvExtract(s, s->floatType, reachAll, 0), ny = spvExtract(s, s->floatType, reachAll, 1);
     SpvId now = postVec4(s, p, p->light, i);
-    SpvId still = P_LESS(ADD_F(MUL_F(vx, vx), MUL_F(vy, vy)), FLOAT(.25f));
-    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, pick3(s, still, spvShuffle3(s, now), SCALE_V3(sum, FLOAT(.125f))), W(now)));
+    /* (only where something can reach: elsewhere what was there stays, and costs nothing more) */
+    SpvId reaching = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, spvOp2(s, SPV_OP_Dot, s->floatType, reachAll, reachAll), FLOAT(.25f));
+    SpvId nowRgb = spvShuffle3(s, now); /* (before the if: what a phi reads comes first) */
+    SpvId before = s->block, blurMerge;
+    spvIfBegin(s, reaching, &blurMerge);
+    SpvId here = postPair(s, p, blur, MUL_U(i, UINT(2)));
+    SpvId reach = MUL_F(MAX_F(SQRT_F(spvOp2(s, SPV_OP_Dot, s->floatType, here, here)), FLOAT(.5f)), FLOAT(.5f));
+    SpvId z = postDistance(s, p, xf, yf);
+    z = PICK_F(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, z, FLOAT(0.f)), FLOAT(1e6f), z);
+    SpvId weight = DIV_F(FLOAT(.5f), reach);
+    SpvId sum = SCALE_V3(spvShuffle3(s, now), weight);
+    SpvId jitter = SUB_F(DIV_F(TO_F(AND_U(postHash(s, i), UINT(255))), FLOAT(256.f)), FLOAT(.5f));
+    for (int k = 0; k < POST_BLUR_TAPS; ++k) {
+        SpvId along = SUB_F(DIV_F(ADD_F(FLOAT((float)k + .5f), jitter), FLOAT((float)POST_BLUR_TAPS)), FLOAT(.5f));
+        SpvId qx = P_CLAMP(FLOOR_F(ADD_F(ADD_F(xf, MUL_F(nx, along)), FLOAT(.5f))), FLOAT(0.f), SUB_F(p->widthF, FLOAT(1.f)));
+        SpvId qy = P_CLAMP(FLOOR_F(ADD_F(ADD_F(yf, MUL_F(ny, along)), FLOAT(.5f))), FLOAT(0.f), SUB_F(p->heightF, FLOAT(1.f)));
+        SpvId q = ADD_U(MUL_U(P_TOU(qy), p->width), P_TOU(qx));
+        SpvId dx = SUB_F(qx, xf), dy = SUB_F(qy, yf), d = SQRT_F(ADD_F(MUL_F(dx, dx), MUL_F(dy, dy)));
+        SpvId there = postPair(s, p, blur, MUL_U(q, UINT(2)));
+        SpvId reachThere = MUL_F(MAX_F(SQRT_F(spvOp2(s, SPV_OP_Dot, s->floatType, there, there)), FLOAT(.5f)), FLOAT(.5f));
+        SpvId zThere = postDistance(s, p, qx, qy);
+        zThere = PICK_F(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, zThere, FLOAT(0.f)), FLOAT(1e6f), zThere);
+        SpvId a = ADD_F(ADD_F(MUL_F(postInFront(s, zThere, z), postCone(s, d, reachThere)), MUL_F(postInFront(s, z, zThere), postCone(s, d, reach))),
+                        MUL_F(MUL_F(postCylinder(s, d, reachThere), postCylinder(s, d, reach)), FLOAT(2.f)));
+        weight = ADD_F(weight, a);
+        sum = ADD_V3(sum, SCALE_V3(spvShuffle3(s, postVec4(s, p, p->light, q)), a));
+    }
+    SpvId blurred = SCALE_V3(sum, DIV_F(FLOAT(1.f), weight));
+    SpvId blurredFrom = s->block;
+    spvIfEnd(s, blurMerge);
+    SpvId got = spvPhi(s, s->vec3, blurred, blurredFrom, nowRgb, before);
+    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, got, W(now)));
 POST_FINISH()
 
 /* ---- temporal antialiasing: as temporalRow, into the second light ---- */
@@ -493,7 +683,7 @@ POST_MAIN(artfShaderPostTemporal)
             hi = spvGlsl2(s, SPV_GLSL_FMax, s->vec3, hi, c);
         }
     SpvId sx, sy, ok;
-    postWasAt(s, p, i, xf, yf, &sx, &sy, &ok);
+    postWasAt(s, p, xf, yf, &sx, &sy, &ok);
     SpvId valid = P_AND(ok, P_AND(P_AND(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, sx, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, sy, FLOAT(0.f))), P_AND(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, sx, SUB_F(p->widthF, FLOAT(1.f))), spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, sy, SUB_F(p->heightF, FLOAT(1.f))))));
     /* (the push constant is 1 when there is a frame before to follow) */
     valid = P_AND(valid, spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0)));
@@ -501,6 +691,89 @@ POST_MAIN(artfShaderPostTemporal)
     SpvId was = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, postTap(s, p, p->history, UINT(0), p->width, p->height, sx, sy)), lo), hi);
     SpvId share = PICK_F(valid, FLOAT(.1f), FLOAT(1.f));
     spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, P_MIX3(was, spvShuffle3(s, now), share), W(now)));
+POST_FINISH()
+
+/* ---- upscaling: as upscaleRow, from the scene's light into the second light at the frame's size. The push constant
+ * is 1 when there is a frame before to follow ---- */
+POST_MAIN(artfShaderPostUpscale)
+    SpvId main = spvBeginMain(s);
+    postFrameSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    SpvId xf = TO_F(x), yf = TO_F(y);
+    SpvId jitter = frameVec(s, &p->r, F_POST + 2);
+    SpvId u = ADD_F(SUB_F(MUL_F(ADD_F(xf, FLOAT(.5f)), p->ratioX), FLOAT(.5f)), Z(jitter)), v = SUB_F(SUB_F(MUL_F(ADD_F(yf, FLOAT(.5f)), p->ratioY), FLOAT(.5f)), W(jitter));
+    SpvId bx = FLOOR_F(u), by = FLOOR_F(v), fx = SUB_F(u, bx), fy = SUB_F(v, by);
+    SpvId lastX = SUB_F(p->sceneWF, FLOAT(1.f)), lastY = SUB_F(p->sceneHF, FLOAT(1.f));
+    SpvId x0 = P_TOU(P_CLAMP(bx, FLOAT(0.f), lastX)), x1 = P_TOU(P_CLAMP(ADD_F(bx, FLOAT(1.f)), FLOAT(0.f), lastX));
+    SpvId y0 = MUL_U(P_TOU(P_CLAMP(by, FLOAT(0.f), lastY)), p->sceneW), y1 = MUL_U(P_TOU(P_CLAMP(ADD_F(by, FLOAT(1.f)), FLOAT(0.f), lastY)), p->sceneW);
+    SpvId c00 = postVec4(s, p, p->light, ADD_U(y0, x0)), c10 = postVec4(s, p, p->light, ADD_U(y0, x1)), c01 = postVec4(s, p, p->light, ADD_U(y1, x0)), c11 = postVec4(s, p, p->light, ADD_U(y1, x1));
+    SpvId gx = SUB_F(FLOAT(1.f), fx), gy = SUB_F(FLOAT(1.f), fy);
+    SpvId spatial = ADD_V4(ADD_V4(SCALE_V4(c00, MUL_F(gx, gy)), SCALE_V4(c10, MUL_F(fx, gy))), ADD_V4(SCALE_V4(c01, MUL_F(gx, fy)), SCALE_V4(c11, MUL_F(fx, fy))));
+    SpvId sx, sy, ok;
+    postWasAt(s, p, xf, yf, &sx, &sy, &ok);
+    SpvId follows = P_AND(P_AND(ok, spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0))), P_MORE(W(frameVec(s, &p->r, F_POST + 1)), FLOAT(0.f)));
+    follows = P_AND(follows, P_AND(P_AND(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, sx, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, sy, FLOAT(0.f))),
+                                   P_AND(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, sx, SUB_F(p->widthF, FLOAT(1.f))), spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, sy, SUB_F(p->heightF, FLOAT(1.f))))));
+    /* (only what follows reads the frame before) */
+    SpvId spatialRgb = spvShuffle3(s, spatial);
+    SpvId before = s->block, followMerge;
+    spvIfBegin(s, follows, &followMerge);
+    /* each sample's nearness to the center, in pixels of the frame */
+    SpvId ox0 = DIV_F(fx, p->ratioX), ox1 = DIV_F(gx, p->ratioX), oy0 = DIV_F(fy, p->ratioY), oy1 = DIV_F(gy, p->ratioY);
+    const SpvId d2[4] = {ADD_F(MUL_F(ox0, ox0), MUL_F(oy0, oy0)), ADD_F(MUL_F(ox1, ox1), MUL_F(oy0, oy0)), ADD_F(MUL_F(ox0, ox0), MUL_F(oy1, oy1)), ADD_F(MUL_F(ox1, ox1), MUL_F(oy1, oy1))};
+    const SpvId c[4] = {c00, c10, c01, c11};
+    SpvId near = FLOAT(0.f), fresh = same3(s, 0.f);
+    for (int k = 0; k < 4; ++k) {
+        SpvId one = SUB_F(FLOAT(1.f), d2[k]);
+        SpvId w = PICK_F(P_LESS(d2[k], FLOAT(1.f)), MUL_F(one, one), FLOAT(0.f));
+        near = ADD_F(near, w);
+        fresh = ADD_V3(fresh, SCALE_V3(spvShuffle3(s, c[k]), w));
+    }
+    SpvId gain = DIV_F(FLOAT(.1f), MUL_F(p->ratioX, p->ratioY));
+    SpvId share = MIN_F(MUL_F(near, gain), FLOAT(1.f)), each = PICK_F(P_MORE(near, FLOAT(0.f)), DIV_F(FLOAT(1.f), MAX_F(near, FLOAT(1e-30f))), FLOAT(0.f));
+    /* the box, of the nearest sample's neighbours */
+    SpvId nearX = PICK_F(P_LESS(fx, FLOAT(.5f)), bx, ADD_F(bx, FLOAT(1.f))), nearY = PICK_F(P_LESS(fy, FLOAT(.5f)), by, ADD_F(by, FLOAT(1.f)));
+    SpvId lo = same3(s, 3e38f), hi = same3(s, -3e38f);
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            SpvId qx = P_TOU(P_CLAMP(ADD_F(nearX, FLOAT((float)dx)), FLOAT(0.f), lastX)), qy = P_TOU(P_CLAMP(ADD_F(nearY, FLOAT((float)dy)), FLOAT(0.f), lastY));
+            SpvId q = spvShuffle3(s, postVec4(s, p, p->light, ADD_U(MUL_U(qy, p->sceneW), qx)));
+            lo = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, lo, q);
+            hi = spvGlsl2(s, SPV_GLSL_FMax, s->vec3, hi, q);
+        }
+    SpvId was = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, postTap(s, p, p->history, UINT(0), p->width, p->height, sx, sy)), lo), hi);
+    SpvId fresher = SCALE_V3(fresh, each);
+    SpvId gathered = P_MIX3(was, fresher, share);
+    SpvId gatheredFrom = s->block;
+    spvIfEnd(s, followMerge);
+    SpvId got = spvPhi(s, s->vec3, gathered, gatheredFrom, spatialRgb, before);
+    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, got, W(spatial)));
+POST_FINISH()
+
+/* ---- sharpening: as sharpenRow, into the second light ---- */
+POST_MAIN(artfShaderPostSharpen)
+    SpvId main = spvBeginMain(s);
+    postFrameSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    SpvId amount = Z(frameVec(s, &p->r, F_OUTPUT));
+    SpvId lastX = SUB_U(p->width, UINT(1)), lastY = SUB_U(p->height, UINT(1));
+    SpvId up = spvSelect(s, s->uintType, spvOp2(s, 170, s->boolType, y, UINT(0)), y, SUB_U(y, UINT(1))), down = spvGlsl2(s, 38, s->uintType, ADD_U(y, UINT(1)), lastY);
+    SpvId left = spvSelect(s, s->uintType, spvOp2(s, 170, s->boolType, x, UINT(0)), x, SUB_U(x, UINT(1))), right = spvGlsl2(s, 38, s->uintType, ADD_U(x, UINT(1)), lastX);
+    SpvId here = postVec4(s, p, p->light, i);
+    const SpvId around[4] = {postVec4(s, p, p->light, ADD_U(MUL_U(up, p->width), x)), postVec4(s, p, p->light, ADD_U(MUL_U(down, p->width), x)),
+                             postVec4(s, p, p->light, ADD_U(MUL_U(y, p->width), left)), postVec4(s, p, p->light, ADD_U(MUL_U(y, p->width), right))};
+    SpvId h = spvShuffle3(s, here), lo = h, hi = h, sum = same3(s, 0.f);
+    for (int k = 0; k < 4; ++k) {
+        SpvId t = spvShuffle3(s, around[k]);
+        lo = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, lo, t);
+        hi = spvGlsl2(s, SPV_GLSL_FMax, s->vec3, hi, t);
+        sum = ADD_V3(sum, t);
+    }
+    SpvId sharper = ADD_V3(h, SCALE_V3(SUB_V3(h, SCALE_V3(sum, FLOAT(.25f))), amount));
+    sharper = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, sharper, lo), hi);
+    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, sharper, W(here)));
 POST_FINISH()
 
 /* ---- depth of field: as focusRow, into the second light ---- */
@@ -515,7 +788,7 @@ POST_MAIN(artfShaderPostFocus)
                                       {.95f, 0}, {.82f, .48f}, {.48f, .82f}, {0, .95f}, {-.48f, .82f}, {-.82f, .48f}, {-.95f, 0}, {-.82f, -.48f}, {-.48f, -.82f},
                                       {0, -.95f}, {.48f, -.82f}, {.82f, -.48f}, {.3f, .3f}, {-.3f, .1f}, {.1f, -.3f}};
     SpvId main = spvBeginMain(s);
-    postSizes(s, p);
+    postFrameSizes(s, p);
     SpvId i, x, y, merge;
     postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
     SpvId xf = TO_F(x), yf = TO_F(y);
@@ -611,7 +884,7 @@ uint32_t* artfShaderPostMeter(size_t* size) {
     SpvId main = spvBeginMain(s);
     SpvId ptrFnF = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptrFnU = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
     SpvId sumVar = spvVariable(s, ptrFnF, SPV_STORAGE_Function), weightVar = spvVariable(s, ptrFnF, SPV_STORAGE_Function), counter = spvVariable(s, ptrFnU, SPV_STORAGE_Function);
-    postSizes(s, p);
+    postFrameSizes(s, p);
     SpvId i = spvExtract(s, s->uintType, spvLoad(s, p->uvec3, p->global), 0);
     SpvId merge;
     spvIfBegin(s, spvOp2(s, 170 /* OpIEqual */, s->boolType, i, UINT(0)), &merge);
@@ -666,7 +939,7 @@ uint32_t* artfShaderPostMeter(size_t* size) {
 
 POST_MAIN(artfShaderPostBloomDown)
     SpvId main = spvBeginMain(s);
-    postSizes(s, p);
+    postFrameSizes(s, p);
     SpvId level = postPush(s, p);
     SpvId start, w, h, aboveStart, aboveW, aboveH;
     postLevel(s, p, level, &start, &w, &h);
@@ -691,7 +964,7 @@ POST_FINISH()
 
 POST_MAIN(artfShaderPostBloomUp)
     SpvId main = spvBeginMain(s);
-    postSizes(s, p);
+    postFrameSizes(s, p);
     SpvId level = postPush(s, p);
     SpvId start, w, h, belowStart, belowW, belowH;
     postLevel(s, p, level, &start, &w, &h);
@@ -714,7 +987,7 @@ uint32_t* artfShaderPostFinal(size_t* size) {
     SpvId outColor = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
     spvDecorate(s, outColor, SPV_DECORATE_Location, 0);
     SpvId main = spvBeginMain(s);
-    postSizes(s, p);
+    postFrameSizes(s, p);
     SpvId coord = spvLoad(s, s->vec4, fragCoord);
     SpvId x = P_TOU(FLOOR_F(X(coord))), y = P_TOU(FLOOR_F(Y(coord)));
     SpvId light = postVec4(s, p, p->light, ADD_U(MUL_U(y, p->width), x));

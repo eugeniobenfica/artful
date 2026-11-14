@@ -6,7 +6,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   pixel's depth, up to eight in a pixel, at 96 bytes a pixel on the GPU. A layer shows only its nearest surface. Tracing
   has neither limit.
 - Antialiasing is four samples, or none, and it smooths edges only: what a texture or a highlight does
-  inside a triangle is not sampled again. There is no upscaling: the frame is drawn at its size.
+  inside a triangle is not sampled again. Upscaling (`renderScale`) needs a frame in floats, and temporal antialiasing to
+  be more than reading between pixels; it gathers 16 places within a pixel, so what is very thin flickers below .5.
 - When tracing, a light is a point unless it has a size (`artfLightSetSize`), and those past the sixteen are points;
   glass has no Fresnel of its own, nor color. It reads textures in their largest mipmap. Black holes stay behind
   everything and do not bend what is traced. Without `denoise`, a scene that moves starts over each frame; with it,
@@ -25,9 +26,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - A frame in floats (`hdr`): layers go by their centers. With four samples, what comes after reads the first sample's
   depth and surface. Reflections see only what the frame shows: what is off screen or behind something is not
   reflected, and the light from all around stays there instead. Ambient occlusion reads depth, not geometry: thin
-  things and their backs are guessed. Temporal antialiasing and motion blur follow instances, not what bones bend,
-  which leaves a trail where its history does not fit. Motion blur takes eight points over at most 32 pixels, and
-  spreads what is behind a moving thing over its edge, as it spreads the thing.
+  things and their backs are guessed. On the GPU, what bones and targets bend is followed by the vertices it had, in
+  the bits of the box it had then: the frame its box grows, it moves as its instance does. Motion blur takes 12 points
+  over at most 32 pixels, and what is behind a moving thing at its edge is guessed from what is around it.
 - Auto exposure meters 576 points of the frame, not all of it, and has no histogram to leave out its brightest and
   darkest: a small, very bright light in the middle of a dark frame darkens it more than a camera would. The black hole keeps its own exposure and tone mapping. Fog that
   light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is
@@ -47,14 +48,14 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   than a real one. It is a picture of all around, so its sun is not a disc in it, and it is made again, in tens of
   milliseconds, when the sun moves. Fog by height thins fog that light goes through, not the plain fog.
 - Lights' sizes count for the sixteen lights the frame holds. Soft shadows (`ArtfShadowDesc.soft`) take 50 reads a
-  pixel and light; their penumbra is at most 12 texels wide, and lights past the sixteen and fog that light goes
+  pixel and light, 13 with temporal antialiasing (gathered over frames, so they settle in a few); their penumbra is at most 12 texels wide, and lights past the sixteen and fog that light goes
   through keep sharp ones.
 - What is too small to see (`artfSceneSetCullSize`) goes by an instance's bounding ball: a long thin thing seen end on
   counts as large.
 - A terrain's layers are a material in C, with one set of texture coordinates; what is scattered over it is placed
   once, and does not follow if the heights change.
 - On the GPU, turning probes, their walls or fog that light goes through on or off makes the scene's pixel shaders
-  again: that frame waits for them.
+  again, and turning temporal antialiasing or motion blur on or off its passes and pipelines: that frame waits for them.
 - Decals are tested against each drawn pixel, all of those in view: dozens are cheap, hundreds cost. They go on what is
   solid, not on what blends, and read one mipmap, chosen for the box's distance.
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual

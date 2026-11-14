@@ -1404,6 +1404,9 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->fogBase = s->fogBase;
     out->fogFalloff = s->fogFalloff;
     out->motionBlur = artfClampf(p->motionBlur, 0, 1);
+    out->output[0] = (float)width;
+    out->output[1] = (float)height;
+    out->output[2] = artfClampf(p->sharpen, 0, 1);
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;
     {

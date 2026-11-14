@@ -21,7 +21,7 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_SIZE = 104 };
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_OUTPUT = 104, F_SIZE = 105 };
 
 typedef struct Resources {
     SpvId frame, instances, visible, meshes, materials, indirect, hiz, flags, environment;
@@ -638,12 +638,14 @@ uint32_t* artfShaderHiz(size_t* size, bool fromDepth, int samples) {
 
 /* ---- the scene: vertices ---- */
 
-uint32_t* artfShaderSceneVertex(size_t* size) {
+uint32_t* artfShaderSceneVertex(size_t* size, bool motion) {
     Spv b, *s = &b;
     spvInit(s);
     Resources r;
     declare(s, &r, false);
     SpvId colors = spvResource(s, blockOf(s, r.uintArray, false), SPV_STORAGE_StorageBuffer, 16);
+    /* (with motion: what the vertices were a frame ago, as they are in the vertex buffer, for what a pose bent) */
+    SpvId pastVertices = motion ? spvResource(s, blockOf(s, r.uintArray, false), SPV_STORAGE_StorageBuffer, 65) : 0;
 
     SpvId ptrIn4 = spvTypePointer(s, SPV_STORAGE_Input, s->vec4), ptrIn2 = spvTypePointer(s, SPV_STORAGE_Input, s->vec2), ptrInInt = spvTypePointer(s, SPV_STORAGE_Input, s->intType);
     SpvId aPosition = spvVariable(s, ptrIn4, SPV_STORAGE_Input), aNormal = spvVariable(s, ptrIn2, SPV_STORAGE_Input), aUv = spvVariable(s, ptrIn2, SPV_STORAGE_Input);
@@ -679,6 +681,11 @@ uint32_t* artfShaderSceneVertex(size_t* size) {
     SpvId vInstance = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->uintType), SPV_STORAGE_Output);
     spvDecorate(s, vInstance, SPV_DECORATE_Location, 7);
     spvDecorate(s, vInstance, SPV_DECORATE_Flat, -1);
+    SpvId vPast = 0;
+    if (motion) {
+        vPast = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
+        spvDecorate(s, vPast, SPV_DECORATE_Location, 8);
+    }
 
     SpvId main = spvBeginMain(s);
     /* the copy drawn is this instance */
@@ -732,10 +739,36 @@ uint32_t* artfShaderSceneVertex(size_t* size) {
     SpvId opacity = DIV_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, opacityBits), FLOAT(65535.f));
     spvStore(s, vColor, vec4Of(s, MUL_V3(rgb, rgb), W(bgra)));
     spvStore(s, vOpacity, opacity);
+    if (motion) {
+        /* where a vertex that a pose moved was: its place a frame ago, through its instance as it was (the motion's rows,
+         * after the instances, four each: the fourth says it was bent) and the view before. The instance's top bit says
+         * so to the pixels, which read this only then. */
+        SpvId moving = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Y(frameVec(s, &r, F_CULL)), FLOAT(0.f)), movingMerge;
+        spvIfBegin(s, moving, &movingMerge);
+        SpvId row = ADD_U(MUL_U(AS_UINT(Y(frameVec(s, &r, F_COUNTS))), UINT(4)), MUL_U(id, UINT(4)));
+        SpvId bentMerge;
+        spvIfBegin(s, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, X(bufferVec(s, &r, r.instances, ADD_U(row, UINT(3)))), FLOAT(0.f)), &bentMerge);
+        SpvId word0 = spvLoad(s, s->uintType, bufferUintPtr(s, &r, pastVertices, MUL_U(vertex, UINT(4))));
+        SpvId word1 = spvLoad(s, s->uintType, bufferUintPtr(s, &r, pastVertices, ADD_U(MUL_U(vertex, UINT(4)), UINT(1))));
+        SpvId unit = vec3Of(s, spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, word0, UINT(65535))),
+                            spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, word0, UINT(16))),
+                            spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, word1, UINT(65535))));
+        SpvId was = ADD_V3(MUL_V3(SCALE_V3(unit, FLOAT(1.f / 65535.f)), scale), offset);
+        SpvId was4 = vec4Of(s, was, FLOAT(1.f));
+        SpvId w4 = vec4Of(s, vec3Of(s, DOT4(r0, was4), DOT4(r1, was4), DOT4(r2, was4)), FLOAT(1.f));
+        SpvId m0 = bufferVec(s, &r, r.instances, row), m1 = bufferVec(s, &r, r.instances, ADD_U(row, UINT(1))), m2 = bufferVec(s, &r, r.instances, ADD_U(row, UINT(2)));
+        SpvId before = vec3Of(s, DOT4(m0, w4), DOT4(m1, w4), DOT4(m2, w4));
+        SpvId pastClip = ADD_V4(ADD_V4(SCALE_V4(frameVec(s, &r, F_PREVIOUS), X(before)), SCALE_V4(frameVec(s, &r, F_PREVIOUS + 1), Y(before))),
+                                ADD_V4(SCALE_V4(frameVec(s, &r, F_PREVIOUS + 2), Z(before)), frameVec(s, &r, F_PREVIOUS + 3)));
+        spvStore(s, vPast, vec4Of(s, vec3Of(s, X(pastClip), Y(pastClip), W(pastClip)), FLOAT(1.f)));
+        spvStore(s, vInstance, spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, id, UINT(ARTF_MOTION_VECTOR)));
+        spvIfEnd(s, bentMerge);
+        spvIfEnd(s, movingMerge);
+    }
     spvEndMain(s);
 
-    const SpvId interface[14] = {aPosition, aNormal, aUv, instanceIndex, vertexIndex, outVertex, vWorld, vNormal, vUv, vMaterial, vColor, vOpacity, vFade, vInstance};
-    spvEntryPoint(s, SPV_MODEL_Vertex, main, interface, 14);
+    const SpvId interface[15] = {aPosition, aNormal, aUv, instanceIndex, vertexIndex, outVertex, vWorld, vNormal, vUv, vMaterial, vColor, vOpacity, vFade, vInstance, vPast};
+    spvEntryPoint(s, SPV_MODEL_Vertex, main, interface, motion ? 15 : 14);
     return finish(s, size);
 }
 
@@ -846,7 +879,8 @@ static void emitGraphs(Spv* s, const Resources* r, const ArtfGraphData* graphs, 
 enum { S_SPLITS = 0, S_SUN = 1, S_LIGHTS = 2, S_VIEWS = 18, S_VIEW_ROWS = 7, S_INFO = 4, S_PLACE = 5, S_SIZE = 6, S_EXTRA = S_VIEWS + ARTF_SHADOW_VIEWS * S_VIEW_ROWS,
        S_ROWS = S_EXTRA + ARTF_SHADOW_EXTRA };
 
-typedef struct Shadows { SpvId block, atlas, imageType, sampled, ivec2; const Resources* r; } Shadows;
+/* turning: soft shadows take shadows.c's fewer reads, turned by turn (artfShadowTurn), where it holds; 0: never. */
+typedef struct Shadows { SpvId block, atlas, imageType, sampled, ivec2; const Resources* r; SpvId turning, turn; } Shadows;
 
 static SpvId shadowRow(Spv* s, const Shadows* h, SpvId row) {
     const SpvId idx[2] = {h->r->zero, row};
@@ -880,6 +914,7 @@ static SpvId shadowLookup(Spv* s, const Shadows* h, SpvId view, SpvId place) {
     return spvSelect(s, s->floatType, inside, MUL_F(lit, FLOAT(1.f / 9.f)), FLOAT(1.f));
 }
 
+#define P_NOT_TURNING(b) spvOp1(s, SPV_OP_LogicalNot, s->boolType, b)
 /* As lookUpSoft in shadows.c: soft by the light's size (0: shadowLookup's nine texels). */
 static SpvId shadowLookupSoft(Spv* s, const Shadows* h, SpvId view, SpvId place, SpvId lightSize, bool sun) {
     SpvId base = ADD_U(UINT(S_VIEWS), MUL_U(view, UINT(S_VIEW_ROWS)));
@@ -895,37 +930,79 @@ static SpvId shadowLookupSoft(Spv* s, const Shadows* h, SpvId view, SpvId place,
     SpvId image = spvLoad(s, h->sampled, h->atlas);
 #define SOFT_TAP(fu, fv) X(spvImageFetch(s, h->imageType, image, spvCompose(s, h->ivec2, (const SpvId[2]){spvOp1(s, SPV_OP_ConvertFToS, s->intType, ADD_F(MIN_F(MAX_F(spvGlsl1(s, SPV_GLSL_Floor, s->floatType, fu), FLOAT(0.f)), last), X(info))), \
                                                                                                  spvOp1(s, SPV_OP_ConvertFToS, s->intType, ADD_F(MIN_F(MAX_F(spvGlsl1(s, SPV_GLSL_Floor, s->floatType, fv), FLOAT(0.f)), last), Y(info)))}, 2)))
-    SpvId blockers = FLOAT(0.f), count = FLOAT(0.f);
-    for (int dy = -2; dy <= 2; ++dy)
-        for (int dx = -2; dx <= 2; ++dx) {
-            SpvId there = SOFT_TAP(ADD_F(u, FLOAT((float)dx * 3.f)), ADD_F(v, FLOAT((float)dy * 3.f)));
-            SpvId in = spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, there, depth);
-            blockers = ADD_F(blockers, spvSelect(s, s->floatType, in, there, FLOAT(0.f)));
-            count = ADD_F(count, spvSelect(s, s->floatType, in, FLOAT(1.f), FLOAT(0.f)));
-        }
-    SpvId blocker = DIV_F(blockers, MAX_F(count, FLOAT(1.f)));
-    SpvId spread;
-    if (sun) {
-        spread = DIV_F(DIV_F(MUL_F(lightSize, SUB_F(depth, blocker)), spvGlsl1(s, SPV_GLSL_Length, s->floatType, spvShuffle3(s, r2))), Z(info));
-    } else {
-        SpvId row3 = spvShuffle3(s, r3);
-        SpvId a = DIV_F(DOT3(spvShuffle3(s, r2), row3), DOT3(row3, row3)), b = SUB_F(W(r2), MUL_F(a, W(r3)));
-        SpvId wb = DIV_F(b, MIN_F(SUB_F(blocker, a), FLOAT(-1e-12f)));
-        spread = DIV_F(MUL_F(lightSize, SUB_F(cw, wb)), MUL_F(MUL_F(MAX_F(wb, FLOAT(1e-6f)), Z(info)), cw));
+#define SOFT_SPREAD(blocker)                                                                                                                                       \
+    (sun ? DIV_F(DIV_F(MUL_F(lightSize, SUB_F(depth, blocker)), spvGlsl1(s, SPV_GLSL_Length, s->floatType, spvShuffle3(s, r2))), Z(info))                          \
+         : DIV_F(MUL_F(lightSize, SUB_F(cw, DIV_F(b, MIN_F(SUB_F(blocker, a), FLOAT(-1e-12f))))), MUL_F(MUL_F(MAX_F(DIV_F(b, MIN_F(SUB_F(blocker, a), FLOAT(-1e-12f))), FLOAT(1e-6f)), Z(info)), cw)))
+    SpvId row3 = spvShuffle3(s, r3);
+    SpvId a = sun ? 0 : DIV_F(DOT3(spvShuffle3(s, r2), row3), DOT3(row3, row3)), b = sun ? 0 : SUB_F(W(r2), MUL_F(a, W(r3)));
+    /* with temporal antialiasing: 2 x 2 reads to find what is in the way and 3 x 3 to filter, moved within their squares
+     * (as lookUpSoft) */
+    SpvId fewer = FLOAT(1.f), fewerCount = FLOAT(0.f);
+    if (h->turning) {
+        SpvId before = s->block, merge;
+        spvIfBegin(s, h->turning, &merge);
+        SpvId jx = SUB_F(MUL_F(ADD_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, h->turn, UINT(3))), FLOAT(.5f)), FLOAT(.25f)), FLOAT(.5f));
+        SpvId jy = SUB_F(MUL_F(ADD_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, h->turn, UINT(2))), FLOAT(.5f)), FLOAT(.25f)), FLOAT(.5f));
+        SpvId blockers = FLOAT(0.f), count = FLOAT(0.f);
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx) {
+                SpvId there = SOFT_TAP(ADD_F(u, MUL_F(ADD_F(FLOAT((float)dx - .5f), jx), FLOAT(6.f))), ADD_F(v, MUL_F(ADD_F(FLOAT((float)dy - .5f), jy), FLOAT(6.f))));
+                SpvId in = spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, there, depth);
+                blockers = ADD_F(blockers, spvSelect(s, s->floatType, in, there, FLOAT(0.f)));
+                count = ADD_F(count, spvSelect(s, s->floatType, in, FLOAT(1.f), FLOAT(0.f)));
+            }
+        SpvId blocker = DIV_F(blockers, MAX_F(count, FLOAT(1.f)));
+        SpvId spread = MUL_F(MIN_F(MAX_F(SOFT_SPREAD(blocker), FLOAT(1.f)), FLOAT(12.f)), FLOAT(.5f));
+        SpvId cell = MUL_F(spread, FLOAT(4.f / 3.f));
+        SpvId lit = FLOAT(0.f);
+        for (int dy = 0; dy < 3; ++dy)
+            for (int dx = 0; dx < 3; ++dx) {
+                SpvId there = SOFT_TAP(ADD_F(u, MUL_F(ADD_F(FLOAT((float)dx - 1.f), jx), cell)), ADD_F(v, MUL_F(ADD_F(FLOAT((float)dy - 1.f), jy), cell)));
+                lit = ADD_F(lit, spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, depth, there), FLOAT(1.f), FLOAT(0.f)));
+            }
+        SpvId got = MUL_F(lit, FLOAT(1.f / 9.f));
+        SpvId from = s->block;
+        spvIfEnd(s, merge);
+        fewer = spvPhi(s, s->floatType, got, from, FLOAT(1.f), before);
+        fewerCount = spvPhi(s, s->floatType, count, from, FLOAT(0.f), before);
     }
-    spread = MUL_F(MIN_F(MAX_F(spread, FLOAT(1.f)), FLOAT(12.f)), FLOAT(.5f));
-    SpvId lit = FLOAT(0.f);
-    for (int dy = -2; dy <= 2; ++dy)
-        for (int dx = -2; dx <= 2; ++dx) {
-            SpvId there = SOFT_TAP(ADD_F(u, MUL_F(FLOAT((float)dx), spread)), ADD_F(v, MUL_F(FLOAT((float)dy), spread)));
-            lit = ADD_F(lit, spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, depth, there), FLOAT(1.f), FLOAT(0.f)));
+    /* without: all 50, the same every frame */
+    SpvId steady = 0, steadyCount = 0;
+    {
+        SpvId before = s->block, merge = 0;
+        if (h->turning) spvIfBegin(s, P_NOT_TURNING(h->turning), &merge);
+        SpvId blockers = FLOAT(0.f), count = FLOAT(0.f);
+        for (int dy = -2; dy <= 2; ++dy)
+            for (int dx = -2; dx <= 2; ++dx) {
+                SpvId there = SOFT_TAP(ADD_F(u, FLOAT((float)dx * 3.f)), ADD_F(v, FLOAT((float)dy * 3.f)));
+                SpvId in = spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, there, depth);
+                blockers = ADD_F(blockers, spvSelect(s, s->floatType, in, there, FLOAT(0.f)));
+                count = ADD_F(count, spvSelect(s, s->floatType, in, FLOAT(1.f), FLOAT(0.f)));
+            }
+        SpvId blocker = DIV_F(blockers, MAX_F(count, FLOAT(1.f)));
+        SpvId spread = MUL_F(MIN_F(MAX_F(SOFT_SPREAD(blocker), FLOAT(1.f)), FLOAT(12.f)), FLOAT(.5f));
+        SpvId lit = FLOAT(0.f);
+        for (int dy = -2; dy <= 2; ++dy)
+            for (int dx = -2; dx <= 2; ++dx) {
+                SpvId there = SOFT_TAP(ADD_F(u, MUL_F(FLOAT((float)dx), spread)), ADD_F(v, MUL_F(FLOAT((float)dy), spread)));
+                lit = ADD_F(lit, spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, depth, there), FLOAT(1.f), FLOAT(0.f)));
+            }
+        steady = MUL_F(lit, FLOAT(1.f / 25.f));
+        steadyCount = count;
+        if (h->turning) {
+            SpvId from = s->block;
+            spvIfEnd(s, merge);
+            steady = spvPhi(s, s->floatType, steady, from, fewer, before);
+            steadyCount = spvPhi(s, s->floatType, steadyCount, from, fewerCount, before);
         }
+    }
+#undef SOFT_SPREAD
 #undef SOFT_TAP
     SpvId zero = FLOAT(0.f);
     SpvId inU = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, u, zero), spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, u, size));
     SpvId inV = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, v, zero), spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, v, size));
     SpvId inside = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, inU, inV), spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, cw, zero));
-    SpvId soft = spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, count, FLOAT(0.f)), MUL_F(lit, FLOAT(1.f / 25.f)), FLOAT(1.f));
+    SpvId soft = spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, steadyCount, FLOAT(0.f)), steady, FLOAT(1.f));
     SpvId got = spvSelect(s, s->floatType, inside, soft, FLOAT(1.f));
     /* (no size: the nine texels, as drawn without) */
     return spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, lightSize, FLOAT(0.f)), got, shadowLookup(s, h, view, place));
@@ -1108,6 +1185,12 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         outSurface = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, spvTypeVector(s, s->uintType, 2)), SPV_STORAGE_Output);
         spvDecorate(s, outSurface, SPV_DECORATE_Location, 1);
     }
+    /* (what a pose bent: where it was, through the view before, from the vertex shader; w above 0 when it was bent) */
+    SpvId vPast = 0;
+    if (hdr && !lists) {
+        vPast = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->vec4), SPV_STORAGE_Input);
+        spvDecorate(s, vPast, SPV_DECORATE_Location, 8);
+    }
 
     SpvId main = spvBeginMain(s);
     SpvId ptrFn3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3), ptrFnUint = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
@@ -1130,6 +1213,20 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
 
     SpvId world = spvLoad(s, s->vec3, vWorld);
     SpvId n = NORMALIZE(spvLoad(s, s->vec3, vNormal));
+    if (softShadows && hdr) {
+        /* with temporal antialiasing, soft shadows turn by the pixel and the frame: as artfShadowTurn */
+        SpvId coord = spvLoad(s, s->vec4, pixelCoord);
+        SpvId px = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(coord)), py = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(coord));
+        SpvId a0 = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, px, UINT(1)), b0 = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, py, UINT(1));
+        SpvId a1 = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, px, UINT(1)), UINT(1));
+        SpvId b1 = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, py, UINT(1)), UINT(1));
+#define BAYER2(a, b) spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, spvOp2(s, SPV_OP_ShiftLeftLogical, s->uintType, spvOp2(s, SPV_OP_BitwiseXor, s->uintType, a, b), UINT(1)), b)
+        SpvId pattern = ADD_U(MUL_U(BAYER2(a0, b0), UINT(4)), BAYER2(a1, b1));
+#undef BAYER2
+        SpvId number = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_OUTPUT)));
+        shadows.turn = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, ADD_U(pattern, MUL_U(number, UINT(7))), UINT(15));
+        shadows.turning = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, W(frameVec(s, &r, F_POST + 1)), FLOAT(0.f));
+    }
     SpvId front = 0;
     if (cutout) {
         /* (a back is lit as a front) */
@@ -1586,13 +1683,36 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId lum3 = vec3Of(s, FLOAT(.3f), FLOAT(.59f), FLOAT(.11f));
         SpvId around = DOT3(aroundLit, lum3);
         SpvId share = DIV_F(MUL_F(around, airLeft), MAX_F(DOT3(lit, lum3), FLOAT(1e-6f)));
-        const SpvId surfaceParts[2] = {packSurfaceSpv(s, n, rough, metal, share), ADD_U(spvLoad(s, s->uintType, vInstance), UINT(1))};
+        /* the second word: the instance + 1, or for what a pose bent, where it was (as kernels.inc's pixelMotion) */
+        SpvId who = spvLoad(s, s->uintType, vInstance);
+        SpvId instanceWord = ADD_U(spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, who, UINT(~ARTF_MOTION_VECTOR)), UINT(1));
+        SpvId bent = spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, who, UINT(ARTF_MOTION_VECTOR)), UINT(0));
+        SpvId before = s->block, bentMerge;
+        spvIfBegin(s, bent, &bentMerge);
+        SpvId past = spvLoad(s, s->vec4, vPast);
+        SpvId pastAt = vec3Of(s, X(past), Y(past), Z(past));
+        SpvId pixel = spvLoad(s, s->vec4, pixelCoord), jitter = frameVec(s, &r, F_POST + 2);
+        SpvId sceneW = W(frameVec(s, &r, F_FOG)), sceneH = W(frameVec(s, &r, F_EYE + 1));
+        SpvId pastW = MAX_F(Z(pastAt), FLOAT(1e-5f));
+        SpvId pastX = SUB_F(MUL_F(ADD_F(MUL_F(DIV_F(X(pastAt), pastW), FLOAT(.5f)), FLOAT(.5f)), sceneW), FLOAT(.5f));
+        SpvId pastY = SUB_F(MUL_F(SUB_F(FLOAT(.5f), MUL_F(DIV_F(Y(pastAt), pastW), FLOAT(.5f))), sceneH), FLOAT(.5f));
+        SpvId movedX = SUB_F(pastX, SUB_F(SUB_F(X(pixel), FLOAT(.5f)), Z(jitter))), movedY = SUB_F(pastY, ADD_F(SUB_F(Y(pixel), FLOAT(.5f)), W(jitter)));
+        SpvId behind = spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, Z(pastAt), FLOAT(1e-5f));
+        movedX = spvSelect(s, s->floatType, behind, FLOAT(1e5f), movedX);
+        movedY = spvSelect(s, s->floatType, behind, FLOAT(1e5f), movedY);
+#define PACKED(d) spvOp1(s, SPV_OP_ConvertFToU, s->uintType, MIN_F(MAX_F(ADD_F(MUL_F(d, FLOAT(4.f)), FLOAT(16384.5f)), FLOAT(0.f)), FLOAT(32767.f)))
+        SpvId vector = spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, UINT(ARTF_MOTION_VECTOR), spvOp2(s, 197, s->uintType, PACKED(movedX), spvOp2(s, SPV_OP_ShiftLeftLogical, s->uintType, PACKED(movedY), UINT(15))));
+#undef PACKED
+        SpvId vectorFrom = s->block;
+        spvIfEnd(s, bentMerge);
+        SpvId word = spvPhi(s, s->uintType, vector, vectorFrom, instanceWord, before);
+        const SpvId surfaceParts[2] = {packSurfaceSpv(s, n, rough, metal, share), word};
         spvStore(s, outSurface, spvCompose(s, spvTypeVector(s, s->uintType, 2), surfaceParts, 2));
         spvEndMain(s);
-        const SpvId all[12] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, pixelCoord, vInstance};
-        SpvId hdrInterface[12];
+        const SpvId all[13] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, pixelCoord, vInstance, vPast};
+        SpvId hdrInterface[13];
         uint32_t used = 0;
-        for (int k = 0; k < 12; ++k)
+        for (int k = 0; k < 13; ++k)
             if (all[k]) hdrInterface[used++] = all[k];
         spvEntryPoint(s, SPV_MODEL_Fragment, main, hdrInterface, used);
         spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);

@@ -19,6 +19,8 @@
  *                 [--sun x y z]: where the sun shines, as a direction; [--sky [haze]]: a sky from the sun
  *                 [--fog-height base falloff]: fog that light goes through thins with height
  *                 [--indirect]: light that bounces, from probes, every frame; [--through-walls]: lighter, and it leaks
+ *                 [--render-scale s]: with --hdr, the scene drawn at s of the size and upscaled (with --temporal, as
+ *                 TSR does); [--sharpen x]: after temporal antialiasing or upscaling
  *
  * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
  *
@@ -431,6 +433,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--volumetric") && i + 1 < argc) post.volumetric = (float)atof(argv[++i]);
         else if (!strcmp(a, "--scattering") && i + 1 < argc) post.scattering = (float)atof(argv[++i]);
         else if (!strcmp(a, "--temporal")) post.temporal = true;
+        else if (!strcmp(a, "--render-scale") && i + 1 < argc) o.renderScale = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--sharpen") && i + 1 < argc) post.sharpen = (float)atof(argv[++i]);
         else if (!strcmp(a, "--tone") && i + 1 < argc) {
             const char* curve = argv[++i];
             post.toneMap = !strcmp(curve, "neutral") ? ARTF_TONE_NEUTRAL : !strcmp(curve, "reinhard") ? ARTF_TONE_REINHARD : !strcmp(curve, "none") ? ARTF_TONE_NONE : ARTF_TONE_ACES;

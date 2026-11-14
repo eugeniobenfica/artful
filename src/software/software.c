@@ -44,6 +44,8 @@ typedef struct Software {
     float previous[16];   /* the frame before's viewProj */
     ArtfMotion motion;    /* how each instance moved */
     bool hasPrevious;
+    int frameW, frameH;   /* the frame's size: the scene's, unless it is drawn smaller and upscaled */
+    float renderScale;    /* ArtfRendererOptions.renderScale, with a frame in floats; else 1 */
 } Software;
 
 #ifdef ARTFUL_HAVE_AVX2
@@ -92,8 +94,12 @@ static const ArtfKernels* chooseKernels(ArtfSimd simd) {
 
 /* ---- the size ---- */
 
-static void allocateTargets(Software* s, int width, int height) {
+static void allocateTargets(Software* s, int frameWidth, int frameHeight) {
     ArtfSoftFrame* f = &s->f;
+    s->frameW = frameWidth;
+    s->frameH = frameHeight;
+    /* (drawn smaller: the tiles and what they leave are the scene's size, and the frame is made whole after them) */
+    const int width = artfMaxi((int)((float)frameWidth * s->renderScale + .5f), 1), height = artfMaxi((int)((float)frameHeight * s->renderScale + .5f), 1);
     artfAlignedFree(s->pixels);
     artfFree(f->traceSum);
     f->traceSum = NULL;
@@ -105,8 +111,8 @@ static void allocateTargets(Software* s, int width, int height) {
     f->tilesX = (width + ARTF_TILE - 1) / ARTF_TILE;
     f->tilesY = (height + ARTF_TILE - 1) / ARTF_TILE;
     const size_t tiles = (size_t)f->tilesX * f->tilesY;
-    s->pixels = artfAlignedMalloc((size_t)width * height * 4, 64);
-    memset(s->pixels, 0, (size_t)width * height * 4);
+    s->pixels = artfAlignedMalloc((size_t)frameWidth * frameHeight * 4, 64);
+    memset(s->pixels, 0, (size_t)frameWidth * frameHeight * 4);
     f->pixels = s->pixels;
     for (int i = 0; i < ARTF_CHUNKS; ++i) {
         artfFree(f->chunks[i].heads);
@@ -127,7 +133,7 @@ static void allocateTargets(Software* s, int width, int height) {
         const size_t pixels = (size_t)width * height;
         for (int c = 0; c < 4; ++c) {
             artfFree(f->postLight[c]);
-            f->postLight[c] = artfCalloc(pixels, 4);
+            f->postLight[c] = artfCalloc((size_t)frameWidth * frameHeight, 4); /* (once upscaled, the frame's) */
         }
         artfFree(f->postDepth);
         artfFree(f->postSurface);
@@ -135,7 +141,7 @@ static void allocateTargets(Software* s, int width, int height) {
         f->postDepth = artfCalloc(pixels, 4);
         f->postSurface = artfCalloc(pixels, 4);
         f->postInstance = artfCalloc(pixels, 4);
-        artfSoftPostSize(&s->post, width, height);
+        artfSoftPostSize(&s->post, width, height, frameWidth, frameHeight);
         s->hasPrevious = false;
     }
     /* as far out as the integers of the rasterizer go */
@@ -145,7 +151,7 @@ static void allocateTargets(Software* s, int width, int height) {
 
 static void softResize(ArtfRenderer* r, int width, int height) {
     Software* s = (Software*)r;
-    if (width <= 0 || height <= 0 || (width == s->f.width && height == s->f.height)) return;
+    if (width <= 0 || height <= 0 || (width == s->frameW && height == s->frameH)) return;
     allocateTargets(s, width, height);
 }
 
@@ -155,6 +161,14 @@ static void softSetOverlay(ArtfRenderer* r, const ArtfOverlay* o) {
     Software* s = (Software*)r;
     ArtfSoftFrame* f = &s->f;
     const size_t tiles = (size_t)f->tilesX * f->tilesY;
+    if (s->renderScale < 1.f) {
+        /* (upscaled, it goes over the frame shown, after all the rest: tiles do not see it) */
+        s->post.overlay = o && o->pixels ? o->pixels : NULL;
+        s->post.overlayWidth = o ? o->width : 0;
+        s->post.overlayHeight = o ? o->height : 0;
+        s->post.overlayStride = o ? (o->stride ? o->stride : o->width) : 0;
+        return;
+    }
     if (!o || !o->pixels) {
         f->overlay = NULL;
         memset(f->tileDirty, 1, tiles);
@@ -586,13 +600,24 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         if (s->hasPrevious) memcpy(f->data.previous, s->previous, sizeof s->previous);
         memcpy(s->previous, now, sizeof now);
         s->hasPrevious = true;
+        f->data.output[3] = (float)s->postFrames;
         if (scene->post.temporal) artfFrameJitter(&f->data, s->postFrames++, f->width, f->height);
-        /* how each instance moved: for temporal antialiasing and motion blur */
+        f->data.output[0] = (float)s->frameW;
+        f->data.output[1] = (float)s->frameH;
+        /* how each instance moved, and the vertices of what bends: for temporal antialiasing and motion blur */
         f->motion = NULL;
+        f->motionBack = NULL;
         if (scene->post.temporal || scene->post.motionBlur > 0) {
-            artfMotionStep(&s->motion, scene);
+            artfMotionStep(&s->motion, scene, true);
             /* (nothing moved: the view alone says where each pixel was) */
             f->motion = s->motion.moving ? s->motion.motion : NULL;
+            f->motionBack = s->motion.moving ? s->motion.back : NULL;
+        }
+        if (s->renderScale >= 1.f) {
+            s->post.overlay = f->overlay;
+            s->post.overlayWidth = f->overlayWidth;
+            s->post.overlayHeight = f->overlayHeight;
+            s->post.overlayStride = f->overlayStride;
         }
     } else {
         memset(f->data.post, 0, sizeof f->data.post);
@@ -693,7 +718,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
 
 static bool softReadPixels(ArtfRenderer* r, uint32_t* dst) {
     Software* s = (Software*)r;
-    memcpy(dst, s->pixels, (size_t)s->f.width * s->f.height * 4);
+    memcpy(dst, s->pixels, (size_t)s->frameW * s->frameH * 4);
     return true;
 }
 
@@ -789,6 +814,7 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
     f->workers = artfCalloc((size_t)workers, sizeof *f->workers);
     f->samples = o->antialias ? 4 : 1;
     f->post = o->hdr;
+    s->renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
     s->post.pool = s->pool;
     const size_t planes = (size_t)ARTF_TILE_PIXELS * 4 * f->samples;
     /* (with a frame in floats, each color has its alpha and surface after it: see storeLit) */

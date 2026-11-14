@@ -285,7 +285,25 @@ typedef struct ArtfFrameData {
     float cullScale;
     float moving;       /* 1: something moved since the frame before, and the GPU has how (ArtfMotion); 0: the view alone */
     float cullPad[2];
+    /* The frame shown, when the scene is drawn smaller (ArtfRendererOptions.renderScale): its width and height (the
+     * scene's own when it is not), how much to sharpen it (ArtfPostDesc.sharpen), and the number of this frame, for
+     * patterns that turn from one frame to the next (soft shadows, with temporal antialiasing). */
+    float output[4];
 } ArtfFrameData;
+
+/* Of a pixel's second word of surface (what the GPU's surface target and the CPU's tiles leave when motion is
+ * followed): with this bit, where it was a frame ago, in quarter pixels of the scene's size, from where it is, its
+ * jitter taken out; 15 bits a way, x then y, each + 16384. Without, the instance that shows + 1 (0: none). What bones
+ * and targets bend moves by its vertices, so it says this. */
+#define ARTF_MOTION_VECTOR 0x80000000u
+ARTF_INLINE uint32_t artfMotionPack(float dx, float dy) {
+    const float x = artfClampf(dx * 4.f + 16384.5f, 0, 32767.f), y = artfClampf(dy * 4.f + 16384.5f, 0, 32767.f);
+    return ARTF_MOTION_VECTOR | (uint32_t)x | (uint32_t)y << 15;
+}
+ARTF_INLINE void artfMotionUnpack(uint32_t word, float* dx, float* dy) {
+    *dx = ((float)(word & 32767u) - 16384.f) * .25f;
+    *dy = ((float)(word >> 15 & 32767u) - 16384.f) * .25f;
+}
 
 /* A ball of this radius, this far from the eye, is too small to draw (ArtfFrameData.cullScale). */
 ARTF_INLINE bool artfTooSmall(const ArtfFrameData* f, float radius, float distance) { return f->cullScale > 0 && radius * f->cullScale < distance; }
@@ -320,16 +338,26 @@ ARTF_INLINE float artfFogHeight(const ArtfFrameData* f, float y) {
 }
 /* How each instance moved since the last step (motion.c): of each, twelve floats, the rows of what takes a point
  * of the world from where it is to where it was. A renderer keeps its own. */
+typedef struct ArtfMotionPose {
+    float* was;         /* where each of its mesh's vertices was, by the slots of its meshlets (positions'), three floats */
+    float* back;        /* from where each is to where it was at the step before */
+    uint32_t slots;
+    uint64_t version;   /* the mesh's deformVersion they are at */
+} ArtfMotionPose;
 typedef struct ArtfMotion {
     float* at;          /* by handle: where each was at the last step */
     uint8_t* there;     /* by handle: it was */
+    ArtfMotionPose* poses; /* by handle: what bones and targets moved, for those that bend */
     size_t handles;     /* room for so many */
     float* motion;      /* by instance */
+    uint8_t* bent;      /* by instance: a pose moved its vertices since the last step */
+    const float** back; /* by instance, with vertices: its pose's back, where bent; else NULL */
     size_t count, capacity;
     uint64_t scene, version; /* version: the motion changed */
     bool moving;
 } ArtfMotion;
-void artfMotionStep(ArtfMotion* m, const ArtfScene* s);
+/* vertices: what each vertex of what bends did, from the meshes' positions on the CPU (back); else only which bent. */
+void artfMotionStep(ArtfMotion* m, const ArtfScene* s, bool vertices);
 void artfMotionFree(ArtfMotion* m);
 
 /* sin and cos of any angle by polynomials, within 4e-6: the same bytes everywhere, as the C library's are not. */
