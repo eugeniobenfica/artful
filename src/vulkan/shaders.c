@@ -21,7 +21,7 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_SIZE = 104 };
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_TRACED = 104, F_SIZE = 105 };
 
 typedef struct Resources {
     SpvId frame, instances, visible, meshes, materials, indirect, hiz, flags, environment;
@@ -1036,19 +1036,34 @@ static SpvId lampShadowSpv(Spv* s, const Shadows* shadows, SpvId lamp, SpvId d, 
     return softSize ? shadowLookupSoft(s, shadows, lampView, place, softSize, false) : shadowLookup(s, shadows, lampView, place);
 }
 
+/* Rays while drawing, from the pixel shader: below, with the tracer's code. */
+typedef struct Tracer Tracer;
+static Tracer* tracerNew(void);
+static void tracerDeclare(Spv* s, Tracer* t, const Resources* r, SpvId textures, SpvId sampled, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware);
+static void tracerVariables(Tracer* t);
+static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index);
+
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant) {
     const bool hdr = variant & ARTF_SHADER_FLOATS, withProbes = variant & ARTF_SHADER_PROBES, walls = variant & ARTF_SHADER_WALLS, froxelsOn = hdr && variant & ARTF_SHADER_FROXELS;
     const bool coats = variant & ARTF_SHADER_COAT, softShadows = variant & ARTF_SHADER_SOFT;
+    const bool traced = variant & ARTF_SHADER_TRACED, rayQuery = traced && variant & ARTF_SHADER_RAY_QUERY;
     Spv b, *s = &b;
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    if (rayQuery) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
     spvExtension(s, "SPV_EXT_descriptor_indexing");
     Resources r;
     declare(s, &r, false);
 
     SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);
     SpvId textures = spvResource(s, spvTypeArray(s, sampled, maxTextures, 0), SPV_STORAGE_UniformConstant, 6);
+    /* shadows from rays (ArtfShadowDesc.traced): the trees, or the hardware */
+    Tracer* tracer = NULL;
+    if (traced) {
+        tracer = tracerNew();
+        tracerDeclare(s, tracer, &r, textures, sampled, graphs, graphCount, rayQuery);
+    }
     Shadows shadows = {spvResource(s, blockOf(s, spvTypeArray(s, s->vec4, S_ROWS, 16), true), SPV_STORAGE_Uniform, 24), spvResource(s, sampled, SPV_STORAGE_UniformConstant, 25), imageType, sampled, spvNewId(s), &r};
     spvEmit(&s->types, 23 /* OpTypeVector */, SPV_WORDS(shadows.ivec2, s->intType, 2));
     SpvId ptrIn3 = spvTypePointer(s, SPV_STORAGE_Input, s->vec3);
@@ -1110,6 +1125,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     }
 
     SpvId main = spvBeginMain(s);
+    if (tracer) tracerVariables(tracer);
     SpvId ptrFn3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3), ptrFnUint = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
     Accumulators acc = {spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function)};
     SpvId ptrFnFloat = spvTypePointer(s, SPV_STORAGE_Function, s->floatType);
@@ -1407,8 +1423,16 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId sunRow = shadowRow(s, &shadows, UINT(S_SUN)), splits = shadowRow(s, &shadows, UINT(S_SPLITS));
     spvStore(s, shadowed, FLOAT(1.f));
     SpvId sunCasts;
-    spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(X(sunRow)), UINT(0)), &sunCasts);
-    {
+    SpvId tracedCasts = traced ? AS_UINT(Y(frameVec(s, &r, F_TRACED))) : 0;
+    if (traced) {
+        /* from rays, where the sun reaches at all: as tracedLanes in kernels.inc */
+        SpvId reaches = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, DOT3(n, spvShuffle3(s, frameVec(s, &r, F_TOSUN))), FLOAT(0.f));
+        spvIfBegin(s, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, tracedCasts, UINT(ARTF_TRACED_SUN)), UINT(0)), reaches), &sunCasts);
+        spvStore(s, shadowed, tracedShadowSpv(tracer, world, n, true, 0));
+    } else {
+        spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(X(sunRow)), UINT(0)), &sunCasts);
+    }
+    if (!traced) {
         SpvId distance = spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(world, eye));
         SpvId past0 = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, distance, X(splits)), past1 = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, distance, Y(splits));
         SpvId past2 = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, distance, Z(splits));
@@ -1448,15 +1472,23 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(toLight, spvShuffle3(s, lightC))), W(lightC)), W(lightB));
         spot = MIN_F(MAX_F(spot, FLOAT(0.f)), FLOAT(1.f));
         /* its shadow: as artfShadowOfLight */
-        SpvId lamp = AS_UINT(X(shadowRow(s, &shadows, ADD_U(UINT(S_LIGHTS), i))));
         spvStore(s, shadowed, FLOAT(1.f));
         SpvId lampCasts;
-        spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, lamp, UINT(0)), &lampCasts);
-        {
-            SpvId lampSize = softShadows ? frameFloatAt(s, &r, ADD_U(UINT(F_LIGHT_SIZES), spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, i, UINT(2))), spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, i, UINT(3))) : 0;
-            spvStore(s, shadowed, lampShadowSpv(s, &shadows, lamp, d, d2, n, toLight, world, lampSize));
+        if (traced) {
+            /* from rays, where the light reaches at all */
+            SpvId casts = spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, tracedCasts, i), UINT(1)), UINT(0));
+            spvIfBegin(s, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, casts, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, MUL_F(fade, spot), FLOAT(0.f))), &lampCasts);
+            spvStore(s, shadowed, tracedShadowSpv(tracer, world, n, false, i));
+            spvIfEnd(s, lampCasts);
+        } else {
+            SpvId lamp = AS_UINT(X(shadowRow(s, &shadows, ADD_U(UINT(S_LIGHTS), i))));
+            spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, lamp, UINT(0)), &lampCasts);
+            {
+                SpvId lampSize = softShadows ? frameFloatAt(s, &r, ADD_U(UINT(F_LIGHT_SIZES), spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, i, UINT(2))), spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, i, UINT(3))) : 0;
+                spvStore(s, shadowed, lampShadowSpv(s, &shadows, lamp, d, d2, n, toLight, world, lampSize));
+            }
+            spvIfEnd(s, lampCasts);
         }
-        spvIfEnd(s, lampCasts);
         SpvId strength = MUL_F(MUL_F(MUL_F(fade, fade), spot), spvLoad(s, s->floatType, shadowed));
         /* a light with a size: its highlight from its point nearest the mirror ray, as nearestOfBall */
         SpvId size = frameFloatAt(s, &r, ADD_U(UINT(F_LIGHT_SIZES), spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, i, UINT(2))), spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, i, UINT(3)));
@@ -1596,6 +1628,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
             if (all[k]) hdrInterface[used++] = all[k];
         spvEntryPoint(s, SPV_MODEL_Fragment, main, hdrInterface, used);
         spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
+        artfFree(tracer);
         return finish(s, size);
     }
     lit = exposed(s, lit, X(look));
@@ -1641,6 +1674,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, used);
     spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
     if (lists) spvExecutionMode(s, main, 9 /* EarlyFragmentTests */, 0, 0, 0, 0);
+    artfFree(tracer);
     return finish(s, size);
 }
 
@@ -2468,6 +2502,8 @@ typedef struct Tracer {
     SpvId guideBits, guidePlace, guideColor, guideInstance, guideShift; /* what a pixel's first surface was */
     bool hardware;                 /* rays through the ray tracing hardware */
     SpvId accel, accelType, query; /* the top level, its type; the ray query, a variable of main */
+    /* rays while drawing: artfTracedBall, a table of the module's; what a pixel's rays to a light add up to, the ray */
+    SpvId ballTable, tracedSum, tracedRay;
 } Tracer;
 
 #define IS_EQ(a, b) spvOp2(s, 170 /* OpIEqual */, s->boolType, a, b)
@@ -2594,9 +2630,9 @@ static void hitMesh(const Tracer* t, SpvId instance, SpvId root, SpvId twoSided,
 }
 
 /* As closest, by the ray tracing hardware: a ray query through the top level, all of it taken as opaque (what shows
- * through is the path's business, as with the trees). An instance's id is its place among the traced ones, its custom
- * index its mesh's first triangle; fronts are counter-clockwise, as det > 0 has them, and backs are culled for what
- * has one side unless bothSides. */
+ * through is the path's business, as with the trees). An instance's id is its place among the traced ones, which the
+ * table of instances gives its mesh's first triangle by; fronts are counter-clockwise, as det > 0 has them, and backs
+ * are culled for what has one side unless bothSides. */
 static void closestHardware(const Tracer* t, SpvId o, SpvId d, SpvId limit, bool bothSides) {
     Spv* s = t->s;
     SpvId accel = spvLoad(s, t->accelType, t->accel);
@@ -2610,10 +2646,9 @@ static void closestHardware(const Tracer* t, SpvId o, SpvId d, SpvId limit, bool
     SpvId committed = spvConstInt(s, 1);
     SpvId kind = spvNewId(s);
     spvEmit(&s->code, 4479 /* OpRayQueryGetIntersectionTypeKHR */, SPV_WORDS(s->uintType, kind, t->query, committed));
-    SpvId hitT = spvNewId(s), instance = spvNewId(s), custom = spvNewId(s), primitive = spvNewId(s), bary = spvNewId(s);
+    SpvId hitT = spvNewId(s), instance = spvNewId(s), primitive = spvNewId(s), bary = spvNewId(s);
     spvEmit(&s->code, 6018 /* OpRayQueryGetIntersectionTKHR */, SPV_WORDS(s->floatType, hitT, t->query, committed));
     spvEmit(&s->code, 6020 /* OpRayQueryGetIntersectionInstanceIdKHR */, SPV_WORDS(s->intType, instance, t->query, committed));
-    spvEmit(&s->code, 6019 /* OpRayQueryGetIntersectionInstanceCustomIndexKHR */, SPV_WORDS(s->intType, custom, t->query, committed));
     spvEmit(&s->code, 6023 /* OpRayQueryGetIntersectionPrimitiveIndexKHR */, SPV_WORDS(s->intType, primitive, t->query, committed));
     spvEmit(&s->code, 6024 /* OpRayQueryGetIntersectionBarycentricsKHR */, SPV_WORDS(s->vec2, bary, t->query, committed));
     SpvId hit = NOT_EQ(kind, UINT(0));
@@ -2621,7 +2656,9 @@ static void closestHardware(const Tracer* t, SpvId o, SpvId d, SpvId limit, bool
     spvStore(s, t->bestU, spvExtract(s, s->floatType, bary, 0));
     spvStore(s, t->bestV, spvExtract(s, s->floatType, bary, 1));
     spvStore(s, t->bestInstance, spvSelect(s, s->uintType, hit, spvOp1(s, SPV_OP_Bitcast, s->uintType, instance), UINT(0xFFFFFFFFu)));
-    spvStore(s, t->bestTriangle, ADD_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, custom), spvOp1(s, SPV_OP_Bitcast, s->uintType, primitive)));
+    /* (the mesh's first triangle from the instance's table, past the custom index's 24 bits: bit 0 is its sides) */
+    SpvId meta = bufferVec(s, &t->r, t->instances, ADD_U(MUL_U(spvSelect(s, s->uintType, hit, spvOp1(s, SPV_OP_Bitcast, s->uintType, instance), UINT(0)), UINT(4)), UINT(3)));
+    spvStore(s, t->bestTriangle, ADD_U(SHR_U(AS_UINT(W(meta)), 1), spvOp1(s, SPV_OP_Bitcast, s->uintType, primitive)));
 }
 
 /* As closest: leaves what it found in bestT and the others. */
@@ -2657,7 +2694,7 @@ static void closest(const Tracer* t, SpvId o, SpvId d, SpvId limit, bool bothSid
         SpvId o4 = vec4Of(s, o, FLOAT(1.f));
         SpvId oo = vec3Of(s, DOT4(k0, o4), DOT4(k1, o4), DOT4(k2, o4));
         SpvId od = vec3Of(s, DOT3(spvShuffle3(s, k0), d), DOT3(spvShuffle3(s, k1), d), DOT3(spvShuffle3(s, k2), d));
-        hitMesh(t, i, AS_UINT(X(meta)), bothSides ? spvConstBool(s, true) : NOT_EQ(AS_UINT(W(meta)), UINT(0)), oo, od);
+        hitMesh(t, i, AS_UINT(X(meta)), bothSides ? spvConstBool(s, true) : NOT_EQ(AND_U(AS_UINT(W(meta)), UINT(1)), UINT(0)), oo, od);
         spvStore(s, t->leaf, ADD_U(i, UINT(1)));
         loopClose(s, &each);
     }
@@ -2827,6 +2864,135 @@ static void lightThrough(const Tracer* t, SpvId from, SpvId to, SpvId limit) {
     breakIf(s, &steps, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, left, FLOAT(0.f)));
     spvStore(s, t->shadowStep, ADD_U(LOAD_U(t->shadowStep), UINT(1)));
     loopClose(s, &steps);
+}
+
+/* ---- rays while drawing (ArtfShadowDesc.traced, ArtfPostDesc.tracedReflections): trace.c's artfTraced* ----
+ *
+ * A pixel shader or a pass after the frame follows rays through the same trees (or the hardware) as tracing, with
+ * the same code: what it needs is declared here. */
+
+/* artfTracedBall, as a table of the module's. */
+static SpvId tracedBallTable(Spv* s) {
+    uint32_t words[18];
+    SpvId array = spvTypeArray(s, s->vec3, 16, 0), pointer = spvTypePointer(s, 6 /* Private */, array);
+    for (int i = 0; i < 16; ++i) {
+        const SpvId c[3] = {FLOAT(artfTracedBall[i][0]), FLOAT(artfTracedBall[i][1]), FLOAT(artfTracedBall[i][2])};
+        words[2 + i] = spvNewId(s);
+        spvEmit(&s->types, 44 /* OpConstantComposite */, SPV_WORDS(s->vec3, words[2 + i], c[0], c[1], c[2]));
+    }
+    words[0] = array;
+    words[1] = spvNewId(s);
+    spvEmit(&s->types, 44, words, 18);
+    SpvId table = spvNewId(s);
+    spvEmit(&s->types, 59 /* OpVariable */, SPV_WORDS(pointer, table, 6, words[1]));
+    return table;
+}
+
+/* Before main: the trees' bindings, the top level with the hardware (its capability already asked for), and the
+ * table. textures and sampled: the shader's array of binding 6. */
+static void tracerDeclare(Spv* s, Tracer* t, const Resources* r, SpvId textures, SpvId sampled, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware) {
+    memset(t, 0, sizeof *t);
+    t->s = s;
+    t->r = *r;
+    t->textures = textures;
+    t->sampledType = sampled;
+    t->nodes = spvResource(s, blockOf(s, r->vec4Array, false), SPV_STORAGE_StorageBuffer, 17);
+    t->triangles = spvResource(s, blockOf(s, r->vec4Array, false), SPV_STORAGE_StorageBuffer, 18);
+    t->vertices = spvResource(s, blockOf(s, r->vec4Array, false), SPV_STORAGE_StorageBuffer, 19);
+    t->top = spvResource(s, blockOf(s, r->vec4Array, false), SPV_STORAGE_StorageBuffer, 20);
+    t->instances = spvResource(s, blockOf(s, r->vec4Array, false), SPV_STORAGE_StorageBuffer, 21);
+    t->hardware = hardware;
+    if (hardware) {
+        spvExtension(s, "SPV_KHR_ray_query");
+        t->accelType = spvTypeOpaque(s, 5341 /* OpTypeAccelerationStructureKHR */);
+        t->accel = spvResource(s, t->accelType, SPV_STORAGE_UniformConstant, 64);
+    }
+    t->graphs = graphs;
+    t->graphCount = graphCount;
+    t->ptrFnUint = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
+    t->ballTable = tracedBallTable(s);
+}
+
+/* First thing in main: what the walks and lightThrough keep. */
+static void tracerVariables(Tracer* t) {
+    Spv* s = t->s;
+    SpvId ptrStack = spvTypePointer(s, SPV_STORAGE_Function, spvTypeArray(s, s->uintType, ARTF_TRACE_STACK, 0)), ptrUint = t->ptrFnUint;
+    SpvId ptrFloat = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptrVec3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3);
+    t->stack = VAR(ptrStack); t->stack2 = VAR(ptrStack);
+    t->depth = VAR(ptrUint); t->at = VAR(ptrUint); t->pop = VAR(ptrUint); t->leaf = VAR(ptrUint);
+    t->depth2 = VAR(ptrUint); t->at2 = VAR(ptrUint); t->pop2 = VAR(ptrUint); t->leaf2 = VAR(ptrUint);
+    t->bestT = VAR(ptrFloat); t->bestU = VAR(ptrFloat); t->bestV = VAR(ptrFloat);
+    t->bestInstance = VAR(ptrUint); t->bestTriangle = VAR(ptrUint);
+    t->shadowOrigin = VAR(ptrVec3); t->origin = VAR(ptrVec3); t->direction = VAR(ptrVec3);
+    t->through = VAR(ptrFloat); t->limit = VAR(ptrFloat); t->shadowStep = VAR(ptrUint); t->step = VAR(ptrUint);
+    t->tracedSum = VAR(ptrFloat); t->tracedRay = VAR(ptrUint);
+    t->own.color = VAR(ptrVec3); t->own.emissive = VAR(ptrVec3); t->own.normal = VAR(ptrVec3);
+    t->own.rough = VAR(ptrFloat); t->own.metal = VAR(ptrFloat); t->own.alpha = VAR(ptrFloat);
+    if (t->hardware) t->query = VAR(spvTypePointer(s, SPV_STORAGE_Function, spvTypeOpaque(s, 4472 /* OpTypeRayQueryKHR */)));
+}
+
+static Tracer* tracerNew(void) { return artfCalloc(1, sizeof(Tracer)); }
+
+static SpvId tracedBallAt(const Tracer* t, SpvId i) {
+    Spv* s = t->s;
+    return spvLoad(s, s->vec3, spvAccess(s, spvTypePointer(s, 6 /* Private */, s->vec3), t->ballTable, &i, 1));
+}
+
+/* As artfTracedPlace. */
+static SpvId tracedPlaceSpv(Spv* s, const Resources* r, SpvId p) {
+    SpvId c0 = frameVec(s, r, F_VIEWPROJ), c1 = frameVec(s, r, F_VIEWPROJ + 1), c2 = frameVec(s, r, F_VIEWPROJ + 2), c3 = frameVec(s, r, F_VIEWPROJ + 3);
+    SpvId px = X(p), py = Y(p), pz = Z(p);
+    SpvId cx = ADD_F(ADD_F(ADD_F(MUL_F(X(c0), px), MUL_F(X(c1), py)), MUL_F(X(c2), pz)), X(c3));
+    SpvId cy = ADD_F(ADD_F(ADD_F(MUL_F(Y(c0), px), MUL_F(Y(c1), py)), MUL_F(Y(c2), pz)), Y(c3));
+    SpvId cw = ADD_F(ADD_F(ADD_F(MUL_F(W(c0), px), MUL_F(W(c1), py)), MUL_F(W(c2), pz)), W(c3));
+    SpvId inv = DIV_F(FLOAT(1.f), MAX_F(cw, FLOAT(1e-6f)));
+    SpvId x = MUL_F(ADD_F(MUL_F(MUL_F(cx, inv), FLOAT(.5f)), FLOAT(.5f)), W(frameVec(s, r, F_EYE)));
+    SpvId y = MUL_F(SUB_F(FLOAT(.5f), MUL_F(MUL_F(cy, inv), FLOAT(.5f))), W(frameVec(s, r, F_EYE + 1)));
+    x = MIN_F(MAX_F(x, FLOAT(-1e6f)), FLOAT(1e6f));
+    y = MIN_F(MAX_F(y, FLOAT(-1e6f)), FLOAT(1e6f));
+    SpvId ix = AND_U(TO_U(FLOOR_F(x)), UINT(1)), iy = AND_U(TO_U(FLOOR_F(y)), UINT(1));
+    return AND_U(ADD_U(ADD_U(ix, MUL_U(iy, UINT(2))), AS_UINT(Z(frameVec(s, r, F_TRACED)))), UINT(3));
+}
+
+/* As tracedLift. */
+static SpvId tracedLiftSpv(Spv* s, const Resources* r, SpvId p, SpvId n) {
+    SpvId lift = ADD_F(reachOf(s, p), MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(p, spvShuffle3(s, frameVec(s, r, F_CAMERA)))), FLOAT(1e-3f)));
+    return ADD_V3(p, SCALE_V3(n, lift));
+}
+
+/* As artfTracedShadow: the sun, or the frame's light `index`. */
+static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index) {
+    Spv* s = t->s;
+    const Resources* r = &t->r;
+    SpvId o = tracedLiftSpv(s, r, world, n);
+    SpvId size = sun ? Z(frameVec(s, r, F_LOOK)) : frameFloatAt(s, r, ADD_U(UINT(F_LIGHT_SIZES), SHR_U(index, 2)), AND_U(index, UINT(3)));
+    SpvId rays = spvSelect(s, s->uintType, MORE_F(size, FLOAT(0.f)), spvGlsl2(s, SPV_GLSL_UMax, s->uintType, AS_UINT(W(frameVec(s, r, F_TRACED))), UINT(1)), UINT(1));
+    SpvId first = MUL_U(tracedPlaceSpv(s, r, world), UINT(4));
+    SpvId position = sun ? 0 : spvShuffle3(s, frameVecAt(s, r, ADD_U(UINT(F_LIGHTS), MUL_U(index, UINT(F_LIGHT_ROWS)))));
+    SpvId toSun = sun ? spvShuffle3(s, frameVec(s, r, F_TOSUN)) : 0;
+    spvStore(s, t->tracedSum, FLOAT(0.f));
+    spvStore(s, t->tracedRay, UINT(0));
+    Loop each;
+    loopOpen(s, &each);
+    loopWhile(s, &each, LESS_U(LOAD_U(t->tracedRay), rays));
+    {
+        SpvId k = LOAD_U(t->tracedRay);
+        SpvId b = SCALE_V3(tracedBallAt(t, AND_U(ADD_U(first, k), UINT(15))), size);
+        SpvId to, limit;
+        if (sun) {
+            to = NORMALIZE(ADD_V3(toSun, b));
+            limit = FLOAT(3e37f);
+        } else {
+            SpvId toward = SUB_V3(ADD_V3(position, b), o);
+            limit = SQRT_F(MAX_F(DOT3(toward, toward), FLOAT(1e-8f)));
+            to = SCALE_V3(toward, DIV_F(FLOAT(1.f), limit));
+        }
+        lightThrough(t, o, to, limit);
+        spvStore(s, t->tracedSum, ADD_F(LOAD_F(t->tracedSum), LOAD_F(t->through)));
+        spvStore(s, t->tracedRay, ADD_U(k, UINT(1)));
+    }
+    loopClose(s, &each);
+    return DIV_F(LOAD_F(t->tracedSum), TO_F(rays));
 }
 
 uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides, bool hardware) {

@@ -183,6 +183,31 @@ static void occlusionBlurRow(ArtfSoftPost* p, int y) {
 
 /* ---- reflections ---- */
 
+/* What a reflection found (seen) takes the place of what the surface was lit with from all around in the mirror
+ * direction r, as sure as fade says: into bloom's first level, at half. */
+static void reflectionUse(ArtfSoftPost* p, const ArtfFrameData* f, size_t i, size_t half, uint32_t s, float rough, float vn, const float* r, const float* seen, float fade, float strength) {
+    const float smooth = 1.f - rough / .6f, metal = metalOf(s);
+    /* as the surface was lit from all around in the mirror direction (kernels.inc's highlight) */
+    const float f0 = .04f + .96f * metal, c5 = 1.f - artfMaxf(-vn, 1e-4f), fresnel = c5 * c5 * c5 * c5 * c5;
+    const float mirror = f0 + (artfMaxf(1.f - rough, f0) - f0) * fresnel, sure = smooth * smooth * fade * strength;
+    float around[3];
+    const float* environment = f->sky[3] > 0 ? p->f->scene->environment : NULL;
+    if (environment) {
+        artfEnvReflected(environment, rough, r[0], r[1], r[2], around);
+        for (int c = 0; c < 3; ++c) around[c] *= f->sky[3];
+    } else {
+        const float up = r[1] * .5f + .5f;
+        for (int c = 0; c < 3; ++c) around[c] = f->ground[c] + (f->sky[c] - f->ground[c]) * up;
+    }
+    /* a metal's reflection is tinted by its color: that of the light it shows, as near as is known */
+    float tint[3] = {1, 1, 1};
+    if (metal > 0) {
+        const float sum = p->f->postLight[0][i] + p->f->postLight[1][i] + p->f->postLight[2][i];
+        for (int c = 0; c < 3; ++c) tint[c] = 1.f + metal * (sum > 1e-6f ? p->f->postLight[c][i] * 3.f / sum - 1.f : 0.f);
+    }
+    for (int c = 0; c < 3; ++c) p->bloom[c][half] = (seen[c] - around[c]) * tint[c] * mirror * sure;
+}
+
 /* At half the frame's resolution, a pixel for each two by two: what the march found takes the place of what the surface
  * was lit with from all around in the mirror direction (the picture, or the sky's two colors), which hid it. What that
  * changes goes into bloom's first level, before bloom needs it; reflectionApplyRow takes it up. Where the march finds
@@ -209,6 +234,14 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
         for (int k = 0; k < 3; ++k) r[k] = v[k] - 2.f * vn * n[k];
         /* toward the eye there is nothing in the frame to see */
         const float away = r[0] * f->eye[2][0] + r[1] * f->eye[2][1] + r[2] * f->eye[2][2];
+        if (f->traced & ARTF_TRACED_REFLECTIONS) {
+            /* from rays: what the scene shows that way, off the frame too, toward the eye as well */
+            float seen[3];
+            const uint32_t point = ((uint32_t)hx & 3u) + ((uint32_t)hy & 3u) * 4u + f->tracedFrame * 5u;
+            if (!artfTracedReflection(p->f->scene, f, at, n, v, rough, point, seen)) continue;
+            reflectionUse(p, f, i, half, s, rough, vn, r, seen, 1.f, strength);
+            continue;
+        }
         if (away < -.2f) continue;
         const float stride = d * .04f + .02f, thickness = d * .03f + .05f;
         /* the ray from here to as far as 24 steps reach, across the frame: a line, along which 1 / w goes evenly */
@@ -243,26 +276,9 @@ static void reflectionRow(ArtfSoftPost* p, int hy) {
         /* fading where the ray left near the frame's edges, and as it grows rough */
         const float edge = artfMinf(artfMinf(hx2, (float)p->width - 1 - hx2), artfMinf(hy2, (float)p->height - 1 - hy2));
         const float fade = artfClampf(edge / ((float)p->width * .08f), 0, 1);
-        const float smooth = 1.f - rough / .6f, metal = metalOf(s);
-        /* as the surface was lit from all around in the mirror direction (kernels.inc's highlight) */
-        const float f0 = .04f + .96f * metal, c5 = 1.f - artfMaxf(-vn, 1e-4f), fresnel = c5 * c5 * c5 * c5 * c5;
-        const float mirror = f0 + (artfMaxf(1.f - rough, f0) - f0) * fresnel, sure = smooth * smooth * fade * strength;
-        float around[3];
-        const float* environment = f->sky[3] > 0 ? p->f->scene->environment : NULL;
-        if (environment) {
-            artfEnvReflected(environment, rough, r[0], r[1], r[2], around);
-            for (int c = 0; c < 3; ++c) around[c] *= f->sky[3];
-        } else {
-            const float up = r[1] * .5f + .5f;
-            for (int c = 0; c < 3; ++c) around[c] = f->ground[c] + (f->sky[c] - f->ground[c]) * up;
-        }
-        /* a metal's reflection is tinted by its color: that of the light it shows, as near as is known */
-        float tint[3] = {1, 1, 1};
-        if (metal > 0) {
-            const float sum = p->f->postLight[0][i] + p->f->postLight[1][i] + p->f->postLight[2][i];
-            for (int c = 0; c < 3; ++c) tint[c] = 1.f + metal * (sum > 1e-6f ? p->f->postLight[c][i] * 3.f / sum - 1.f : 0.f);
-        }
-        for (int c = 0; c < 3; ++c) p->bloom[c][half] = (tap(p->f->postLight[c], p->width, p->height, hx2, hy2) - around[c]) * tint[c] * mirror * sure;
+        float seen[3];
+        for (int c = 0; c < 3; ++c) seen[c] = tap(p->f->postLight[c], p->width, p->height, hx2, hy2);
+        reflectionUse(p, f, i, half, s, rough, vn, r, seen, fade, strength);
     }
 }
 

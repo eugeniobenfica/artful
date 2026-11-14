@@ -37,6 +37,9 @@ int main(int argc, char** argv) {
     SAVE("sceneFragmentCoat", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_COAT));
     SAVE("sceneFragmentSoft", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_COAT | ARTF_SHADER_SOFT));
     SAVE("sceneFragmentFloatsPlain", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS));
+    SAVE("sceneFragmentTraced", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_TRACED));
+    SAVE("sceneCutoutTracedHardware", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_COAT | ARTF_SHADER_TRACED | ARTF_SHADER_RAY_QUERY));
+    SAVE("sceneLayerListTraced", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4, ARTF_SHADER_TRACED | ARTF_SHADER_RAY_QUERY));
     SAVE("sceneLayerList", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 1, 0));
     SAVE("sceneLayerListSamples", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4, 0));
     SAVE("layerResolve", artfShaderLayerResolve(&size, 1));
@@ -74,6 +77,9 @@ int main(int argc, char** argv) {
     artfGraphFree(g);
     SAVE("graphFragment", artfShaderSceneFragment(&size, 1024, true, scene->graphs.items, 1, 0, 0));
     SAVE("graphTrace", artfShaderTrace(&size, 1024, scene->graphs.items, 1, false, false));
+    SAVE("graphFragmentTraced", artfShaderSceneFragment(&size, 1024, true, scene->graphs.items, 1, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_TRACED));
+    SAVE("graphFragmentPlainTraced", artfShaderSceneFragment(&size, 1024, false, scene->graphs.items, 1, 0, ARTF_SHADER_TRACED | ARTF_SHADER_RAY_QUERY));
+    SAVE("graphReflectionTraced", artfShaderPostReflectionTraced(&size, 1024, scene->graphs.items, 1, true));
     artfSceneFree(scene);
     SAVE("shadowVertex", artfShaderShadowVertex(&size));
     SAVE("shadowFragment", artfShaderShadowFragment(&size, 1024));
@@ -92,6 +98,8 @@ int main(int argc, char** argv) {
     SAVE("postOcclusionBlur", artfShaderPostOcclusionBlur(&size));
     SAVE("postReflection", artfShaderPostReflection(&size));
     SAVE("postReflectionApply", artfShaderPostReflectionApply(&size));
+    SAVE("postReflectionTraced", artfShaderPostReflectionTraced(&size, 1024, NULL, 0, false));
+    SAVE("postReflectionTracedHardware", artfShaderPostReflectionTraced(&size, 1024, NULL, 0, true));
     SAVE("postFroxels", artfShaderPostFroxels(&size));
     SAVE("fogBackdrop", artfShaderFogBackdrop(&size));
     SAVE("postTemporal", artfShaderPostTemporal(&size));

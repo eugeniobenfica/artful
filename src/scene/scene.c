@@ -1072,6 +1072,7 @@ void artfFrameJitter(ArtfFrameData* frame, uint32_t n, int width, int height) {
     const float jx = halton(n % 16 + 1, 2) - .5f, jy = halton(n % 16 + 1, 3) - .5f;
     frame->post[2][2] = jx;
     frame->post[2][3] = jy;
+    frame->tracedFrame = n % 4u;
     const float ox = jx * 2.f / (float)width, oy = jy * 2.f / (float)height;
     for (int c = 0; c < 4; ++c) {
         frame->viewProj[c * 4] += ox * frame->viewProj[c * 4 + 3];
@@ -1118,10 +1119,12 @@ void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc) {
 }
 void artfSceneSetShadows(ArtfScene* s, const ArtfShadowDesc* desc) {
     memset(&s->shadows, 0, sizeof s->shadows);
-    if (!desc || desc->resolution <= 0) return;
-    s->shadows.resolution = artfClampi((desc->resolution + 63) & ~63, 64, 4096);
-    s->shadows.distance = desc->distance > 0 ? desc->distance : 60.f;
+    if (!desc || (desc->resolution <= 0 && !desc->traced)) return;
+    s->shadows.traced = desc->traced;
     s->shadows.soft = desc->soft;
+    s->shadows.distance = desc->distance > 0 ? desc->distance : 60.f;
+    if (desc->resolution <= 0) return;
+    s->shadows.resolution = artfClampi((desc->resolution + 63) & ~63, 64, 4096);
 }
 
 void artfLightSetShadow(ArtfScene* s, ArtfLight l, bool casts) {
@@ -1203,7 +1206,9 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
     out->sun[2] = (uint32_t)side;
     uint32_t views = 0;
 
-    if (s->sunColor.x > 0 || s->sunColor.y > 0 || s->sunColor.z > 0) {
+    /* (shadows from rays: the sun keeps its maps only for fog that light goes through, and the frame's lights take none) */
+    const bool traced = s->shadows.traced;
+    if ((s->sunColor.x > 0 || s->sunColor.y > 0 || s->sunColor.z > 0) && (!traced || s->post.volumetric > 0)) {
         /* Each map holds a ball around a stretch of the view, and moves by whole texels, so that shadows do not
          * shimmer as the eye moves. Depth reaches all that can cast into it. */
         ArtfVec3 middle;
@@ -1254,7 +1259,7 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
     for (uint32_t i = 0; i < ARTF_MAX_LIGHTS && frameLight < ARTF_FRAME_LIGHTS; ++i) {
         if (!s->lightOn[i]) continue;
         const uint32_t index = frameLight++;
-        if (!s->lightCasts[i]) continue;
+        if (!s->lightCasts[i] || traced) continue;
         const ArtfLightData* L = &s->lights[i];
         const ArtfVec3 position = artfVec3(L->position[0], L->position[1], L->position[2]);
         const bool spot = L->direction[0] != 0 || L->direction[1] != 0 || L->direction[2] != 0;
@@ -1369,6 +1374,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     for (uint32_t i = 0; i < ARTF_MAX_LIGHTS && out->lightCount < ARTF_FRAME_LIGHTS; ++i)
         if (s->lightOn[i]) {
             out->lightSizes[out->lightCount] = s->lightSize[i];
+            if (s->lightCasts[i]) out->tracedCasts |= 1u << out->lightCount;
             out->lights[out->lightCount++] = s->lights[i];
         }
     if (s->environment) {
@@ -1404,6 +1410,14 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->fogBase = s->fogBase;
     out->fogFalloff = s->fogFalloff;
     out->motionBlur = artfClampf(p->motionBlur, 0, 1);
+    if (s->shadows.traced) {
+        out->traced |= ARTF_TRACED_SHADOWS;
+        out->tracedRays = ARTF_TRACED_RAYS;
+        if (s->sunColor.x > 0 || s->sunColor.y > 0 || s->sunColor.z > 0) out->tracedCasts |= ARTF_TRACED_SUN;
+    } else {
+        out->tracedCasts = 0;
+    }
+    if (p->tracedReflections && p->reflections > 0) out->traced |= ARTF_TRACED_REFLECTIONS;
     out->eye[0][3] = (float)width;
     out->eye[1][3] = (float)height;
     {

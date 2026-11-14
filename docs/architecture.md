@@ -469,9 +469,42 @@ width are each in or out.
 With `ArtfTraceDesc.hardware` on a device that has ray queries, the tracing shader asks the hardware where a ray meets
 the scene, in place of walking the trees, and all that follows is as it was. Each mesh gets a bottom level from the
 triangles the trees were made from, in the same order; the top level holds the traced instances in their order, so an
-instance's id is its place among them, and its custom index is its mesh's first triangle. Fronts are counter-clockwise,
-as the trees have them; eye rays cull backs but for what has two sides; everything is opaque to the hardware, as what
-shows through is the path's business.
+instance's id is its place among them, and the table of instances the trees use gives its mesh's first triangle (in
+the word that says whether it has two sides, past bit 0: so no limit of a custom index's 24 bits). Fronts are
+counter-clockwise, as the trees have them, which is the hardware's own way with no flag; eye rays cull backs but for
+what has two sides; everything is opaque to the hardware, as what shows through is the path's business.
+
+What bones or targets move each frame has its bottom level built again, in place, alone: the rest stay, and the top
+level is built again over them. The hardware's refit (an update of a level built to allow it) was tried, and on a
+Radeon RX 9060 XT it left shadows of what was not there, where building again draws as a level built from nothing does
+(`testTracedMoved`).
+
+## Rays while drawing
+
+Unreal's ray traced shadows and reflections: the rasterizer draws, and asks rays only what maps and the frame cannot
+know. Both read tracing's trees (`artfSceneTraceSync`, without particles), kept while drawing as instances move, and on
+the GPU through the hardware where there is some; on a GPU without, the pixel shader and the pass walk the trees
+themselves, with the tracer's code. The CPU's `artfTracedShadow` and `artfTracedReflection` (`trace.c`) and the GPU's
+`tracedShadowSpv` and `artfShaderPostReflectionTraced` do the same arithmetic, so the backends draw the same picture,
+and the hardware the same as the trees.
+
+**Shadows** (`ArtfShadowDesc.traced`): for the sun and each of the sixteen lights that casts, where it can reach the
+surface at all, a ray from a point lifted off the surface (by a ten-thousandth of how far it is from the origin, and a
+thousandth of how far from the eye, as what is drawn far away may be a lighter level than the trees hold) toward it, through
+`lightThrough`: what is in the way stops as much of the light as it is there, so glass and fences let light through as
+they do when traced. A light with a size takes four rays, at points of a ball of its size (for the sun, of its size as
+an angle): sixteen points, four by four, and each pixel of a 2 x 2 square takes its four, so that the square takes all
+sixteen; with temporal antialiasing the four turn each frame, and the history mixes them. The pixel shader that does
+this is made only for a scene that asks (`ARTF_SHADER_TRACED`, with `ARTF_SHADER_RAY_QUERY` for the hardware); the
+sixteen take no maps, and the sun keeps its maps only for fog that light goes through.
+
+**Reflections** (`ArtfPostDesc.tracedReflections`): in place of the march, at the same half resolution, a ray from the
+surface the frame shows, along its mirror, strayed by a point of the same ball times the square of its roughness, finds
+what is there, off the frame or behind something too. What is mostly not there (alpha under one half) is gone through.
+What it finds is lit simply, as Unreal's reflections are: its color, and what it reflects head on, under light from all
+around, the sun and the sixteen lights, with no shadows; and its own light. That takes the place of what the surface was
+lit with from all around in that direction, as what the march found did, but sure everywhere: there are no frame's edges
+to fade toward. Where it finds nothing, that light stays.
 
 ## The GPU: the CPU stays out of the way
 

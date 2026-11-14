@@ -11,20 +11,36 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   glass has no Fresnel of its own, nor color. It reads textures in their largest mipmap. Black holes stay behind
   everything and do not bend what is traced. Without `denoise`, a scene that moves starts over each frame; with it,
   what was hidden starts with no history, and is soft for some frames.
-- The ray tracing hardware (`ArtfTraceDesc.hardware`) builds every mesh's bottom level again whenever meshes change,
-  bones included: what bones move each frame pays that each frame, where a refit would do. A mesh's first triangle
-  goes in 24 bits, so a scene traced this way holds up to 16 million triangles. It was run on one device, a Radeon
-  RX 9060 XT; CI's software Vulkan has no such hardware, and so does not run it.
+- The ray tracing hardware (`ArtfTraceDesc.hardware`, and shadows and reflections from rays): what bones or targets
+  move has its bottom level built again each frame it moves, alone, not refitted (the hardware's refit put shadows
+  where nothing was on the one device it was run on); anything else that changes meshes builds every bottom level
+  again, and an instance that moves builds the top level again. Each of those, and the trees sent up when they change,
+  waits for the GPU to be idle. It was run on one device, a Radeon RX 9060 XT; CI's software Vulkan has no such
+  hardware, and so does not run it.
+- Shadows from rays (`ArtfShadowDesc.traced`) start off the surface by a thousandth of its distance from the eye: what
+  touches its caster by less shows a gap there, and a mesh drawn at a level of detail lighter than the trees' (which
+  are the whole mesh) may shade itself where the two part by more. Smooth normals on few triangles shade themselves
+  near where the light grazes, as traced shadows do. A light with a size takes four rays a pixel: without temporal
+  antialiasing its penumbra is a pattern of 2 x 2 pixels. They are for the sun and the sixteen lights: those past them
+  keep their maps (none at resolution 0), and so does the sun, for fog that light goes through. Particles cast none.
+  On a GPU without ray tracing hardware the pixel shader walks the trees: the same picture, slower. The GPU's pixel
+  shader for plain materials reads what materials of the program's own make of alpha only when shadows from rays are
+  on; then it holds their code too. Metal has neither shadows nor reflections from rays: with them asked, the sun and
+  the sixteen lights cast nothing there, and reflections are marched.
+- Reflections from rays (`ArtfPostDesc.tracedReflections`) light what they find simply: its color under the sun and
+  the sixteen lights with no shadows, its own light, and light from all around (the picture, or the sky's two colors:
+  not probes, not fog); what is less than half there is gone through. One ray for each 2 x 2 pixels, as the march.
 - Bones run on the GPU when Vulkan draws; targets, and bones on the CPU or Metal, go per instance on the CPU. What
   bends is not culled by its parts, and has no levels of detail.
 - ASTC is its low dynamic range profile: a block in high dynamic range decodes to magenta on the CPU. The CPU makes
   blocks into pixels when first drawn, not sample by sample, for all mipmaps. A streamed texture is plain pixels.
 - A material in C picks its mipmap from neighbouring pixels along a row, on the CPU, so a surface slanted the other way
   may show more detail than it should. When tracing it reads the largest resident mipmap.
-- What shows through casts no shadow when drawing triangles.
+- What shows through casts no shadow in maps when drawing triangles (from rays, it lets light through as it is not
+  there).
 - A frame in floats (`hdr`): layers go by their centers. With four samples, what comes after reads the first sample's
-  depth and surface. Reflections see only what the frame shows: what is off screen or behind something is not
-  reflected, and the light from all around stays there instead. Ambient occlusion reads depth, not geometry: thin
+  depth and surface. Reflections marched across the frame see only what it shows: what is off screen or behind
+  something is not reflected, and the light from all around stays there instead. Ambient occlusion reads depth, not geometry: thin
   things and their backs are guessed. Temporal antialiasing and motion blur follow instances, not what bones bend,
   which leaves a trail where its history does not fit. Motion blur takes eight points over at most 32 pixels, and
   spreads what is behind a moving thing over its edge, as it spreads the thing.

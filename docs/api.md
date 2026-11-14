@@ -62,14 +62,14 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | | |
 | --- | --- |
 | `artfSceneSetCamera` | Where the eye is. |
-| `artfSceneSetSun`, `artfSceneSetSunSize` | Light from far away; soft shadows, when traced. |
+| `artfSceneSetSun`, `artfSceneSetSunSize` | Light from far away; soft shadows, when traced or with shadows from rays. |
 | `artfSceneSetAmbient` | Light from all around: a sky and a ground. |
 | `artfSceneSetEnvironment`, `artfSceneSetEnvironmentLight`, `artfImageDecodeHdr` | Light from all around, from a picture of it, and that picture behind the scene. |
 | `artfSceneSetSky` | Light from all around from the sun: a sky of air and haze, red at sunset, and the sun's own color through it. |
 | `artfSceneAddLight`, `artfLightSet`, `artfLightSetSpot`, `artfSceneRemoveLight` | Point lights and spots, up to 1024; the first 16 may cast shadows, and 32 more each frame. |
 | `artfLightSetSize` | A light as wide as a bulb: wider highlights, and soft shadows. |
 | `artfSceneSetIndirect` | Light that bounced, from probes, every frame; walls stop it unless `throughWalls`. |
-| `artfSceneSetPost` | With `ArtfRendererOptions.hdr`: bloom, ambient occlusion, reflections, fog that light goes through, temporal antialiasing that follows what moves, depth of field, motion blur; then auto exposure, a choice of tone curve, white balance, saturation, contrast, vignette and chromatic aberration. |
+| `artfSceneSetPost` | With `ArtfRendererOptions.hdr`: bloom, ambient occlusion, reflections (marched across the frame, or from rays with `tracedReflections`), fog that light goes through, temporal antialiasing that follows what moves, depth of field, motion blur; then auto exposure, a choice of tone curve, white balance, saturation, contrast, vignette and chromatic aberration. |
 | `artfSceneSetExposure` | Film: bright light rolls off to white. |
 | `artfSceneSetFog`, `artfSceneSetFogHeight` | Air; thinner higher up. |
 | `artfSceneSetBackground`, `artfSceneSetBackgroundAlpha` | What shows where nothing is. |
@@ -88,7 +88,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `ARTF_FEATURE_LOD_FADE`, `ARTF_FEATURE_LAYERS_SORTED` | Levels that fade into each other; layers by each pixel's depth. |
 | `artfSceneAddTextureStreamed` | A texture whose larger mipmaps are read when they become resident. |
 | `artfPrepareModel`, `artfSceneAddPreparedModel` | A glTF model made on any thread, and added quickly. |
-| `artfSceneSetShadows`, `artfLightSetShadow` | Shadows when drawing triangles; `soft` makes them as wide as their light. |
+| `artfSceneSetShadows`, `artfLightSetShadow` | Shadows when drawing triangles; `soft` makes them as wide as their light; `traced` takes them from rays (through the ray tracing hardware where there is some), exact, through what shows through. |
 | `artfSceneSetBlackHole` | A black hole behind the scene. |
 | `artfRendererSetOverlay` | A picture over the frame. |
 | `artfRendererStats` | What a frame cost, on the CPU and on the GPU. |

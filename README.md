@@ -48,9 +48,9 @@ same scene is drawn on the CPU.
 | **Software** | Works as a phone's GPU does: triangles are binned into tiles, and each tile is resolved in the cache, so every pixel is shaded once and the depth buffer never reaches main memory. All cores, with AVX2, SSE4.1 or NEON chosen at run time. |
 | **Meshes** | 16 bytes a vertex, ordered for the vertex cache and cut into meshlets when they are added. Levels of detail made on the way in. |
 | **Files** | glTF (`.gltf`, `.glb`) with nodes, PBR materials, normal maps, skins, clips, lights and cameras, meshopt compression, unlit, ior and transmission; PNG, JPEG, KTX2 and Radiance `.hdr`, read by its own decoders, on all cores. |
-| **Lighting** | Physically based materials, with a clear coat and sheen; a sun, up to 1024 spots and point lights (16 with shadow maps, and 32 more chosen each frame), as wide as a bulb if asked, with shadows as soft as their light; light from all around from a picture of it, or from a sky of air and haze that the sun makes, reflected as rough as each surface is, and shown behind the scene; fog, thinner higher up. |
+| **Lighting** | Physically based materials, with a clear coat and sheen; a sun, up to 1024 spots and point lights (16 with shadow maps or shadows from rays, through the ray tracing hardware where there is some, and 32 more with maps chosen each frame), as wide as a bulb if asked, with shadows as soft as their light; light from all around from a picture of it, or from a sky of air and haze that the sun makes, reflected as rough as each surface is, and shown behind the scene; fog, thinner higher up. |
 | **Light that bounced** | A grid of probes traced every frame, on any GPU or the CPU: light bounces once more each frame, walls stop it, and what is shiny reflects it. |
-| **After the frame** | With the frame in floats: bloom, ambient occlusion, screen-space reflections, temporal antialiasing that follows what moves, motion blur, depth of field, four samples a pixel; fog that light goes through, lit through the sun's shadows, as a grid that every surface reads, smoke and glass too; then auto exposure, a choice of tone curve, white balance, saturation, contrast, vignette and chromatic aberration. |
+| **After the frame** | With the frame in floats: bloom, ambient occlusion, reflections across the frame or from rays (of what is off it too), temporal antialiasing that follows what moves, motion blur, depth of field, four samples a pixel; fog that light goes through, lit through the sun's shadows, as a grid that every surface reads, smoke and glass too; then auto exposure, a choice of tone curve, white balance, saturation, contrast, vignette and chromatic aberration. |
 | **Particles, terrain, decals** | Emitters of soft particles that fade as they age, swirl, spin and bounce on the ground, drawn together; terrain from heights, with levels of detail, layers by a painted map or by slope and height, and what grows on it scattered over it; pictures laid over surfaces through a box. |
 | **Layers** | Colors on vertices, opacity, holes and two sided surfaces, frames with alpha and four samples a pixel: a model can go over something else, with smooth edges, on both backends. |
 | **Rays and paths** | Real shadows and reflections, or all light however often it bounced, in place of triangles: on the CPU, or on any GPU by a compute shader, and through the ray tracing hardware where a GPU has it, with the same picture. A denoiser for what moves. |
@@ -217,7 +217,10 @@ artfLightSetShadow(scene, lamp, true);             /* a spot takes one map, a po
 ```
 
 The sixteen first lights cast shadows when asked. Past them, the 32 that matter most each frame, near the eye and
-wide, get smaller maps of their own.
+wide, get smaller maps of their own. With `.traced = true` the sun and the sixteen take theirs from rays, as Unreal's
+ray traced shadows: exact, as soft as their light is wide, through glass as much as it lets light through, and through
+the GPU's ray tracing hardware where it has some (`--traced-shadows`). `ArtfPostDesc.tracedReflections` does the same
+for reflections, which then show what is off the frame (`--traced-reflections`).
 
 ```bash
 build/artful-render --scene spheres --shadows 2048 --out picture.png

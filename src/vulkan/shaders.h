@@ -23,7 +23,8 @@ uint32_t* artfShaderSceneVertex(size_t* size);
 /* What a scene's pixel shader holds beside the rest: a frame in floats, light from probes (what costs its registers, so
  * that a scene without probes does not pay for them). */
 enum { ARTF_SHADER_FLOATS = 1, ARTF_SHADER_PROBES = 2, ARTF_SHADER_WALLS = 4 /* the probes' maps of how far they see */, ARTF_SHADER_FROXELS = 8,
-       ARTF_SHADER_COAT = 16 /* materials with a clear coat or sheen */, ARTF_SHADER_SOFT = 32 /* soft shadows */ };
+       ARTF_SHADER_COAT = 16 /* materials with a clear coat or sheen */, ARTF_SHADER_SOFT = 32 /* soft shadows */,
+       ARTF_SHADER_TRACED = 64 /* shadows from rays, through the trees */, ARTF_SHADER_RAY_QUERY = 128 /* and those through the ray tracing hardware */ };
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant);
 uint32_t* artfShaderLayerResolve(size_t* size, int samples);
 /* Shadow maps: depth from a light; and, for what has holes, what leaves pixels. */
@@ -56,6 +57,8 @@ uint32_t* artfShaderPostOcclusion(size_t* size);
 uint32_t* artfShaderPostOcclusionBlur(size_t* size);
 uint32_t* artfShaderPostReflection(size_t* size);
 uint32_t* artfShaderPostReflectionApply(size_t* size);
+/* Reflections from rays (ArtfPostDesc.tracedReflections), through the trees or, with hardware, the top level. */
+uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware);
 uint32_t* artfShaderPostFroxels(size_t* size);
 /* Fog that light goes through, over what is behind the scene (with the overlay's vertices). */
 uint32_t* artfShaderFogBackdrop(size_t* size);

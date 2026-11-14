@@ -337,6 +337,128 @@ POST_MAIN(artfShaderPostReflection)
     spvIfEnd(s, marching);
 POST_FINISH()
 
+/* ---- reflections from rays (ArtfPostDesc.tracedReflections): as reflectionRow's, with artfTracedReflection in place
+ * of the march ---- */
+uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware) {
+    Spv b, *s = &b;
+    spvInit(s);
+    spvCapability(s, 5301); /* ShaderNonUniform */
+    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    if (hardware) spvCapability(s, 4472 /* RayQueryKHR */);
+    spvExtension(s, "SPV_EXT_descriptor_indexing");
+    Post post, *p = &post;
+    postDeclare(s, p);
+    SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);
+    SpvId textures = spvResource(s, spvTypeArray(s, sampled, maxTextures, 0), SPV_STORAGE_UniformConstant, 6);
+    Tracer tracer, *t = &tracer;
+    tracerDeclare(s, t, &p->r, textures, sampled, graphs, graphCount, hardware);
+    SpvId main = spvBeginMain(s);
+    tracerVariables(t);
+    SpvId ptrFn3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3), ptrFnUint = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
+    SpvId found = VAR(ptrFnUint), seenVar = VAR(ptrFn3), litVar = VAR(ptrFn3), lightIndex = VAR(ptrFnUint);
+    postSizes(s, p);
+    SpvId hw = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(1)), UINT(2)), hh = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(1)), UINT(2));
+    SpvId half, halfX, halfY, merge;
+    postBegin(s, p, &half, &halfX, &halfY, &merge, hw, hh);
+    SpvId x = spvGlsl2(s, 38 /* UMin */, s->uintType, MUL_U(halfX, UINT(2)), SUB_U(p->width, UINT(1))), y = spvGlsl2(s, 38, s->uintType, MUL_U(halfY, UINT(2)), SUB_U(p->height, UINT(1)));
+    SpvId i = ADD_U(MUL_U(y, p->width), x);
+    SpvId xf = TO_F(x), yf = TO_F(y);
+    SpvId word = postUint(s, p, p->surface, i), d = postDistance(s, p, xf, yf);
+    SpvId rough = postField(s, word, 18, 31, 31.f), metal = postField(s, word, 23, 15, 15.f);
+    SpvId n = postNormal(s, word), at = postWorld(s, p, xf, yf, d);
+    SpvId v = NORMALIZE(SUB_V3(at, spvShuffle3(s, frameVec(s, &p->r, F_CAMERA))));
+    SpvId vn = DOT3(v, n);
+    SpvId strength = X(frameVec(s, &p->r, F_POST + 1));
+    spvStore(s, postPtr(s, p, p->bloom, s->vec4, half), vec4Of(s, same3(s, 0.f), FLOAT(0.f)));
+    SpvId eligible = P_AND(P_AND(P_MORE(d, FLOAT(0.f)), spvOp2(s, SPV_OP_INotEqual, s->boolType, word, UINT(0))), P_AND(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, rough, FLOAT(.6f)), P_MORE(strength, FLOAT(0.f))));
+    SpvId tracing;
+    spvIfBegin(s, eligible, &tracing);
+    {
+        /* as artfTracedReflection: the ray, strayed by roughness, off the surface */
+        SpvId point = ADD_U(ADD_U(AND_U(halfX, UINT(3)), MUL_U(AND_U(halfY, UINT(3)), UINT(4))), MUL_U(AS_UINT(Z(frameVec(s, &p->r, F_TRACED))), UINT(5)));
+        SpvId mirror = SUB_V3(v, SCALE_V3(n, MUL_F(FLOAT(2.f), vn)));
+        SpvId strayed = NORMALIZE(ADD_V3(mirror, SCALE_V3(tracedBallAt(t, AND_U(point, UINT(15))), MUL_F(rough, rough))));
+        spvStore(s, t->direction, pick3(s, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(strayed, n), FLOAT(0.f)), mirror, strayed));
+        spvStore(s, t->origin, tracedLiftSpv(s, &p->r, at, n));
+        spvStore(s, found, UINT(0));
+        spvStore(s, seenVar, same3(s, 0.f));
+        spvStore(s, t->step, UINT(0));
+        Loop steps;
+        loopOpen(s, &steps);
+        loopWhile(s, &steps, LESS_U(LOAD_U(t->step), UINT(4)));
+        {
+            SpvId o = LOAD_V3(t->origin), dir = LOAD_V3(t->direction);
+            closest(t, o, dir, FLOAT(3e37f), false);
+            breakIf(s, &steps, IS_EQ(LOAD_U(t->bestInstance), UINT(0xFFFFFFFFu)));
+            Met m = surfaceAt(t, o, dir);
+            SpvId q = ADD_V3(o, SCALE_V3(dir, LOAD_F(t->bestT)));
+            SpvId through = P_LESS(m.alpha, FLOAT(.5f)), branch;
+            spvIfBegin(s, through, &branch);
+            spvStore(s, t->origin, ADD_V3(q, SCALE_V3(dir, reachOf(s, q))));
+            spvIfEnd(s, branch);
+            spvIfBegin(s, P_NOT(through), &branch);
+            {
+                /* its color under light from all around, the sun and the frame's lights, with no shadows; its own light */
+                SpvId skyRow = frameVec(s, &p->r, F_SKY), ground = spvShuffle3(s, frameVec(s, &p->r, F_GROUND));
+                SpvId up = ADD_F(MUL_F(Y(m.normal), FLOAT(.5f)), FLOAT(.5f));
+                SpvId plain = SCALE_V3(ADD_V3(ground, SCALE_V3(SUB_V3(spvShuffle3(s, skyRow), ground), up)), m.open);
+                SpvId pictured = SCALE_V3(envSample(s, &p->r, UINT(ARTF_ENV_DIFFUSE), m.normal), MUL_F(W(skyRow), m.open));
+                SpvId sun = MAX_F(DOT3(m.normal, spvShuffle3(s, frameVec(s, &p->r, F_TOSUN))), FLOAT(0.f));
+                spvStore(s, litVar, ADD_V3(pick3(s, P_MORE(W(skyRow), FLOAT(0.f)), pictured, plain), SCALE_V3(spvShuffle3(s, frameVec(s, &p->r, F_SUNCOLOR)), sun)));
+                SpvId lightCount = AS_UINT(X(frameVec(s, &p->r, F_COUNTS)));
+                spvStore(s, lightIndex, UINT(0));
+                Loop lights;
+                loopOpen(s, &lights);
+                loopWhile(s, &lights, LESS_U(LOAD_U(lightIndex), lightCount));
+                {
+                    SpvId li = LOAD_U(lightIndex);
+                    SpvId row = ADD_U(UINT(F_LIGHTS), MUL_U(li, UINT(F_LIGHT_ROWS)));
+                    SpvId lightA = frameVecAt(s, &p->r, row), lightB = frameVecAt(s, &p->r, ADD_U(row, UINT(1))), lightC = frameVecAt(s, &p->r, ADD_U(row, UINT(2)));
+                    SpvId toward = SUB_V3(spvShuffle3(s, lightA), q);
+                    SpvId d2 = DOT3(toward, toward);
+                    SpvId to = SCALE_V3(toward, DIV_F(FLOAT(1.f), SQRT_F(MAX_F(d2, FLOAT(1e-8f)))));
+                    SpvId fade = MAX_F(SUB_F(FLOAT(1.f), DIV_F(d2, MUL_F(W(lightA), W(lightA)))), FLOAT(0.f));
+                    SpvId spot = P_CLAMP(MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(to, spvShuffle3(s, lightC))), W(lightC)), W(lightB)), FLOAT(0.f), FLOAT(1.f));
+                    SpvId amount = MUL_F(MUL_F(MUL_F(MAX_F(DOT3(m.normal, to), FLOAT(0.f)), fade), fade), spot);
+                    spvStore(s, litVar, ADD_V3(LOAD_V3(litVar), SCALE_V3(spvShuffle3(s, lightB), amount)));
+                    spvStore(s, lightIndex, ADD_U(li, UINT(1)));
+                }
+                loopClose(s, &lights);
+                spvStore(s, seenVar, ADD_V3(m.emissive, MUL_V3(ADD_V3(m.albedo, m.f0), LOAD_V3(litVar))));
+                spvStore(s, found, UINT(1));
+            }
+            spvIfEnd(s, branch);
+            breakIf(s, &steps, P_NOT(through));
+            spvStore(s, t->step, ADD_U(LOAD_U(t->step), UINT(1)));
+        }
+        loopClose(s, &steps);
+        /* as reflectionUse, sure throughout: the frame's edges do not matter to a ray */
+        SpvId mine = postVec4(s, p, p->light, i);
+        SpvId smooth = SUB_F(FLOAT(1.f), DIV_F(rough, FLOAT(.6f)));
+        SpvId f0 = ADD_F(FLOAT(.04f), MUL_F(FLOAT(.96f), metal));
+        SpvId c1 = SUB_F(FLOAT(1.f), MAX_F(spvOp1(s, SPV_OP_FNegate, s->floatType, vn), FLOAT(1e-4f))), c2 = MUL_F(c1, c1), fresnel = MUL_F(MUL_F(c2, c2), c1);
+        SpvId reflecting = ADD_F(f0, MUL_F(SUB_F(MAX_F(SUB_F(FLOAT(1.f), rough), f0), f0), fresnel));
+        SpvId sure = MUL_F(MUL_F(MUL_F(smooth, smooth), FLOAT(1.f)), strength);
+        SpvId r = mirror;
+        SpvId skyRow = frameVec(s, &p->r, F_SKY), ground = spvShuffle3(s, frameVec(s, &p->r, F_GROUND));
+        SpvId up = ADD_F(MUL_F(Y(r), FLOAT(.5f)), FLOAT(.5f));
+        SpvId plain = ADD_V3(ground, SCALE_V3(SUB_V3(spvShuffle3(s, skyRow), ground), up));
+        SpvId pictured = SCALE_V3(envReflected(s, &p->r, rough, r), W(skyRow));
+        SpvId around = pick3(s, P_MORE(W(skyRow), FLOAT(0.f)), pictured, plain);
+        SpvId sum = ADD_F(ADD_F(X(mine), Y(mine)), Z(mine));
+        SpvId tint = ADD_V3(same3(s, 1.f), SCALE_V3(SUB_V3(SCALE_V3(spvShuffle3(s, mine), DIV_F(FLOAT(3.f), MAX_F(sum, FLOAT(1e-6f)))), same3(s, 1.f)), PICK_F(P_MORE(sum, FLOAT(1e-6f)), metal, FLOAT(0.f))));
+        SpvId reflected = SCALE_V3(MUL_V3(SUB_V3(LOAD_V3(seenVar), around), tint), MUL_F(reflecting, sure));
+        SpvId use = spvOp2(s, SPV_OP_INotEqual, s->boolType, LOAD_U(found), UINT(0));
+        spvStore(s, postPtr(s, p, p->bloom, s->vec4, half), vec4Of(s, pick3(s, use, reflected, same3(s, 0.f)), FLOAT(0.f)));
+    }
+    spvIfEnd(s, tracing);
+    spvIfEnd(s, merge);
+    spvEndMain(s);
+    spvEntryPoint(s, SPV_MODEL_GLCompute, main, &p->global, 1);
+    spvExecutionMode(s, main, 17, 64, 1, 1, 3);
+    return finish(s, size);
+}
+
 POST_MAIN(artfShaderPostReflectionApply)
     SpvId main = spvBeginMain(s);
     postSizes(s, p);

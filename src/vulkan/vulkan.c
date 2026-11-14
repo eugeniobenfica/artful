@@ -221,6 +221,9 @@ typedef struct Vulkan {
     uint64_t graphScene;
     uint32_t graphCount;
     bool probes, walls, froxels, coats, softShadows; /* the scene's pixel shaders read probes, their maps, the fog's grid, coats: made again when that changes */
+    bool tracedShadows, tracedHardware; /* and shadows from rays (ArtfShadowDesc.traced), through the trees or the hardware */
+    VkPipeline reflectionTraced;        /* reflections from rays (ArtfPostDesc.tracedReflections): made when first asked */
+    bool reflectionTracedHardware;
     /* shadow maps: all in one atlas of depth */
     VkRenderPass shadowPass;
     VkFramebuffer shadowFramebuffer;
@@ -239,6 +242,8 @@ typedef struct Vulkan {
     uint32_t rtBottomCount;
     VkAccelerationStructureKHR rtTopLevel;
     uint64_t rtMeshVersion, rtTopVersion, rtScene;
+    uint64_t* rtDeform;   /* of each mesh, the pose its bottom level was built for */
+    uint64_t rtRemovals;  /* meshes gone, as tracing counted them when the bottom levels were built */
     uint32_t maxTextures;
     /* the depth pyramid; flags: what showed last frame */
     GpuBuffer hiz, flags;
@@ -763,15 +768,17 @@ static bool shadowAtlasMake(Vulkan* v, int width, int height) {
 
 static uint32_t shaderVariant(const Vulkan* v) {
     return (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->probes ? ARTF_SHADER_PROBES : 0u) | (v->probes && v->walls ? ARTF_SHADER_WALLS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u) |
-           (v->coats ? ARTF_SHADER_COAT : 0u) | (v->softShadows ? ARTF_SHADER_SOFT : 0u);
+           (v->coats ? ARTF_SHADER_COAT : 0u) | (v->softShadows ? ARTF_SHADER_SOFT : 0u) | (v->tracedShadows ? ARTF_SHADER_TRACED : 0u) | (v->tracedShadows && v->tracedHardware ? ARTF_SHADER_RAY_QUERY : 0u);
 }
 
 /* The pipeline of what is plain and solid, made again: when the probes come or go. */
-static bool scenePipelineMake(Vulkan* v) {
+static bool scenePipelineMake(Vulkan* v, const ArtfGraphData* graphs, uint32_t graphCount) {
     if (v->scenePipeline) v->vkDestroyPipeline(v->device, v->scenePipeline, NULL);
     v->scenePipeline = 0;
     size_t size;
-    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0, shaderVariant(v));
+    /* (with shadows from rays, what they meet may be of the program's own materials) */
+    if (!v->tracedShadows) graphs = NULL, graphCount = 0;
+    uint32_t* code = artfShaderSceneFragment(&size, v->maxTextures, false, graphs, graphCount, 0, shaderVariant(v));
     VkShaderModule fragment = shaderModule(v, code, size);
     if (!fragment) return false;
     const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
@@ -949,8 +956,9 @@ static bool pipelinesMake(Vulkan* v) {
         {11, DESCRIPTOR_UNIFORM, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {12, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL},
         {13, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {14, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {15, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {16, DESCRIPTOR_STORAGE, 1, SHADER_VERTEX, NULL},
-        {17, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {18, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {19, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
-        {20, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {21, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {22, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
+        /* (what rays read: the pixel shader too, for shadows from rays) */
+        {17, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {18, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {19, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
+        {20, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {21, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL}, {22, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {23, DESCRIPTOR_UNIFORM, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL},
         {24, DESCRIPTOR_UNIFORM, 1, graphics | SHADER_COMPUTE, NULL}, {25, DESCRIPTOR_COMBINED, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {26, DESCRIPTOR_STORAGE, 1, SHADER_VERTEX | SHADER_COMPUTE, NULL},
         {27, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {28, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {29, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {30, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
@@ -973,7 +981,7 @@ static bool pipelinesMake(Vulkan* v) {
     uint32_t bindingCount = v->floats ? 64 : 54;
     memcpy(all, bindings, bindingCount * sizeof *all);
     if (v->rayQuery) {
-        const DescriptorSetLayoutBinding top = {64, DESCRIPTOR_AS, 1, SHADER_COMPUTE, NULL};
+        const DescriptorSetLayoutBinding top = {64, DESCRIPTOR_AS, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL};
         all[bindingCount++] = top;
     }
     const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, bindingCount, all};
@@ -1656,7 +1664,9 @@ static void rtFreeBottoms(Vulkan* v) {
     for (uint32_t i = 0; i < v->rtBottomCount; ++i)
         if (v->rtBottoms[i]) v->vkDestroyAccelerationStructureKHR(v->device, v->rtBottoms[i], NULL);
     artfFree(v->rtBottoms);
+    artfFree(v->rtDeform);
     v->rtBottoms = NULL;
+    v->rtDeform = NULL;
     v->rtBottomCount = 0;
     bufferFree(v, &v->rtBottom);
 }
@@ -1694,12 +1704,58 @@ static AsGeometry rtTriangles(Vulkan* v, uint32_t vertexCount) {
     return g;
 }
 
+/* When only bones or targets moved meshes: the bottom levels of those, built again in place from the positions they have
+ * now, and no other; false when anything else changed, and all must be built again. (Refitting, the hardware's update of
+ * a level built to allow it, came out with shadows of what was not there on a Radeon RX 9060 XT, in testTracedMoved:
+ * so what moved is built whole, which costs a little more than a refit would, and the rest is left as it is.) */
+static bool rtRebuildMoved(Vulkan* v, const ArtfScene* scene, uint32_t* rebuilt, bool* failed) {
+    const ArtfTrace* t = &scene->trace;
+    if (v->rtBottomCount != t->ranges.len || v->rtRemovals != t->meshRemovals) return false;
+    uint32_t changed = 0;
+    for (uint32_t m = 0; m < v->rtBottomCount; ++m) {
+        const ArtfTraceRange* r = &t->ranges.items[m];
+        if (!r->triangleCount || r->deformVersion == v->rtDeform[m]) continue;
+        ++changed;
+    }
+    *rebuilt = changed;
+    if (!changed) return true;
+    v->vkDeviceWaitIdle(v->device);
+    float* positions = v->rtPositions.mapped;
+    AsGeometry geometry = rtTriangles(v, (uint32_t)t->vertices.len);
+    VkCommandBuffer c = oneShotBegin(v);
+    const VkDeviceAddress scratchAt = rtAddress(v, &v->rtScratch);
+    for (uint32_t m = 0; m < v->rtBottomCount; ++m) {
+        const ArtfTraceRange* r = &t->ranges.items[m];
+        if (!r->triangleCount || r->deformVersion == v->rtDeform[m]) continue;
+        const uint32_t vertexCount = scene->meshes.items[m].vertexCount;
+        for (uint32_t i = r->firstVertex; i < r->firstVertex + vertexCount; ++i) memcpy(positions + (size_t)i * 3, t->vertices.items[i].p, 12);
+        /* (in place, into the structure it had: as many triangles, as much room) */
+        const AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1 /* bottom */, 4 /* fast to trace */, 0 /* built */, 0, v->rtBottoms[m], 1, &geometry, NULL, scratchAt};
+        const AsBuildRange range = {r->triangleCount, r->firstTriangle * 12, 0, 0};
+        const AsBuildRange* ranges = &range;
+        v->vkCmdBuildAccelerationStructuresKHR(c, 1, &build, &ranges);
+        memoryBarrier(v, c, STAGE_AS_BUILD, STAGE_AS_BUILD, ACCESS_AS_WRITE, ACCESS_AS_READ | ACCESS_AS_WRITE);
+        v->rtDeform[m] = r->deformVersion;
+    }
+    if (!oneShotEnd(v, c)) *failed = true;
+    return true;
+}
+
 /* Brings the structures up to date with what tracing holds: each mesh's bottom level when meshes change, the top
- * when instances do. Meshes are built again whole when one moves, as bones do: a refit is for later. */
+ * when instances do. Of the meshes that bones or targets move, only those that moved are built again, each frame;
+ * anything else that changes builds them all again. */
 static bool rtSync(Vulkan* v, const ArtfScene* scene) {
     const ArtfTrace* t = &scene->trace;
     const bool otherScene = v->rtScene != scene->id;
     bool topNeeded = otherScene || v->rtTopVersion != t->topVersion || !v->rtTopLevel;
+    bool failed = false;
+    uint32_t rebuilt = 0;
+    if (!otherScene && v->rtBottoms && v->rtMeshVersion != t->meshVersion && rtRebuildMoved(v, scene, &rebuilt, &failed)) {
+        if (failed) return false;
+        v->rtMeshVersion = t->meshVersion;
+        /* (the top level holds the bottom levels' boxes) */
+        topNeeded |= rebuilt > 0;
+    }
     if (otherScene || v->rtMeshVersion != t->meshVersion || !v->rtBottoms) {
         v->vkDeviceWaitIdle(v->device);
         rtFreeBottoms(v);
@@ -1720,12 +1776,15 @@ static bool rtSync(Vulkan* v, const ArtfScene* scene) {
         /* sizes first: then one buffer for them all, each at a multiple of 256 */
         const uint32_t meshes = (uint32_t)t->ranges.len;
         v->rtBottoms = artfCalloc(meshes + 1, sizeof *v->rtBottoms);
+        v->rtDeform = artfCalloc(meshes + 1, sizeof *v->rtDeform);
         v->rtBottomCount = meshes;
+        v->rtRemovals = t->meshRemovals;
         VkDeviceSize* offsets = artfCalloc(meshes + 1, sizeof *offsets);
         VkDeviceSize total = 0, scratch = 0;
         AsGeometry geometry = rtTriangles(v, (uint32_t)vertexCount);
         for (uint32_t m = 0; m < meshes; ++m) {
             const ArtfTraceRange* r = &t->ranges.items[m];
+            v->rtDeform[m] = r->deformVersion;
             if (!r->triangleCount) continue;
             AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1 /* bottom */, 4 /* fast to trace */, 0, 0, 0, 1, &geometry, NULL, 0};
             AsBuildSizes sizes = {ST_AS_BUILD_SIZES, NULL, 0, 0, 0};
@@ -1743,7 +1802,7 @@ static bool rtSync(Vulkan* v, const ArtfScene* scene) {
         for (uint32_t m = 0; m < meshes; ++m) {
             const ArtfTraceRange* r = &t->ranges.items[m];
             if (!r->triangleCount) continue;
-            AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1, 4, 0, 0, 0, 1, &geometry, NULL, 0};
+            AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1, 4 /* fast to trace */, 0, 0, 0, 1, &geometry, NULL, 0};
             AsBuildSizes sizes = {ST_AS_BUILD_SIZES, NULL, 0, 0, 0};
             v->vkGetAccelerationStructureBuildSizesKHR(v->device, 1, &build, &r->triangleCount, &sizes);
             const AsCreateInfo create = {ST_AS_CREATE_INFO, NULL, 0, v->rtBottom.buffer, offsets[m], sizes.structureSize, 1, 0};
@@ -1780,10 +1839,10 @@ static bool rtSync(Vulkan* v, const ArtfScene* scene) {
             const VkAccelerationStructureKHR bottom = mesh < v->rtBottomCount ? v->rtBottoms[mesh] : 0;
             AsInstance o;
             memcpy(o.transform, t->instanceWorlds.items + (size_t)i * 12, 48);
-            /* (its custom index, its mesh's first triangle; fronts counter-clockwise, as the trees have them; and both
-             * sides of what has two) */
-            o.customAndMask = (t->ranges.items[mesh].firstTriangle & 0xFFFFFFu) | 0xFFu << 24;
-            o.offsetAndFlags = (uint32_t)(2u /* counter-clockwise */ | 4u /* opaque */ | (t->instances.items[i].twoSided ? 1u /* no culling */ : 0u)) << 24;
+            /* (no custom index: the table of instances has its mesh's first triangle, with no limit of 24 bits; fronts
+             * counter-clockwise, as the trees have them; and both sides of what has two) */
+            o.customAndMask = 0xFFu << 24;
+            o.offsetAndFlags = (uint32_t)(4u /* opaque; counter-clockwise is the front, as the trees have it, with no flag */ | (t->instances.items[i].twoSided & 1u ? 1u /* no culling */ : 0u)) << 24;
             const AsDeviceAddressInfo address = {ST_AS_DEVICE_ADDRESS_INFO, NULL, bottom};
             o.reference = bottom ? v->vkGetAccelerationStructureDeviceAddressKHR(v->device, &address) : 0;
             /* (one with no triangles is there, empty: ids are places among the traced instances) */
@@ -1814,7 +1873,7 @@ static bool rtSync(Vulkan* v, const ArtfScene* scene) {
         const AsBuildRange range = {made, 0, 0, 0};
         const AsBuildRange* ranges = &range;
         v->vkCmdBuildAccelerationStructuresKHR(c, 1, &build, &ranges);
-        memoryBarrier(v, c, STAGE_AS_BUILD, STAGE_COMPUTE, ACCESS_AS_WRITE, ACCESS_AS_READ);
+        memoryBarrier(v, c, STAGE_AS_BUILD, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_AS_WRITE, ACCESS_AS_READ);
         if (!oneShotEnd(v, c)) return false;
         const WriteDescriptorSetAs structures = {ST_WRITE_DESCRIPTOR_SET_AS, NULL, 1, &v->rtTopLevel};
         for (int i = 0; i < SLOTS; ++i) {
@@ -1829,6 +1888,53 @@ static bool rtSync(Vulkan* v, const ArtfScene* scene) {
 
 _Static_assert(sizeof(AsGeometryTriangles) == 64 && sizeof(AsGeometry) == 96 && sizeof(AsBuildGeometryInfo) == 80 && sizeof(AsInstance) == 64 && sizeof(AsCreateInfo) == 64,
                "the ray tracing structures are laid out as Vulkan's");
+
+/* The trees rays walk, as tracing holds them (artfSceneTraceSync first): sent up when they changed. */
+static bool traceBuffersSync(Vulkan* v, const ArtfScene* scene) {
+    const ArtfTrace* t = &scene->trace;
+    const bool otherScene = v->traceScene != scene->id;
+    if (otherScene || v->traceMeshVersion != t->meshVersion) {
+        v->vkDeviceWaitIdle(v->device);
+        if (!traceBuffer(v, &v->traceNodes, 17, t->nodes.items, t->nodes.len * sizeof *t->nodes.items)) return false;
+        if (!traceBuffer(v, &v->traceTriangles, 18, t->triangles.items, t->triangles.len * sizeof *t->triangles.items)) return false;
+        if (!traceBuffer(v, &v->traceVertices, 19, t->vertices.items, t->vertices.len * sizeof *t->vertices.items)) return false;
+        v->traceMeshVersion = t->meshVersion;
+    }
+    if (otherScene || v->traceTopVersion != t->topVersion) {
+        v->vkDeviceWaitIdle(v->device);
+        if (!traceBuffer(v, &v->traceTop, 20, t->top.items, t->top.len * sizeof *t->top.items)) return false;
+        if (!traceBuffer(v, &v->traceInstances, 21, t->instances.items, (t->instances.len + 1) * sizeof *t->instances.items)) return false;
+        v->traceTopVersion = t->topVersion;
+    }
+    v->traceScene = scene->id;
+    return true;
+}
+
+/* Shadows and reflections from rays while drawing: what rays read, kept up to date as instances move (particles left
+ * out), with the hardware's structures where there are some; and the reflections' pass, made when first asked. */
+static bool syncTraced(Vulkan* v, ArtfScene* scene, bool reflections) {
+    artfSceneTraceSync(scene);
+    if (!traceBuffersSync(v, scene)) return false;
+    if (v->rayQuery && !rtSync(v, scene)) return false;
+    const bool hardware = v->rayQuery;
+    if (reflections && v->reflectionTraced && v->reflectionTracedHardware != hardware) {
+        v->vkDeviceWaitIdle(v->device);
+        v->vkDestroyPipeline(v->device, v->reflectionTraced, NULL);
+        v->reflectionTraced = 0;
+    }
+    if (reflections && !v->reflectionTraced) {
+        size_t size;
+        v->reflectionTracedHardware = hardware;
+        uint32_t* code = artfShaderPostReflectionTraced(&size, v->maxTextures, scene->graphs.items, (uint32_t)scene->graphs.len, hardware);
+        VkShaderModule module = shaderModule(v, code, size);
+        if (!module) return false;
+        const ComputePipelineCreateInfo info = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
+        const bool ok = v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &info, NULL, &v->reflectionTraced) == VK_OK;
+        v->vkDestroyShaderModule(v->device, module, NULL);
+        if (!ok) return false;
+    }
+    return true;
+}
 
 static bool syncTrace(Vulkan* v, ArtfScene* scene) {
     artfSceneTraceSync(scene);
@@ -1852,21 +1958,7 @@ static bool syncTrace(Vulkan* v, ArtfScene* scene) {
         v->vkDestroyShaderModule(v->device, module, NULL);
         if (!ok) return false;
     }
-    const bool otherScene = v->traceScene != scene->id;
-    if (otherScene || v->traceMeshVersion != t->meshVersion) {
-        v->vkDeviceWaitIdle(v->device);
-        if (!traceBuffer(v, &v->traceNodes, 17, t->nodes.items, t->nodes.len * sizeof *t->nodes.items)) return false;
-        if (!traceBuffer(v, &v->traceTriangles, 18, t->triangles.items, t->triangles.len * sizeof *t->triangles.items)) return false;
-        if (!traceBuffer(v, &v->traceVertices, 19, t->vertices.items, t->vertices.len * sizeof *t->vertices.items)) return false;
-        v->traceMeshVersion = t->meshVersion;
-    }
-    if (otherScene || v->traceTopVersion != t->topVersion) {
-        v->vkDeviceWaitIdle(v->device);
-        if (!traceBuffer(v, &v->traceTop, 20, t->top.items, t->top.len * sizeof *t->top.items)) return false;
-        if (!traceBuffer(v, &v->traceInstances, 21, t->instances.items, (t->instances.len + 1) * sizeof *t->instances.items)) return false;
-        v->traceTopVersion = t->topVersion;
-    }
-    v->traceScene = scene->id;
+    if (!traceBuffersSync(v, scene)) return false;
     if (hardware && !rtSync(v, scene)) return false;
     if (!v->traceSum.buffer) {
         v->vkDeviceWaitIdle(v->device);
@@ -2595,12 +2687,14 @@ static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, const ArtfFra
 
 /* ---- what comes after a frame in floats: post.c's order ---- */
 
-static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) {
-    v->vkCmdBindPipeline(c, 1, v->postPipelines[pipeline]);
+static void postStepWith(Vulkan* v, VkCommandBuffer c, VkPipeline pipeline, uint32_t push, uint32_t count) {
+    v->vkCmdBindPipeline(c, 1, pipeline);
     v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &push);
     v->vkCmdDispatch(c, (count + 63) / 64, 1, 1);
     memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
 }
+
+static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) { postStepWith(v, c, v->postPipelines[pipeline], push, count); }
 
 static void postCopy(Vulkan* v, VkCommandBuffer c, GpuBuffer* from, GpuBuffer* to) {
     const BufferCopy copy = {0, 0, from->size < to->size ? from->size : to->size};
@@ -2620,7 +2714,9 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
         postStep(v, c, POST_OCCLUSION_BLUR, 0, pixels);
     }
     if (frame->post[1][0] > 0) {
-        postStep(v, c, POST_REFLECTION, 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
+        /* (from rays, or marched across the frame) */
+        const bool traced = frame->traced & ARTF_TRACED_REFLECTIONS && v->reflectionTraced;
+        postStepWith(v, c, traced ? v->reflectionTraced : v->postPipelines[POST_REFLECTION], 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
         postStep(v, c, POST_REFLECTION_APPLY, 0, pixels);
     }
     if (frame->post[1][3] > 0) {
@@ -2677,27 +2773,38 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     const bool probes = scene->indirect.on && scene->indirect.probes, walls = probes && !scene->indirect.desc.throughWalls;
     const bool fogGrid = v->floats && scene->post.volumetric > 0 && scene->fogDensity > 0;
     const bool coats = scene->layeredMaterials > 0, softShadows = scene->shadows.soft && scene->shadows.resolution > 0;
-    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels || coats != v->coats || softShadows != v->softShadows) {
+    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE;
+    /* shadows and reflections from rays while drawing: the trees, or the hardware */
+    const bool tracedShadows = !tracing && scene->shadows.traced, tracedHardware = tracedShadows && v->rayQuery;
+    const bool tracedReflections = !tracing && v->floats && scene->post.tracedReflections && scene->post.reflections > 0;
+    if (probes != v->probes || walls != v->walls || fogGrid != v->froxels || coats != v->coats || softShadows != v->softShadows || tracedShadows != v->tracedShadows ||
+        tracedHardware != v->tracedHardware) {
         v->vkDeviceWaitIdle(v->device);
         v->probes = probes;
         v->walls = walls;
         v->froxels = fogGrid;
         v->coats = coats;
         v->softShadows = softShadows;
-        if (!scenePipelineMake(v) || !cutoutPipelinesMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
+        v->tracedShadows = tracedShadows;
+        v->tracedHardware = tracedHardware;
+        if (tracedHardware) artfLog("artful: shadows from rays go through the ray tracing hardware");
+        if (!scenePipelineMake(v, scene->graphs.items, (uint32_t)scene->graphs.len) || !cutoutPipelinesMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
         v->graphCount = (uint32_t)scene->graphs.len;
     }
     /* new materials of the program's own: new shaders */
     if (v->graphCount != scene->graphs.len || (v->graphScene != scene->id && (v->graphCount || scene->graphs.len))) {
         v->vkDeviceWaitIdle(v->device);
         if (!cutoutPipelinesMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
+        if (v->tracedShadows && !scenePipelineMake(v, scene->graphs.items, (uint32_t)scene->graphs.len)) return false;
         if (v->tracePipeline) v->vkDestroyPipeline(v->device, v->tracePipeline, NULL);
         v->tracePipeline = 0;
+        if (v->reflectionTraced) v->vkDestroyPipeline(v->device, v->reflectionTraced, NULL);
+        v->reflectionTraced = 0;
         v->graphCount = (uint32_t)scene->graphs.len;
     }
     v->graphScene = scene->id;
-    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE;
     if (tracing && !syncTrace(v, scene)) return false;
+    if ((tracedShadows || tracedReflections) && !syncTraced(v, scene, tracedReflections)) return false;
 
     {
         ArtfFrameData look;
@@ -2753,6 +2860,9 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     } else {
         memset(frame.post, 0, sizeof frame.post);
     }
+    /* (rays while drawing: not when all is traced; reflections only in floats) */
+    if (tracing || !v->floats) frame.traced &= ~(uint32_t)ARTF_TRACED_REFLECTIONS;
+    if (tracing) frame.traced = frame.tracedCasts = 0;
     frame.hizLevels = v->hizLevels;
     memcpy(frame.hiz, v->hizTable, sizeof frame.hiz);
     /* the decals that may show, straight into this slot's buffer (its fence was waited for) */
@@ -3239,6 +3349,7 @@ static void vkFree(ArtfRenderer* r) {
         if (v->shadowHolesPipeline) v->vkDestroyPipeline(v->device, v->shadowHolesPipeline, NULL);
         if (v->shadowPass) v->vkDestroyRenderPass(v->device, v->shadowPass, NULL);
         if (v->tracePipeline) v->vkDestroyPipeline(v->device, v->tracePipeline, NULL);
+        if (v->reflectionTraced) v->vkDestroyPipeline(v->device, v->reflectionTraced, NULL);
         if (v->traceShowPipeline) v->vkDestroyPipeline(v->device, v->traceShowPipeline, NULL);
         if (v->cutoutPipeline) v->vkDestroyPipeline(v->device, v->cutoutPipeline, NULL);
         if (v->layerListPipeline) v->vkDestroyPipeline(v->device, v->layerListPipeline, NULL);

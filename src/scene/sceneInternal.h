@@ -285,6 +285,9 @@ typedef struct ArtfFrameData {
     float cullScale;
     float moving;       /* 1: something moved since the frame before, and the GPU has how (ArtfMotion); 0: the view alone */
     float cullPad[2];
+    /* Rays while drawing: ARTF_TRACED_SHADOWS and REFLECTIONS; which lights cast (ARTF_TRACED_SUN and bits 0 to 15);
+     * how far the pattern of a pixel's rays turns this frame; rays to a light with a size. */
+    uint32_t traced, tracedCasts, tracedFrame, tracedRays;
 } ArtfFrameData;
 
 /* A ball of this radius, this far from the eye, is too small to draw (ArtfFrameData.cullScale). */
@@ -444,7 +447,7 @@ typedef struct ArtfTraceInstance {
     float toObject[12]; /* the rows of its inverse */
     uint32_t root, material;
     float opacity;
-    uint32_t twoSided;
+    uint32_t twoSided;  /* bit 0: both sides show; the rest, its mesh's first triangle, for the ray tracing hardware */
 } ArtfTraceInstance;
 
 /* Where tracing last saw an instance, by its handle. (A handle used again looks as if it jumped: the filter sees that.) */
@@ -662,6 +665,22 @@ void artfSceneTraceFrame(const ArtfScene* s, const ArtfFrameData* frame, int wid
 uint64_t artfSceneTraceKey(const ArtfScene* s, const ArtfFrameData* frame);
 /* Adds one sample of a pixel to out: the light of what was covered, and 1 in out[3] if it was. */
 void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTraceFrame* c, uint32_t x, uint32_t y, uint32_t sample, float* out, ArtfTraceGuide* guide);
+
+/* Rays while drawing (ArtfShadowDesc.traced, ArtfPostDesc.tracedReflections): ArtfFrameData.traced holds these. The
+ * trees are tracing's, kept up to date by artfSceneTraceSync, without particles. */
+enum { ARTF_TRACED_SHADOWS = 1, ARTF_TRACED_REFLECTIONS = 2 };
+#define ARTF_TRACED_SUN (1u << 16) /* in tracedCasts: the sun casts; bits 0 to 15, the frame's lights */
+#define ARTF_TRACED_RAYS 4         /* to a light with a size, from each pixel */
+/* Points in a ball, four by four: each four spread through it. A pixel's rays take the four of its place in a 2 x 2
+ * square, which turns each frame with temporal antialiasing; so a square takes all sixteen. */
+extern const float artfTracedBall[16][3];
+/* The 2 x 2 place of where p falls in the frame, turned by the frame: 0 to 3. */
+uint32_t artfTracedPlace(const ArtfFrameData* f, const float* p);
+/* How much of a light reaches p, of normal n (toward the eye): light -1 the sun, else the frame's light. */
+float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light);
+/* What a ray from p (of normal n) along the mirror of the view v finds, strayed by rough through the ball's point
+ * `point`, lit simply, into out; false when it finds nothing. */
+bool artfTracedReflection(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, const float* v, float rough, uint32_t point, float* out);
 
 /* A layer in view: an instance (dense index) that shows what is behind it, and the mesh it takes. */
 typedef struct ArtfLayer {
