@@ -46,7 +46,7 @@ static inline void binPush(ArtfChunk* c, uint32_t tile, uint32_t tri) {
     head[1] = index;
 }
 
-/* z: 1 / w at each vertex. */
+/* z: 1 / w at each vertex, or an orthographic view's depth. */
 static inline void emitTriangle(GeometryContext* g, int32_t x0, int32_t y0, float z0, int32_t x1, int32_t y1, float z1, int32_t x2, int32_t y2, float z2) {
     /* In a frame, y goes down: a triangle counter-clockwise from the front has a negative area. The
      * others face away, and show only with two sides. Swapping two vertices leaves the rest with a
@@ -105,14 +105,14 @@ static inline void emitTriangle(GeometryContext* g, int32_t x0, int32_t y0, floa
         for (int txx = tx0; txx <= tx1; ++txx) binPush(c, (uint32_t)(ty * f->tilesX + txx), index);
 }
 
-typedef struct ClipVertex { float x, y, w; } ClipVertex;
+typedef struct ClipVertex { float x, y, w, z; } ClipVertex; /* (z: an orthographic view's depth) */
 
-/* Keeps what is on the positive side of a * x + b * y + c * w + d >= 0. */
-static int clipPlane(const ClipVertex* in, int n, ClipVertex* out, float a, float b, float c, float d) {
+/* Keeps what is on the positive side of a * x + b * y + c * w + e * z + d >= 0. */
+static int clipPlane(const ClipVertex* in, int n, ClipVertex* out, float a, float b, float c, float e, float d) {
     int m = 0;
     for (int i = 0; i < n; ++i) {
         const ClipVertex *p = &in[i], *q = &in[i + 1 == n ? 0 : i + 1];
-        float dp = a * p->x + b * p->y + c * p->w + d, dq = a * q->x + b * q->y + c * q->w + d;
+        float dp = a * p->x + b * p->y + c * p->w + e * p->z + d, dq = a * q->x + b * q->y + c * q->w + e * q->z + d;
         if (dp >= 0) out[m++] = *p;
         if ((dp >= 0) != (dq >= 0)) {
             /* Two triangles share this edge, and walk it in opposite ways: worked out in one order
@@ -121,7 +121,7 @@ static int clipPlane(const ClipVertex* in, int n, ClipVertex* out, float a, floa
             const ClipVertex *from = swap ? q : p, *to = swap ? p : q;
             const float df = swap ? dq : dp, dt = swap ? dp : dq;
             const float t = df / (df - dt);
-            ClipVertex v = {from->x + (to->x - from->x) * t, from->y + (to->y - from->y) * t, from->w + (to->w - from->w) * t};
+            ClipVertex v = {from->x + (to->x - from->x) * t, from->y + (to->y - from->y) * t, from->w + (to->w - from->w) * t, from->z + (to->z - from->z) * t};
             out[m++] = v;
         }
     }
@@ -133,11 +133,13 @@ static void clipTriangle(GeometryContext* g, const ClipVertex* v) {
     ArtfSoftFrame* f = g->f;
     ClipVertex a[12], b[12];
     a[0] = v[0]; a[1] = v[1]; a[2] = v[2];
-    int n = clipPlane(a, 3, b, 0, 0, 1, -f->nearW);
-    n = clipPlane(b, n, a, -1, 0, f->guardX, 0);
-    n = clipPlane(a, n, b, 1, 0, f->guardX, 0);
-    n = clipPlane(b, n, a, 0, -1, f->guardY, 0);
-    n = clipPlane(a, n, b, 0, 1, f->guardY, 0);
+    /* (orthographic: w is 1, and what is nearer than near has a depth above 1) */
+    const bool ortho = artfOrtho(&f->data);
+    int n = ortho ? clipPlane(a, 3, b, 0, 0, 0, -1, 1) : clipPlane(a, 3, b, 0, 0, 1, 0, -f->nearW);
+    n = clipPlane(b, n, a, -1, 0, f->guardX, 0, 0);
+    n = clipPlane(a, n, b, 1, 0, f->guardX, 0, 0);
+    n = clipPlane(b, n, a, 0, -1, f->guardY, 0, 0);
+    n = clipPlane(a, n, b, 0, 1, f->guardY, 0, 0);
     if (n < 3) return;
     int32_t x[12], y[12];
     float z[12];
@@ -146,13 +148,16 @@ static void clipTriangle(GeometryContext* g, const ClipVertex* v) {
         float iw = 1.f / b[i].w;
         x[i] = (int32_t)floorf((b[i].x * iw * hw + hw) * 16.f + .5f);
         y[i] = (int32_t)floorf((hh - b[i].y * iw * hh) * 16.f + .5f);
-        z[i] = iw;
+        z[i] = ortho ? b[i].z : iw;
     }
     for (int i = 1; i + 1 < n; ++i) emitTriangle(g, x[0], y[0], z[0], x[i], y[i], z[i], x[i + 1], y[i + 1], z[i + 1]);
 }
 
 static inline bool meshletCulled(const ArtfSoftFrame* f, const ArtfVisible* v, const ArtfMeshlet* l) {
-    if (v->useCone && l->coneCutoff < 2.f) {
+    if (v->useCone && l->coneCutoff < 2.f && artfOrtho(&f->data)) {
+        /* (all rays go one way: all its triangles face away when that way is inside the cone's back) */
+        if (v->camera[0] * l->cone[0] + v->camera[1] * l->cone[1] + v->camera[2] * l->cone[2] >= l->coneCutoff) return true;
+    } else if (v->useCone && l->coneCutoff < 2.f) {
         float dx = l->center[0] - v->camera[0], dy = l->center[1] - v->camera[1], dz = l->center[2] - v->camera[2];
         float along = dx * l->cone[0] + dy * l->cone[1] + dz * l->cone[2];
         if (along >= l->coneCutoff * sqrtf(dx * dx + dy * dy + dz * dz) + l->radius) return true;
@@ -187,6 +192,9 @@ static void geometryMeshlet(GeometryContext* g, const ArtfVisible* v, uint32_t m
     const V8F halfW = v8fSet((float)f->width * .5f), halfH = v8fSet((float)f->height * .5f);
     const V8F sixteen = v8fSet(16.f), half = v8fSet(.5f), one = v8fSet(1.f), zero = v8fSet(0.f);
     const V8F limit = v8fSet(262000.f); /* what the integers below are good for */
+    /* orthographic: w is 1, and depth is the clip's z, which is cut at 1 (near) */
+    const bool ortho = artfOrtho(&f->data);
+    const V8F z0 = v8fSet(v->depthRow[0]), z1 = v8fSet(v->depthRow[1]), z2 = v8fSet(v->depthRow[2]), z3 = v8fSet(v->depthRow[3]);
     const float* px = mesh->positions + l->vertexOffset;
     const float* py = px + mesh->positionStride;
     const float* pz = py + mesh->positionStride;
@@ -207,6 +215,10 @@ static void geometryMeshlet(GeometryContext* g, const ArtfVisible* v, uint32_t m
         V8F iw = v8fDiv(one, v8fMax(cw, nearW)); /* (what is nearer is clipped: its numbers are not used) */
         V8F sx = v8fAdd(v8fMul(v8fMul(cx, iw), halfW), halfW);
         V8F sy = v8fSub(halfH, v8fMul(v8fMul(cy, iw), halfH));
+        if (ortho) {
+            iw = v8fAdd(v8fAdd(v8fAdd(v8fMul(z0, x), v8fMul(z1, y)), v8fMul(z2, z)), z3);
+            code = v8iOr(code, v8iAnd(v8fGt(iw, one), v8iSet(OUT_NEAR)));
+        }
         sx = v8fMin(v8fMax(v8fFloor(v8fAdd(v8fMul(sx, sixteen), half)), v8fSub(zero, limit)), limit);
         sy = v8fMin(v8fMax(v8fFloor(v8fAdd(v8fMul(sy, sixteen), half)), v8fSub(zero, limit)), limit);
         v8fStore(clipX + i, cx);
@@ -225,7 +237,7 @@ static void geometryMeshlet(GeometryContext* g, const ArtfVisible* v, uint32_t m
         if (ca & cb & cc & OUT_FRUSTUM) continue;
         g->key = meshletIndex << 7 | t;
         if ((ca | cb | cc) & OUT_CLIP) {
-            const ClipVertex in[3] = {{clipX[a], clipY[a], clipW[a]}, {clipX[b], clipY[b], clipW[b]}, {clipX[c], clipY[c], clipW[c]}};
+            const ClipVertex in[3] = {{clipX[a], clipY[a], clipW[a], invW[a]}, {clipX[b], clipY[b], clipW[b], invW[b]}, {clipX[c], clipY[c], clipW[c], invW[c]}};
             clipTriangle(g, in);
         } else {
             emitTriangle(g, fixedX[a], fixedY[a], invW[a], fixedX[b], fixedY[b], invW[b], fixedX[c], fixedY[c], invW[c]);
@@ -349,6 +361,16 @@ V8_INLINE V8F dot3(Lanes3 a, Lanes3 b) { return v8fAdd(v8fAdd(v8fMul(a.x, b.x), 
 V8_INLINE Lanes3 normalize3(Lanes3 a) {
     V8F inv = v8fDiv(v8fSet(1.f), v8fSqrt(dot3(a, a)));
     Lanes3 r = {v8fMul(a.x, inv), v8fMul(a.y, inv), v8fMul(a.z, inv)};
+    return r;
+}
+/* Where the eye is for eight places (artfEyeOf): the camera, or in an orthographic view the place on its plane behind each. */
+V8_INLINE Lanes3 eyeLanes(const ArtfFrameData* frame, Lanes3 world) {
+    const Lanes3 camera = {v8fSet(frame->cameraPos[0]), v8fSet(frame->cameraPos[1]), v8fSet(frame->cameraPos[2])};
+    if (!artfOrtho(frame)) return camera;
+    const Lanes3 ahead = {v8fSet(frame->eye[2][0]), v8fSet(frame->eye[2][1]), v8fSet(frame->eye[2][2])};
+    const Lanes3 from = {v8fSub(world.x, camera.x), v8fSub(world.y, camera.y), v8fSub(world.z, camera.z)};
+    const V8F along = dot3(from, ahead);
+    const Lanes3 r = {v8fSub(world.x, v8fMul(ahead.x, along)), v8fSub(world.y, v8fMul(ahead.y, along)), v8fSub(world.z, v8fMul(ahead.z, along))};
     return r;
 }
 
@@ -637,7 +659,9 @@ static V8F shadowLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
     const bool soft = f->scene->shadows.soft;
     for (int i = 0; i < 8; ++i) {
         const float p[3] = {wx[i], wy[i], wz[i]}, normal[3] = {nx[i], ny[i], nz[i]};
-        out[i] = light < 0 ? artfShadowOfSun(f->shadows, f->data.cameraPos, p, normal, soft ? f->data.look[2] : 0.f)
+        float eye[3];
+        artfEyeOf(&f->data, p, eye);
+        out[i] = light < 0 ? artfShadowOfSun(f->shadows, eye, p, normal, soft ? f->data.look[2] : 0.f)
                            : artfShadowOfLight(f->shadows, (uint32_t)light, f->data.lights[light].position, p, normal, soft ? f->data.lightSizes[light] : 0.f);
     }
     return v8fLoad(out);
@@ -787,8 +811,10 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         v8fStore(io.color[0], albedo.x); v8fStore(io.color[1], albedo.y); v8fStore(io.color[2], albedo.z);
         v8fStore(io.emissive[0], own.x); v8fStore(io.emissive[1], own.y); v8fStore(io.emissive[2], own.z);
         v8fStore(io.roughness, rough); v8fStore(io.metallic, metal); v8fStore(io.alpha, one);
-        const float* eye = frame->cameraPos;
         for (int i = 0; i < 8; ++i) {
+            const float at[3] = {io.world[0][i], io.world[1][i], io.world[2][i]};
+            float eye[3];
+            artfEyeOf(frame, at, eye);
             const float dx = eye[0] - io.world[0][i], dy = eye[1] - io.world[1][i], dz = eye[2] - io.world[2][i], inverse = 1.f / sqrtf(artfMaxf(dx * dx + dy * dy + dz * dz, 1e-12f));
             io.toEye[0][i] = dx * inverse;
             io.toEye[1][i] = dy * inverse;
@@ -852,7 +878,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
     Lanes3 bounced = {v8fSet(0.f), v8fSet(0.f), v8fSet(0.f)};
     if (frame->indirect[0][3] > 0) {
         /* or from the probes near it: light that bounced */
-        Lanes3 toEye = {v8fSub(v8fSet(frame->cameraPos[0]), world.x), v8fSub(v8fSet(frame->cameraPos[1]), world.y), v8fSub(v8fSet(frame->cameraPos[2]), world.z)};
+        const Lanes3 eye = eyeLanes(frame, world);
+        Lanes3 toEye = {v8fSub(eye.x, world.x), v8fSub(eye.y, world.y), v8fSub(eye.z, world.z)};
         const Lanes3 seen = normalize3(toEye);
         const V8F twice = v8fMul(dot3(n, seen), v8fSet(2.f));
         const Lanes3 mirror = {v8fSub(v8fMul(n.x, twice), seen.x), v8fSub(v8fMul(n.y, twice), seen.y), v8fSub(v8fMul(n.z, twice), seen.z)};
@@ -868,7 +895,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
     Lanes3 view = {zero, zero, zero};
     Reflecting reflecting;
     if (shiny || coated) {
-        Lanes3 toEye = {v8fSub(v8fSet(frame->cameraPos[0]), world.x), v8fSub(v8fSet(frame->cameraPos[1]), world.y), v8fSub(v8fSet(frame->cameraPos[2]), world.z)};
+        const Lanes3 eye = eyeLanes(frame, world);
+        Lanes3 toEye = {v8fSub(eye.x, world.x), v8fSub(eye.y, world.y), v8fSub(eye.z, world.z)};
         view = normalize3(toEye);
     }
     if (shiny) {
@@ -1027,7 +1055,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         lit.z = v8fAdd(baseColor.z, own.z);
     }
     if (frame->look[1] > 0 && !f->postFog) {
-        Lanes3 fromEye = {v8fSub(world.x, v8fSet(frame->cameraPos[0])), v8fSub(world.y, v8fSet(frame->cameraPos[1])), v8fSub(world.z, v8fSet(frame->cameraPos[2]))};
+        const Lanes3 eye = eyeLanes(frame, world);
+        Lanes3 fromEye = {v8fSub(world.x, eye.x), v8fSub(world.y, eye.y), v8fSub(world.z, eye.z)};
         /* (with no exp, whose bits differ from one C library to the next) */
         const V8F air = v8fMul(v8fSqrt(dot3(fromEye, fromEye)), v8fSet(frame->look[1]));
         const V8F keep = v8fDiv(v8fSet(1.f), v8fAdd(v8fAdd(v8fSet(1.f), air), v8fMul(v8fMul(air, air), v8fSet(.5f))));
@@ -1046,8 +1075,10 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
             const float x = lw[0][i], y = lw[1][i], z = lw[2][i];
             const float cx = m[0] * x + m[4] * y + m[8] * z + m[12], cy = m[1] * x + m[5] * y + m[9] * z + m[13];
             const float cw = artfMaxf(m[3] * x + m[7] * y + m[11] * z + m[15], 1e-5f);
+            /* (orthographic: w is 1, and how far along the view is the depth's) */
+            const float along = artfOrtho(frame) ? frame->ortho[1] - (m[2] * x + m[6] * y + m[10] * z + m[14]) * frame->ortho[0] : cw;
             float c[4];
-            artfFroxelAt(f, (cx / cw * .5f + .5f) * (float)f->width - .5f, (.5f - cy / cw * .5f) * (float)f->height - .5f, cw, c);
+            artfFroxelAt(f, (cx / cw * .5f + .5f) * (float)f->width - .5f, (.5f - cy / cw * .5f) * (float)f->height - .5f, along, c);
             for (int j = 0; j < 4; ++j) got[j][i] = c[j];
         }
         airLeft = v8fLoad(got[3]);
@@ -1713,9 +1744,11 @@ static void environmentFill(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int o
     const ArtfFrameData* d = &f->data;
     const float* env = f->scene->environment;
     const float light = d->sky[3], exposure = d->look[0], alpha = d->background[3];
+    /* (orthographic: every ray goes the way the view looks, and sees the same) */
+    const float spread = artfOrtho(d) ? 0.f : 1.f;
     for (int y = 0; y < th; ++y)
         for (int x = 0; x < tw; ++x) {
-            const float px = ((float)(ox + x) + .5f) / (float)f->width * 2.f - 1.f, py = 1.f - ((float)(oy + y) + .5f) / (float)f->height * 2.f;
+            const float px = (((float)(ox + x) + .5f) / (float)f->width * 2.f - 1.f) * spread, py = (1.f - ((float)(oy + y) + .5f) / (float)f->height * 2.f) * spread;
             float c[3];
             artfEnvSample(env, 0, d->eye[2][0] + px * d->eye[0][0] + py * d->eye[1][0], d->eye[2][1] + px * d->eye[0][1] + py * d->eye[1][1],
                           d->eye[2][2] + px * d->eye[0][2] + py * d->eye[1][2], c);

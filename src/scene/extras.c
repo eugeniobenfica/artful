@@ -340,7 +340,7 @@ uint32_t artfSceneDecals(const ArtfScene* s, const ArtfFrameData* frame, int hei
         const uint32_t texture = d->texture < s->textures.len && !s->textures.items[d->texture].removed ? d->texture : 0;
         const ArtfTextureData* t = &s->textures.items[texture];
         /* the mipmap whose texels are about a pixel's size where the box is: as mipLevel in kernels.inc */
-        const float along = artfMaxf((m[3] - frame->cameraPos[0]) * frame->eye[2][0] + (m[7] - frame->cameraPos[1]) * frame->eye[2][1] + (m[11] - frame->cameraPos[2]) * frame->eye[2][2], frame->nearW);
+        const float along = artfSeenDistance(frame, artfMaxf((m[3] - frame->cameraPos[0]) * frame->eye[2][0] + (m[7] - frame->cameraPos[1]) * frame->eye[2][1] + (m[11] - frame->cameraPos[2]) * frame->eye[2][2], frame->nearW));
         const float texel = artfMaxf(sx, sz) / (float)artfMaxi(t->width, 1), ratio = along * pixel / artfMaxf(texel, 1e-20f), rho2 = ratio * ratio;
         uint32_t bits;
         memcpy(&bits, &rho2, 4);

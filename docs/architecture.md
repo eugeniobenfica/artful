@@ -473,6 +473,34 @@ instance's id is its place among them, and its custom index is its mesh's first 
 as the trees have them; eye rays cull backs but for what has two sides; everything is opaque to the hardware, as what
 shows through is the path's business.
 
+## An orthographic camera
+
+`ArtfCamera.orthoHeight` sends every ray the same way, each from its own place on the view's plane. Its matrix has w
+1, so depth cannot be `near / t`: it is `(far - t) / (far - near)`, 1 at near and 0 at far, and even across a
+triangle, as all that is interpolated is then. Far is just past the scene's bounds, so all of it has a depth above 0.
+A perspective's depth is as it was, to the bit, and so is all that reads it: the frame says which camera it is
+(`ArtfFrameData.ortho`), and where the two part, the code asks.
+
+What changes is in a few places, the same on both backends. Depth becomes distance by `artfDepthAlong`; the eye a
+point is lit and fogged from is the place on the view's plane behind it (`artfEyeOf`, the shaders' `eyeOf`), so the
+view and the distance along it come out right with no other change; and what goes by size on screen takes every
+distance as 1 (`artfSeenDistance`), as focalY is then 2 / height. The CPU's rasterizer keeps the clip's z as a
+pixel's depth in place of 1 / w, and cuts at z = 1 in place of w = near. A meshlet's cone is tested against the one
+way the view looks; the sun's cascades are boxes along the view, and the squares of the frame that list lights are
+boxes too. After the frame, `worldAt` and `postWorld` start each pixel from its place, and reflections walk depth
+itself along their line, as it goes evenly there. A traced ray starts on the plane (`ArtfTraceFrame.eye[3]`). Where
+the GPU must choose, it multiplies by a 0 or a 1 of the view rather than choosing between results: what a perspective
+computes stays as it was, and so does what the GPU's compiler fuses of it.
+
+## Picking
+
+`artfScenePick` and `artfSceneRaycast` go down the trees tracing makes (`trace.c`), on the calling thread, with
+nothing of a renderer. What they meet is looked at as a traced ray looks at it: a surface with less than half of it
+there, a hole for instance, is gone through, from just past it; particles are always gone through. A ray costs a walk
+of two trees, and the trees are made again only for what changed, which the first pick of a frame finds out from
+versions. Tracing's filter wants to see what moved since the frame before, which the next frame's own look at the trees
+would think still: so a pick that made them again leaves a mark, and that look keeps what moved once more.
+
 ## The GPU: the CPU stays out of the way
 
 All meshes share one vertex buffer and one index buffer, every texture is in one descriptor array,
@@ -494,7 +522,8 @@ The CPU's share is writing what changed, and recording those commands: 0.05 ms, 
 Other choices, each small:
 
 - **Reversed depth with no far plane.** Depth is `near / distance` in a 32-bit float, which spreads
-  precision evenly along the view: no far plane to tune, and far less z-fighting in the distance.
+  precision evenly along the view: no far plane to tune, and far less z-fighting in the distance. (An orthographic
+  camera has one: see above.)
 - **Memory written by the CPU is the GPU's own** where it can be (always on an integrated GPU): no
   staging copy for what changes each frame.
 - **Depth is never stored.** The render pass drops it at the end, which on a tiling GPU means it

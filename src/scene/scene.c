@@ -562,7 +562,7 @@ void artfSceneResidencyStep(ArtfScene* s, const ArtfFrameData* frame, int height
         /* (what is behind the eye still shows in a mirror) */
         if (!inView && s->trace.desc.mode == ARTF_TRACE_NONE) continue;
         const float dx = wx - frame->cameraPos[0], dy = wy - frame->cameraPos[1], dz = wz - frame->cameraPos[2];
-        const float distance = artfMaxf(sqrtf(dx * dx + dy * dy + dz * dz) - r, frame->nearW);
+        const float distance = artfSeenDistance(frame, artfMaxf(sqrtf(dx * dx + dy * dy + dz * dz) - r, frame->nearW));
         const float pixels = 2.f * r * frame->focalY * (float)height * .5f / distance;
         const ArtfMaterialData* material = &s->materials.items[inst->material];
         const uint32_t maps[4] = {material->texture, material->normalMap, material->surfaceMap, material->occlusionMap};
@@ -906,7 +906,7 @@ uint32_t artfSceneLayers(const ArtfScene* s, const ArtfFrameData* frame, ArtfLay
         if (artfTooSmall(frame, r, artfMaxf(distance - r, frame->nearW))) continue;
         /* (by depth along the view, as depth is tested: what faces the eye then comes in the order it shows in) */
         const float along = dx * frame->eye[2][0] + dy * frame->eye[2][1] + dz * frame->eye[2][2];
-        const ArtfLayer layer = {(uint32_t)i, artfMeshLevel(s, inst->mesh, frame->lodScale, inst->maxScale, artfMaxf(distance - r, frame->nearW)), along};
+        const ArtfLayer layer = {(uint32_t)i, artfMeshLevel(s, inst->mesh, frame->lodScale, inst->maxScale, artfSeenDistance(frame, artfMaxf(distance - r, frame->nearW))), along};
         out[n++] = layer;
     }
     qsort(out, n, sizeof *out, fartherFirst);
@@ -1052,6 +1052,12 @@ void artfSceneLightTiles(const ArtfFrameData* f, int width, int height, const Ar
                 const float z = c[0] * f->eye[2][0] + c[1] * f->eye[2][1] + c[2] * f->eye[2][2];
                 const float x = c[0] * right[0] + c[1] * right[1] + c[2] * right[2], y = c[0] * up[0] + c[1] * up[1] + c[2] * up[2];
                 const float r = L->radius;
+                if (artfOrtho(f)) {
+                    /* (orthographic: the square's slice of the view is a box, its sides x0 to x1 and y0 to y1 across) */
+                    if (z < f->ortho[1] - f->ortho[0] - r || x - x0 < -r || x1 - x < -r || y - y0 < -r || y1 - y < -r) continue;
+                    list[1 + list[0]++] = i;
+                    continue;
+                }
                 /* (outside a plane through the eye by more than the radius: it cannot reach the square) */
                 if (z < -r || x - x0 * z < -r * l0 || x1 * z - x < -r * l1 || y - y0 * z < -r * m0 || y1 * z - y < -r * m1) continue;
                 list[1 + list[0]++] = i;
@@ -1221,7 +1227,8 @@ uint32_t artfSceneShadowFrame(const ArtfScene* s, const ArtfFrameData* frame, Ar
         out->sun[1] = ARTF_SHADOW_CASCADES;
         float from = 0;
         for (uint32_t i = 0; i < ARTF_SHADOW_CASCADES; ++i) {
-            const float to = ends[i], along = (from + to) * .5f, wide = to * spread * sqrtf(1.f - 1.f / (spread * spread));
+            /* (orthographic: the stretch of the view is a box, as wide everywhere as the view) */
+            const float to = ends[i], along = (from + to) * .5f, wide = artfOrtho(frame) ? sqrtf(tanX * tanX + tanY * tanY) : to * spread * sqrtf(1.f - 1.f / (spread * spread));
             const float half = sqrtf((to - along) * (to - along) + wide * wide) * 1.02f, texel = 2.f * half / (float)side;
             out->splits[i] = to;
             const ArtfVec3 center = artfVec3Add(c->position, artfVec3Scale(forward, along));
@@ -1324,6 +1331,24 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     const ArtfCamera* c = &s->camera;
     ArtfMat4 view = artfMat4LookAt(c->position, c->target, c->up);
     ArtfMat4 proj = artfMat4Perspective(c->fovY, (float)width / (float)artfMaxi(height, 1), c->near_);
+    if (c->orthoHeight > 0) {
+        /* Depth from 1 at near to 0 at far, even along the view: far is where it is asked to be, or just past the
+         * scene's bounds, so that all of it has a depth above 0. */
+        const ArtfVec3 ahead = artfVec3Normalize(artfVec3Sub(c->target, c->position));
+        float far = c->far_;
+        if (!(far > c->near_)) {
+            ArtfVec3 center;
+            float radius;
+            far = artfSceneBounds(s, &center, &radius) ? artfVec3Dot(artfVec3Sub(center, c->position), ahead) + radius : c->near_ + 1.f;
+            far = artfMaxf(far, c->near_ + 1e-3f);
+            far += (far - c->near_) * .01f + 1e-3f;
+        }
+        const float span = far - c->near_, aspect = (float)width / (float)artfMaxi(height, 1);
+        const ArtfMat4 ortho = {{2.f / (c->orthoHeight * aspect), 0, 0, 0, 0, 2.f / c->orthoHeight, 0, 0, 0, 0, 1.f / span, 0, 0, 0, far / span, 1.f}};
+        proj = ortho;
+        out->ortho[0] = span;
+        out->ortho[1] = far;
+    }
     ArtfMat4 vp = artfMat4Mul(proj, view);
     memcpy(out->viewProj, vp.m, sizeof vp.m);
 

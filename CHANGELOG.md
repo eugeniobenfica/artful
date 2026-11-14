@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **An orthographic camera**: `ArtfCamera.orthoHeight`, the view's height in the world, and `far_`, where its depth
+  ends (0: just past the scene's bounds). All its rays go one way, so things keep their size however far they are:
+  plans, elevations, isometric games. Depth is `(far - t) / (far - near)`, even across a triangle as w is 1, where a
+  perspective's stays `near / t`; the frame says which (`ArtfFrameData.ortho`, in what was padding), and everything
+  that read depth, or took rays from the eye, reads it so on both backends: culling, levels of detail and what is too
+  small to see (all as at one distance), cones, occlusion, the sun's cascades (boxes along the view), the lists of
+  lights past sixteen, the view a surface is lit from, fog, all that comes after a frame in floats (occlusion,
+  reflections, temporal antialiasing, motion blur, depth of field, the grid of fog), decals' mipmaps, the picture of
+  all around behind the scene (one direction: one color) and tracing. The backends agree on a scene with all of it:
+  0.02% of pixels apart drawn, 0.00% after the frame, 0.01% traced. glTF's orthographic cameras are orthographic now.
+  A perspective frame is the same bytes as before: a test holds four of them, drawn, after the frame, with fog that
+  light goes through, and traced, to the hashes the commit before drew on the CPU; on the GPU, the same four came
+  out the same bytes as before on the Radeon.
+- **Picking**: `artfScenePick`, what is under a point of the frame, and `artfSceneRaycast`, the first surface along a
+  ray (`ArtfPickHit`: the instance, the triangle, where, its normal, how far, and the texture coordinates there).
+  Through the trees tracing makes, so on any renderer or none, with bones as posed; through holes, what is less than
+  half there, and particles. The trees are made the first time, and again only for what changed: among `city`'s 40,201
+  instances, 16 ms for the first pick, then 10,000 picks in 9 ms. A pick between frames leaves what moved
+  for the next frame's filter to see.
+- `artful-render`: `--ortho height`.
 - **The ray tracing hardware**: `ArtfTraceDesc.hardware`. Where the GPU has acceleration structures and ray queries
   (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`), a ray goes through them in place of the trees the compute
   shader walks: a bottom level for each mesh traced, from the same triangles, and the top over the traced instances,

@@ -73,11 +73,20 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   on a slow desktop.
 - glTF: Draco compression and Basis Universal's formats are not read. `EXT_meshopt_compression` is decoded as its
   specification has it, and checked against streams made by an encoder in the tests, not yet against meshoptimizer's
-  own files. An orthographic camera comes out as a perspective one from far behind, through a field a hundredth of a
-  radian high. A file's lights end at a radius, as Artful's do, and are not the square law: as bright as it at a
-  quarter of their reach. Each material has one set of texture coordinates, moved by the transform of its first
+  own files. An orthographic camera's width goes by the frame's shape, not by its xmag. A file's lights end at a
+  radius, as Artful's do, and are not the square law: as bright as it at a quarter of their reach. Each material has one set of texture coordinates, moved by the transform of its first
   texture. Transmission is drawn as blending, and bends light only when traced.
-- Metal leaves out everything since 0.4: its shaders were not made again, and read the records they did.
+- An orthographic camera (`ArtfCamera.orthoHeight`) sees the picture of all around, behind the scene, along one
+  direction: all of it one color. Its depth is even from near to far, and far is just past the scene's bounds unless
+  given (`far_`): what is past it is not drawn, a scene that spans thousands of units spends a float's precision on
+  all of them, and finding those bounds goes over every instance each frame. A black hole is still seen through a
+  perspective. Its shadows' cascades are boxes as wide as the view: a wide view spreads the sun's texels thin.
+- Picking (`artfScenePick`, `artfSceneRaycast`) goes by the trees tracing makes: the first pick makes them for all
+  the scene's meshes, as long as levels of detail take, and it is the full mesh, not the level drawn. A surface
+  stops a pick when at least half of it is there, so glass more transparent than not is gone through. A material in
+  C's normals do not count: the normal is the triangle's. The triangle is in the order Artful keeps the mesh in.
+- Metal leaves out everything since 0.4: its shaders were not made again, and read the records they did. An
+  orthographic camera there is drawn by its matrices, but lit, fogged and finished as if from its eye.
 - **Metal has never been run.** It was written without a Mac: CI builds it on macOS and puts its shaders through
   Apple's compiler, and no more than that is known. So it is chosen only by name. It needs Metal 3; it leaves out
   occlusion, black holes, materials in C and light from a picture, and sends textures up decoded. Linux and macOS are

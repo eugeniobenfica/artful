@@ -120,6 +120,15 @@ static SpvId pick3(Spv* s, SpvId condition, SpvId a, SpvId b) {
     SpvId z = spvSelect(s, s->floatType, condition, spvExtract(s, s->floatType, a, 2), spvExtract(s, s->floatType, b, 2));
     return vec3Of(s, x, y, z);
 }
+/* An orthographic view: ArtfFrameData.ortho, how deep its depth goes, is above 0. */
+static SpvId orthoOn(Spv* s, const Resources* r) { return spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Z(frameVec(s, r, F_CULL)), spvConstFloat(s, 0.f)); }
+/* Where the eye is for a point of the world: as artfEyeOf, the camera, or in an orthographic view the place on its
+ * plane behind the point. */
+static SpvId eyeOf(Spv* s, const Resources* r, SpvId world) {
+    SpvId camera = spvShuffle3(s, frameVec(s, r, F_CAMERA)), ahead = spvShuffle3(s, frameVec(s, r, F_EYE + 2));
+    SpvId onPlane = SUB_V3(world, SCALE_V3(ahead, DOT3(SUB_V3(world, camera), ahead)));
+    return pick3(s, orthoOn(s, r), onPlane, camera);
+}
 /* As toneMap in kernels.inc, where exposure is above 0. */
 static SpvId exposed(Spv* s, SpvId light, SpvId exposure) {
     SpvId v = spvOp2(s, SPV_OP_VectorTimesScalar, s->vec3, light, exposure);
@@ -308,9 +317,12 @@ static SpvId sphereHidden(Spv* s, const Resources* r, SpvId world, SpvId radius)
     SpvId cx = X(clip), cy = Y(clip), cw = W(clip);
     SpvId projection = frameVec(s, r, F_PROJECTION);
     SpvId nearW = Z(projection);
-    SpvId closest = SUB_F(cw, radius);
-    SpvId safe = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, closest, nearW);
-    SpvId nearest = MAX_F(closest, nearW), farthest = ADD_F(cw, radius);
+    /* (orthographic: w is 1, and the sphere's nearest point is its radius nearer along the view than its center) */
+    SpvId ortho = orthoOn(s, r), depthRow = frameVec(s, r, F_CULL);
+    SpvId along = DOT3(SUB_V3(spvShuffle3(s, world), spvShuffle3(s, frameVec(s, r, F_CAMERA))), spvShuffle3(s, frameVec(s, r, F_EYE + 2)));
+    SpvId closest = SUB_F(spvSelect(s, s->floatType, ortho, along, cw), radius);
+    SpvId safe = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, closest, spvSelect(s, s->floatType, ortho, SUB_F(W(depthRow), Z(depthRow)), nearW));
+    SpvId nearest = spvSelect(s, s->floatType, ortho, FLOAT(1.f), MAX_F(closest, nearW)), farthest = spvSelect(s, s->floatType, ortho, FLOAT(1.f), ADD_F(cw, radius));
     SpvId px = MUL_F(radius, X(projection)), py = MUL_F(radius, Y(projection));
     SpvId left = SUB_F(cx, px), right = ADD_F(cx, px), down = SUB_F(cy, py), up = ADD_F(cy, py);
     SpvId xlo = MIN_F(DIV_F(left, nearest), DIV_F(left, farthest)), xhi = MAX_F(DIV_F(right, nearest), DIV_F(right, farthest));
@@ -340,7 +352,7 @@ static SpvId sphereHidden(Spv* s, const Resources* r, SpvId world, SpvId radius)
     SpvId tx0 = UMIN(SHIFT(x0, level), lastX), tx1 = UMIN(SHIFT(x1, level), lastX), ty0 = UMIN(SHIFT(y0, level), lastY), ty1 = UMIN(SHIFT(y1, level), lastY);
     SpvId far = MIN_F(MIN_F(hizTexel(s, r, start, width, tx0, ty0), hizTexel(s, r, start, width, tx1, ty0)),
                       MIN_F(hizTexel(s, r, start, width, tx0, ty1), hizTexel(s, r, start, width, tx1, ty1)));
-    SpvId depth = DIV_F(nearW, nearest);
+    SpvId depth = spvSelect(s, s->floatType, ortho, DIV_F(SUB_F(W(depthRow), closest), MAX_F(Z(depthRow), FLOAT(1e-20f))), DIV_F(nearW, nearest));
     return spvOp2(s, SPV_OP_LogicalAnd, s->boolType, safe, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, depth, far));
 }
 
@@ -418,6 +430,8 @@ uint32_t* artfShaderCull(size_t* size, ArtfCullPhase phase) {
     SpvId eye = spvShuffle3(s, frameVec(s, &r, F_CAMERA));
     SpvId nearW = Z(frameVec(s, &r, F_PROJECTION));
     SpvId distance = MAX_F(SUB_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(world3, eye)), radius), nearW);
+    /* (orthographic: all are as at 1, as artfSeenDistance) */
+    distance = spvSelect(s, s->floatType, orthoOn(s, &r), FLOAT(1.f), distance);
     /* what is too small to see: as artfTooSmall */
     SpvId cullScale = X(frameVec(s, &r, F_CULL));
     SpvId tooSmall = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, cullScale, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, MUL_F(radius, cullScale), distance));
@@ -545,6 +559,10 @@ uint32_t* artfShaderMeshletCull(size_t* size, ArtfCullPhase phase) {
     SpvId toIt = SUB_V3(world3, spvShuffle3(s, frameVec(s, &r, F_CAMERA)));
     SpvId along = DOT3(toIt, axis);
     SpvId reach = ADD_F(MUL_F(W(cone), spvGlsl1(s, SPV_GLSL_Length, s->floatType, toIt)), radius);
+    /* (orthographic: all rays go the way the view looks, as meshletCulled in kernels.inc) */
+    SpvId ortho = orthoOn(s, &r);
+    along = spvSelect(s, s->floatType, ortho, DOT3(spvShuffle3(s, frameVec(s, &r, F_EYE + 2)), axis), along);
+    reach = spvSelect(s, s->floatType, ortho, W(cone), reach);
     SpvId hasCone = spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, W(cone), FLOAT(2.f));
     SpvId away = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, uniform, hasCone), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, along, reach));
     SpvId shown = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, seen, spvOp1(s, SPV_OP_LogicalNot, s->boolType, away));
@@ -1200,7 +1218,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId albedo = MUL_V3(MUL_V3(spvShuffle3(s, m0), MUL_V3(texel, texel)), spvShuffle3(s, tint));
 
     SpvId specular = W(m0);
-    SpvId view = NORMALIZE(SUB_V3(spvShuffle3(s, frameVec(s, &r, F_CAMERA)), world));
+    SpvId view = NORMALIZE(SUB_V3(eyeOf(s, &r, world), world));
     SpvId emission = spvShuffle3(s, m1);
     if (cutout && graphCount) {
         /* a material of the program's own: only here, so that plain ones pay nothing */
@@ -1403,7 +1421,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         aroundSheen = spvLoad(s, s->vec3, coating.sheen);
     }
     /* the sun's shadow: as artfShadowOfSun */
-    SpvId eye = spvShuffle3(s, frameVec(s, &r, F_CAMERA));
+    SpvId eye = eyeOf(s, &r, world);
     SpvId sunRow = shadowRow(s, &shadows, UINT(S_SUN)), splits = shadowRow(s, &shadows, UINT(S_SPLITS));
     spvStore(s, shadowed, FLOAT(1.f));
     SpvId sunCasts;
@@ -1561,7 +1579,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     lit = pick3(s, unlit, ADD_V3(albedo, emission), lit);
     /* air, then film, as on the CPU */
     SpvId look = frameVec(s, &r, F_LOOK), fog = spvShuffle3(s, frameVec(s, &r, F_FOG));
-    SpvId air = MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(world, spvShuffle3(s, frameVec(s, &r, F_CAMERA)))), Y(look));
+    SpvId air = MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(world, eyeOf(s, &r, world))), Y(look));
     SpvId keep = DIV_F(FLOAT(1.f), ADD_F(ADD_F(FLOAT(1.f), air), MUL_F(MUL_F(air, air), FLOAT(.5f))));
     SpvId fogged = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Y(look), FLOAT(0.f));
     SpvId volumetric = 0;
@@ -1576,7 +1594,10 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId airLeft = FLOAT(1.f);
         if (froxelsOn) {
             SpvId coord = spvLoad(s, s->vec4, pixelCoord);
-            SpvId air = froxelAt(s, &r, froxels, SUB_F(X(coord), FLOAT(.5f)), SUB_F(Y(coord), FLOAT(.5f)), DIV_F(FLOAT(1.f), W(coord)));
+            /* (how far along the view: w, or in an orthographic view, from the depth) */
+            SpvId depthRow = frameVec(s, &r, F_CULL);
+            SpvId along = spvSelect(s, s->floatType, orthoOn(s, &r), SUB_F(W(depthRow), MUL_F(Z(coord), Z(depthRow))), DIV_F(FLOAT(1.f), W(coord)));
+            SpvId air = froxelAt(s, &r, froxels, SUB_F(X(coord), FLOAT(.5f)), SUB_F(Y(coord), FLOAT(.5f)), along);
             airLeft = spvSelect(s, s->floatType, volumetric, W(air), FLOAT(1.f));
             lit = pick3(s, volumetric, ADD_V3(SCALE_V3(lit, W(air)), spvShuffle3(s, air)), lit);
         }
@@ -2310,8 +2331,10 @@ uint32_t* artfShaderEnvironmentBackdrop(size_t* size, bool hdr) {
     SpvId main = spvBeginMain(s);
     SpvId coord = spvLoad(s, s->vec4, fragCoord);
     SpvId right = frameVec(s, &r, F_EYE), up = frameVec(s, &r, F_EYE + 1), forward = spvShuffle3(s, frameVec(s, &r, F_EYE + 2));
-    SpvId px = SUB_F(MUL_F(DIV_F(X(coord), W(right)), FLOAT(2.f)), FLOAT(1.f));
-    SpvId py = SUB_F(FLOAT(1.f), MUL_F(DIV_F(Y(coord), W(up)), FLOAT(2.f)));
+    /* (orthographic: every ray goes the way the view looks, and sees the same) */
+    SpvId spread = spvSelect(s, s->floatType, orthoOn(s, &r), FLOAT(0.f), FLOAT(1.f));
+    SpvId px = MUL_F(SUB_F(MUL_F(DIV_F(X(coord), W(right)), FLOAT(2.f)), FLOAT(1.f)), spread);
+    SpvId py = MUL_F(SUB_F(FLOAT(1.f), MUL_F(DIV_F(Y(coord), W(up)), FLOAT(2.f))), spread);
     SpvId d = ADD_V3(ADD_V3(forward, SCALE_V3(spvShuffle3(s, right), px)), SCALE_V3(spvShuffle3(s, up), py));
     SpvId light = SCALE_V3(envSample(s, &r, UINT(0), d), W(frameVec(s, &r, F_SKY)));
     if (hdr) {
@@ -2917,8 +2940,11 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         SpvId jx = traceRandom(t), jy = traceRandom(t);
         SpvId px = SUB_F(MUL_F(DIV_F(ADD_F(TO_F(x), jx), TO_F(width)), FLOAT(2.f)), FLOAT(1.f));
         SpvId py = SUB_F(FLOAT(1.f), MUL_F(DIV_F(ADD_F(TO_F(y), jy), TO_F(height)), FLOAT(2.f)));
-        spvStore(s, t->origin, eye);
-        spvStore(s, t->direction, NORMALIZE(ADD_V3(ADD_V3(forward, SCALE_V3(right, px)), SCALE_V3(up, py))));
+        /* (orthographic, eye's w 1: each ray from its place on the view's plane, all forward. By a 0 or a 1, so that a
+         * perspective's arithmetic is as it was, to the bit) */
+        SpvId across = W(traceFrameVec(t, T_EYE)), spread = SUB_F(FLOAT(1.f), across);
+        spvStore(s, t->origin, ADD_V3(ADD_V3(eye, SCALE_V3(right, MUL_F(px, across))), SCALE_V3(up, MUL_F(py, across))));
+        spvStore(s, t->direction, NORMALIZE(ADD_V3(ADD_V3(forward, SCALE_V3(right, MUL_F(px, spread))), SCALE_V3(up, MUL_F(py, spread)))));
         spvStore(s, t->path, one3);
         spvStore(s, t->light, zero3);
         spvStore(s, t->covered, UINT(0));

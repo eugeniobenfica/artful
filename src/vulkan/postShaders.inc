@@ -77,19 +77,28 @@ static SpvId postBegin(Spv* s, Post* p, SpvId* i, SpvId* x, SpvId* y, SpvId* mer
     return *i;
 }
 
-/* Distance along the view at a pixel (whole numbers, clamped); 0 where nothing is. */
+/* Distance along the view at a pixel (whole numbers, clamped); 0 where nothing is. The buffer holds 1 / w, or an
+ * orthographic view's depth, as post.c's distanceAt reads it. */
 static SpvId postDistance(Spv* s, Post* p, SpvId xf, SpvId yf) {
     SpvId x = P_TOU(P_CLAMP(xf, FLOAT(0.f), SUB_F(p->widthF, FLOAT(1.f)))), y = P_TOU(P_CLAMP(yf, FLOAT(0.f), SUB_F(p->heightF, FLOAT(1.f))));
     SpvId d = postFloat(s, p, p->depth, ADD_U(MUL_U(y, p->width), x));
-    return PICK_F(P_MORE(d, FLOAT(0.f)), DIV_F(FLOAT(1.f), MAX_F(d, FLOAT(1e-30f))), FLOAT(0.f));
+    SpvId depthRow = frameVec(s, &p->r, F_CULL);
+    SpvId along = PICK_F(orthoOn(s, &p->r), SUB_F(W(depthRow), MUL_F(d, Z(depthRow))), DIV_F(FLOAT(1.f), MAX_F(d, FLOAT(1e-30f))));
+    return PICK_F(P_MORE(d, FLOAT(0.f)), along, FLOAT(0.f));
 }
 
-/* The world at a pixel's center, d along the view. */
+/* The world at a pixel's center, d along the view: on the ray from the eye, or in an orthographic view, from its
+ * place on the view's plane. */
 static SpvId postWorld(Spv* s, Post* p, SpvId xf, SpvId yf, SpvId d) {
     SpvId px = SUB_F(MUL_F(DIV_F(ADD_F(xf, FLOAT(.5f)), p->widthF), FLOAT(2.f)), FLOAT(1.f));
     SpvId py = SUB_F(FLOAT(1.f), MUL_F(DIV_F(ADD_F(yf, FLOAT(.5f)), p->heightF), FLOAT(2.f)));
-    SpvId dir = ADD_V3(ADD_V3(spvShuffle3(s, frameVec(s, &p->r, F_EYE + 2)), SCALE_V3(spvShuffle3(s, frameVec(s, &p->r, F_EYE)), px)), SCALE_V3(spvShuffle3(s, frameVec(s, &p->r, F_EYE + 1)), py));
-    return ADD_V3(spvShuffle3(s, frameVec(s, &p->r, F_CAMERA)), SCALE_V3(dir, d));
+    /* (by a 0 or a 1 of the view, and not by a choice of results, so that a perspective's arithmetic is as it was, to
+     * the bit: orthographic, the place moves across, and the way spreads no more) */
+    SpvId ortho = orthoOn(s, &p->r), across = PICK_F(ortho, FLOAT(1.f), FLOAT(0.f)), spread = PICK_F(ortho, FLOAT(0.f), FLOAT(1.f));
+    SpvId right = spvShuffle3(s, frameVec(s, &p->r, F_EYE)), up = spvShuffle3(s, frameVec(s, &p->r, F_EYE + 1));
+    SpvId from = ADD_V3(ADD_V3(spvShuffle3(s, frameVec(s, &p->r, F_CAMERA)), SCALE_V3(right, MUL_F(px, across))), SCALE_V3(up, MUL_F(py, across)));
+    SpvId dir = ADD_V3(ADD_V3(spvShuffle3(s, frameVec(s, &p->r, F_EYE + 2)), SCALE_V3(right, MUL_F(px, spread))), SCALE_V3(up, MUL_F(py, spread)));
+    return ADD_V3(from, SCALE_V3(dir, d));
 }
 
 /* Where a point falls through a matrix (four rows of the frame, by columns), in pixels; w along the view; *ok: in
@@ -98,9 +107,11 @@ static void postProject(Spv* s, Post* p, uint32_t matrix, SpvId q, SpvId* sx, Sp
     SpvId q4 = vec4Of(s, q, FLOAT(1.f));
     SpvId c0 = frameVec(s, &p->r, matrix), c1 = frameVec(s, &p->r, matrix + 1), c2 = frameVec(s, &p->r, matrix + 2), c3 = frameVec(s, &p->r, matrix + 3);
     SpvId clip = ADD_V4(ADD_V4(SCALE_V4(c0, X(q4)), SCALE_V4(c1, Y(q4))), ADD_V4(SCALE_V4(c2, Z(q4)), c3));
-    *w = W(clip);
-    *ok = P_MORE(*w, FLOAT(1e-5f));
-    SpvId inv = DIV_F(FLOAT(1.f), MAX_F(*w, FLOAT(1e-5f)));
+    SpvId cw = W(clip), depthRow = frameVec(s, &p->r, F_CULL);
+    /* (orthographic: w is 1, and how far along the view comes from the depth) */
+    *w = PICK_F(orthoOn(s, &p->r), SUB_F(W(depthRow), MUL_F(Z(clip), Z(depthRow))), cw);
+    *ok = P_MORE(cw, FLOAT(1e-5f));
+    SpvId inv = DIV_F(FLOAT(1.f), MAX_F(cw, FLOAT(1e-5f)));
     *sx = SUB_F(MUL_F(ADD_F(MUL_F(MUL_F(X(clip), inv), FLOAT(.5f)), FLOAT(.5f)), p->widthF), FLOAT(.5f));
     *sy = SUB_F(MUL_F(SUB_F(FLOAT(.5f), MUL_F(MUL_F(Y(clip), inv), FLOAT(.5f))), p->heightF), FLOAT(.5f));
 }
@@ -190,9 +201,9 @@ uint32_t* artfShaderPostGather(size_t* size, int samples) {
     spvIfEnd(s, movedMerge);
     spvIfEnd(s, rest);
     spvIfBegin(s, depthAlone, &depthOnly);
-    /* (reversed depth is near / distance: 1 / w is depth over near) */
+    /* (reversed depth is near / distance: 1 / w is depth over near; an orthographic view's is kept as it is) */
     SpvId z = X(many ? spvImageFetchSampleAs(s, s->vec4, depthType, spvLoad(s, depthSampled, depthImage), at, spvConstInt(s, 0)) : spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, depthImage), at));
-    spvStore(s, postPtr(s, p, p->depth, s->floatType, i), DIV_F(z, Z(frameVec(s, &p->r, F_PROJECTION))));
+    spvStore(s, postPtr(s, p, p->depth, s->floatType, i), PICK_F(orthoOn(s, &p->r), z, DIV_F(z, Z(frameVec(s, &p->r, F_PROJECTION)))));
     spvIfEnd(s, depthOnly);
 POST_FINISH()
 
@@ -277,7 +288,7 @@ POST_MAIN(artfShaderPostReflection)
     SpvId word = postUint(s, p, p->surface, i), d = postDistance(s, p, xf, yf);
     SpvId rough = postField(s, word, 18, 31, 31.f), metal = postField(s, word, 23, 15, 15.f);
     SpvId n = postNormal(s, word), at = postWorld(s, p, xf, yf, d);
-    SpvId v = NORMALIZE(SUB_V3(at, spvShuffle3(s, frameVec(s, &p->r, F_CAMERA))));
+    SpvId v = NORMALIZE(SUB_V3(at, eyeOf(s, &p->r, at)));
     SpvId vn = DOT3(v, n);
     SpvId r = SUB_V3(v, SCALE_V3(n, MUL_F(FLOAT(2.f), vn)));
     SpvId away = DOT3(r, spvShuffle3(s, frameVec(s, &p->r, F_EYE + 2)));
@@ -293,7 +304,10 @@ POST_MAIN(artfShaderPostReflection)
     postProject(s, p, F_VIEWPROJ, at, &sx0, &sy0, &w0, &ok0);
     SpvId wDrop = spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(r, spvShuffle3(s, frameVec(s, &p->r, F_EYE + 2))));
     SpvId reach = MUL_F(stride, FLOAT(70.f));
-    reach = PICK_F(P_MORE(wDrop, FLOAT(0.f)), MIN_F(reach, DIV_F(MUL_F(w0, FLOAT(.9f)), MAX_F(wDrop, FLOAT(1e-20f)))), reach);
+    /* (not past the eye; orthographic: not past near) */
+    SpvId ortho = orthoOn(s, &p->r), depthRow = frameVec(s, &p->r, F_CULL);
+    SpvId room = SUB_F(w0, PICK_F(ortho, SUB_F(W(depthRow), Z(depthRow)), FLOAT(0.f)));
+    reach = PICK_F(P_MORE(wDrop, FLOAT(0.f)), MIN_F(reach, DIV_F(MUL_F(room, FLOAT(.9f)), MAX_F(wDrop, FLOAT(1e-20f)))), reach);
     postProject(s, p, F_VIEWPROJ, ADD_V3(at, SCALE_V3(r, reach)), &sx1, &sy1, &w1, &ok1);
     SpvId inv0 = DIV_F(FLOAT(1.f), w0), invStep = SUB_F(DIV_F(FLOAT(1.f), MAX_F(w1, FLOAT(1e-5f))), inv0);
     SpvId jitter = DIV_F(TO_F(spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, postHash(s, i), UINT(255))), FLOAT(256.f));
@@ -301,7 +315,8 @@ POST_MAIN(artfShaderPostReflection)
     for (int step = 1; step <= 24; ++step) {
         SpvId share = DIV_F(ADD_F(FLOAT((float)step), jitter), FLOAT(25.f)), t = MUL_F(share, share);
         SpvId sx = ADD_F(sx0, MUL_F(SUB_F(sx1, sx0), t)), sy = ADD_F(sy0, MUL_F(SUB_F(sy1, sy0), t));
-        SpvId w = DIV_F(FLOAT(1.f), ADD_F(inv0, MUL_F(invStep, t)));
+        /* (orthographic: w itself goes evenly) */
+        SpvId w = PICK_F(ortho, ADD_F(w0, MUL_F(SUB_F(w1, w0), t)), DIV_F(FLOAT(1.f), ADD_F(inv0, MUL_F(invStep, t))));
         SpvId qx = FLOOR_F(ADD_F(sx, FLOAT(.5f))), qy = FLOOR_F(ADD_F(sy, FLOAT(.5f)));
         SpvId inside = P_AND(P_AND(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qx, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qy, FLOAT(0.f))), P_AND(P_LESS(qx, p->widthF), P_LESS(qy, p->heightF)));
         stopped = P_OR(stopped, P_NOT(inside));
@@ -370,7 +385,8 @@ POST_MAIN(artfShaderPostFroxels)
     SpvId density = Y(look), amount = Y(postRow), g = Z(postRow);
     SpvId far = DIV_F(FLOAT(4.f), MAX_F(density, FLOAT(1e-6f)));
     SpvId cx = ADD_F(MUL_F(TO_F(x), FLOAT((float)ARTF_FROXEL_TILE)), FLOAT(ARTF_FROXEL_TILE * .5f - .5f)), cy = ADD_F(MUL_F(TO_F(y), FLOAT((float)ARTF_FROXEL_TILE)), FLOAT(ARTF_FROXEL_TILE * .5f - .5f));
-    SpvId eye = spvShuffle3(s, frameVec(s, &p->r, F_CAMERA));
+    /* (orthographic: each column starts from its place on the view's plane, and goes the way the view looks) */
+    SpvId eye = pick3(s, orthoOn(s, &p->r), postWorld(s, p, cx, cy, FLOAT(0.f)), spvShuffle3(s, frameVec(s, &p->r, F_CAMERA)));
     SpvId dir = SUB_V3(postWorld(s, p, cx, cy, FLOAT(1.f)), eye);
     SpvId along = spvGlsl1(s, SPV_GLSL_Length, s->floatType, dir);
     SpvId toSun = spvShuffle3(s, frameVec(s, &p->r, F_TOSUN)), sunColor = spvShuffle3(s, frameVec(s, &p->r, F_SUNCOLOR));
