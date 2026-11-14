@@ -322,9 +322,14 @@ into clouds further out, with lanes of dark dust, at one temperature tinted towa
 the veil of an IMAX lens. Its view and its spin are theirs too.
 
 ```c
+#include "artful/blackhole.h" /* the library artful-blackhole (artful::blackhole) */
+
 ArtfBlackHoleDesc hole = artfBlackHoleDefaults();
 artfSceneSetBlackHole(scene, &hole);
 ```
+
+It is not in the library: it is an extension, built apart (`extensions/blackhole`), on the background pass
+(`artfSceneSetBackgroundPass`), through which a program can put light of its own behind a scene the same way.
 
 | As it would really look | Spinning nearly as fast as a hole can | Without the lens's veil |
 | --- | --- | --- |
@@ -374,7 +379,7 @@ about a second and a half each on a Vega 8. How it works is [here](docs/architec
 Adreno GPU (Android).<br>
 **Tier 2**: experimental. [CI](.github/workflows/ci.yml) builds Linux, macOS, MSVC and every Android ABI and runs
 the tests on Linux (on a software Vulkan, under validation and sanitizers), macOS (on the CPU) and MSVC; none of
-them has opened a window. iOS is written, not built. **Metal has never been run**, so it is chosen only by name.
+them has opened a window. iOS is written, not built. **Metal has never been run**, is built only with `-DARTFUL_METAL=ON`, and lacks most of what came after 0.4 ([limits](docs/limits.md)), so it is chosen only by name.
 
 Vulkan needs version 1.2, `drawIndirectFirstInstance` and non-uniform texture indexing; a device
 without them draws on the CPU, which needs only a C compiler.
@@ -431,7 +436,9 @@ SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful
 | Option | Default | |
 | --- | :---: | --- |
 | `ARTFUL_VULKAN` | `ON` | the GPU backend; off, a lighter library, drawing on the CPU |
-| `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-blackhole`, `artful-shaders`, `artful-tests` |
+| `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-blackhole` (the window), `artful-shaders`, `artful-tests` |
+| `ARTFUL_BLACKHOLE` | top level | the black hole, `artful-blackhole` (`artful::blackhole`), a library apart; the tools and tests build it too |
+| `ARTFUL_METAL` | `OFF` | the Metal backend (Apple only): never run, and without most of what came after 0.4 |
 | `ARTFUL_CASCADE_DIR` | empty | cascade's source folder: builds the bridge to it (`artful::cascade`), its example and its tests |
 | `ARTFUL_CASCADE` | `OFF` | the same, with an installed cascade (`find_package`) |
 </details>
@@ -448,7 +455,9 @@ src/scene/        scenes; meshBuild.c packs and orders meshes, simplify.c makes 
 src/render/       the choice of a backend
 src/software/     the CPU backend: kernels.inc is built once for each instruction set, on simd.h
 src/vulkan/       the GPU backend: vulkanApi.h, spirv.c and the shaders in shaders.c
-src/metal/        the GPU backend for Apple's systems, never run: metal.c, and shaders.inc, which is generated
+src/metal/        the GPU backend for Apple's systems, never run and built only when asked: metal.c, and shaders.inc,
+                  which is generated
+extensions/       built apart, on the public API: blackhole/ (artful-blackhole, include/artful/blackhole.h)
 tools/            artful-render, artful-blackhole, artful-shaders, mkmetal.py; androidTest.sh for a device
 tests/            tests.c
 integrations/     bridges to other libraries, each a target of its own and named by nothing above

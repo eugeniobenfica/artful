@@ -55,12 +55,11 @@ uint32_t* artfShaderDenoiseSpace(size_t* size, int pass);
 uint32_t* artfShaderDenoiseEnd(size_t* size);
 uint32_t* artfShaderTraceShow(size_t* size, bool hdr);
 uint32_t* artfShaderOverlayFragment(size_t* size);
-/* A black hole: its rays, then the bloom's levels going down and coming back, then the frame's
+/* A background pass: after the program's shader, the bloom's levels going down and coming back, then the frame's
  * background. (Its vertices are the overlay's: one triangle.) */
-uint32_t* artfShaderHoleTrace(size_t* size);
 uint32_t* artfShaderBloomDown(size_t* size, bool fromLight);
 uint32_t* artfShaderBloomUp(size_t* size);
-uint32_t* artfShaderHoleBackdrop(size_t* size, bool hdr);
+uint32_t* artfShaderBackgroundBackdrop(size_t* size, bool hdr);
 uint32_t* artfShaderEnvironmentBackdrop(size_t* size, bool hdr);
 /* What comes after a frame in floats (postShaders.inc): post.c's passes. */
 uint32_t* artfShaderPostGather(size_t* size, int samples);

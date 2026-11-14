@@ -9,6 +9,7 @@
 #
 #   build/artful-shaders dir
 #   python tools/mkmetal.py dir path/to/spirv-cross [dir for .metal files, for Apple's compiler to check]
+#   python tools/mkmetal.py --extract dir      (what shaders.inc holds now, as .metal files)
 import os, re, struct, subprocess, sys
 
 SHADERS = [  # name, stage
@@ -46,7 +47,18 @@ def entries(source):
         out.append((int(index), binding, kind + (2 if array and kind else 0)))
     return out
 
+def extract(out):
+    """The sources shaders.inc holds, as .metal files: for Apple's compiler to check what the library takes."""
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    text = open(os.path.join(root, "src", "metal", "shaders.inc"), encoding="utf-8").read().replace("\r\n", "\n")
+    for name, body in re.findall(r"static const char metalSource_(\w+)\[\] =\n(.*?)\n    ;\n", text, re.S):
+        lines = re.findall(r'^    "(.*)\\n"$', body, re.M)
+        with open(os.path.join(out, name + ".metal"), "w") as f:
+            f.write("".join(re.sub(r'\\(.)', r'\1', line) + "\n" for line in lines))
+
 def main():
+    if sys.argv[1] == "--extract":
+        return extract(sys.argv[2])
     folder, cross = sys.argv[1], sys.argv[2]
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     text = ["/* Made by tools/mkmetal.py, from the shaders Vulkan runs. Not to be edited. */\n"]

@@ -459,7 +459,7 @@ typedef struct ArtfShadowDesc {
 void artfSceneSetShadows(ArtfScene* s, const ArtfShadowDesc* desc);
 void artfLightSetShadow(ArtfScene* s, ArtfLight l, bool casts);
 
-/* Light past 1 rolls off to white, as film does, by the same curve as a black hole's; 0 (to start with):
+/* Light past 1 rolls off to white, as film does, by the same curve as a background pass's; 0 (to start with):
  * light is cut at 1. What a surface shows is multiplied by this first. */
 void artfSceneSetExposure(ArtfScene* s, float exposure);
 /* Air that is not clear: a surface fades into color with distance, by about e^(-density x distance). The
@@ -474,7 +474,8 @@ void artfSceneSetSunSize(ArtfScene* s, float size);
 /* What shows where nothing is drawn, as it shows (no light applied): 0..1 for red, green, blue. */
 void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color);
 /* How much of the background there is: 1 to start with; 0: nothing, and the frame's alpha is what the
- * scene covers, to put it over something else. A black hole fills the frame all the same. */
+ * scene covers, to put it over something else. A background pass (artfSceneSetBackgroundPass) fills the frame all
+ * the same. */
 void artfSceneSetBackgroundAlpha(ArtfScene* s, float alpha);
 
 /* ---- what is made of the scene's own parts ----
@@ -759,42 +760,70 @@ bool artfSceneRaycast(ArtfScene* s, ArtfVec3 origin, ArtfVec3 direction, float m
  * at + .5), as a camera sees it (NULL: the scene's), from near on, as the frame shows it. */
 bool artfScenePick(ArtfScene* s, const ArtfCamera* camera, float x, float y, int width, int height, ArtfPickHit* out);
 
-/* ---- a black hole ----
- * Behind everything else in the scene: its light is traced along the paths Kerr's metric gives it,
- * pixel by pixel, through a glowing disc of gas and out to the stars, then goes through high dynamic
- * range, bloom and tone mapping. What the scene holds is drawn over it, and is not bent. Lengths given
- * in masses are multiples of mass: with no spin the horizon is at 2 and the photons' orbit at 3. */
-typedef struct ArtfBlackHoleDesc {
-    ArtfVec3 position;
-    ArtfVec3 axis;       /* what the disc turns around; zero: +y */
-    float mass;          /* in the world's lengths */
-    float spin;          /* -1 to 1, of the most a hole can have; the same way round as the gas when above 0 */
-    float discInner;     /* where the disc starts, in masses; 0: where orbits end, for this spin */
-    float discOuter;     /* where it has faded out */
-    float discHeight;    /* how deep it is, each way, per unit of radius */
-    float discThickness; /* how much of the light behind it the disc stops */
-    float discGain;      /* how bright it is */
-    float doppler;       /* 0: the disc looks the same all around; 1: the side coming at the eye is as
-                          * much brighter and bluer as relativity says */
-    float stars;         /* how bright they are; 0: none */
-    float bloom;         /* the veil of a lens: how much light spills around what is far too bright */
-    float exposure;
-    float time;          /* in masses: going forward, the gas flows; it cannot be run back */
-    float shutter;       /* how much time a frame's exposure lasts: with several rays a pixel, motion blur */
-    ArtfVec3 velocity;   /* the eye's, in the world, as a fraction of light's: what it sees moves toward
-                          * where it is going, and with doppler, turns bluer there */
-    int samples;         /* rays a pixel, on a side: 1 is one ray, 3 is nine */
-} ArtfBlackHoleDesc;
+/* ---- a background pass ----
+ * Light behind all that the scene holds, made by the program: what each pixel's ray brings back, in floats, as
+ * the scene's light is. It goes through a bloom and a tone curve of its own (Narkowicz's fit to ACES, the curve
+ * of artfSceneSetExposure), and the scene is drawn over it: before what comes after a frame in floats, and under
+ * the overlay. It fills the frame, whatever artfSceneSetBackgroundAlpha says. A view (artfRendererSetView) leaves
+ * it out. The black hole (extensions/blackhole) is one.
+ *
+ * Both backends call frame once a frame, on the drawing thread, and read what it wrote: the CPU hands it to rows,
+ * a rectangle of the frame at a time, on its threads; Vulkan to the program's compute shader. The two must make
+ * the same light, as the library's own backends do. Metal draws none. */
+#define ARTF_BACKGROUND_PARAMS 512 /* bytes a frame may say to its pass */
 
-/* A hole that looks like what cinema has shown of one: seen from outside, a thin bright disc, its far
- * side thrown up over the shadow and under it. */
-ArtfBlackHoleDesc artfBlackHoleDefaults(void);
-/* How fast a circular orbit goes at r masses, as a fraction of light's: for ArtfBlackHoleDesc.velocity. */
-float artfBlackHoleOrbitSpeed(float spin, float r);
-/* NULL: none. Call it every frame with a new time: the disc's gas is a fluid, and this is where it moves
- * on, in fixed steps, on the calling thread (a few milliseconds each). A change of the disc's size or of
- * the spin starts it over, which takes some time. */
-void artfSceneSetBlackHole(ArtfScene* s, const ArtfBlackHoleDesc* desc);
+/* A rectangle of the frame to fill with light. */
+typedef struct ArtfBackgroundRows {
+    int x, y, width, height;    /* within the frame: x and y are multiples of 64, and so are width and height but
+                                 * at the frame's right and bottom edges */
+    int frameWidth, frameHeight;
+    float* light[3];            /* red, green and blue: light[c][j * stride + i] is the pixel (x + i, y + j); a row
+                                 * may be written in eights past width, up to stride */
+    size_t stride;              /* in floats: a multiple of 8, as x is; the planes are aligned to 64 bytes */
+    int simd;                   /* the ArtfSimd the renderer's kernels use, which this processor has: PORTABLE, 128
+                                 * or 256, so that a pass can use the same (and must make the same bits with each) */
+} ArtfBackgroundRows;
+
+typedef struct ArtfBackgroundPass {
+    void* user;
+    /* What a frame of width x height pixels needs, from the camera as the scene has it: into params, which come
+     * zeroed, ARTF_BACKGROUND_PARAMS bytes. */
+    void (*frame)(void* user, const ArtfCamera* camera, int width, int height, void* params);
+    /* The CPU: the light of a rectangle, from what frame wrote. From several threads at once. */
+    void (*rows)(void* user, const void* params, const ArtfBackgroundRows* rows);
+    /* When the scene lets go of user: the pass is replaced by one of another user, or by none, or the scene is
+     * freed. NULL: nothing to do. */
+    void (*release)(void* user);
+    /* Vulkan: a compute shader, SPIR-V for Vulkan 1.2, copied (NULL: no light there, which is black). Its entry point
+     * is "main", of 8 x 8 x 1 invocations a group, an invocation a pixel: GlobalInvocationId's x and y (a frame that
+     * is very large goes out in bands of rows, each from a base). Descriptor set 0:
+     *   11  uniform block: bytes 0 to 255 the renderer's (the frame's width and height, two uints at 0 and 4), and
+     *       from 256 the params frame wrote
+     *   12  storage buffer, written: the light, a vec4 a pixel (w unused), at y * width + x
+     *   14  storage buffer: data, below
+     *   15  storage buffer: stream, below
+     * It may use no other binding, and no push constants. */
+    const uint32_t* spirv;
+    size_t spirvBytes;
+    /* What the shader reads, where the program keeps it: data goes up to the GPU when dataVersion changes, and
+     * stream is copied for each frame in flight when streamVersion changes (for what changes every frame or so). */
+    const void* data;
+    size_t dataBytes;
+    uint64_t dataVersion;
+    const void* stream;
+    size_t streamBytes;
+    uint64_t streamVersion;
+    float exposure;    /* what light is multiplied by before the tone curve */
+    float bloom;       /* how much spills around what is far too bright (past 2), as a lens's veil; 0: none */
+    int raysPerPixel;  /* what a pixel costs the GPU, as rays: past 64 million rays a frame it goes in bands of rows,
+                        * each a submission of its own, so that none keeps the GPU for seconds; 0: 1 */
+} ArtfBackgroundPass;
+
+/* NULL: none. Copied. Call it again whenever what it points to changes (a version, the stream): with the same user,
+ * nothing is released. */
+void artfSceneSetBackgroundPass(ArtfScene* s, const ArtfBackgroundPass* pass);
+/* The pass the scene has, as it was given; NULL: none. */
+const ArtfBackgroundPass* artfSceneBackgroundPass(const ArtfScene* s);
 
 #ifdef __cplusplus
 }

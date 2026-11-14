@@ -9,9 +9,13 @@
  *   what is drawn is drawn into a texture of its own, and copied to the window, so reading a frame is the same
  *   with or without one.
  *
- * What it does not have yet: occlusion (the picture is the same, without its savings), a black hole, materials
- * written in C (each shows its plain values) and compressed textures on the GPU (they go up decoded). It says so
- * in the log, once. It needs Metal 3, so that argument buffers hold a thousand textures. */
+ * Built only with ARTFUL_METAL. Its C side is 0.4's: it binds what 0.4's shaders read, and nothing that came after
+ * (docs/limits.md lists all it leaves out: a frame in floats and what follows it, fog that light goes through,
+ * probes, lights past the sixteen, decals, ArtfMaterialMore, ...). Its shaders were made again from today's plain
+ * variants, which read those same bindings and the whole frame block. What it does not have, it says in the log
+ * where it can: occlusion (the picture is the same, without its savings), a background pass, materials written in C
+ * (each shows its plain values) and compressed textures on the GPU (they go up decoded). It needs Metal 3, so that
+ * argument buffers hold a thousand textures. */
 #include "render/rendererInternal.h"
 #include "scene/sceneInternal.h"
 
@@ -847,9 +851,9 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     waitLast(v);
     if (v->targetsStale && !targetsMake(v)) return false;
     if (!v->frameTexture) return true; /* a window with no size */
-    if (scene->hole.on && !v->warnedHole) {
+    if (scene->backgroundPass.on && !v->warnedHole) {
         v->warnedHole = true;
-        artfLog("artful: Metal does not draw a black hole yet");
+        artfLog("artful: Metal does not draw a background pass");
     }
     if (scene->graphs.len && !v->warnedGraphs) {
         v->warnedGraphs = true;

@@ -31,6 +31,7 @@ typedef struct Software {
     double cpuMs, cullMs, geometryMs, rasterMs, lensMs;
     uint32_t tilesSkipped[16];
     uint32_t bloomLevel;  /* the one being made */
+    const ArtfScene* backgroundScene; /* whose pass this frame draws */
     uint64_t traceKey;    /* of what traceSum holds */
     uint32_t traceAdding; /* samples this frame */
     uint32_t traceFrames, traceCounted; /* with a filter: all samples, for their numbers; and of what is shown */
@@ -345,12 +346,25 @@ static void tileJob(void* user, uint32_t tile, uint32_t worker) {
     s->tilesSkipped[worker] += s->kernels->tile(&s->f, tile, worker);
 }
 
-/* ---- a black hole's light ---- */
+/* ---- a background pass ---- */
 
-static void lensJob(void* user, uint32_t tile, uint32_t worker) {
+/* A tile's light, from the program. */
+static void backgroundJob(void* user, uint32_t tile, uint32_t worker) {
     (void)worker;
     Software* s = user;
-    s->kernels->lens(&s->f, tile);
+    ArtfSoftFrame* f = &s->f;
+    const ArtfBackgroundPass* p = &s->backgroundScene->backgroundPass.pass;
+    ArtfBackgroundRows rows;
+    rows.x = (int)(tile % (uint32_t)f->tilesX) * ARTF_TILE;
+    rows.y = (int)(tile / (uint32_t)f->tilesX) * ARTF_TILE;
+    rows.width = artfMini(ARTF_TILE, f->width - rows.x);
+    rows.height = artfMini(ARTF_TILE, f->height - rows.y);
+    rows.frameWidth = f->width;
+    rows.frameHeight = f->height;
+    for (int c = 0; c < 3; ++c) rows.light[c] = f->hdr[c] + (size_t)rows.y * f->hdrStride + rows.x;
+    rows.stride = (size_t)f->hdrStride;
+    rows.simd = s->kernels->simd;
+    p->rows(p->user, f->backgroundData.params, &rows);
 }
 
 /* A level at a place given in its texels, read between them. */
@@ -371,7 +385,7 @@ static void bloomDownRow(void* user, uint32_t y, uint32_t worker) {
     (void)worker;
     Software* s = user;
     ArtfSoftFrame* f = &s->f;
-    const uint32_t* to = f->holeData.bloom[s->bloomLevel];
+    const uint32_t* to = f->backgroundData.bloom[s->bloomLevel];
     if (!s->bloomLevel) {
         const int lastX = f->width - 1, lastY = f->height - 1;
         const int y0 = artfMini((int)y * 2, lastY), y1 = artfMini((int)y * 2 + 1, lastY);
@@ -388,7 +402,7 @@ static void bloomDownRow(void* user, uint32_t y, uint32_t worker) {
         }
         return;
     }
-    const uint32_t* from = f->holeData.bloom[s->bloomLevel - 1];
+    const uint32_t* from = f->backgroundData.bloom[s->bloomLevel - 1];
     const float cy = (float)y * 2.f + .5f;
     for (int c = 0; c < 3; ++c) {
         float* out = f->bloom[c] + to[0] + (size_t)y * to[1];
@@ -407,8 +421,8 @@ static void bloomUpRow(void* user, uint32_t y, uint32_t worker) {
     (void)worker;
     Software* s = user;
     ArtfSoftFrame* f = &s->f;
-    const uint32_t* to = f->holeData.bloom[s->bloomLevel];
-    const uint32_t* from = f->holeData.bloom[s->bloomLevel + 1];
+    const uint32_t* to = f->backgroundData.bloom[s->bloomLevel];
+    const uint32_t* from = f->backgroundData.bloom[s->bloomLevel + 1];
     const float sy = ((float)y + .5f) * .5f - .5f;
     for (int c = 0; c < 3; ++c) {
         float* out = f->bloom[c] + to[0] + (size_t)y * to[1];
@@ -422,8 +436,8 @@ static void bloomUpRow(void* user, uint32_t y, uint32_t worker) {
     }
 }
 
-/* Room for the hole's light at this size. */
-static void holeTargets(Software* s, size_t bloomPixels) {
+/* Room for the background's light at this size. */
+static void backgroundTargets(Software* s, size_t bloomPixels) {
     ArtfSoftFrame* f = &s->f;
     f->hdrStride = (f->width + 7) & ~7;
     const size_t pixels = (size_t)f->hdrStride * f->height;
@@ -443,23 +457,24 @@ static void holeTargets(Software* s, size_t bloomPixels) {
     }
 }
 
-/* All of the hole's light, up to what tiles need to tone map it. */
-static void drawHole(Software* s, const ArtfScene* scene) {
+/* All of the background's light, up to what tiles need to tone map it. */
+static void drawBackground(Software* s, const ArtfScene* scene) {
     ArtfSoftFrame* f = &s->f;
     uint32_t bloomPixels = 0;
-    artfHoleFrame(scene, f->width, f->height, &f->holeData, &bloomPixels);
-    f->holeMap = scene->hole.map;
-    f->holeFluid = artfFluidField(scene->hole.fluid);
-    holeTargets(s, bloomPixels);
-    artfPoolRun(s->pool, lensJob, s, (uint32_t)(f->tilesX * f->tilesY));
-    const uint32_t levels = f->holeData.size[3];
+    artfBackgroundFrame(scene, f->width, f->height, &f->backgroundData, &bloomPixels);
+    backgroundTargets(s, bloomPixels);
+    s->backgroundScene = scene;
+    if (scene->backgroundPass.pass.rows) artfPoolRun(s->pool, backgroundJob, s, (uint32_t)(f->tilesX * f->tilesY));
+    else
+        for (int c = 0; c < 3; ++c) memset(f->hdr[c], 0, s->hdrPixels * 4);
+    const uint32_t levels = f->backgroundData.size[2];
     for (uint32_t i = 0; i < levels; ++i) {
         s->bloomLevel = i;
-        artfPoolRun(s->pool, bloomDownRow, s, f->holeData.bloom[i][2]);
+        artfPoolRun(s->pool, bloomDownRow, s, f->backgroundData.bloom[i][2]);
     }
     for (uint32_t i = levels - 1; i-- > 0;) {
         s->bloomLevel = i;
-        artfPoolRun(s->pool, bloomUpRow, s, f->holeData.bloom[i][2]);
+        artfPoolRun(s->pool, bloomUpRow, s, f->backgroundData.bloom[i][2]);
     }
 }
 
@@ -785,10 +800,10 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     const double t2 = artfNowMs();
 
-    f->hole = scene->hole.on && !view;
-    if (f->hole) {
-        drawHole(s, scene);
-        artfPassMark(&s->passes, "black hole");
+    f->backgroundPass = scene->backgroundPass.on && !view;
+    if (f->backgroundPass) {
+        drawBackground(s, scene);
+        artfPassMark(&s->passes, "background");
     }
     const double tHole = artfNowMs();
 

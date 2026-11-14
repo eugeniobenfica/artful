@@ -5,7 +5,8 @@
  *             at run time: no SDK to build, and the program still starts without it.
  *   software  on the CPU: tiles on every core, AVX2 where there is AVX2. Always there. Draws into
  *             memory: showing the pixels is up to the caller.
- *   Metal     macOS and iOS, with Metal 3. Written without a Mac and never run: not chosen unless asked
+ *   Metal     macOS and iOS, with Metal 3, built only with ARTFUL_METAL. Written without a Mac and never
+ *             run, and without most of what came after 0.4 (docs/limits.md): not chosen unless asked
  *             for by name. See src/metal/metal.c for what it leaves out.
  *
  * Frames are premultiplied BGRA, as a window's; their alpha is 255 unless the scene says otherwise (see
@@ -123,7 +124,7 @@ uint32_t* artfRendererPixels(ArtfRenderer* r);
 /* What a frame shows, for those who build with Artful: the picture as it is, or one thing that went into it, as a
  * color. Both backends draw each the same, but for what the notes say. Nothing that comes after the frame is done in
  * a view but the lit one (bloom, exposure, fog and the rest), what is behind the scene is black, and what is traced
- * or a black hole is drawn as triangles are. Off, a view costs nothing. */
+ * is drawn as triangles are, and a background pass is left out. Off, a view costs nothing. */
 typedef enum ArtfView {
     ARTF_VIEW_LIT,        /* the picture */
     ARTF_VIEW_BASE_COLOR, /* what a surface is made of: its color, after textures, vertex colors and decals */
@@ -170,7 +171,7 @@ typedef struct ArtfFrameStats {
     double cullMs;            /* software: the parts of cpuMs */
     double geometryMs;
     double rasterMs;
-    double lensMs;            /* software: tracing a black hole's light, and its bloom */
+    double lensMs;            /* software: the background pass (artfSceneSetBackgroundPass): its light, and its bloom */
     uint32_t instancesDrawn;  /* software; the GPU culls on its own */
     uint32_t trianglesBinned; /* software: what reached the tiles */
     uint32_t tilesSkipped;    /* software: under an opaque overlay */

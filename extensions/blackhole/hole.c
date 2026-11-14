@@ -1,10 +1,10 @@
-/* artful — a black hole: what it is, for both backends. The maps both read are made here, once; and
- * what a frame needs of the geometry around the eye, which is the same for all its rays. The light
- * itself is traced by each backend (software/lens.inc, vulkan/shaders.c).
+/* artful — a black hole: what it is, for both backends, as a background pass. The maps both read are made here,
+ * once; and what a frame needs of the geometry around the eye, which is the same for all its rays. The light
+ * itself is traced by lens.inc on the CPU and holeShader.c's shader on the GPU.
  *
  * Nothing here calls pow, exp or the like: a C library's differ from one system to the next, and so
  * would every picture. Square roots are exact. */
-#include "scene/sceneInternal.h"
+#include "holeInternal.h"
 #include "core/threads.h"
 
 /* Where a row of the map is: rows are even in 1 / r, which spends them near the hole, where the disc
@@ -239,16 +239,57 @@ ArtfBlackHoleDesc artfBlackHoleDefaults(void) {
     return d;
 }
 
+/* ---- the background pass ---- */
+
+static void holeRelease(void* user) {
+    ArtfHole* h = user;
+    artfFree(h->map);
+    artfFluidFree(h->fluid);
+    artfFree(h->shader);
+    artfFree(h);
+}
+
+static void holeFrame(void* user, const ArtfCamera* camera, int width, int height, void* params) {
+    artfHoleFrame(user, camera, width, height, params);
+}
+
+static void holeRows(void* user, const void* params, const ArtfBackgroundRows* rows) {
+    const ArtfHole* h = user;
+    ArtfHoleRows run = artfHoleRowsPortable;
+    /* (the renderer's own choice, which the processor has: each makes the same bits) */
+#ifdef ARTFUL_HAVE_AVX2
+    if (rows->simd == ARTF_SIMD_256) run = artfHoleRowsAvx2;
+#endif
+#ifdef ARTFUL_HAVE_SSE41
+    if (rows->simd == ARTF_SIMD_128) run = artfHoleRowsSse41;
+#endif
+#ifdef ARTFUL_HAVE_NEON
+    if (rows->simd == ARTF_SIMD_128 || rows->simd == ARTF_SIMD_256) run = artfHoleRowsNeon;
+#endif
+    run(params, h->map, artfFluidField(h->fluid), rows);
+}
+
+ArtfHole* artfBlackHoleOf(const ArtfScene* s) {
+    const ArtfBackgroundPass* p = artfSceneBackgroundPass(s);
+    return p && p->release == holeRelease ? p->user : NULL;
+}
+
 void artfSceneSetBlackHole(ArtfScene* s, const ArtfBlackHoleDesc* desc) {
-    ArtfHole* h = &s->hole;
-    if (!desc) { h->on = false; return; }
+    ArtfHole* h = artfBlackHoleOf(s);
+    if (!desc) {
+        if (h) artfSceneSetBackgroundPass(s, NULL);
+        return;
+    }
+    if (!h) {
+        h = ARTF_NEW(ArtfHole);
+        h->shader = artfBlackHoleShader(&h->shaderBytes);
+    }
     const float spin = artfClampf(desc->spin, -.998f, .998f);
     const float horizon = 1.f + sqrtf(1.f - spin * spin);
     const float inner = desc->discInner > 0 ? artfMaxf(desc->discInner, horizon + .2f) : artfHoleIsco(spin);
     const float outer = artfMaxf(desc->discOuter, inner + 1.f);
     const bool sameDisc = h->map && h->desc.discInner == inner && h->desc.discOuter == outer;
     const bool sameSpin = sameDisc && h->desc.spin == spin;
-    h->on = true;
     h->desc = *desc;
     h->desc.spin = spin;
     h->desc.mass = artfMaxf(desc->mass, 1e-6f);
@@ -268,12 +309,30 @@ void artfSceneSetBlackHole(ArtfScene* s, const ArtfBlackHoleDesc* desc) {
     } else if (artfFluidAdvance(h->fluid, desc->time)) {
         ++h->fluidVersion;
     }
+
+    ArtfBackgroundPass pass;
+    memset(&pass, 0, sizeof pass);
+    pass.user = h;
+    pass.frame = holeFrame;
+    pass.rows = holeRows;
+    pass.release = holeRelease;
+    pass.spirv = h->shader;
+    pass.spirvBytes = h->shaderBytes;
+    pass.data = h->map;
+    pass.dataBytes = ARTF_HOLE_MAP_FLOATS * sizeof(float);
+    pass.dataVersion = h->mapVersion;
+    pass.stream = artfFluidField(h->fluid);
+    pass.streamBytes = (size_t)ARTF_FLUID_WIDTH * ARTF_FLUID_HEIGHT * sizeof(float);
+    pass.streamVersion = h->fluidVersion;
+    pass.exposure = h->desc.exposure;
+    pass.bloom = h->desc.bloom;
+    pass.raysPerPixel = h->desc.samples * h->desc.samples;
+    artfSceneSetBackgroundPass(s, &pass);
 }
 
-void artfHoleFrame(const ArtfScene* s, int width, int height, ArtfHoleFrame* out, uint32_t* bloomPixels) {
+void artfHoleFrame(const ArtfHole* hole, const ArtfCamera* c, int width, int height, ArtfHoleFrame* out) {
     memset(out, 0, sizeof *out);
-    const ArtfBlackHoleDesc* d = &s->hole.desc;
-    const ArtfCamera* c = &s->camera;
+    const ArtfBlackHoleDesc* d = &hole->desc;
     const float a = d->spin, horizon = 1.f + sqrtf(1.f - a * a);
 
     /* the hole's frame: the disc in xz */
@@ -318,7 +377,7 @@ void artfHoleFrame(const ArtfScene* s, int width, int height, ArtfHoleFrame* out
     out->spin[1] = .995f / horizon;
     out->spin[2] = d->discHeight;
     out->spin[3] = d->shutter;
-    out->flow[0] = (float)artfFluidTime(s->hole.fluid);
+    out->flow[0] = (float)artfFluidTime(hole->fluid);
 
     /* the camera's three axes and its speed, along the directions there */
     const ArtfVec3 forward = artfVec3Normalize(artfVec3Sub(c->target, c->position));
@@ -346,26 +405,10 @@ void artfHoleFrame(const ArtfScene* s, int width, int height, ArtfHoleFrame* out
     out->look[0] = d->discGain;
     out->look[1] = d->doppler;
     out->look[2] = d->stars;
-    out->look[3] = d->bloom;
-    out->image[0] = d->exposure;
     out->image[1] = 2.f / (float)width;
     out->image[2] = 2.f / (float)height;
     out->image[3] = 1.f / (float)(d->samples * d->samples);
     out->size[0] = (uint32_t)width;
     out->size[1] = (uint32_t)height;
     out->size[2] = (uint32_t)d->samples;
-
-    uint32_t w = (uint32_t)width, h = (uint32_t)height, at = 0, levels = 0;
-    /* (there is always one, however small the frame: tone mapping reads it) */
-    while (levels < ARTF_BLOOM_LEVELS && (!levels || (w > 3 && h > 3))) {
-        w = (w + 1) / 2;
-        h = (h + 1) / 2;
-        out->bloom[levels][0] = at;
-        out->bloom[levels][1] = w;
-        out->bloom[levels][2] = h;
-        at += w * h;
-        ++levels;
-    }
-    out->size[3] = levels;
-    *bloomPixels = at;
 }

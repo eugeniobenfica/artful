@@ -18,6 +18,7 @@
 #include <windowsx.h>
 
 #include "artful/artful.h"
+#include "artful/blackhole.h"
 
 #include <stdio.h>
 #include <stdlib.h>

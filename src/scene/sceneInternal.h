@@ -15,16 +15,7 @@
 #define ARTF_SHADOW_CASCADES 3
 #define ARTF_SHADOW_ATLAS_COLUMNS 4
 #define ARTF_HIZ_LEVELS 15
-/* The disc's gas: rings of it, each a row, so that each can turn at the speed of its own orbit. */
-#define ARTF_HOLE_MAP_WIDTH 2048
-#define ARTF_HOLE_MAP_HEIGHT 1024
-#define ARTF_HOLE_DUST_WIDTH 1024 /* where the gas gives less light than it stops: dark lanes */
-#define ARTF_HOLE_DUST_HEIGHT 256
-#define ARTF_FLUID_WIDTH 1024  /* the disc's gas, as a fluid: around each ring (a power of two) */
-#define ARTF_FLUID_HEIGHT 256  /* and rings */
-#define ARTF_HOLE_COLORS 256
-#define ARTF_HOLE_SKY_WIDTH 1024
-#define ARTF_HOLE_SKY_HEIGHT 512
+/* A background pass's bloom (artfSceneSetBackgroundPass). */
 #define ARTF_BLOOM_LEVELS 8
 #define ARTF_BLOOM_CEILING 48.f /* what one pixel can give the bloom */
 #define ARTF_BLOOM_FADE .85f    /* what each level is worth, of the one below: glow falls off with distance */
@@ -654,42 +645,16 @@ uint64_t artfShadowViewKey(const ArtfScene* s, const ArtfShadowView* view, uint3
 bool artfShadowViewTouched(const ArtfScene* s, const ArtfShadowView* view, uint32_t side, uint64_t seen);
 #define ARTF_SHADOW_CHANGES 1024 /* more than this since a frame, and all maps are drawn */
 
-/* What a frame needs to know of a black hole, as the GPU's uniform block. In units of its mass. */
-typedef struct ArtfHoleFrame {
-    /* where the eye is on the unit sphere, and the two directions along it: x, z, and the axis */
-    float er[4];      /* w: its distance */
-    float etheta[4], ephi[4];
-    /* a pixel's ray, forward + x right + y up with x and y in -1..1: along r, theta and phi at the eye */
-    float right[4], up[4], forward[4];
-    float metric[4];  /* at the eye: the lapse, space's turning times the radius, that radius, and per sine */
-    float place[4];   /* sqrt(Sigma), sqrt(Delta), 1 / r, cos(theta) */
-    float spin[4];    /* spin, the 1 / r of the horizon, the disc's height, the shutter */
-    float flow[4];    /* the moment the fluid's field is of */
-    float boost[4];   /* the eye's speed along r, theta and phi; w: gamma */
-    float disc[4];    /* inner, outer, time, thickness */
-    float look[4];    /* gain, doppler, stars, bloom */
-    float image[4];   /* exposure, 2 / width, 2 / height, 1 / rays a pixel */
-    uint32_t size[4]; /* width, height, rays a side, bloom levels */
+/* What a frame of a background pass needs, as the GPU's uniform block (binding 11): the renderer's part, then what the
+ * pass's frame wrote, from byte 256 on. */
+typedef struct ArtfBackgroundBlock {
+    uint32_t size[4]; /* width, height, bloom levels, 0 */
+    float image[4];   /* exposure, bloom, 0, 0 */
     uint32_t bloom[ARTF_BLOOM_LEVELS][4]; /* of each level: where it starts, its width and its height */
-} ArtfHoleFrame;
-
-/* What both backends read, in one block of floats: the gas's finest detail, below what the fluid
- * resolves; of each row its turns per unit of time and its heat; a black body's colors, by temperature;
- * the dust of the sky; of each row how much light its gas gives. */
-#define ARTF_HOLE_ROWS_AT (ARTF_HOLE_MAP_WIDTH * ARTF_HOLE_MAP_HEIGHT)
-#define ARTF_HOLE_COLORS_AT (ARTF_HOLE_ROWS_AT + ARTF_HOLE_MAP_HEIGHT * 2)
-#define ARTF_HOLE_SKY_AT (ARTF_HOLE_COLORS_AT + ARTF_HOLE_COLORS * 3)
-#define ARTF_HOLE_GLOW_AT (ARTF_HOLE_SKY_AT + ARTF_HOLE_SKY_WIDTH * ARTF_HOLE_SKY_HEIGHT)
-#define ARTF_HOLE_DUST_AT (ARTF_HOLE_GLOW_AT + ARTF_HOLE_MAP_HEIGHT)
-#define ARTF_HOLE_MAP_FLOATS (ARTF_HOLE_DUST_AT + ARTF_HOLE_DUST_WIDTH * ARTF_HOLE_DUST_HEIGHT)
-/* How much the fluid says of the gas's density (the painted map says the rest: the fluid is coarser than
- * what shows, and it moves the gas); and dust, which gives this much less light and stops this much more:
- * dark lanes, against the gas behind. */
-#define ARTF_HOLE_FLUID .1f
-#define ARTF_HOLE_DUST_DIM .97f
-#define ARTF_HOLE_DUST_DENSE 25.f
-/* A heat of 1 is this, in kelvin: the middle of the table of colors, which goes up linearly from 0. */
-#define ARTF_HOLE_KELVIN 6500.0
+    uint32_t unused[(256 - 32 - ARTF_BLOOM_LEVELS * 16) / 4];
+    uint8_t params[ARTF_BACKGROUND_PARAMS];
+} ArtfBackgroundBlock;
+#define ARTF_BACKGROUND_PARAMS_AT 16 /* in vec4s */
 
 /* What rays read (trace.c), laid out for the GPU as well. A node with count 0 has its children at first
  * and first + 1; any other has that many triangles, or instances, from first on. */
@@ -769,16 +734,14 @@ typedef struct ArtfTrace {
     uint64_t meshRemovals;
 } ArtfTrace;
 
-typedef struct ArtfFluid ArtfFluid;
-
-typedef struct ArtfHole {
+/* The scene's background pass, and what tells a backend when to take its parts again: each changes when what it says
+ * of may have. */
+typedef struct ArtfBackground {
     bool on;
-    ArtfBlackHoleDesc desc;
-    float* map;
-    uint64_t mapVersion;
-    ArtfFluid* fluid;
-    uint64_t fluidVersion; /* what the field holds: each step changes it */
-} ArtfHole;
+    ArtfBackgroundPass pass;
+    uint32_t* spirv;      /* the scene's copy */
+    uint64_t moduleStamp, dataStamp, streamStamp;
+} ArtfBackground;
 
 struct ArtfScene {
     uint64_t id; /* no two scenes of a program share one */
@@ -828,7 +791,7 @@ struct ArtfScene {
     ArtfCamera camera;
     bool features[ARTF_FEATURE_COUNT];
     float lodError;
-    ArtfHole hole;
+    ArtfBackground backgroundPass;
     ArtfTrace trace;
     ArtfPostDesc post;
     ArtfDecalDesc decals[ARTF_MAX_DECALS];
@@ -1059,19 +1022,11 @@ void artfSceneFaceParticles(ArtfScene* s);
 /* Makes an instance an emitter's particle (ARTF_INSTANCE_PARTICLE). */
 void artfInstanceMarkParticle(ArtfScene* s, ArtfInstance i);
 
-/* The disc's gas as a fluid (fluid.c). New: warmed up, at that moment. Advance: to that moment, in fixed
- * steps; true when the field changed. The field: ARTF_FLUID_WIDTH * ARTF_FLUID_HEIGHT floats, rows even in
- * 1 / r as the map's are, of what shows of the gas; what moment it is of. */
-ArtfFluid* artfFluidNew(float inner, float outer, float spin, double time);
-void artfFluidFree(ArtfFluid* f);
-bool artfFluidAdvance(ArtfFluid* f, double time);
-const float* artfFluidField(const ArtfFluid* f);
-double artfFluidTime(const ArtfFluid* f);
-
-/* Where the last stable orbit is around a hole of this spin, in masses. */
-float artfHoleIsco(float spin);
-/* Fills in what a frame of that size needs of the black hole; bloomPixels: what its levels take. */
-void artfHoleFrame(const ArtfScene* s, int width, int height, ArtfHoleFrame* out, uint32_t* bloomPixels);
+/* Fills in what a frame of that size needs of the scene's background pass, calling its frame; bloomPixels: what the
+ * bloom's levels take. */
+void artfBackgroundFrame(const ArtfScene* s, int width, int height, ArtfBackgroundBlock* out, uint32_t* bloomPixels);
+/* Lets go of the pass, as the scene is freed. */
+void artfBackgroundFini(ArtfScene* s);
 
 /* Packs and orders a mesh (meshBuild.c); false when no triangle is left. skin: NULL, or one for each vertex. */
 bool artfMeshBuild(ArtfMeshData* m, const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const ArtfVertexSkin* skin, const ArtfMorphTarget* targets, uint32_t targetCount);

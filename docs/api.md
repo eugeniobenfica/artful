@@ -95,7 +95,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneAddTextureStreamed` | A texture whose larger mipmaps are read when they become resident. |
 | `artfPrepareModel`, `artfSceneAddPreparedModel` | A glTF model made on any thread, and added quickly. |
 | `artfSceneSetShadows`, `artfLightSetShadow` | Shadows when drawing triangles; `soft` makes them as wide as their light; `traced` takes them from rays (through the ray tracing hardware where there is some), exact, through what shows through. |
-| `artfSceneSetBlackHole` | A black hole behind the scene. |
+| `artfSceneSetBackgroundPass`, `artfSceneBackgroundPass` | Light behind the scene that the program makes: a frame's parameters, a tile's light on the CPU, a compute shader on Vulkan; then its own bloom and tone curve. |
+| `artfSceneSetBlackHole` | A black hole behind the scene: `artful/blackhole.h`, in the library `artful-blackhole` (`extensions/blackhole`), on the background pass. |
 | `artfRendererSetOverlay` | A picture over the frame. |
 | `artfRendererStats` | What a frame cost, on the CPU and on the GPU, and each of its passes (`passes`, `passCount`). |
 | `artfRendererSetView`, `artfViewName`, `artfViewFromName` | What the frame shows: the picture, or one thing that went into it (`ArtfView`). |

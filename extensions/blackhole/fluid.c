@@ -22,7 +22,7 @@
  * It runs on the CPU, for both backends: what they are given is the same, and so is the picture. Only
  * + - * / and comparisons are used, in an order that does not depend on threads: the flow is chaotic, and
  * any difference would grow. So the same steps give the same bytes on any processor. */
-#include "scene/sceneInternal.h"
+#include "holeInternal.h"
 #include "core/threads.h"
 
 #define W ARTF_FLUID_WIDTH

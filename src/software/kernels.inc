@@ -670,7 +670,7 @@ V8_INLINE void storeLit(const ArtfSoftFrame* f, uint32_t* at, LitOut o) {
     }
 }
 
-/* Narkowicz's fit to ACES: what is very bright rolls off to white. As lensToneMap, and the GPU's. */
+/* Narkowicz's fit to ACES: what is very bright rolls off to white. As backgroundToneMap, and the GPU's. */
 V8_INLINE V8F toneMap(V8F x) {
     const V8F top = v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.51f)), v8fSet(.03f)));
     const V8F bottom = v8fAdd(v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.43f)), v8fSet(.59f))), v8fSet(.14f));
@@ -1793,7 +1793,71 @@ static void shadePlane(ArtfSoftFrame* f, ArtfWorker* w, const ArtfRasterTri* con
     batchFlush(&batch, f, color);
 }
 
-#include "software/lens.inc"
+/* ---- a background pass ---- */
+
+V8_INLINE V8I backgroundHash(V8I x, V8I y, V8I z) {
+    V8I h = v8iXor(v8iXor(v8iMul(x, v8iSet(73856093)), v8iMul(y, v8iSet(19349663))), v8iMul(z, v8iSet(83492791)));
+    h = v8iMul(v8iXor(h, v8iShr(h, 15)), v8iSet(0x2C1B3C6D));
+    h = v8iMul(v8iXor(h, v8iShr(h, 12)), v8iSet(0x297A2D39));
+    return v8iXor(h, v8iShr(h, 15));
+}
+
+/* Light to what a screen can show, as the curve film stock has: a toe, and a shoulder that bends all
+ * that is very bright to white, without clipping. (Narkowicz's fit to ACES.) */
+V8_INLINE V8F backgroundToneMap(V8F x) {
+    const V8F top = v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.51f)), v8fSet(.03f)));
+    const V8F bottom = v8fAdd(v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.43f)), v8fSet(.59f))), v8fSet(.14f));
+    return v8fSqrt(v8fMin(v8fDiv(top, bottom), v8fSet(1.f)));
+}
+
+/* A tile's background: the light with its bloom, tone mapped. Glows fade over more pixels than a byte
+ * has steps, so a little noise goes in to keep them from showing bands. */
+static void backgroundFill(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, int th) {
+    const ArtfBackgroundBlock* h = &f->backgroundData;
+    const float exposure = h->image[0];
+    const uint32_t* level = h->bloom[0];
+    const int bw = (int)level[1], bh = (int)level[2];
+    const V8F lanes = v8iToF(v8iIota()), zero = v8fSet(0.f);
+    const V8F spread = v8fSet(h->image[1] * (1.f - ARTF_BLOOM_FADE));
+    const V8F lastX = v8fSet((float)(bw - 1));
+    const V8F bytes = v8fSet(255.f), round = v8fSet(.5f);
+    for (int y = 0; y < th; ++y) {
+        const float sy = ((float)(oy + y) + .5f) * .5f - .5f, baseY = floorf(sy), partY = sy - baseY;
+        const int y0 = artfClampi((int)baseY, 0, bh - 1), y1 = artfClampi((int)baseY + 1, 0, bh - 1);
+        const V8F rowPart = v8fSet(partY);
+        const size_t row = (size_t)(oy + y) * f->hdrStride + ox;
+        for (int x = 0; x < tw; x += 8) {
+            const V8F pixel = v8fAdd(lanes, v8fSet((float)(ox + x)));
+            const V8F sx = v8fSub(v8fMul(v8fAdd(pixel, round), round), round);
+            const V8F baseX = v8fFloor(sx), partX = v8fSub(sx, baseX);
+            const V8I x0 = v8fToI(v8fMin(v8fMax(baseX, zero), lastX)), x1 = v8fToI(v8fMin(v8fMax(v8fAdd(baseX, v8fSet(1.f)), zero), lastX));
+            const V8I top = v8iSet(y0 * bw), bottom = v8iSet(y1 * bw);
+            V8F glows[3];
+            for (int c = 0; c < 3; ++c) {
+                const uint32_t* plane = (const uint32_t*)(f->bloom[c] + level[0]);
+                const V8F a = v8iAsF(v8iGather(plane, v8iAdd(top, x0))), b = v8iAsF(v8iGather(plane, v8iAdd(top, x1)));
+                const V8F d = v8iAsF(v8iGather(plane, v8iAdd(bottom, x0))), e = v8iAsF(v8iGather(plane, v8iAdd(bottom, x1)));
+                const V8F upper = v8fAdd(a, v8fMul(v8fSub(b, a), partX)), lower = v8fAdd(d, v8fMul(v8fSub(e, d), partX));
+                glows[c] = v8fAdd(upper, v8fMul(v8fSub(lower, upper), rowPart));
+            }
+            /* a lens's glow is nearly white: the colors of what makes it run together in it */
+            const V8F grey = v8fAdd(v8fAdd(v8fMul(glows[0], v8fSet(.3f)), v8fMul(glows[1], v8fSet(.59f))), v8fMul(glows[2], v8fSet(.11f)));
+            V8F out[3];
+            for (int c = 0; c < 3; ++c) {
+                const V8F glow = v8fAdd(glows[c], v8fMul(v8fSub(grey, glows[c]), v8fSet(ARTF_BLOOM_WHITE)));
+                const V8F light = v8fAdd(v8fLoad(f->hdr[c] + row + x), v8fMul(glow, spread));
+                out[c] = backgroundToneMap(v8fMul(light, v8fSet(exposure)));
+            }
+            const V8I id = v8iAdd(v8iAdd(v8iSet(ox + x), v8iIota()), v8iSet((oy + y) * 8192));
+            const V8I noiseBits = backgroundHash(id, v8iSet(7), v8iSet(13));
+            const V8F dither = v8fMul(v8iToF(v8iAnd(noiseBits, v8iSet(255))), v8fSet(1.f / 255.f));
+#define BYTE(v) v8fToI(v8fMin(v8fAdd(v8fMul(v, bytes), dither), bytes))
+            const V8I pixelOut = v8iOr(v8iOr(v8iShl(BYTE(out[0]), 16), v8iShl(BYTE(out[1]), 8)), v8iOr(BYTE(out[2]), v8iSet((int32_t)0xFF000000u)));
+#undef BYTE
+            v8iStore(w->color + y * ARTF_TILE + x, pixelOut);
+        }
+    }
+}
 
 /* ---- a tile -------------------------------------------------------------------------------------- */
 
@@ -1816,7 +1880,7 @@ V8_INLINE V8I overlayBlend(V8I src, V8I dst) {
 
 /* ---- a tile of a frame in floats ---- */
 
-/* What the tile's colors were made of before: a black hole's, already tone mapped, back to light. */
+/* What the tile's colors were made of before: a background pass's, already tone mapped, back to light. */
 static void postFromBytes(uint32_t* c, int count) {
     const V8F inverse = v8fSet(1.f / 255.f);
     const V8I byte = v8iSet(255);
@@ -2251,8 +2315,8 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
 
     const V8I zeroI = v8iSet(0);
     const V8I background = v8iSet((int32_t)f->background);
-    if (f->hole) {
-        lensFill(f, w, ox, oy, tw, th);
+    if (f->backgroundPass) {
+        backgroundFill(f, w, ox, oy, tw, th);
         if (f->post) postFromBytes(w->color, ARTF_TILE_PIXELS);
     } else if (f->post) {
         /* the background as light: what shows, squared */
@@ -2439,4 +2503,4 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     return 0;
 }
 
-const ArtfKernels KERNELS = {KERNELS_NAME, geometry, tile, depthTile, lensTile};
+const ArtfKernels KERNELS = {KERNELS_NAME, KERNELS_SIMD, geometry, tile, depthTile};

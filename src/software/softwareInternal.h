@@ -106,11 +106,9 @@ typedef struct ArtfSoftFrame {
     float* hizCells;
     float* hizTiles;
     int cellsX, cellsY;
-    /* a black hole: its light before tone mapping, by planes, and its bloom's levels */
-    bool hole;
-    ArtfHoleFrame holeData;
-    const float* holeMap;
-    const float* holeFluid;
+    /* a background pass: its light before tone mapping, by planes, and its bloom's levels */
+    bool backgroundPass;
+    ArtfBackgroundBlock backgroundData;
     const ArtfShadowSource* shadows; /* NULL: this frame has none */
     /* tracing: what each pixel gathered, four floats (light, and how often something was there) */
     float* traceSum;
@@ -195,10 +193,10 @@ void artfFroxelAt(const ArtfSoftFrame* f, float sx, float sy, float w, float* ou
 
 typedef struct ArtfKernels {
     const char* name;
+    int simd;  /* as ArtfSimd: PORTABLE, 128 or 256 */
     void (*geometry)(ArtfSoftFrame* f, uint32_t chunk);
     uint32_t (*tile)(ArtfSoftFrame* f, uint32_t tile, uint32_t worker); /* 1 when skipped */
     void (*depth)(ArtfSoftFrame* f, uint32_t tile, uint32_t worker);    /* a tile's depth alone, for occlusion */
-    void (*lens)(ArtfSoftFrame* f, uint32_t tile);                      /* a tile's light from a black hole */
 } ArtfKernels;
 
 extern const ArtfKernels artfKernelsPortable;

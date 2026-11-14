@@ -4,6 +4,7 @@
 #include "scene/sceneInternal.h"
 #include "render/rendererInternal.h"
 #include "core/threads.h"
+#include "holeInternal.h" /* (extensions/blackhole) */
 
 #include <math.h>
 #include <stdio.h>
@@ -7193,6 +7194,88 @@ static void testFluid(void) {
     artfFluidFree(b);
 }
 
+/* A background pass of the program's own: light the same everywhere, and what the scene does with it. */
+typedef struct FlatPass { float light; int released, frames, simd; } FlatPass;
+
+static void flatFrame(void* user, const ArtfCamera* camera, int width, int height, void* params) {
+    (void)camera;
+    FlatPass* p = user;
+    ++p->frames;
+    float* out = params;
+    out[0] = p->light;
+    out[1] = (float)width;
+    out[2] = (float)height;
+}
+
+static void flatRows(void* user, const void* params, const ArtfBackgroundRows* rows) {
+    FlatPass* p = user;
+    const float* in = params;
+    p->simd = rows->simd;
+    CHECK(rows->x % 64 == 0 && rows->y % 64 == 0 && rows->stride % 8 == 0);
+    CHECK(rows->x + rows->width <= rows->frameWidth && rows->y + rows->height <= rows->frameHeight);
+    CHECK(in[1] == (float)rows->frameWidth && in[2] == (float)rows->frameHeight);
+    for (int y = 0; y < rows->height; ++y)
+        for (int x = 0; x < rows->width; ++x)
+            for (int c = 0; c < 3; ++c) rows->light[c][(size_t)y * rows->stride + x] = in[0];
+}
+
+static void flatRelease(void* user) { ++((FlatPass*)user)->released; }
+
+static void testBackgroundPass(void) {
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 1, false); /* (one thread: rows checks as it goes) */
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    ArtfScene* s = plainScene();
+    artfSceneSetBackgroundAlpha(s, 0.f);
+    FlatPass flat = {.25f, 0, 0, 0}, other = {1.f, 0, 0, 0};
+    ArtfBackgroundPass p;
+    memset(&p, 0, sizeof p);
+    p.user = &flat;
+    p.frame = flatFrame;
+    p.rows = flatRows;
+    p.release = flatRelease;
+    p.exposure = 1.f;
+    artfSceneSetBackgroundPass(s, &p);
+    CHECK(artfSceneBackgroundPass(s) && artfSceneBackgroundPass(s)->user == &flat);
+    CHECK(!artfBlackHoleOf(s));
+    CHECK(artfRendererDraw(cpu, s));
+    CHECK(artfRendererReadPixels(cpu, a));
+    CHECK(flat.frames == 1 && flat.simd != ARTF_SIMD_AUTO);
+    /* the same color everywhere, whatever the background's alpha: the tone curve of .25, with a little noise */
+    const double top = .25 * (.25 * 2.51 + .03), bottom = .25 * (.25 * 2.43 + .59) + .14;
+    const int expected = (int)(sqrt(top / bottom) * 255.0);
+    bool even = true;
+    for (size_t i = 0; i < (size_t)W * H; ++i) even = even && a[i] >> 24 == 255 && abs(CHANNEL(a[i], 16) - expected) <= 1 && CHANNEL(a[i], 16) == CHANNEL(a[i], 0);
+    CHECK(even);
+    /* given again with the same user, nothing is let go; another user, and the first is */
+    artfSceneSetBackgroundPass(s, &p);
+    CHECK(flat.released == 0);
+    p.user = &other;
+    artfSceneSetBackgroundPass(s, &p);
+    CHECK(flat.released == 1 && other.released == 0);
+    CHECK(artfRendererDraw(cpu, s));
+    CHECK(artfRendererReadPixels(cpu, a));
+    CHECK(CHANNEL(a[W * H / 2], 16) > expected + 40);
+    /* a view leaves it out */
+    artfRendererSetView(cpu, ARTF_VIEW_NORMALS);
+    other.frames = 0;
+    CHECK(artfRendererDraw(cpu, s));
+    CHECK(other.frames == 0);
+    artfRendererSetView(cpu, ARTF_VIEW_LIT);
+    /* with none, the frame is as it was */
+    artfSceneSetBackgroundPass(s, NULL);
+    CHECK(other.released == 1);
+    CHECK(artfRendererDraw(cpu, s));
+    CHECK(artfRendererReadPixels(cpu, a));
+    CHECK(a[0] == 0);
+    /* the scene lets go of it as it goes */
+    artfSceneSetBackgroundPass(s, &p);
+    artfSceneFree(s);
+    CHECK(other.released == 2);
+    artfRendererFree(cpu);
+    artfFree(a);
+}
+
 static void testBlackHole(void) {
     uint32_t* a = artfMalloc((size_t)W * H * 4);
     uint32_t* a_ = a;
@@ -7209,7 +7292,7 @@ static void testBlackHole(void) {
     for (int i = 0; i < 3; ++i) {
         const float r = distances[i];
         ArtfScene* s = holeScene(r, 1.57079633f, 0, 0);
-        ArtfBlackHoleDesc far = s->hole.desc;
+        ArtfBlackHoleDesc far = artfBlackHoleOf(s)->desc;
         far.discInner = 10.f;
         far.discOuter = 60.f;
         far.discGain = 200.f;
@@ -7236,7 +7319,7 @@ static void testBlackHole(void) {
     for (int i = 0; i < 3; ++i) {
         const double a = spins[i], r = 60.0;
         ArtfScene* s = holeScene((float)r, 0, 0, 0);
-        ArtfBlackHoleDesc lit = s->hole.desc;
+        ArtfBlackHoleDesc lit = artfBlackHoleOf(s)->desc;
         lit.spin = spins[i];
         lit.discGain = 0;
         lit.discThickness = 0;
@@ -7270,7 +7353,7 @@ static void testBlackHole(void) {
 
     /* the same pixels on any instruction set, with any number of threads */
     ArtfScene* s = holeScene(26.f, .06f, .5f, 1.f);
-    ArtfBlackHoleDesc all = s->hole.desc;
+    ArtfBlackHoleDesc all = artfBlackHoleOf(s)->desc;
     all.spin = .9f;
     all.bloom = 1.f;
     all.samples = 2;
@@ -7305,7 +7388,7 @@ static void testBlackHole(void) {
     s = holeScene(26.f, .06f, 1.f, 0);
     {
         /* (exposed low: a side that has gone white tells nothing of how much brighter it is) */
-        ArtfBlackHoleDesc d = s->hole.desc;
+        ArtfBlackHoleDesc d = artfBlackHoleOf(s)->desc;
         d.exposure = .1f;
         artfSceneSetBlackHole(s, &d);
     }
@@ -7319,11 +7402,11 @@ static void testBlackHole(void) {
     s = holeScene(26.f, .06f, 0, 0);
     CHECK(artfRendererDraw(cpu, s));
     CHECK(artfRendererReadPixels(cpu, a));
-    const uint64_t version = s->hole.mapVersion;
-    ArtfBlackHoleDesc d = s->hole.desc;
+    const uint64_t version = artfBlackHoleOf(s)->mapVersion;
+    ArtfBlackHoleDesc d = artfBlackHoleOf(s)->desc;
     d.time = 40.f;
     artfSceneSetBlackHole(s, &d);
-    CHECK(s->hole.mapVersion == version);
+    CHECK(artfBlackHoleOf(s)->mapVersion == version);
     CHECK(artfRendererDraw(cpu, s));
     CHECK(artfRendererReadPixels(cpu, b));
     CHECK(hashOf(a, (size_t)W * H) != hashOf(b, (size_t)W * H));
@@ -7544,6 +7627,7 @@ int main(void) {
     testGraphs(ARTF_BACKEND_VULKAN);
     testGraphsBothBackends();
     testFluid();
+    testBackgroundPass();
     testBlackHole();
 #ifdef ARTFUL_COUNT_ALLOCATIONS
     printf("allocations still alive: %ld\n", artfAllocationsAlive());

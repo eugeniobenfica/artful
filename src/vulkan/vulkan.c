@@ -72,7 +72,7 @@ typedef struct Slot {
     bool timed; /* its timestamps hold a frame */
     const char* passNames[ARTF_PASS_TIMES]; /* the passes its timestamps end, after the first */
     uint32_t passCount;
-    GpuBuffer frame, instances, visible, indirect, template_, materials, overlayStaging, hole, fluid, layerList, trace;
+    GpuBuffer frame, instances, visible, indirect, template_, materials, overlayStaging, background, stream, layerList, trace;
     GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
     GpuBuffer decals;                  /* the decals that may show (63) */
     GpuBuffer probes;                  /* light that bounced (62) */
@@ -87,7 +87,7 @@ typedef struct Slot {
     VkBuffer skinBoundData, skinBoundVertices; /* what its set says binding 34 and 36 are */
     uint64_t shadowInstances, shadowStructure, shadowMaterials, shadowScene;
     uint32_t shadowMeshes;
-    uint64_t instanceVersion, structureVersion, materialVersion, lodVersion, fluidVersion, fluidScene;
+    uint64_t instanceVersion, structureVersion, materialVersion, lodVersion, streamStamp, streamScene;
     bool fresh; /* nothing written yet */
 } Slot;
 
@@ -251,7 +251,7 @@ typedef struct Vulkan {
     VkFramebuffer shadowFramebuffer;
     GpuImage shadowAtlas;
     int shadowWidth, shadowHeight;
-    VkPipeline holePipeline, bloomFirstPipeline, bloomNextPipeline, bloomUpPipeline, backdropPipeline;
+    VkPipeline backgroundPipeline, bloomFirstPipeline, bloomNextPipeline, bloomUpPipeline, backdropPipeline;
     VkDescriptorPool descriptorPool;
     VkSampler sampler, depthSampler;
     bool multiDraw;       /* several draws in one indirect call */
@@ -303,8 +303,8 @@ typedef struct Vulkan {
     uint64_t traceScene, traceMeshVersion, traceTopVersion, traceKey;
     uint32_t traceDone;
 
-    /* a black hole: its light, its bloom and its disc */
-    GpuBuffer hdr, bloom, holeMap;
+    /* a background pass: its light, its bloom and its data; its shader, the program's */
+    GpuBuffer hdr, bloom, backgroundData;
     GpuBuffer environment;          /* a scene's maps of all around (binding 49): four bytes until one has some */
     uint64_t environmentVersion, environmentScene;
     VkPipeline environmentPipeline; /* behind the scene */
@@ -345,7 +345,7 @@ typedef struct Vulkan {
     ArtfLightData* lightScratch;    /* lights past the frame's own, and their lists, before they go up */
     uint32_t* listScratch;
     VkDeviceSize listScratchSize;
-    uint64_t holeMapVersion, holeMapScene;
+    uint64_t backgroundDataStamp, backgroundDataScene, backgroundModuleStamp, backgroundModuleScene;
 
     /* the overlay */
     GpuImage overlay;
@@ -1138,7 +1138,7 @@ static bool pipelinesMake(Vulkan* v) {
 
     /* the shaders, built here */
     size_t size;
-    enum { COMPUTE_SHADERS = 9 };
+    enum { COMPUTE_SHADERS = 8 };
     VkShaderModule compute[COMPUTE_SHADERS];
     for (int i = 0; i < 3; ++i) {
         uint32_t* cullCode = artfShaderCull(&size, (ArtfCullPhase)i);
@@ -1148,14 +1148,12 @@ static bool pipelinesMake(Vulkan* v) {
     compute[3] = shaderModule(v, code, size);
     code = artfShaderHiz(&size, false, 1);
     compute[4] = shaderModule(v, code, size);
-    code = artfShaderHoleTrace(&size);
-    compute[5] = shaderModule(v, code, size);
     code = artfShaderBloomDown(&size, true);
-    compute[6] = shaderModule(v, code, size);
+    compute[5] = shaderModule(v, code, size);
     code = artfShaderBloomDown(&size, false);
-    compute[7] = shaderModule(v, code, size);
+    compute[6] = shaderModule(v, code, size);
     code = artfShaderBloomUp(&size);
-    compute[8] = shaderModule(v, code, size);
+    compute[7] = shaderModule(v, code, size);
     code = artfShaderSceneVertex(&size, v->floats);
     VkShaderModule sceneVertex = shaderModule(v, code, size);
     code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0, shaderVariant(v));
@@ -1164,7 +1162,7 @@ static bool pipelinesMake(Vulkan* v) {
     VkShaderModule overlayVertex = shaderModule(v, code, size);
     code = artfShaderOverlayFragment(&size);
     VkShaderModule overlayFragment = shaderModule(v, code, size);
-    code = artfShaderHoleBackdrop(&size, v->floats);
+    code = artfShaderBackgroundBackdrop(&size, v->floats);
     VkShaderModule backdropFragment = shaderModule(v, code, size);
     code = artfShaderTraceShow(&size, v->floats);
     VkShaderModule traceFragment = shaderModule(v, code, size);
@@ -1181,9 +1179,7 @@ static bool pipelinesMake(Vulkan* v) {
 
     ComputePipelineCreateInfo computeInfo[COMPUTE_SHADERS];
     for (int i = 0; i < COMPUTE_SHADERS; ++i) {
-        /* (the hole's rays go out in bands, each from a base: VK_PIPELINE_CREATE_DISPATCH_BASE_BIT) */
-        const VkFlags flags = i == 5 ? 0x10 : 0;
-        const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, flags, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, compute[i], "main", NULL}, v->pipelineLayout, 0, -1};
+        const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, compute[i], "main", NULL}, v->pipelineLayout, 0, -1};
         computeInfo[i] = c;
     }
     VkPipeline computeMade[COMPUTE_SHADERS];
@@ -1192,10 +1188,9 @@ static bool pipelinesMake(Vulkan* v) {
     memcpy(v->cullPipelines, computeMade, sizeof v->cullPipelines);
     v->hizFirstPipeline = computeMade[3];
     v->hizNextPipeline = computeMade[4];
-    v->holePipeline = computeMade[5];
-    v->bloomFirstPipeline = computeMade[6];
-    v->bloomNextPipeline = computeMade[7];
-    v->bloomUpPipeline = computeMade[8];
+    v->bloomFirstPipeline = computeMade[5];
+    v->bloomNextPipeline = computeMade[6];
+    v->bloomUpPipeline = computeMade[7];
 
     const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
     const VertexAttribute attributes[3] = {{0, 0, FORMAT_RGBA16_UNORM, 0}, {1, 0, FORMAT_RG16_SNORM, 8}, {2, 0, FORMAT_RG16_FLOAT, 12}};
@@ -1313,12 +1308,12 @@ static void writeBufferDescriptors(Vulkan* v, Slot* s) {
     const DescriptorBufferInfo flags = {v->flags.buffer, 0, ~(VkDeviceSize)0};
     const WriteDescriptorSet flagWrite = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 10, 0, 1, DESCRIPTOR_STORAGE, NULL, &flags, NULL};
     v->vkUpdateDescriptorSets(v->device, 1, &flagWrite, 0, NULL);
-    const DescriptorBufferInfo hole = {s->hole.buffer, 0, ~(VkDeviceSize)0};
-    const WriteDescriptorSet holeWrite = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 11, 0, 1, DESCRIPTOR_UNIFORM, NULL, &hole, NULL};
-    v->vkUpdateDescriptorSets(v->device, 1, &holeWrite, 0, NULL);
-    const DescriptorBufferInfo fluid = {s->fluid.buffer, 0, ~(VkDeviceSize)0};
-    const WriteDescriptorSet fluidWrite = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 15, 0, 1, DESCRIPTOR_STORAGE, NULL, &fluid, NULL};
-    v->vkUpdateDescriptorSets(v->device, 1, &fluidWrite, 0, NULL);
+    const DescriptorBufferInfo background = {s->background.buffer, 0, ~(VkDeviceSize)0};
+    const WriteDescriptorSet backgroundWrite = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 11, 0, 1, DESCRIPTOR_UNIFORM, NULL, &background, NULL};
+    v->vkUpdateDescriptorSets(v->device, 1, &backgroundWrite, 0, NULL);
+    const DescriptorBufferInfo stream = {s->stream.buffer, 0, ~(VkDeviceSize)0};
+    const WriteDescriptorSet streamWrite = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 15, 0, 1, DESCRIPTOR_STORAGE, NULL, &stream, NULL};
+    v->vkUpdateDescriptorSets(v->device, 1, &streamWrite, 0, NULL);
     const DescriptorBufferInfo colors = {v->colors.buffer, 0, ~(VkDeviceSize)0};
     const WriteDescriptorSet colorWrite = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 16, 0, 1, DESCRIPTOR_STORAGE, NULL, &colors, NULL};
     v->vkUpdateDescriptorSets(v->device, 1, &colorWrite, 0, NULL);
@@ -2177,32 +2172,60 @@ static void denoise(Vulkan* v, VkCommandBuffer c, Slot* s) {
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE, ACCESS_TRANSFER_WRITE, readWrite);
 }
 
-/* ---- a black hole ---- */
+/* ---- a background pass ---- */
 
-/* Room for its light at this size, and its disc, where they changed. That is rare, so it may wait. */
-static bool syncHole(Vulkan* v, const ArtfScene* scene, uint32_t bloomPixels) {
+/* The program's shader, as a pipeline, when the scene's is another. It goes out in bands, each from a base:
+ * VK_PIPELINE_CREATE_DISPATCH_BASE_BIT. No shader, or one the driver will not take: no pipeline, and no light. */
+static void backgroundPipelineMake(Vulkan* v, const ArtfScene* scene) {
+    const ArtfBackground* b = &scene->backgroundPass;
+    if (v->backgroundModuleStamp == b->moduleStamp && v->backgroundModuleScene == scene->id) return;
+    v->backgroundModuleStamp = b->moduleStamp;
+    v->backgroundModuleScene = scene->id;
+    if (v->backgroundPipeline) {
+        v->vkDeviceWaitIdle(v->device);
+        v->vkDestroyPipeline(v->device, v->backgroundPipeline, NULL);
+        v->backgroundPipeline = 0;
+    }
+    if (!b->spirv) return;
+    uint32_t* code = artfMalloc(b->pass.spirvBytes);
+    memcpy(code, b->spirv, b->pass.spirvBytes);
+    VkShaderModule module = shaderModule(v, code, b->pass.spirvBytes);
+    if (module) {
+        const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, 0x10, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
+        if (v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &c, NULL, &v->backgroundPipeline) != VK_OK) v->backgroundPipeline = 0;
+        v->vkDestroyShaderModule(v->device, module, NULL);
+    }
+    if (!v->backgroundPipeline) artfLog("artful: the background pass's shader could not be made");
+}
+
+/* Room for its light at this size, and its data, where they changed. That is rare, so it may wait. */
+static bool syncBackground(Vulkan* v, const ArtfScene* scene, uint32_t bloomPixels) {
     const VkDeviceSize hdrSize = (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16, bloomSize = (VkDeviceSize)bloomPixels * 16;
     bool rebind = false;
     if (v->hdr.size != hdrSize || v->bloom.size != bloomSize) {
         v->vkDeviceWaitIdle(v->device);
         bufferFree(v, &v->hdr);
         bufferFree(v, &v->bloom);
-        if (!bufferNew(v, &v->hdr, hdrSize, BUFFER_STORAGE, false)) return false;
+        if (!bufferNew(v, &v->hdr, hdrSize, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
         if (!bufferNew(v, &v->bloom, bloomSize, BUFFER_STORAGE, false)) return false;
         rebind = true;
     }
-    if (v->holeMapVersion != scene->hole.mapVersion || v->holeMapScene != scene->id) {
+    const ArtfBackgroundPass* p = &scene->backgroundPass.pass;
+    if (v->backgroundDataStamp != scene->backgroundPass.dataStamp || v->backgroundDataScene != scene->id || !v->backgroundData.buffer) {
         v->vkDeviceWaitIdle(v->device);
-        if (!v->holeMap.buffer) {
-            if (!bufferNew(v, &v->holeMap, ARTF_HOLE_MAP_FLOATS * sizeof(float), BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
+        const VkDeviceSize bytes = p->data ? (VkDeviceSize)((p->dataBytes + 3) & ~(size_t)3) : 0;
+        if (!v->backgroundData.buffer || v->backgroundData.size < bytes) {
+            bufferFree(v, &v->backgroundData);
+            if (!bufferNew(v, &v->backgroundData, bytes, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
             rebind = true;
         }
-        if (!upload(v, &v->holeMap, 0, scene->hole.map, ARTF_HOLE_MAP_FLOATS * sizeof(float))) return false;
-        v->holeMapVersion = scene->hole.mapVersion;
-        v->holeMapScene = scene->id;
+        if (p->data && !upload(v, &v->backgroundData, 0, p->data, p->dataBytes)) return false;
+        v->backgroundDataStamp = scene->backgroundPass.dataStamp;
+        v->backgroundDataScene = scene->id;
     }
+    backgroundPipelineMake(v, scene);
     if (rebind) {
-        const DescriptorBufferInfo infos[3] = {{v->hdr.buffer, 0, ~(VkDeviceSize)0}, {v->bloom.buffer, 0, ~(VkDeviceSize)0}, {v->holeMap.buffer, 0, ~(VkDeviceSize)0}};
+        const DescriptorBufferInfo infos[3] = {{v->hdr.buffer, 0, ~(VkDeviceSize)0}, {v->bloom.buffer, 0, ~(VkDeviceSize)0}, {v->backgroundData.buffer, 0, ~(VkDeviceSize)0}};
         for (int i = 0; i < SLOTS; ++i) {
             WriteDescriptorSet writes[3];
             for (uint32_t k = 0; k < 3; ++k) {
@@ -2219,23 +2242,25 @@ static bool syncHole(Vulkan* v, const ArtfScene* scene, uint32_t bloomPixels) {
  * a device that keeps the GPU two seconds as lost. Nor does a driver have to give it back between the
  * dispatches of one submission: so a frame this large goes out in bands of rows, each a submission of
  * its own, waited for. Below this a frame is one dispatch, as fast as it can go. */
-#define HOLE_RAYS_APART 64000000ull
-#define HOLE_RAYS_A_BAND 8000000u
+#define BACKGROUND_RAYS_APART 64000000ull
+#define BACKGROUND_RAYS_A_BAND 8000000u
 
-static uint64_t holeRays(const Vulkan* v, const ArtfHoleFrame* h) {
-    return (uint64_t)v->sceneWidth * (uint64_t)v->sceneHeight * h->size[2] * h->size[2];
+static uint32_t backgroundRaysPerPixel(const ArtfScene* scene) { return (uint32_t)artfMaxi(scene->backgroundPass.pass.raysPerPixel, 1); }
+
+static uint64_t backgroundRays(const Vulkan* v, const ArtfScene* scene) {
+    return (uint64_t)v->sceneWidth * (uint64_t)v->sceneHeight * backgroundRaysPerPixel(scene);
 }
 
-static bool traceHoleApart(Vulkan* v, Slot* s, const ArtfHoleFrame* h) {
+static bool traceBackgroundApart(Vulkan* v, Slot* s, const ArtfScene* scene) {
     const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
     const uint32_t groupsX = ((uint32_t)v->sceneWidth + 7) / 8, groupsY = ((uint32_t)v->sceneHeight + 7) / 8;
-    const uint32_t raysPerGroupRow = groupsX * 64u * h->size[2] * h->size[2];
-    const uint32_t band = (uint32_t)artfMaxi(1, (int)(HOLE_RAYS_A_BAND / raysPerGroupRow));
+    const uint32_t raysPerGroupRow = groupsX * 64u * backgroundRaysPerPixel(scene);
+    const uint32_t band = (uint32_t)artfMaxi(1, (int)(BACKGROUND_RAYS_A_BAND / raysPerGroupRow));
     for (uint32_t y = 0; y < groupsY; y += band) {
         VkCommandBuffer c = oneShotBegin(v);
         /* (the frame before reads what this one is about to write) */
         memoryBarrier(v, c, STAGE_COMPUTE | STAGE_FRAGMENT, STAGE_COMPUTE, readWrite, readWrite);
-        v->vkCmdBindPipeline(c, 1, v->holePipeline);
+        v->vkCmdBindPipeline(c, 1, v->backgroundPipeline);
         v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         v->vkCmdDispatchBase(c, 0, y, 0, groupsX, (uint32_t)artfMini((int)band, (int)(groupsY - y)), 1);
         if (!oneShotEnd(v, c)) return false;
@@ -2244,17 +2269,22 @@ static bool traceHoleApart(Vulkan* v, Slot* s, const ArtfHoleFrame* h) {
 }
 
 /* Its rays, unless they went out apart, and its bloom: all that comes before the render pass. */
-static void traceHole(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfHoleFrame* h, bool raysDone) {
+static void traceBackground(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfBackgroundBlock* h, bool raysDone) {
     const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
     /* (the frame before reads what this one is about to write; or, the bands wrote it) */
     memoryBarrier(v, c, STAGE_COMPUTE | STAGE_FRAGMENT, STAGE_COMPUTE, readWrite, readWrite);
     v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
-    if (!raysDone) {
-        v->vkCmdBindPipeline(c, 1, v->holePipeline);
+    if (!raysDone && v->backgroundPipeline) {
+        v->vkCmdBindPipeline(c, 1, v->backgroundPipeline);
         v->vkCmdDispatch(c, ((uint32_t)v->sceneWidth + 7) / 8, ((uint32_t)v->sceneHeight + 7) / 8, 1);
         memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_WRITE, readWrite);
+    } else if (!raysDone) {
+        /* (no shader: no light) */
+        memoryBarrier(v, c, STAGE_COMPUTE, STAGE_TRANSFER, readWrite, ACCESS_TRANSFER_WRITE);
+        v->vkCmdFillBuffer(c, v->hdr.buffer, 0, ~(VkDeviceSize)0, 0);
+        memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE, ACCESS_TRANSFER_WRITE, readWrite);
     }
-    const uint32_t levels = h->size[3];
+    const uint32_t levels = h->size[2];
     v->vkCmdBindPipeline(c, 1, v->bloomFirstPipeline);
     for (uint32_t i = 0; i < levels; ++i) {
         if (i == 1) v->vkCmdBindPipeline(c, 1, v->bloomNextPipeline);
@@ -3001,7 +3031,7 @@ static bool scenePassesMake(Vulkan* v, const ArtfScene* scene) {
     size_t size;
     uint32_t* code = artfShaderOverlayVertex(&size);
     VkShaderModule whole = shaderModule(v, code, size);
-    code = artfShaderHoleBackdrop(&size, true);
+    code = artfShaderBackgroundBackdrop(&size, true);
     VkShaderModule backdrop = shaderModule(v, code, size);
     code = artfShaderTraceShow(&size, true);
     VkShaderModule traced = shaderModule(v, code, size);
@@ -3449,23 +3479,32 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
             out[i * 2 + 1] = v->layers.items[i].mesh;
         }
     }
-    const bool hole = scene->hole.on && !view;
-    ArtfHoleFrame holeFrame;
-    if (hole) {
+    const bool background = scene->backgroundPass.on && !view;
+    ArtfBackgroundBlock backgroundFrame;
+    if (background) {
         uint32_t bloomPixels = 0;
-        artfHoleFrame(scene, v->sceneWidth, v->sceneHeight, &holeFrame, &bloomPixels);
-        if (!syncHole(v, scene, bloomPixels)) return false;
-        memcpy(s->hole.mapped, &holeFrame, sizeof holeFrame);
-        /* (each frame in flight has its own copy of the gas: this one's is free to write) */
-        if (s->fluidVersion != scene->hole.fluidVersion || s->fluidScene != scene->id) {
-            memcpy(s->fluid.mapped, artfFluidField(scene->hole.fluid), (size_t)ARTF_FLUID_WIDTH * ARTF_FLUID_HEIGHT * 4);
-            s->fluidVersion = scene->hole.fluidVersion;
-            s->fluidScene = scene->id;
+        artfBackgroundFrame(scene, v->sceneWidth, v->sceneHeight, &backgroundFrame, &bloomPixels);
+        if (!syncBackground(v, scene, bloomPixels)) return false;
+        memcpy(s->background.mapped, &backgroundFrame, sizeof backgroundFrame);
+        /* (each frame in flight has its own copy of the stream: this one's is free to write) */
+        const ArtfBackgroundPass* p = &scene->backgroundPass.pass;
+        if (s->streamStamp != scene->backgroundPass.streamStamp || s->streamScene != scene->id) {
+            const VkDeviceSize bytes = p->stream ? p->streamBytes : 0;
+            if (bytes > s->stream.size) {
+                bufferFree(v, &s->stream);
+                if (!bufferNew(v, &s->stream, bytes, BUFFER_STORAGE, true)) return false;
+                const DescriptorBufferInfo info = {s->stream.buffer, 0, ~(VkDeviceSize)0};
+                const WriteDescriptorSet write = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 15, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
+                v->vkUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
+            }
+            if (bytes) memcpy(s->stream.mapped, p->stream, (size_t)bytes);
+            s->streamStamp = scene->backgroundPass.streamStamp;
+            s->streamScene = scene->id;
         }
     }
-    const bool holeApart = hole && holeRays(v, &holeFrame) > HOLE_RAYS_APART;
-    if (holeApart && !traceHoleApart(v, s, &holeFrame)) {
-        artfLog("artful: the black hole's rays could not be traced");
+    const bool backgroundApart = background && v->backgroundPipeline && backgroundRays(v, scene) > BACKGROUND_RAYS_APART;
+    if (backgroundApart && !traceBackgroundApart(v, s, scene)) {
+        artfLog("artful: the background pass's rays could not be traced");
         return false;
     }
 
@@ -3544,9 +3583,9 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     passMark(v, c, s, "cull");
 
     runSwarms(v, c, s);
-    if (hole) {
-        traceHole(v, c, s, &holeFrame, holeApart);
-        passMark(v, c, s, "black hole");
+    if (background) {
+        traceBackground(v, c, s, &backgroundFrame, backgroundApart);
+        passMark(v, c, s, "background");
     }
     if (shadowViews) {
         drawShadows(v, c, s, &shadows, shadowViews, shadowChanged);
@@ -3602,8 +3641,8 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     v->vkCmdBeginRenderPass(c, &pass, 0);
     v->vkCmdSetViewport(c, 0, 1, &viewport);
     v->vkCmdSetScissor(c, 0, 1, &area);
-    if (hole || (frame.sky[3] > 0 && frame.ground[3] > 0)) {
-        v->vkCmdBindPipeline(c, 0, hole ? v->backdropPipeline : v->environmentPipeline);
+    if (background || (frame.sky[3] > 0 && frame.ground[3] > 0)) {
+        v->vkCmdBindPipeline(c, 0, background ? v->backdropPipeline : v->environmentPipeline);
         v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         v->vkCmdDraw(c, 3, 1, 0, 0);
     }
@@ -3822,7 +3861,7 @@ static void vkFree(ArtfRenderer* r) {
         imageFree(v, &v->shadowAtlas);
         bufferFree(v, &v->hdr);
         bufferFree(v, &v->bloom);
-        bufferFree(v, &v->holeMap);
+        bufferFree(v, &v->backgroundData);
         bufferFree(v, &v->environment);
         bufferFree(v, &v->lutStaging);
         if (v->environmentPipeline) v->vkDestroyPipeline(v->device, v->environmentPipeline, NULL);
@@ -3843,8 +3882,8 @@ static void vkFree(ArtfRenderer* r) {
             bufferFree(v, &s->decals);
             bufferFree(v, &s->tileLights);
             bufferFree(v, &s->probes);
-            bufferFree(v, &s->hole);
-            bufferFree(v, &s->fluid);
+            bufferFree(v, &s->background);
+            bufferFree(v, &s->stream);
             bufferFree(v, &s->instances);
             bufferFree(v, &s->visible);
             bufferFree(v, &s->indirect);
@@ -3897,9 +3936,9 @@ static void vkFree(ArtfRenderer* r) {
         for (int i = 0; i < 2; ++i)
             if (v->overdrawPipelines[i]) v->vkDestroyPipeline(v->device, v->overdrawPipelines[i], NULL);
         bufferFree(v, &v->meshletIds);
-        const VkPipeline holePipelines[5] = {v->holePipeline, v->bloomFirstPipeline, v->bloomNextPipeline, v->bloomUpPipeline, v->backdropPipeline};
+        const VkPipeline backgroundPipelines[5] = {v->backgroundPipeline, v->bloomFirstPipeline, v->bloomNextPipeline, v->bloomUpPipeline, v->backdropPipeline};
         for (int i = 0; i < 5; ++i)
-            if (holePipelines[i]) v->vkDestroyPipeline(v->device, holePipelines[i], NULL);
+            if (backgroundPipelines[i]) v->vkDestroyPipeline(v->device, backgroundPipelines[i], NULL);
         if (v->sampler) v->vkDestroySampler(v->device, v->sampler, NULL);
         if (v->depthSampler) v->vkDestroySampler(v->device, v->depthSampler, NULL);
         if (v->descriptorPool) v->vkDestroyDescriptorPool(v->device, v->descriptorPool, NULL);
@@ -4243,10 +4282,10 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
         if (!bufferNew(v, &s->decals, (VkDeviceSize)ARTF_MAX_DECALS * sizeof(ArtfDecalData), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->tileLights, 4, BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->probes, 16, BUFFER_STORAGE, true)) goto failed;
-        if (!bufferNew(v, &s->hole, sizeof(ArtfHoleFrame), BUFFER_UNIFORM, true)) goto failed;
+        if (!bufferNew(v, &s->background, sizeof(ArtfBackgroundBlock), BUFFER_UNIFORM, true)) goto failed;
         if (!bufferNew(v, &s->trace, sizeof(ArtfTraceFrame), BUFFER_UNIFORM, true)) goto failed;
         if (!bufferNew(v, &s->shadow, sizeof(ArtfShadowFrame), BUFFER_UNIFORM, true)) goto failed;
-        if (!bufferNew(v, &s->fluid, (VkDeviceSize)ARTF_FLUID_WIDTH * ARTF_FLUID_HEIGHT * 4, BUFFER_STORAGE, true)) goto failed;
+        if (!bufferNew(v, &s->stream, 16, BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->instances, (VkDeviceSize)v->instanceCapacity * (sizeof(ArtfInstanceData) + 64), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->visible, visibleSize(v), BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) goto failed;
         if (!bufferNew(v, &s->materials, (VkDeviceSize)v->materialCapacity * (sizeof(ArtfMaterialData) + sizeof(ArtfMaterialMore)), BUFFER_STORAGE, true)) goto failed;

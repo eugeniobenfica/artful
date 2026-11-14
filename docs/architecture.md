@@ -152,8 +152,8 @@ not touch them.
 
 Frames are premultiplied, so a frame can be put over anything by the same blend the overlay uses. The
 background's alpha is what starts a pixel: with 0, what is left is exactly what the scene covered. Layers
-and the overlay then add to it, by the one rule `src + dst (1 - alpha)`, alpha included. A black hole is
-light from everywhere and fills the frame.
+and the overlay then add to it, by the one rule `src + dst (1 - alpha)`, alpha included. A background pass (the
+black hole) is light from everywhere and fills the frame.
 
 ## Four samples a pixel
 
@@ -204,7 +204,7 @@ rejection in a ball, as C libraries do not agree on those.
 
 **What was covered.** A path that meets nothing leaves the frame's background: sums hold light for covered
 samples, and how many there were. So alpha comes out as how often something was there, edges are smooth for
-nothing, and what was traced goes over the background or a black hole as a layer does.
+nothing, and what was traced goes over the background or a background pass as a layer does.
 
 **On the GPU**, one compute shader does all that, written out like the others (`artfShaderTrace` in `shaders.c`),
 over the same arrays, sent up as they are. It needs no ray tracing extension: the driver this was written
@@ -370,6 +370,18 @@ surface reads it where it is, as it is lit (trilinear: the CPU's `artfFroxelAt`,
 what is behind the scene reads the last slice. So smoke in front of the sky is fogged at its own depth, and the grid
 costs what a quarter of the frame's cells did, without the march at each pixel. The CPU builds it on its workers after
 the shadow maps, the GPU in a compute pass between them and the frame.
+
+**Two fogs, on purpose.** Fog that is only distance (`artfSceneSetFog` without `volumetric`) is a few operations where
+each pixel is lit, in four places that agree (`kernels.inc`, the scene's pixel shader, `trace.c` and the tracing
+shader); the grid is the second way, and could stand for the first in a frame in floats: a grid whose cells add only
+the fog's color, with no sun. It was measured, and it would cost far more than it saves in code. `--scene outdoors`
+at 1920 x 1080, a frame in floats, on 16 threads of an AVX2 desktop and a Radeon RX 9060 XT: without fog the CPU takes
+11.1 ms a frame and the GPU 0.99 ms; with plain fog 11.3 and 1.03, which is noise; with the grid 19.4 and 1.45. Of
+that, building the grid is a small part (0.9 ms on the CPU, 0.25 on the GPU); what costs is that every pixel then
+reads it, eight cells between its slices, where plain fog is a rational curve of its own distance (the CPU's tiles
+went from 10.2 to 15 ms). Without the sun the grid would cost less to build, not to read. And plain fog has to stay
+anyway for frames in bytes and for traced paths, which have no grid. So both stay: plain fog where it is, the grid
+only for fog that light goes through.
 
 ## Lights past sixteen
 
@@ -728,7 +740,7 @@ dependency. Artful's shaders are few and small, so `src/vulkan/shaders.c` writes
 SSA when a renderer starts, on a builder of about 300 lines (`spirv.c`). No file, no tool, and the same
 words on every build.
 
-There is no validator in the loop, so what checks the shaders is the CPU backend: lighting is the same
+There is no validator in the loop at run time (CI and `artful-shaders` put every shader through `spirv-val`), so what checks the shaders is the CPU backend: lighting is the same
 arithmetic on both sides, and a test compares their pictures: they differ by more than 24 of 255 in
 0.05% of the pixels of its scene. (The driver accepting a module proves less than that picture does.)
 
@@ -802,7 +814,8 @@ vertices as light.
 
 ## Metal
 
-**Never run.** `metal.c` was written without a Mac. Everything below is what it is meant to do.
+**Never run, and not built unless asked** (`-DARTFUL_METAL=ON`). `metal.c` was written without a Mac. Everything
+below is what it is meant to do.
 
 It is plain C. Both Metal and the Objective-C runtime are opened at run time, and a message is `objc_msgSend` cast to
 what the method takes, so there is nothing to link and no Objective-C to compile. Its shaders are Vulkan's: SPIRV-Cross,
@@ -812,16 +825,50 @@ in an argument buffer to bindings, which is what `arguments` fills in.
 
 That is also its first gap: shaders are made ahead of time, so a program's graphs, which Vulkan compiles when they
 appear, cannot reach it. It would need its own way from a graph to Metal's language. The others are smaller. Occlusion
-is left out, which changes no picture. A black hole would be a matter of porting. Textures go up decoded.
+is left out, which changes no picture. A background pass would need a shader in Metal's language. Textures go up
+decoded.
+
+The larger gap is time. Its C side is 0.4's: it binds what 0.4's shaders read, and nothing since. `shaders.inc` was
+made again from today's SPIR-V, seventeen plain variants, and the table of bindings `mkmetal.py` derives came out the
+same as before, entry by entry: those variants read nothing new but the frame block, which Metal fills whole with the
+code the other backends use (where 0.4's shaders read its first 95 vec4s, these read all 178). Everything since 0.4
+that needs a binding or a variant of its own is not there: [limits](limits.md) lists it. The translation was checked
+only for form here (each source parses into one entry point, and reads only what its argument buffer declares); CI
+puts it through Apple's compiler.
 
 Being shared, memory needs no staging, and a frame waits for the one before it, so there is one copy of everything. Metal
 has no single call for many indirect draws, so each mesh is a call: the CPU's part grows with meshes, though not with
 instances.
 
+## A background pass
+
+`artfSceneSetBackgroundPass` lets a program put light behind the scene, made its own way: what each pixel's ray brings
+back. It is the black hole's way into the backends, made public, and the hole (below) is now built on it, apart from
+the library. The renderer keeps what was general in the hole: planes of light in floats, a bloom over a pyramid of up
+to eight levels (`background.c` says where each level is, once for both backends), and the tone curve and the noise
+that turn it into the frame's background. The program gives the light:
+
+- once a frame, on the drawing thread, `frame` writes up to 512 bytes from the camera and the frame's size, which both
+  backends then read: so a frame is worked out once, the same for both;
+- on the CPU, `rows` fills a tile's rectangle of each plane, from the workers, told which kernels the renderer runs so
+  that it can run the same (the black hole builds its rays once for each instruction set, as `kernels.inc` is);
+- on Vulkan, the program's compute shader writes the same buffer, with the frame's 512 bytes at binding 11 past the
+  renderer's 256, its data at 14 (sent up when its version changes) and a stream at 15 (copied for each frame in
+  flight when its version changes). The scene keeps a copy of the shader, and the renderer makes its pipeline when it
+  is another. It goes out in bands of rows when the frame is very large, by what the program says a pixel costs.
+
+The scene says when what it was given changed, by stamps that move with the user, the data and the stream, so a
+renderer never mistakes one pass's data for another's of the same version. A scene without a pass pays nothing:
+the backends do not look past a flag. Metal draws none.
+
 ## A black hole
 
-`artfSceneSetBlackHole` puts one behind the scene. All of it is light: nothing is modelled, and the
-frame's background is what comes back along each pixel's ray.
+`artfSceneSetBlackHole` (`extensions/blackhole`, the library `artful-blackhole`, header `artful/blackhole.h`) puts one
+behind the scene, as its background pass. All of it is light: nothing is modelled, and the frame's background is what
+comes back along each pixel's ray. The library itself has none of it: its maps, its fluid, its rays on the CPU
+(`lens.inc`, built for each instruction set) and its shader (`holeShader.c`, on the library's SPIR-V builder) are the
+extension's, which uses three of the library's inner headers (threads, eight lanes, SPIR-V) and goes with the library
+it was built with. Its pictures on the CPU are the bytes they were inside the library.
 
 ### A path is a few numbers
 

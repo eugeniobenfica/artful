@@ -2,4 +2,5 @@
 #define ARTF_KERNEL_AVX2 1
 #define KERNELS artfKernelsAvx2
 #define KERNELS_NAME "AVX2"
+#define KERNELS_SIMD ARTF_SIMD_256
 #include "software/kernels.inc"

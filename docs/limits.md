@@ -53,7 +53,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   from 1 / 4096 to 4096. Grading (lift, gamma, gain, the wheels, the look-up table, grain) is done in what a screen
   shows, the square root of light, not in a log space as Unreal's is; a look-up table is read between its points, not
   by a tetrahedron, and a .cube file's domain is taken to be 0 to 1. The flare is three ghosts of what blooms, with no
-  dirt on the lens. The black hole keeps its own exposure and tone mapping. Fog that
+  dirt on the lens. A background pass (the black hole) keeps its own exposure, bloom and tone mapping. Fog that
   light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is
   wide, and it reaches 4 / density along the view. It is not traced. Metal leaves all of it out.
 - Lights past the first 16 are listed up to 64 for each 64 x 64 square of the frame, and are left out of tracing and of
@@ -125,7 +125,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   512 texels a side at most, so the picture shown behind the scene is soft at a wide view's center. Metal leaves it
   out. Paths read the sharp map where they leave the scene: a small, very bright sun in the picture makes fireflies,
   as it would in any path tracer that does not aim at it.
-- A black hole bends only its own disc and stars: what the scene holds is drawn in front of it, straight.
+- A background pass is light behind the scene, and only that: what the scene holds is drawn in front of it, and is
+  not bent, lit or reflected by it; it fills the frame (alpha 1), its bloom and tone curve are its own, and Metal
+  draws none. The black hole (extensions/blackhole) is one: it bends only its own disc and stars.
   Its gas is painted, as the film's was, and moved by a two-dimensional fluid with no magnetic field; both
   are maps, which show their texels when the eye comes close.
 - A removed mesh gives back GPU memory, but its handle's place in the scene stays used. Residency keeps textures'
@@ -139,7 +141,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   own files. An orthographic camera's width goes by the frame's shape, not by its xmag. A file's lights end at a
   radius, as Artful's do, and are not the square law: as bright as it at a quarter of their reach. Each material has one set of texture coordinates, moved by the transform of its first
   texture. Transmission is drawn as blending, and bends light only when traced.
-- Views (`artfRendererSetView`) show what is drawn as triangles: tracing and a black hole are left out while one is
+- Views (`artfRendererSetView`) show what is drawn as triangles: tracing and a background pass are left out while one is
   asked, and so is everything after the frame. Overdraw counts each triangle that covers a pixel, holes and what is
   hidden included, without occlusion; the GPU and the CPU round slivers in their own ways, so in a crowd of small
   things (`city`) 2% of pixels differ by a step. The meshlets view needs geometry shaders on Vulkan (`PrimitiveId`), and
@@ -157,12 +159,20 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   the scene's meshes, as long as levels of detail take, and it is the full mesh, not the level drawn. A surface
   stops a pick when at least half of it is there, so glass more transparent than not is gone through. A material in
   C's normals do not count: the normal is the triangle's. The triangle is in the order Artful keeps the mesh in.
-- Metal leaves out everything since 0.4: its shaders were not made again, and read the records they did. An
-  orthographic camera there is drawn by its matrices, but lit, fogged and finished as if from its eye.
-- **Metal has never been run.** It was written without a Mac: CI builds it on macOS and puts its shaders through
-  Apple's compiler, and no more than that is known. So it is chosen only by name. It needs Metal 3; it leaves out
-  occlusion, black holes, materials in C and light from a picture, and sends textures up decoded. Linux and macOS are
-  built and tested by CI, Linux on a software Vulkan; iOS has not been built with Apple's tools.
+- **Metal has never been run**, and is not built unless asked for (`-DARTFUL_METAL=ON`, Apple only). It was written
+  without a Mac: CI builds it on macOS and puts its shaders through Apple's compiler, and no more than that is known.
+  So it is chosen only by name, and needs Metal 3. Its shaders (`src/metal/shaders.inc`) are seventeen of Vulkan's,
+  translated ahead of time by `tools/mkmetal.py`: the plain variants only, made again from today's SPIR-V with a
+  newer SPIRV-Cross than CI's, with the same bindings as before. Its C side is still 0.4's. So it reads the frame
+  block whole (`ArtfFrameData`, filled by the code both other backends use), but binds nothing that came after 0.4,
+  and leaves out: a frame in floats and all that comes after it (bloom, ambient occlusion, reflections, temporal
+  antialiasing, upscaling, depth of field, motion blur, the look), fog that light goes through, light from a picture
+  of all around and the sky, probes, lights past the sixteen, lights with a shape or a profile, soft and traced
+  shadows, decals, clear coats, sheen and the rest of `ArtfMaterialMore`, light under the surface, views, sorted
+  layers, meshlets culled on the GPU, emitters of many, the ray tracing hardware, a background pass, occlusion and
+  materials in C; and it sends textures up decoded. What it draws of what it has is meant to be Vulkan's picture, and
+  nobody has looked. Linux and macOS are built and tested by CI, Linux on a software Vulkan; iOS has not been built
+  with Apple's tools.
 - On macOS and iOS the cascade bridge draws on the CPU, as the Metal layer is cascade's to hand over.
 
 [What stands between this and a stable version](stability.md), and

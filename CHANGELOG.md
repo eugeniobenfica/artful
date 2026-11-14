@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **The black hole is an extension** (breaks the API): `artfSceneSetBlackHole`, `ArtfBlackHoleDesc`,
+  `artfBlackHoleDefaults` and `artfBlackHoleOrbitSpeed` moved from `artful/scene.h` to `artful/blackhole.h`, in a
+  library of its own, `artful-blackhole` (`artful::blackhole` once installed; `extensions/blackhole`, option
+  `ARTFUL_BLACKHOLE`). A program that draws one adds the header and links it; nothing else changes, and its
+  pictures on the CPU are the same bytes as before (several holes, with Doppler, spin, a moving eye, several rays a
+  pixel, each instruction set, a frame in floats, traced, under a scene). The library has no hole, fluid or lens code
+  left. Turning a hole off now lets go of its maps, so turning it on again makes them again. The window tool keeps
+  its name, `artful-blackhole`, as the target `artful-blackhole-window`.
+- **A background pass**: `artfSceneSetBackgroundPass`, light behind the scene that a program makes, as the black hole
+  is now made. Once a frame `frame` writes up to 512 bytes from the camera and the frame's size; on the CPU `rows`
+  fills a tile's light, told which kernels the renderer runs; on Vulkan the program's compute shader writes the same
+  buffer, with those bytes, its data and a stream at documented bindings. The renderer gives it a bloom and a tone
+  curve, and it fills the frame under the scene, before what comes after a frame in floats. Metal draws none.
+  `ArtfFrameStats.lensMs` is now what the pass took on the CPU, and the pass is named "background".
+- **Metal is built only when asked**: `-DARTFUL_METAL=ON` (CI does, on macOS). It has still never run. Its shaders
+  were made again from today's SPIR-V (the same bindings as before, entry by entry; checked here for form, and by
+  Apple's compiler in CI), but its C side is 0.4's, so it lacks most of what came since: `docs/limits.md` says what.
+  `tools/mkmetal.py --extract dir` writes what `shaders.inc` holds as `.metal` files; CI compiles both those and what
+  its own SPIRV-Cross makes, and warns, without failing, when `shaders.inc` is not what it would make.
+- **Two fogs, measured**: plain fog stays where it is lit; putting it through the grid of fog that light goes
+  through would have taken a frame in floats from 11.3 to 19.4 ms on the CPU and from 1.03 to 1.45 on the GPU
+  (`docs/architecture.md`).
 - **Views**, as Unreal's view modes: `artfRendererSetView` shows, in place of the picture, a surface's base color, its
   normal, roughness, metal, the light it has from all around, its own light, which level of detail is drawn, its
   meshlets, its instance, how many triangles cover each pixel, depth, how far each pixel moved since the frame before,

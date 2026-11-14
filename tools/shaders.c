@@ -3,6 +3,7 @@
  *   artful-shaders folder */
 #include "scene/sceneInternal.h"
 #include "vulkan/shaders.h"
+#include "holeInternal.h" /* (extensions/blackhole) */
 
 #include <stdio.h>
 
@@ -100,11 +101,11 @@ int main(int argc, char** argv) {
     SAVE("traceShow", artfShaderTraceShow(&size, false));
     SAVE("overlayVertex", artfShaderOverlayVertex(&size));
     SAVE("overlayFragment", artfShaderOverlayFragment(&size));
-    SAVE("holeTrace", artfShaderHoleTrace(&size));
+    SAVE("holeTrace", artfBlackHoleShader(&size)); /* (the extension's: extensions/blackhole) */
     SAVE("bloomFirst", artfShaderBloomDown(&size, true));
     SAVE("bloomNext", artfShaderBloomDown(&size, false));
     SAVE("bloomUp", artfShaderBloomUp(&size));
-    SAVE("holeBackdrop", artfShaderHoleBackdrop(&size, false));
+    SAVE("backgroundBackdrop", artfShaderBackgroundBackdrop(&size, false));
     SAVE("environmentBackdrop", artfShaderEnvironmentBackdrop(&size, false));
     SAVE("postGather", artfShaderPostGather(&size, 1));
     SAVE("postGatherSamples", artfShaderPostGather(&size, 4));

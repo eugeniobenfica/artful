@@ -2,4 +2,5 @@
 #define ARTF_KERNEL_SSE41 1
 #define KERNELS artfKernelsSse41
 #define KERNELS_NAME "SSE4.1"
+#define KERNELS_SIMD ARTF_SIMD_128
 #include "software/kernels.inc"

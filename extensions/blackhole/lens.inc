@@ -1,4 +1,5 @@
-/* artful — light around a black hole, eight pixels at a time. Part of kernels.inc.
+/* artful — light around a black hole, eight pixels at a time, on the library's eight lanes (src/software/simd.h).
+ * Built once for each instruction set, as the library's kernels are: lensPortable.c and the others name it.
  *
  * Around a spinning hole a ray has three things that do not change: its energy, its momentum along the
  * axis, and Carter's constant. Those separate the motion, and with a parameter chosen for that (Mino's
@@ -16,7 +17,9 @@
  * hence the signs. Where a ray crosses the disc's plane is where m changes sign, however often it goes
  * around; where it escapes is where u reaches 0.
  *
- * vulkan/shaders.c does the same arithmetic. */
+ * holeShader.c does the same arithmetic. */
+#include "software/simd.h"
+#include "holeInternal.h"
 
 #define LENS_STEP .13089969f     /* pi / 24, of an orbit */
 #define LENS_STEPS 192           /* eight half turns: what goes on beyond that is on the photons' orbit */
@@ -350,16 +353,14 @@ static void lensTrace(const ArtfHoleFrame* h, const float* map, const float* flu
     *outB = sumB;
 }
 
-/* Every ray of a tile, into the frame's high dynamic range planes. With several rays a pixel, each is
- * at its own moment of the shutter's opening: what moves comes out blurred, as on film. */
-static void lensTile(ArtfSoftFrame* f, uint32_t index) {
-    const ArtfHoleFrame* h = &f->holeData;
-    const int ox = (int)(index % (uint32_t)f->tilesX) * ARTF_TILE, oy = (int)(index / (uint32_t)f->tilesX) * ARTF_TILE;
-    const int tw = artfMini(ARTF_TILE, f->width - ox), th = artfMini(ARTF_TILE, f->height - oy);
+/* Every ray of a rectangle, into the frame's planes of light. With several rays a pixel, each is at its own
+ * moment of the shutter's opening: what moves comes out blurred, as on film. */
+void LENS_ROWS(const ArtfHoleFrame* h, const float* map, const float* fluid, const ArtfBackgroundRows* rows) {
+    const int ox = rows->x, oy = rows->y, tw = rows->width, th = rows->height;
     const int side = (int)h->size[2];
     const V8F lanes = v8iToF(v8iIota()), scaleX = v8fSet(h->image[1]), one = v8fSet(1.f), share = v8fSet(h->image[3]);
     for (int y = 0; y < th; ++y) {
-        const size_t row = (size_t)(oy + y) * f->hdrStride + ox;
+        const size_t row = (size_t)y * rows->stride;
         for (int x = 0; x < tw; x += 8) {
             V8F r = v8fSet(0.f), g = r, b = r;
             for (int sy = 0; sy < side; ++sy)
@@ -370,71 +371,14 @@ static void lensTile(ArtfSoftFrame* f, uint32_t index) {
                     /* (the moments go by a stride, or neighbours along a row would all share one) */
                     const float moment = ((float)((sy * side + sx) * 5 % (side * side)) + .5f) * h->image[3] - .5f;
                     V8F tr, tg, tb;
-                    lensTrace(h, f->holeMap, f->holeFluid, nx, ny, h->disc[2] + h->spin[3] * moment, &tr, &tg, &tb);
+                    lensTrace(h, map, fluid, nx, ny, h->disc[2] + h->spin[3] * moment, &tr, &tg, &tb);
                     r = v8fAdd(r, tr);
                     g = v8fAdd(g, tg);
                     b = v8fAdd(b, tb);
                 }
-            v8fStore(f->hdr[0] + row + x, v8fMul(r, share));
-            v8fStore(f->hdr[1] + row + x, v8fMul(g, share));
-            v8fStore(f->hdr[2] + row + x, v8fMul(b, share));
-        }
-    }
-}
-
-/* Light to what a screen can show, as the curve film stock has: a toe, and a shoulder that bends all
- * that is very bright to white, without clipping. (Narkowicz's fit to ACES.) */
-V8_INLINE V8F lensToneMap(V8F x) {
-    const V8F top = v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.51f)), v8fSet(.03f)));
-    const V8F bottom = v8fAdd(v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.43f)), v8fSet(.59f))), v8fSet(.14f));
-    return v8fSqrt(v8fMin(v8fDiv(top, bottom), v8fSet(1.f)));
-}
-
-/* A tile's background: the light with its bloom, tone mapped. Glows fade over more pixels than a byte
- * has steps, so a little noise goes in to keep them from showing bands. */
-static void lensFill(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, int th) {
-    const ArtfHoleFrame* h = &f->holeData;
-    const float exposure = h->image[0];
-    const uint32_t* level = h->bloom[0];
-    const int bw = (int)level[1], bh = (int)level[2];
-    const V8F lanes = v8iToF(v8iIota()), zero = v8fSet(0.f);
-    const V8F spread = v8fSet(h->look[3] * (1.f - ARTF_BLOOM_FADE));
-    const V8F lastX = v8fSet((float)(bw - 1));
-    const V8F bytes = v8fSet(255.f), round = v8fSet(.5f);
-    for (int y = 0; y < th; ++y) {
-        const float sy = ((float)(oy + y) + .5f) * .5f - .5f, baseY = floorf(sy), partY = sy - baseY;
-        const int y0 = artfClampi((int)baseY, 0, bh - 1), y1 = artfClampi((int)baseY + 1, 0, bh - 1);
-        const V8F rowPart = v8fSet(partY);
-        const size_t row = (size_t)(oy + y) * f->hdrStride + ox;
-        for (int x = 0; x < tw; x += 8) {
-            const V8F pixel = v8fAdd(lanes, v8fSet((float)(ox + x)));
-            const V8F sx = v8fSub(v8fMul(v8fAdd(pixel, round), round), round);
-            const V8F baseX = v8fFloor(sx), partX = v8fSub(sx, baseX);
-            const V8I x0 = v8fToI(v8fMin(v8fMax(baseX, zero), lastX)), x1 = v8fToI(v8fMin(v8fMax(v8fAdd(baseX, v8fSet(1.f)), zero), lastX));
-            const V8I top = v8iSet(y0 * bw), bottom = v8iSet(y1 * bw);
-            V8F glows[3];
-            for (int c = 0; c < 3; ++c) {
-                const uint32_t* plane = (const uint32_t*)(f->bloom[c] + level[0]);
-                const V8F a = v8iAsF(v8iGather(plane, v8iAdd(top, x0))), b = v8iAsF(v8iGather(plane, v8iAdd(top, x1)));
-                const V8F d = v8iAsF(v8iGather(plane, v8iAdd(bottom, x0))), e = v8iAsF(v8iGather(plane, v8iAdd(bottom, x1)));
-                const V8F upper = v8fAdd(a, v8fMul(v8fSub(b, a), partX)), lower = v8fAdd(d, v8fMul(v8fSub(e, d), partX));
-                glows[c] = v8fAdd(upper, v8fMul(v8fSub(lower, upper), rowPart));
-            }
-            /* a lens's glow is nearly white: the colors of what makes it run together in it */
-            const V8F grey = v8fAdd(v8fAdd(v8fMul(glows[0], v8fSet(.3f)), v8fMul(glows[1], v8fSet(.59f))), v8fMul(glows[2], v8fSet(.11f)));
-            V8F out[3];
-            for (int c = 0; c < 3; ++c) {
-                const V8F glow = v8fAdd(glows[c], v8fMul(v8fSub(grey, glows[c]), v8fSet(ARTF_BLOOM_WHITE)));
-                const V8F light = v8fAdd(v8fLoad(f->hdr[c] + row + x), v8fMul(glow, spread));
-                out[c] = lensToneMap(v8fMul(light, v8fSet(exposure)));
-            }
-            const V8I id = v8iAdd(v8iAdd(v8iSet(ox + x), v8iIota()), v8iSet((oy + y) * 8192));
-            const V8I noiseBits = lensHash(id, v8iSet(7), v8iSet(13));
-            const V8F dither = v8fMul(v8iToF(v8iAnd(noiseBits, v8iSet(255))), v8fSet(1.f / 255.f));
-#define BYTE(v) v8fToI(v8fMin(v8fAdd(v8fMul(v, bytes), dither), bytes))
-            const V8I pixelOut = v8iOr(v8iOr(v8iShl(BYTE(out[0]), 16), v8iShl(BYTE(out[1]), 8)), v8iOr(BYTE(out[2]), v8iSet((int32_t)0xFF000000u)));
-#undef BYTE
-            v8iStore(w->color + y * ARTF_TILE + x, pixelOut);
+            v8fStore(rows->light[0] + row + x, v8fMul(r, share));
+            v8fStore(rows->light[1] + row + x, v8fMul(g, share));
+            v8fStore(rows->light[2] + row + x, v8fMul(b, share));
         }
     }
 }

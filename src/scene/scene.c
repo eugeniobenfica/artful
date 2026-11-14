@@ -74,13 +74,12 @@ void artfSceneFree(ArtfScene* s) {
     if (s->modelsFree) s->modelsFree(s->models);
     if (s->emittersFree) s->emittersFree(s->emitters);
     artfTraceFini(&s->trace);
-    artfFree(s->hole.map);
+    artfBackgroundFini(s);
     artfFree(s->environment);
     artfFree(s->lut);
     artfFree(s->indirect.probes);
     artfFree(s->indirect.next);
     for (int i = 0; i < ARTF_MAX_LIGHTS; ++i) artfFree(s->lightProfile[i]);
-    artfFluidFree(s->hole.fluid);
     artfScaleFree(s->scale);
     artfFree(s);
 }

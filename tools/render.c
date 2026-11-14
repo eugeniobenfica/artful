@@ -50,6 +50,7 @@
  *
  * With --frames a black hole's time goes on, so that what a frame took includes the fluid's step. */
 #include "artful/artful.h"
+#include "artful/blackhole.h"
 
 #include <math.h>
 #include <stdio.h>
