@@ -397,6 +397,22 @@
   for figures to cast shadows: 78 ms a frame, 66 of it on the CPU bending the wholes the trees hold (best of three, on
   a shared machine; with `-lod`, 158). Only frames with such instances and rays change: those of the other scenes, and
   every test's reference, are the same to the byte.
+- Fixed: on Vulkan, bones on the GPU could lose the device, now and then (`motion/skinnedMotion` returning false, a
+  full run losing the device in a test of bones and motion). The `skin` shader's bindings (34: what meshes were; 36: the
+  vertex buffer it writes) and the meshlets' (40, 41) were written again only when the buffer's `VkBuffer` handle
+  changed. A buffer made again, for a new skin or a new scene, or a larger vertex buffer, can come back with the
+  handle of the one it replaces, the driver's objects being memory freed and taken again: then the bindings stayed on
+  memory given back, which the shader read and wrote. Seen, counted in full runs of the tests: the vertex buffer made
+  again came back with its old handle in each of three runs (one to three times a run, once in the motion blur test),
+  and `skinData` in one of three, in both slots. Each buffer now has a serial of its own, and that is what is
+  compared. A test draws 24 scenes with skins in turn on one renderer, each against the CPU (`motion/skinScenes`).
+  (Not everything lost is this: on a GPU shared with other programs, a driver reset that one of them causes loses
+  the device of whoever is drawing then. One such loss, in `tracing/denoiseBones`, came the second Windows logged a
+  GPU engine timeout, with these fixes in.)
+- Fixed, by reading: temporal antialiasing and motion blur on the GPU took, for a pixel that bones bent, the motion's
+  rows of an "instance" that was its motion vector, up to 2^30 rows past the instances' buffer (the value was not used,
+  but the read was out of bounds); and the copy of what the vertex buffer held a frame ago was bounded by its own
+  buffer only, not by the vertex buffer it reads, which can be made again smaller. Neither changes a picture.
 
 ## 0.4.0
 

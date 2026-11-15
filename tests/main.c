@@ -123,6 +123,7 @@ int main(int argc, char** argv) {
     if (chosen("motion/motion")) testMotion();
     if (chosen("post/upscale")) testUpscale();
     if (chosen("motion/skinnedMotion")) testSkinnedMotion();
+    if (chosen("motion/skinScenes")) testSkinScenes();
     if (chosen("motion/blurEdges")) testBlurEdges();
     if (chosen("shadows/softShadowsTurning")) testSoftShadowsTurning();
     if (chosen("post/temporalBytes")) testTemporalBytes();

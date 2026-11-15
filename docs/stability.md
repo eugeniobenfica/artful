@@ -6,7 +6,7 @@ documents promise holds on the systems they name.
 
 ## What has been proven
 
-Run, not assumed. `artful-tests` has 184,784 checks.
+Run, not assumed. `artful-tests` has 184,977 checks.
 
 On GitHub, CI builds and tests every change: Linux with GCC and Clang, all tests under Vulkan's validation layers
 on a software Vulkan (Mesa's lavapipe), with one draw a mesh and with occlusion, then under AddressSanitizer and

@@ -641,14 +641,16 @@ static void postWasAt(Spv* s, Post* p, SpvId xf, SpvId yf, SpvId* sx, SpvId* sy,
     SpvId before = s->block, merge;
     spvIfBegin(s, moving, &merge);
     SpvId who = postUint(s, p, p->surface, ADD_U(MUL_U(p->sceneW, p->sceneH), plane));
-    /* (the motion, after the instances: four rows each) */
+    /* (a vector, in quarter pixels of the scene's size: as artfMotionUnpack) */
+    SpvId vector = spvOp2(s, SPV_OP_INotEqual, s->boolType, AND_U(who, UINT(ARTF_MOTION_VECTOR)), UINT(0));
+    /* (the motion, after the instances: four rows each. A vector's word is no instance: its rows are not read, and
+     * what is read in its place is the first's, so that no read goes past the instances' buffer) */
     SpvId instances = AS_UINT(Y(frameVec(s, &p->r, F_COUNTS)));
-    SpvId row = ADD_U(MUL_U(instances, UINT(4)), MUL_U(SUB_U(spvGlsl2(s, 41 /* UMax */, s->uintType, AND_U(who, UINT(0x7FFFFFFFu)), UINT(1)), UINT(1)), UINT(4)));
+    SpvId which = spvSelect(s, s->uintType, vector, UINT(0), SUB_U(spvGlsl2(s, 41 /* UMax */, s->uintType, who, UINT(1)), UINT(1)));
+    SpvId row = ADD_U(MUL_U(instances, UINT(4)), MUL_U(which, UINT(4)));
     SpvId m0 = bufferVec(s, &p->r, p->r.instances, row), m1 = bufferVec(s, &p->r, p->r.instances, ADD_U(row, UINT(1))), m2 = bufferVec(s, &p->r, p->r.instances, ADD_U(row, UINT(2)));
     SpvId at4 = vec4Of(s, at, FLOAT(1.f));
     SpvId was = pick3(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, who, UINT(0)), vec3Of(s, DOT4(m0, at4), DOT4(m1, at4), DOT4(m2, at4)), at);
-    /* (a vector, in quarter pixels of the scene's size: as artfMotionUnpack) */
-    SpvId vector = spvOp2(s, SPV_OP_INotEqual, s->boolType, AND_U(who, UINT(ARTF_MOTION_VECTOR)), UINT(0));
     SpvId dx = MUL_F(SUB_F(TO_F(AND_U(who, UINT(32767))), FLOAT(16384.f)), FLOAT(.25f)), dy = MUL_F(SUB_F(TO_F(AND_U(SHR_U(who, 15), UINT(32767))), FLOAT(16384.f)), FLOAT(.25f));
     SpvId vx = p->frameSize ? ADD_F(ax, DIV_F(dx, p->ratioX)) : ADD_F(ax, dx), vy = p->frameSize ? ADD_F(ay, DIV_F(dy, p->ratioY)) : ADD_F(ay, dy);
     SpvId known = P_LESS(dx, FLOAT(4095.f));
