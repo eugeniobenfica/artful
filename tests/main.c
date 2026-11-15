@@ -139,6 +139,7 @@ int main(int argc, char** argv) {
     if (chosen("tracing/traceHardware")) testTraceHardware();
     if (chosen("views/views")) testViews();
     if (chosen("backends/shadersAhead")) testShadersAhead();
+    if (chosen("backends/pipelinesAhead")) testPipelinesAhead();
     if (chosen("post/postKernels")) testPostKernels();
     if (chosen("views/passTimes")) testPassTimes();
     if (chosen("views/orthographic")) testOrthographic();

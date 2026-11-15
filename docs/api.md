@@ -99,6 +99,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfSceneSetBlackHole` | A black hole behind the scene: `artful/blackhole.h`, in the library `artful-blackhole` (`extensions/blackhole`), on the background pass. |
 | `artfRendererSetOverlay` | A picture over the frame. |
 | `artfRendererStats` | What a frame cost, on the CPU and on the GPU, and each of its passes (`passes`, `passCount`). |
+| `artfRendererWarm` | Vulkan makes what a feature turned on mid-run needs while frames go on without it: this waits for that, and the next frame has all it asks for. |
 | `artfRendererSetView`, `artfViewName`, `artfViewFromName` | What the frame shows: the picture, or one thing that went into it (`ArtfView`). |
 
 ## Using it from CMake
