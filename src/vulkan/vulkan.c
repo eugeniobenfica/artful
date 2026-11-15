@@ -55,6 +55,7 @@ typedef struct GpuBuffer {
     VkDeviceMemory memory;
     VkDeviceSize size;
     void* mapped;
+    uint64_t serial; /* which allocation this is: a handle can come back the same for another (see Slot's bound) */
 } GpuBuffer;
 
 typedef struct GpuImage {
@@ -87,13 +88,13 @@ typedef struct Slot {
     uint64_t traceTopVersion, traceTopScene, rtTopVersion, rtTopScene, rtTopBottoms;
     GpuBuffer swarmRows;               /* this frame's rows for emitters of many (67) */
     GpuBuffer shadow, shadowList, shadowCommands, shadowViewCommands, shadowCasters, posed, skinTable, motion, meshletCommands, meshletState, layerCommands;
-    VkBuffer meshletBoundTable; /* what its set says bindings 40 and 41 are */
+    uint64_t meshletBoundTable; /* what its set says bindings 40 and 41 are (serials: see GpuBuffer) */
     bool meshletBound;
     uint32_t shadowCasterCount, shadowViews;
     uint64_t motionVersion;
     uint64_t motionStep;  /* (what of ArtfMotion this slot holds, after its instances) */
     size_t motionCount;
-    VkBuffer skinBoundData, skinBoundVertices; /* what its set says binding 34 and 36 are */
+    uint64_t skinBoundData, skinBoundVertices; /* what its set says binding 34 and 36 are (serials) */
     uint64_t shadowInstances, shadowStructure, shadowMaterials, shadowScene;
     uint32_t shadowMeshes;
     uint64_t instanceVersion, structureVersion, materialVersion, lodVersion, streamStamp, streamScene;
@@ -296,6 +297,7 @@ typedef struct Vulkan {
     VkCommandPool commandPool;
     Slot slots[SLOTS];
     uint64_t frameNumber;
+    uint64_t bufferSerial; /* the last GpuBuffer's serial */
     /* Pipelines being made on a thread of their own while frames go on with these (see pipelinesFollow): the scene's
      * pixel shaders and passes, and the compute shaders that read its materials (tracePipeline, reflectionTraced, and
      * what each was made for); warmed: artfRendererWarm was called, and the next frame makes what is left before it
@@ -446,6 +448,7 @@ static bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usa
     if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) return false;
     v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
     b->size = info.size;
+    b->serial = ++v->bufferSerial;
     if (use != BUFFER_GPU && v->vkMapMemory(v->device, b->memory, 0, ~(VkDeviceSize)0, 0, &b->mapped) != VK_OK) return false;
     return true;
 }
@@ -2309,6 +2312,7 @@ static bool rtBufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usag
     if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) return false;
     v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
     b->size = info.size;
+    b->serial = ++v->bufferSerial;
     if (written && v->vkMapMemory(v->device, b->memory, 0, ~(VkDeviceSize)0, 0, &b->mapped) != VK_OK) return false;
     return true;
 }
@@ -3257,10 +3261,10 @@ static bool stageMeshlets(Vulkan* v, Slot* s, bool on) {
         if (!bufferNew(v, &s->meshletCommands, (VkDeviceSize)MESHLET_COMMANDS * 40, BUFFER_STORAGE | BUFFER_INDIRECT, false)) return false;
         bindStorage(v, s, 42, &s->meshletCommands);
     }
-    if (s->meshletBoundTable != v->meshletTable.buffer || !s->meshletBound) {
+    if (s->meshletBoundTable != v->meshletTable.serial || !s->meshletBound) {
         bindStorage(v, s, 40, &v->meshletTable);
         bindStorage(v, s, 41, &v->meshletMeshes);
-        s->meshletBoundTable = v->meshletTable.buffer;
+        s->meshletBoundTable = v->meshletTable.serial;
         s->meshletBound = true;
     }
     uint32_t* header = s->meshletState.mapped;
@@ -3304,14 +3308,14 @@ static bool stageBones(Vulkan* v, Slot* s, const ArtfScene* scene) {
         if (!bufferNew(v, &s->skinTable, bytes * 2, BUFFER_STORAGE, true)) return false;
         rebind = true;
     }
-    if (rebind || s->skinBoundData != v->skinData.buffer || s->skinBoundVertices != v->vertices.buffer) {
+    if (rebind || s->skinBoundData != v->skinData.serial || s->skinBoundVertices != v->vertices.serial) {
         const DescriptorBufferInfo infos[3] = {{v->skinData.buffer, 0, ~(VkDeviceSize)0}, {s->skinTable.buffer, 0, ~(VkDeviceSize)0}, {v->vertices.buffer, 0, ~(VkDeviceSize)0}};
         for (uint32_t i = 0; i < 3; ++i) {
             const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 34 + i, 0, 1, DESCRIPTOR_STORAGE, NULL, &infos[i], NULL};
             v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
         }
-        s->skinBoundData = v->skinData.buffer;
-        s->skinBoundVertices = v->vertices.buffer;
+        s->skinBoundData = v->skinData.serial;
+        s->skinBoundVertices = v->vertices.serial;
     }
     uint32_t* rows = s->skinTable.mapped;
     uint32_t boneRow = (uint32_t)v->skinJobs.len * 3;
@@ -3859,7 +3863,8 @@ static void pastVerticesCopy(Vulkan* v, VkCommandBuffer c, const ArtfScene* scen
         const MeshRange* range = &v->meshes.items[index];
         const VkDeviceSize at = (VkDeviceSize)range->vertexOffset * sizeof(ArtfPackedVertex);
         const BufferCopy copy = {at, at, (VkDeviceSize)scene->meshes.items[index].vertexCount * sizeof(ArtfPackedVertex)};
-        if (copy.size && at + copy.size <= v->pastVertices.size) artfVecPush(&v->pastCopies, copy);
+        /* (the vertex buffer may have been made again smaller than this one: both bound it) */
+        if (copy.size && at + copy.size <= v->pastVertices.size && at + copy.size <= v->vertices.size) artfVecPush(&v->pastCopies, copy);
     }
     if (!v->pastCopies.len) return;
     /* (the frame before read both; the bones write the vertices after this) */

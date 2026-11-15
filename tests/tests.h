@@ -166,6 +166,7 @@ void testSkyMore(void);
 /* motion.c: what bends and moves: bones, targets, clips, motion followed, motion blur */
 void testMotion(void);
 void testSkinnedMotion(void);
+void testSkinScenes(void);
 void testBlurEdges(void);
 void testSlerp(void);
 void testSkin(ArtfBackend backend);

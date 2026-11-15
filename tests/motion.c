@@ -150,6 +150,37 @@ void testSkinnedMotion(void) {
     artfFree(blurred[1]);
 }
 
+/* One renderer, scene after scene, each with skins of its own and a vertex buffer of another size: what the GPU's bones
+ * read and write is made again for each, and its frame stays the CPU's. (A buffer made again can have the handle of the
+ * one it replaces: the bones' bindings went stale then, and read or wrote memory given back, which lost the device.) */
+void testSkinScenes(void) {
+    ArtfRendererOptions so = options(ARTF_BACKEND_SOFTWARE, 0, false), vo = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&vo);
+    if (!gpu) return;
+    ArtfRenderer* cpu = artfRendererNew(&so);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    double worst = 0;
+    for (int k = 0; k < 24; ++k) {
+        ArtfScene* s = plainScene();
+        /* (meshes that are not drawn, but take room in the vertex buffer: more or fewer each time) */
+        for (int j = 0; j < k % 4; ++j) artfSceneAddSphere(s, .1f, 8 + 4 * (k % 7), 16);
+        const int strips = 1 + k % 3;
+        for (int j = 0; j < strips; ++j) bendStrip(s, addAt(s, addStrip(s), whiteMaterial(s), (float)j - (float)(strips - 1) * .5f, -1, 0, 1), .15f * (float)(k + j));
+        drawInto(cpu, s, a);
+        drawInto(gpu, s, b);
+        const double apart = differentShare(a, b, 24);
+        worst = apart > worst ? apart : worst;
+        artfSceneFree(s);
+    }
+    printf("bones on the GPU, 24 scenes in turn on one renderer: at most %.2f%% of pixels apart from the CPU\n", worst * 100);
+    CHECK(worst < .005);
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(cpu);
+    artfRendererFree(gpu);
+}
+
 /* Motion blur keeps the edges of what is in front: a ball standing still before a wall that moves stays sharp, and
  * none of it is smeared over the wall around it; both backends alike. */
 static ArtfScene* movingWallScene(ArtfInstance* wall, ArtfInstance* ball) {
