@@ -53,6 +53,8 @@ extern bool artfVulkanRefuseSwapchain;
 /* For tests: every new variant of the scene's pixel shaders is made before the frame that asks for it, as on the
  * first frame, never on a thread of its own while frames go on without it. */
 extern bool artfVulkanShadersWait;
+/* For tests: bottom levels the ray tracing hardware built, [0], and refitted, [1], since the program began. */
+extern uint64_t artfVulkanBottomLevels[2];
 
 /* NULL when Vulkan cannot run here. */
 ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* options);

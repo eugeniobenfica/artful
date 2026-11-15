@@ -686,16 +686,39 @@ the word that says whether it has two sides, past bit 0: so no limit of a custom
 counter-clockwise, as the trees have them, which is the hardware's own way with no flag; eye rays cull backs but for
 what has two sides; everything is opaque to the hardware, as what shows through is the path's business.
 
-What bones or targets move each frame has its bottom level built again, in place, alone: the rest stay, and the top
-level is built again over them.
+Each mesh's bottom level is its own, and only what changed is built (`slotMeshSync`), in the frame's own commands,
+before the top level and anything that reads them: a mesh that came, one whose triangles are another mesh's now, and
+what bones or targets moved. Its corners are counted from its first vertex, so they stay as meshes come and go before
+it, and its positions are read where the trees' vertices are on the GPU (binding 19, 48 bytes apart), as this frame's
+commands leave them. What bends is built to allow an update, and each frame it moves it is refitted, in place: an
+update keeps the tree and moves the boxes, so it is built whole again after 60 refits (staggered by mesh, so that a
+crowd is not built again in one frame), or once its box has grown by half. All the frame's builds and refits go in
+one call, each with its own scratch. A bottom level lives in a room of a block (a buffer of them), as big as the
+structure made there; built again, it stays in its room if it fits, and one that does not takes a new room and leaves
+the old: its structure is retired, destroyed once the frames before are done (`retiredFree`, as pipelines are), and
+its block with it once nothing is left in it. The frames before read what is rebuilt in place, so a frame that builds
+first has the GPU wait for them, with a barrier: nothing waits on the CPU.
+
+When only poses changed the trees (their lengths as they were), what moved of them, each such mesh's nodes and
+vertices, is written into the slot's staging and copied in the frame's commands, before the bottom levels read them;
+a mesh that comes or goes sends the trees up whole, waiting for the device (`traceBuffersSync`).
+
+The refit that was tried before left shadows where the bent strip had been, on a Radeon RX 9060 XT. Refitting a level
+that was not built to allow an update (`ALLOW_UPDATE`: the bottom levels had only "fast to trace") is outside what
+Vulkan defines, and there it changes nothing: the level stays in the pose it was built in. Made so on purpose, it
+fails `testTracedMoved` (0.09% of pixels apart from a level built from nothing) and `testTracedRefit` (0.9% from the
+CPU, as it draws a strip its bones carry five times its width across a floor), and so does a refit from vertices
+not sent up that frame. Built to allow it, the refitted levels draw as levels built from nothing do, to the byte.
 
 Instances that move change only the top level, and what the trees keep of them (their top, and the table of instances).
 Those are each slot's own: once the slot's fence is waited for, its instances are written where the GPU reads them, and
 the top level is built in the frame's own commands, before anything reads it (`slotTopSync`), into a structure with room
 for half as many again, made anew only when they outgrow it. So nothing waits for the device: with 100 of 400 spheres
-moving every frame, shadows from rays took a frame 3.0 ms, 1.5 of it on the CPU, and take 1.7, 0.08 on the CPU. The hardware's refit (an update of a level built to allow it) was tried, and on a
-Radeon RX 9060 XT it left shadows of what was not there, where building again draws as a level built from nothing does
-(`testTracedMoved`).
+moving every frame, shadows from rays took a frame 3.0 ms, 1.5 of it on the CPU, and take 1.7, 0.08 on the CPU. With
+figures that bend (`artful-render --scene crowd --figures n --traced-shadows`, `ARTFUL_FEATURES=-lod`), a frame took
+46 ms with 50 of them and 120 with 200, building every moved level again with the device idle and the trees sent up
+whole; it takes 4.8 and 15, and the refit, against building each again in the frame, takes 0.45 ms less of the GPU's
+time with 200.
 
 ## Rays while drawing
 

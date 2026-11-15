@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The ray tracing hardware refits what bones move, builds only what changed, and waits for nothing** (Vulkan): what
+  bones or targets move is built to allow an update, and refitted each frame it moves, from the vertices this frame's
+  commands sent up; built whole again after 60 refits, staggered, or once its box has grown by half. The refit tried
+  before had left shadows where nothing was: the levels were refitted without having been built to allow it, which
+  Vulkan does not define and the Radeon RX 9060 XT's driver took as nothing to do (made so on purpose, it fails
+  `tracing/tracedMoved`, and the new `tracing/tracedRefit`: a strip its bones carry far across a floor, against the
+  CPU each frame and against levels built from nothing, then a mesh that comes and one that goes). Each mesh's bottom
+  level is its own now: a mesh that comes or changes builds its own and no other, and one that goes leaves the others
+  (what bends is built again, as the trees are made over). They are built in the frame's own commands, all at once,
+  with no wait for the device; what they leave is destroyed once the frames that read it are done. When only poses
+  change the trees, what moved goes up in the frame's commands too, from the slot's staging, in place of all of them
+  with the device idle. `artful-render --scene crowd --figures n` takes fewer figures: with `--traced-shadows` and
+  `ARTFUL_FEATURES=-lod`, a frame of 50 took 46 ms and takes 4.8, one of 200 took 120 and takes 15 (best of three;
+  static scenes as they were). CPU frames are the same bytes.
 - **The shading model written once** (internal): `src/shading/shading.inc` holds its formulas (Schlick's fifth power
   and Fresnel, the coat's, what a surface reflects head on, Trowbridge and Reitz's distribution drawn out or not, Smith's
   visibility, a light's lobe from the halfway vector, the mirror term from all around, the sky and the ground, Charlie's

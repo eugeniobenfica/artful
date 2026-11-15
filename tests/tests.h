@@ -151,6 +151,7 @@ void testProbeReflections(void);
 void testTraceHardware(void);
 void testTracedShadows(void);
 void testTracedMoved(void);
+void testTracedRefit(void);
 void testTracedReflections(void);
 void testProbesWalls(void);
 void testTrace(ArtfBackend backend);
