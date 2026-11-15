@@ -59,6 +59,7 @@ void bendStrip(ArtfScene* s, ArtfInstance i, float angle);
 void put32le(uint8_t* p, uint32_t v);
 void drawSamples(ArtfRenderer* r, ArtfScene* s, int samples, uint32_t* frame);
 double meanOf(const uint32_t* frame, int x, int y, int shift);
+ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o); /* as on a device with no ray tracing hardware */
 
 /* ---- the tests, by area ---- */
 /* core.c: the mesh's data, the CPU's promises, levels of detail, occlusion, handles and lifetimes */
@@ -177,6 +178,7 @@ void testParticleForces(void);
 void testTerrainLayers(void);
 void testHlod(void);
 void testSkinLod(void);
+void testTracedSkinLod(void);
 void testSwarm(void);
 void testExtras(void);
 /* views.c: views, what passes take, an orthographic camera, picking */

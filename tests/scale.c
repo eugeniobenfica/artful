@@ -361,6 +361,117 @@ void testSkinLod(void) {
     if (gpu) artfRendererFree(gpu);
 }
 
+/* What bends, drawn at a lighter level, is met by rays as its whole, as the trees hold whole meshes: picking finds it
+ * where its pose put it; its shadow from rays is as with the levels off, on the CPU and on Vulkan, through the trees
+ * and the ray tracing hardware, whose bottom level of the whole is refitted as the pose moves. And the copies of its
+ * levels, posed, write nothing over the trees' other meshes (they once wrote over mesh 0's vertices). */
+void testTracedSkinLod(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_VULKAN;
+    ArtfRenderer* gpus[2] = {artfRendererNew(&o), gpuWithoutRayQueries(&o)};
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    uint32_t* c = artfMalloc((size_t)W * H * 4);
+    ArtfScene* s = plainScene();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true);
+    artfSceneSetLodError(s, 32);
+    artfSceneSetSun(s, artfVec3(.5f, -1, .3f), artfVec3(1.2f, 1.2f, 1.2f));
+    artfSceneSetAmbient(s, artfVec3(.1f, .1f, .1f), artfVec3(.1f, .1f, .1f));
+    /* mesh 0, a cube far from all else: what the copies of the levels wrote over */
+    const ArtfMaterial white = whiteMaterial(s);
+    addAt(s, artfSceneAddCube(s, .5f), white, 40, 0, 0, 1);
+    CHECK(s->instances.items[0].mesh == 0);
+    addAt(s, artfSceneAddPlane(s, 40, 1), white, 0, -2, 0, 1);
+    const ArtfMesh tube = addTube(s);
+    const ArtfInstance i = addAt(s, tube, white, 0, -2, 0, 1);
+    const ArtfInstanceData* d = &s->instances.items[2];
+    const uint32_t home = d->mesh;
+    const float error = s->meshes.items[tube - 1].skinLodErrors[0];
+    const float far = error * (float)H * .5f / tanf(.5f) / 32.f + 2.5f;
+    setCamera(s, 0, .5f * far, .9f * far, 0, -1.5f, 0);
+    const ArtfShadowDesc traced = {0, 0, false, true};
+    artfSceneSetShadows(s, &traced);
+    bendTube(s, i, 1.2f);
+    drawInto(cpu, s, a);
+    const uint32_t level = d->mesh;
+    CHECK(level != home && s->meshes.items[level].home == home + 1);
+    /* picking: the bent top, not where it is at rest; and the cube as it was made */
+    ArtfPickHit hit;
+    CHECK(artfSceneRaycast(s, artfVec3(-1.5f * sinf(1.2f), 1.5f * cosf(1.2f), 5), artfVec3(0, 0, -1), 0, &hit) && hit.instance == i);
+    CHECK(!artfSceneRaycast(s, artfVec3(0, 1.5f, 5), artfVec3(0, 0, -1), 0, &hit));
+    CHECK(artfSceneRaycast(s, artfVec3(40.2f, 5, .1f), artfVec3(0, -1, 0), 0, &hit) && fabsf(hit.position.y - .25f) < 1e-4f && hit.normal.y > .999f);
+    for (int k = 0; k < 6; ++k) {
+        bendTube(s, i, .2f * (float)k);
+        drawInto(cpu, s, c);
+        CHECK(d->mesh != home);
+    }
+    CHECK(artfSceneRaycast(s, artfVec3(40.2f, 5, .1f), artfVec3(0, -1, 0), 0, &hit) && fabsf(hit.position.y - .25f) < 1e-4f && hit.normal.y > .999f);
+    CHECK(artfSceneRaycast(s, artfVec3(39.9f, 0, 5), artfVec3(0, 0, -1), 0, &hit) && fabsf(hit.position.z - .25f) < 1e-4f && hit.normal.z > .999f);
+    /* the shadow on the floor: as the whole's, with the levels off, and far from none. (The tube itself, a level much
+     * lighter than the whole at 32 pixels, is shaded by the whole: limits.md) */
+    uint32_t* e = artfMalloc((size_t)W * H * 4);
+    bendTube(s, i, 1.2f);
+    drawInto(cpu, s, a);
+    CHECK(d->mesh == level);
+    artfSceneSetShadows(s, NULL);
+    drawInto(cpu, s, c);
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, false);
+    drawInto(cpu, s, e);
+    artfSceneSetShadows(s, &traced);
+    drawInto(cpu, s, b);
+    CHECK(d->mesh == home);
+    int floor = 0, shadow = 0, apart = 0;
+    for (int p = 0; p < W * H; ++p) {
+        /* (the floor, unshadowed, as either draws it: not the tube) */
+        if (c[p] != c[W * H - 1] || e[p] != c[W * H - 1]) continue;
+        int dark = 0, off = 0;
+        for (int k = 0; k < 24; k += 8) {
+            dark = artfMaxi(dark, abs(CHANNEL(a[p], k) - CHANNEL(c[p], k)));
+            off = artfMaxi(off, abs(CHANNEL(a[p], k) - CHANNEL(b[p], k)));
+        }
+        ++floor;
+        shadow += dark > 24;
+        apart += off > 24;
+    }
+    printf("what bends, drawn at a lighter level: of %d pixels of floor, %d in its shadow from rays, %d apart from the whole's\n", floor, shadow, apart);
+    CHECK(floor > W * H / 2 && shadow > 400 && apart <= shadow / 50);
+    artfFree(e);
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true);
+    for (int g = 0; g < 2; ++g) {
+        if (!gpus[g]) continue;
+        bendTube(s, i, 1.2f);
+        drawInto(cpu, s, a);
+        CHECK(d->mesh == level);
+        const uint64_t before[2] = {artfVulkanBottomLevels[0], artfVulkanBottomLevels[1]};
+        drawInto(gpus[g], s, b);
+        const bool hardware = artfVulkanBottomLevels[0] > before[0];
+        const double first = differentShare(a, b, 24);
+        /* posed again: the whole refitted, with the hardware, and only it */
+        bendTube(s, i, .9f);
+        drawInto(cpu, s, a);
+        const uint64_t was[2] = {artfVulkanBottomLevels[0], artfVulkanBottomLevels[1]};
+        drawInto(gpus[g], s, b);
+        CHECK(d->mesh == level);
+        const double second = differentShare(a, b, 24);
+        printf("what bends, drawn at a lighter level, its shadow from rays on the GPU%s against the CPU: %.3f%%, posed again %.3f%% of pixels apart\n",
+               g ? " without ray queries" : hardware ? " through the ray tracing hardware" : "", first * 100, second * 100);
+        CHECK(first < .005 && second < .005);
+        if (hardware) CHECK(artfVulkanBottomLevels[0] + artfVulkanBottomLevels[1] - was[0] - was[1] == 1);
+        if (g) CHECK(artfVulkanBottomLevels[0] == was[0] && artfVulkanBottomLevels[1] == was[1]);
+    }
+    artfSceneSetShadows(s, NULL);
+    artfSceneRemoveInstance(s, i);
+    CHECK(artfSceneRemoveMesh(s, tube));
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+    artfRendererFree(cpu);
+    for (int g = 0; g < 2; ++g)
+        if (gpus[g]) artfRendererFree(gpus[g]);
+}
+
 static ArtfEmitterDesc swarmDesc(uint32_t most) {
     ArtfEmitterDesc d;
     memset(&d, 0, sizeof d);

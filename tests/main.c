@@ -133,6 +133,7 @@ int main(int argc, char** argv) {
     if (chosen("scale/terrainLayers")) testTerrainLayers();
     if (chosen("scale/hlod")) testHlod();
     if (chosen("scale/skinLod")) testSkinLod();
+    if (chosen("scale/tracedSkinLod")) testTracedSkinLod();
     if (chosen("scale/swarm")) testSwarm();
     if (chosen("streaming/meshStreaming/software")) testMeshStreaming(ARTF_BACKEND_SOFTWARE);
     if (chosen("streaming/meshStreaming/vulkan")) testMeshStreaming(ARTF_BACKEND_VULKAN);

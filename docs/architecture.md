@@ -267,7 +267,10 @@ of the mesh; targets, by how far apart they move the two), so the cut between bo
 of each level; once a frame `scale.c` picks the one its distance calls for, by the mesh at rest, as artfMeshLevel
 would, and makes it the instance's mesh, with the pose copied over. Only that copy is bent, so a far crowd bends a
 quarter of the vertices or less, on the GPU's `skin` shader as on the CPU. The backends never see a level of what bends
-as one: it is the instance's mesh.
+as one: it is the instance's mesh. Rays do not meet it: the trees hold whole meshes, and a level of what bends has no
+place in them, so tracing takes an instance drawing one as its copy of the whole (`artfTracedMesh`), and while it
+traces, gives that copy the level's pose each time it changes (`artfSceneSkinWholesPosed`): the whole is bent then
+too, and refitted, in the trees and as a bottom level of the ray tracing hardware.
 
 ## Shadows, levels and layers
 

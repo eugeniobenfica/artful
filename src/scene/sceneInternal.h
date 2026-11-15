@@ -102,6 +102,10 @@ typedef struct ArtfMeshData {
     uint32_t skinLods[ARTF_MAX_LODS];
     float skinLodErrors[ARTF_MAX_LODS];
     uint32_t skinLodCount, home;
+    /* On an instance's copy of the whole, while the instance draws a level: the level it took its pose from (+ 1), at
+     * that level's deformVersion. Rays meet the whole (artfSceneSkinWholesPosed). */
+    uint32_t posedFrom;
+    uint64_t posedAt;
     /* Residency (scale.c): of this mesh's levels (0 the whole, k its lods[k - 1]), the first that is held: those before
      * it are drawn as that one. evicted: this mesh's own triangles are not on the GPU, nor, if it can be read again,
      * in memory. */
@@ -855,6 +859,11 @@ void artfScaleFree(struct ArtfScale* scale);
  * whole (home). */
 void artfSceneSkinLevels(ArtfScene* s, uint32_t mesh);
 void artfSceneCopySkinLevels(ArtfScene* s, uint32_t source, uint32_t home);
+/* The trees hold whole meshes, not the level drawn: each instance drawing a lighter level of what bends has its copy of
+ * the whole posed as that level is, when that changed, for rays to meet. Before poses are applied. */
+void artfSceneSkinWholesPosed(ArtfScene* s);
+/* The mesh rays meet for an instance's mesh: of what bends, its copy of the whole, whatever level it draws. */
+ARTF_INLINE uint32_t artfTracedMesh(const ArtfScene* s, uint32_t mesh) { return s->meshes.items[mesh].home ? s->meshes.items[mesh].home - 1 : mesh; }
 /* scene.c's, for scale.c: lighter versions of a mesh (touching no scene); a place for a mesh; an instance by handle,
  * NULL if there is none, said to no one; and an instance that changed, for what keeps copies. */
 uint32_t artfSceneMakeLevels(const ArtfMeshData* m, ArtfMeshData* made, float* errors);

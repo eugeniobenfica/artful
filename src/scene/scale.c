@@ -450,6 +450,32 @@ static void skinStep(ArtfScene* s, float lodScale, bool traced) {
     }
 }
 
+void artfSceneSkinWholesPosed(ArtfScene* s) {
+    if (!s->scale || !s->scale->skinned) return;
+    for (size_t i = 0; i < s->instances.len; ++i) {
+        const ArtfInstanceData* d = &s->instances.items[i];
+        const ArtfMeshData* level = &s->meshes.items[d->mesh];
+        if (!level->home || level->home - 1 == d->mesh) continue;
+        ArtfMeshData* whole = &s->meshes.items[level->home - 1];
+        if (whole->posedFrom == d->mesh + 1 && whole->posedAt == level->deformVersion) continue;
+        const ArtfPose* from = &level->pose;
+        artfFree(whole->pose.joints);
+        artfFree(whole->pose.weights);
+        whole->pose.joints = copyOf(from->joints, (size_t)from->jointCount * 48);
+        whole->pose.jointCount = from->jointCount;
+        whole->pose.weights = NULL;
+        if (from->weights && whole->skin->morphCount) {
+            /* (a level keeps at most 64 targets) */
+            whole->pose.weights = artfCalloc(whole->skin->morphCount, 4);
+            memcpy(whole->pose.weights, from->weights, (size_t)artfMini((int)level->skin->morphCount, (int)whole->skin->morphCount) * 4);
+        }
+        if (artfMeshPoseFit(whole)) ++s->lodVersion;
+        ++whole->deformVersion;
+        whole->posedFrom = d->mesh + 1;
+        whole->posedAt = level->deformVersion;
+    }
+}
+
 /* ---- which levels of meshes are held ---- */
 
 static Stream* streamOf(ArtfScene* s, uint32_t mesh) {
