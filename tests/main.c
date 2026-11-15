@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
     if (chosen("tracing/tracedShadows")) testTracedShadows();
     if (chosen("tracing/tracedReflections")) testTracedReflections();
     if (chosen("tracing/tracedMoved")) testTracedMoved();
+    if (chosen("tracing/tracedRefit")) testTracedRefit();
     if (chosen("tracing/probesWalls")) testProbesWalls();
     if (chosen("tracing/probesGpu")) testProbesGpu();
     if (chosen("shadows/extraShadows")) testExtraShadows();

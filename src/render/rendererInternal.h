@@ -57,6 +57,8 @@ extern bool artfVulkanShadersWait;
  * as each frame starts); and what the GPU's probes hold now, ARTF_PROBE_FLOATS of each (false: none, or not that many). */
 extern bool artfVulkanProbesOnCpu;
 bool artfVulkanProbesRead(ArtfRenderer* r, float* out, size_t floats);
+/* For tests: bottom levels the ray tracing hardware built, [0], and refitted, [1], since the program began. */
+extern uint64_t artfVulkanBottomLevels[2];
 
 /* NULL when Vulkan cannot run here. */
 ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* options);

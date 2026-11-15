@@ -33,7 +33,8 @@
  *                 motion|lights]: what the frame shows (ArtfView); [--passes]: with --frames, what each pass of the
  *                 last frame took
  *                 [--scene forest] [--hlod [cell]]: far trees merged by cubes of that side (Unreal's HLOD)
- *                 [--scene crowd]: figures that bend, each frame, with levels of detail as the lod feature says
+ *                 [--scene crowd] [--figures n]: figures that bend, each frame, with levels of detail as the lod feature
+ *                 says; 2,500 of them, or n
  *                 [--scene surfaces]: a coat, sheen, anisotropy, a thin film, light under the surface, under lights
  *                 with a size, a shape and a profile
  *                 [--particles n]: an emitter of many, n of them at once, stepped each frame
@@ -443,9 +444,10 @@ static ArtfMesh crowdMesh(ArtfScene* s) {
 }
 
 static ArtfInstance crowd[2500];
+static int crowdCount = 2500;
 
 static void crowdBend(ArtfScene* s, float time) {
-    for (int i = 0; i < 2500; ++i) {
+    for (int i = 0; i < crowdCount; ++i) {
         const float angle = sinf(time * 2.f + (float)i * .37f) * .8f;
         const ArtfTransform turn = artfTransformTrs(artfVec3(0, 0, 0), artfQuatAxisAngle(artfVec3(0, 0, 1), angle), artfVec3(1, 1, 1));
         ArtfTransform joints[2] = {artfTransformIdentity(), turn};
@@ -461,7 +463,7 @@ static void sceneCrowd(ArtfScene* s) {
     ArtfMaterialDesc soil = {artfVec3(.4f, .4f, .38f), 0, .1f, .8f, artfVec3(0, 0, 0)};
     ArtfMaterial m = artfSceneAddMaterial(s, &cloth);
     artfSceneAddInstance(s, ground, artfSceneAddMaterial(s, &soil), NULL);
-    for (int i = 0; i < 2500; ++i) {
+    for (int i = 0; i < crowdCount; ++i) {
         const ArtfTransform t = artfTransformAt((float)(i % 50) * 2.f - 49.f, 0, -(float)(i / 50) * 4.f, 1.f);
         crowd[i] = artfSceneAddInstance(s, figure, m, &t);
     }
@@ -565,6 +567,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--scene") && i + 1 < argc) sceneName = argv[++i];
         else if (!strcmp(a, "--side") && i + 1 < argc) fieldSide = atoi(argv[++i]);
         else if (!strcmp(a, "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
+        else if (!strcmp(a, "--figures") && i + 1 < argc) crowdCount = artfClampi(atoi(argv[++i]), 1, 2500);
         else if (!strcmp(a, "--antialias")) o.antialias = true;
         else if (!strcmp(a, "--ortho") && i + 1 < argc) orthoHeight = (float)atof(argv[++i]);
         else if (!strcmp(a, "--denoise")) trace.denoise = true;

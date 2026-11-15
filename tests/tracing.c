@@ -434,9 +434,10 @@ void testTracedShadows(void) {
     artfFree(b);
 }
 
-/* What bones bend has its bottom level built again each frame it moves, alone, and that draws as building all does: a
+/* What bones bend has its bottom level refitted each frame it moves, alone, and that draws as building all does: a
  * strip bent over a floor, its shadow from rays, posed step by step on one GPU, and at the end drawn by another that
- * builds all at once. (The hardware's refit did not: see rtRebuildMoved in vulkan.c.) */
+ * builds all at once. (A refit of a level not built to allow one changed nothing on a Radeon RX 9060 XT: this was
+ * 0.09% of pixels apart. See slotMeshSync in vulkan.c, and testTracedRefit.) */
 void testTracedMoved(void) {
     ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
     ArtfRenderer* stepped = artfRendererNew(&o);
@@ -464,7 +465,7 @@ void testTracedMoved(void) {
         drawInto(fresh, s, b);
         drawInto(cpu, s, c);
         const double apart = differentShare(a, b, 0), cpuApart = differentShare(b, c, 24);
-        printf("shadows from rays of what bones bend, built again as it moved, against built whole at once: %.3f%% of pixels apart; the GPU against the CPU: %.2f%%\n", apart * 100, cpuApart * 100);
+        printf("shadows from rays of what bones bend, refitted as it moved, against built whole at once: %.3f%% of pixels apart; the GPU against the CPU: %.2f%%\n", apart * 100, cpuApart * 100);
         CHECK(apart == 0);
         CHECK(cpuApart < .01);
         /* and it was bent: the shadow is not where it was */
@@ -475,6 +476,116 @@ void testTracedMoved(void) {
     artfSceneFree(s);
     artfRendererFree(stepped);
     artfRendererFree(fresh);
+    artfRendererFree(cpu);
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+}
+
+/* addStrip's bones: both carried to (x, 0, z), the second bent around the joint by angle. */
+static void carryStrip(ArtfScene* s, ArtfInstance i, float x, float z, float angle) {
+    const ArtfTransform turn = artfTransformTrs(artfVec3(0, 0, 0), artfQuatAxisAngle(artfVec3(0, 0, 1), angle), artfVec3(1, 1, 1));
+    ArtfTransform joints[2] = {artfTransformIdentity(), turn};
+    joints[1].m[3] = -turn.m[1];
+    joints[1].m[7] = 1.f - turn.m[5];
+    for (int k = 0; k < 2; ++k) {
+        joints[k].m[3] += x;
+        joints[k].m[11] += z;
+    }
+    artfInstanceSetJoints(s, i, joints, 2);
+}
+
+/* The hardware's refit of what bones move: a strip that its bones carry far across a floor, bending as they go, its
+ * shadow from rays drawn frame by frame by one GPU, which refits it, against the CPU each frame, and now and then
+ * against a GPU that builds it whole. A refit from the wrong positions, or one that did nothing, leaves a shadow where
+ * the strip was. Then a mesh that comes is built alone, and one that goes takes none built again but what bends. */
+void testTracedRefit(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* stepped = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_VULKAN;
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* c = artfMalloc(W * H * 4);
+    const ArtfShadowDesc traced = {0, 0, false, true};
+    ArtfScene* s = plainScene();
+    artfSceneSetSun(s, artfVec3(.3f, -1, -.5f), artfVec3(1.2f, 1.2f, 1.2f));
+    artfSceneSetAmbient(s, artfVec3(.05f, .05f, .05f), artfVec3(.05f, .05f, .05f));
+    setCamera(s, 1.5f, 5, 6, 1.5f, 0, -.5f);
+    addAt(s, artfSceneAddPlane(s, 30, 1), whiteMaterial(s), 0, 0, 0, 1);
+    const ArtfMesh cube = artfSceneAddCube(s, .5f);
+    const ArtfInstance block = addAt(s, cube, whiteMaterial(s), -1.5f, .5f, -1, 1);
+    const ArtfInstance strip = addAt(s, addStrip(s), whiteMaterial(s), 0, 0, 0, 1);
+    artfSceneSetShadows(s, &traced);
+    if (stepped && cpu) {
+        uint64_t before[2] = {artfVulkanBottomLevels[0], artfVulkanBottomLevels[1]};
+        double worst = 0, worstFresh = 0;
+        int frames = 0;
+        for (int step = 0; step <= 20; ++step) {
+            /* (3 across and 1.5 back, much more than the strip's own size) */
+            carryStrip(s, strip, .15f * (float)step, -.075f * (float)step, .6f * sinf((float)step * .5f));
+            CHECK(artfRendererDraw(stepped, s));
+            CHECK(artfRendererReadPixels(stepped, a));
+            CHECK(artfRendererDraw(cpu, s));
+            CHECK(artfRendererReadPixels(cpu, b));
+            const double apart = differentShare(a, b, 24);
+            worst = apart > worst ? apart : worst;
+            ++frames;
+            if (step % 5 == 4) {
+                /* (what it builds is not the stepped one's) */
+                const uint64_t own[2] = {artfVulkanBottomLevels[0], artfVulkanBottomLevels[1]};
+                ArtfRenderer* fresh = artfRendererNew(&o);
+                CHECK(fresh != NULL);
+                if (!fresh) break;
+                CHECK(artfRendererDraw(fresh, s));
+                CHECK(artfRendererReadPixels(fresh, c));
+                const double off = differentShare(a, c, 0);
+                worstFresh = off > worstFresh ? off : worstFresh;
+                artfRendererFree(fresh);
+                for (int k = 0; k < 2; ++k) before[k] += artfVulkanBottomLevels[k] - own[k];
+            }
+        }
+        const uint64_t built = artfVulkanBottomLevels[0] - before[0], refitted = artfVulkanBottomLevels[1] - before[1];
+        printf("shadows from rays of a strip that bones carry far, %d frames: the GPU against the CPU at worst %.3f%% of pixels apart, "
+               "refitted against built whole %.3f%%; %u bottom levels built, %u refitted\n",
+               frames, worst * 100, worstFresh * 100, (unsigned)built, (unsigned)refitted);
+        CHECK(worst < .005);
+        CHECK(worstFresh == 0);
+        /* (with the hardware: the floor, the cube, the strip and the strip's own copy the instance bends, built once, and
+         * the copy refitted each frame after) */
+        const bool hardware = built > 0;
+        if (hardware) {
+            CHECK(built == 4);
+            CHECK(refitted == (uint64_t)frames - 1);
+            /* a mesh that comes is built alone, and nothing moved is touched */
+            addAt(s, artfSceneAddSphere(s, .4f, 8, 12), whiteMaterial(s), 3, .4f, 1, 1);
+            CHECK(artfRendererDraw(stepped, s));
+            CHECK(artfVulkanBottomLevels[0] - before[0] == 5 && artfVulkanBottomLevels[1] - before[1] == refitted);
+            /* one that goes: none built again but the two that bend, as tracing makes its trees over */
+            artfSceneRemoveInstance(s, block);
+            CHECK(artfSceneRemoveMesh(s, cube));
+            CHECK(artfRendererDraw(stepped, s));
+            CHECK(artfVulkanBottomLevels[0] - before[0] == 7 && artfVulkanBottomLevels[1] - before[1] == refitted);
+            CHECK(artfRendererReadPixels(stepped, a));
+            drawInto(cpu, s, b);
+            const double after = differentShare(a, b, 24);
+            printf("after a mesh came and one went: the GPU against the CPU %.3f%% of pixels apart\n", after * 100);
+            CHECK(after < .005);
+            /* a refit moves the boxes, not the tree: after 60 the strip is built whole again (vulkan.c's RT_REFITS) */
+            const uint64_t was[2] = {artfVulkanBottomLevels[0], artfVulkanBottomLevels[1]};
+            for (int step = 0; step < 65; ++step) {
+                carryStrip(s, strip, 3.f - .05f * (float)step, -1.5f + .02f * (float)step, .6f * sinf((float)step * .3f));
+                CHECK(artfRendererDraw(stepped, s));
+            }
+            CHECK(artfVulkanBottomLevels[0] - was[0] == 1 && artfVulkanBottomLevels[1] - was[1] == 64);
+            CHECK(artfRendererReadPixels(stepped, a));
+            drawInto(cpu, s, b);
+            CHECK(differentShare(a, b, 24) < .005);
+        }
+    }
+    artfSceneFree(s);
+    artfRendererFree(stepped);
     artfRendererFree(cpu);
     artfFree(a);
     artfFree(b);

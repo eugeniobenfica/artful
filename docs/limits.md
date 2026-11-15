@@ -14,12 +14,15 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   everything and do not bend what is traced. Without `denoise`, a scene that moves starts over each frame; with it,
   what was hidden starts with no history, and is soft for some frames.
 - The ray tracing hardware (`ArtfTraceDesc.hardware`, and shadows and reflections from rays): what bones or targets
-  move has its bottom level built again each frame it moves, alone, not refitted (the hardware's refit put shadows
-  where nothing was on the one device it was run on); anything else that changes meshes builds every bottom level
-  again, and an instance that moves builds the top level again. The top level, and the trees' top and table of
-  instances, are each slot's own, built and written with the frame; the bottom levels, and the trees' meshes, are
-  shared, and each change to them still waits for the GPU to be idle. It was run on one device, a Radeon RX 9060 XT; CI's software Vulkan has no such
-  hardware, and so does not run it.
+  move is refitted each frame it moves, and a refit moves the boxes, not the tree: it is built whole again after 60
+  refits, or once its box has grown by half, and between those it traces slower the further its pose is from the one
+  it was built in. A mesh that comes or changes builds its own bottom level, and no other; when one goes, the others
+  stay, but what bends is built again (the trees were made over, its triangles maybe in another order). The bottom
+  levels are built in the frame's commands, and wait for nothing on the CPU; but on the GPU, a frame that changes them
+  first waits for the frame before it to be done. A bottom level that outgrows its room takes a new one, and the room
+  it leaves is not taken again until its whole block is empty. The trees' meshes, when only poses change them, go up
+  in the frame's commands too; a mesh that comes or goes still sends them all up, waiting for the GPU to be idle. It
+  was run on one device, a Radeon RX 9060 XT; CI's software Vulkan has no such hardware, and so does not run it.
 - Shadows from rays (`ArtfShadowDesc.traced`) start off the surface by a thousandth of its distance from the eye: what
   touches its caster by less shows a gap there, and a mesh drawn at a level of detail lighter than the trees' (which
   are the whole mesh) may shade itself where the two part by more. Smooth normals on few triangles shade themselves
