@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The shading model written once** (internal): `src/shading/shading.inc` holds its formulas (Schlick's fifth power
+  and Fresnel, the coat's, what a surface reflects head on, Trowbridge and Reitz's distribution drawn out or not, Smith's
+  visibility, a light's lobe from the halfway vector, the mirror term from all around, the sky and the ground, Charlie's
+  sheen and what it takes from all around, a thin film, light that wraps under the surface, Karis's nearest point of a
+  ball, plain fog), written on a few operations and included three times: in floats for `trace.c` (`artfShade...`), in
+  eight lanes for the kernels (`lanes...`, each instruction set) and as SPIR-V for the pixel and tracing shaders
+  (`shader...`). The same bytes on the CPU on every instruction set, traced too (38 pictures compared, among them a new
+  `artful-render --scene surfaces`: a coat, sheen, anisotropy, a thin film, light under the surface, a specular color,
+  and lights with a size, a shape and a profile); the GPU within the tests' tolerances, every shader valid; no frame
+  slower on either backend. What stays apart, and why, is in `docs/architecture.md`: `trace.c`'s own order in four
+  places (kept for its bytes), and lights with a shape or a profile, which the compiler made 3% slower in the kernels'
+  loop when written once. Lines: 329 removed and 271 added in `kernels.inc`, `shaders.c`, `trace.c` and
+  `sceneInternal.h` (90 of those the three sets of operations), and `shading.inc`'s 264.
 - **`ArtfPostDesc` by purpose** (breaks the API): its 39 fields are now in four parts, in the order they are done:
   `screen` (`ArtfScreenDesc`: what is worked out over the frame's pixels), `lens` (`ArtfLensDesc`: what a camera's
   glass and shutter do), `exposure` (`ArtfExposureDesc`: auto exposure) and `look` (`ArtfLookDesc`: the tone curve

@@ -36,9 +36,46 @@ What the GPU reads is laid out for it in the scene (`ArtfInstanceData`, `ArtfMat
 ## What things are made of
 
 A material says what a surface is, as glTF does: `metallic` and `roughness`. Light is Cook and Torrance's, with
-Trowbridge and Reitz's distribution, Schlick's Fresnel and Smith's shadowing, in four places that must agree:
-`addLight` in `kernels.inc`, the fragment shader, `trace.c` and the tracing shader. A fifth power is multiplied
-out, so nothing here depends on a C library.
+Trowbridge and Reitz's distribution, Schlick's Fresnel and Smith's shadowing. A fifth power is multiplied out, so
+nothing here depends on a C library.
+
+**The shading model is written once**, in `src/shading/shading.inc`, and run four ways: by the CPU's kernels, eight
+lanes at a time; by `trace.c`, a float at a time; by the scene's pixel shaders and by the tracing shader. The file is
+written on a few operations (`S_ADD`, `S_MUL`, `S_DIV`, `S_MAX`, `S_SELECT`, `S_DOT3`, `S_NORMALIZE`, `S_EXP2`...),
+and included once for each way they can be done, with them defined as that way does them:
+
+| Included in | As | Its functions | For |
+| --- | --- | --- | --- |
+| `sceneInternal.h` | floats, `artfMaxf`, `sqrtf`, `artfExp2Fast` | `artfShadeGgx`... | `trace.c`, and what the kernels work out a lane at a time |
+| `kernels.inc` | eight lanes, `v8fAdd`... (once for each instruction set) | `lanesGgx`... | the CPU's pixels |
+| `shaders.c` | calls that write SPIR-V (`ADD_F`, `spvSelect`, `OpDot`...) | `shaderGgx`... | the pixel and tracing shaders |
+
+What is in it: Schlick's fifth power and Fresnel, the coat's (F0 .04), what a surface reflects head on; Trowbridge and
+Reitz's distribution, drawn out or not (anisotropy, and the ways it is drawn along); Smith's visibility; a lobe for a
+light (`Highlight`, from the halfway vector); what a surface shows of all around in its mirror direction (`Mirror`),
+the sky and the ground (`SkyGround`); Charlie's sheen and what it takes from all around; a thin film's colors; light
+that wraps under the surface; Karis's nearest point of a ball, with the energy it keeps (`BallNearest`); plain fog.
+What differs between the ways stays where they are called: lanes against branches, how light is added up, shadows,
+the light's fall-off and cone. The functions are inline (forced, for the lanes), so nothing is slower: measured against
+the build before, best of several runs, the CPU's and the GPU's frames take as long as they did.
+
+Floats round, so the order of the operations is the bytes of the CPU's frames: each formula keeps the order the CPU
+had, and the CPU's frames were the same bytes before and after it moved there, on each instruction set, traced too.
+Where `trace.c` had come to another order than the kernels for the same thing, it keeps it, so that traced frames keep
+their bytes: its lights' and coat's fifth power is multiplied in a row (`FifthInRow`, against `Fifth`'s y^2 squared);
+its coat's lobe takes the coat's amount first (it builds that from `GgxBelow`, `Seen` and `CoatFresnel`); its
+anisotropy squares its strength after the multiplication (its own 1 / long alpha, then `Draw`); its fog has its own
+order (not `FogKeep`). Each could be one, for a change of the last bit in some pixels. `S_NORMALIZE` is each way's own
+(`trace.c`'s has a floor under the length, the kernels' none). The GPU follows the same formulas, with its own vectors
+(`OpDot`, `normalize`), within the tests' tolerances; Metal's shaders, made from the SPIR-V by `tools/mkmetal.py`, were
+not made again.
+
+Lights with a shape or a profile are not in it: `artfLightPlace` (`sceneInternal.h`, which the kernels call a lane
+at a time) and the pixel shader's `lightPlace` are still two. Written once, as shading.inc's other formulas, they gave
+the same bytes, and the function alone was as fast, but in the kernels' loop over the lanes the compiler made slower
+code of it: a frame of `--scene surfaces` (three of its five lights shaped) took 3% longer on the CPU, and those
+lights alone account for it. The ball in `artfLightPlace` is `BallNearest` but for its rounding (it multiplies by an
+inverse where that divides).
 
 Lights' values have pi taken out, as they always had here: a white surface under a light of 1 shows 1. So the
 distribution has no 1 / pi either. Light from all around is the sky and the ground: a diffuse surface takes it
@@ -185,7 +222,7 @@ space, and goes down that mesh's tree: so a thousand copies of a mesh cost one t
 none, as a ray does not care how far away a thing is.
 
 **A path.** At each surface: light that reaches it directly, each point light and the sun, the same arithmetic
-as `addLight` with a shadow ray added; then one bounce. For `ARTF_TRACE_RAYS` that is a mirror's, weighed by
+as `addLight` (`shading.inc`'s) with a shadow ray added; then one bounce. For `ARTF_TRACE_RAYS` that is a mirror's, weighed by
 `specular`, and what comes from all around is the rasterizer's ambient. For `ARTF_TRACE_PATHS` it is that or a
 diffuse bounce, chosen at random, and what comes from all around is what a path finds when it leaves: so a
 corner gets dark by itself. Past three bounces paths end at random, in proportion to what they still carry.
@@ -381,8 +418,8 @@ costs what a quarter of the frame's cells did, without the march at each pixel. 
 the shadow maps, the GPU in a compute pass between them and the frame.
 
 **Two fogs, on purpose.** Fog that is only distance (`artfSceneSetFog` without `volumetric`) is a few operations where
-each pixel is lit, in four places that agree (`kernels.inc`, the scene's pixel shader, `trace.c` and the tracing
-shader); the grid is the second way, and could stand for the first in a frame in floats: a grid whose cells add only
+each pixel is lit (`FogKeep` in `shading.inc`, which the kernels and both shaders use; `trace.c` has the same in its
+own order); the grid is the second way, and could stand for the first in a frame in floats: a grid whose cells add only
 the fog's color, with no sun. It was measured, and it would cost far more than it saves in code. `--scene outdoors`
 at 1920 x 1080, a frame in floats, on 16 threads of an AVX2 desktop and a Radeon RX 9060 XT: without fog the CPU takes
 11.1 ms a frame and the GPU 0.99 ms; with plain fog 11.3 and 1.03, which is noise; with the grid 19.4 and 1.45. Of

@@ -472,6 +472,45 @@ ARTF_INLINE float artfAtan2Fast(float y, float x) {
     return y < 0 ? -r : r;
 }
 
+/* The shading model (shading/shading.inc), in floats: artfShade..., for trace.c and for what the kernels work out
+ * lane by lane. */
+typedef struct ArtfShade3 { float x, y, z; } ArtfShade3;
+ARTF_INLINE float artfShadeDot(ArtfShade3 a, ArtfShade3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+ARTF_INLINE ArtfShade3 artfShadeNormalize(ArtfShade3 a) {
+    const float l = 1.f / sqrtf(artfMaxf(artfShadeDot(a, a), 1e-30f));
+    return (ArtfShade3){a.x * l, a.y * l, a.z * l};
+}
+#define S_FN(name) artfShade##name
+#define S_DEF ARTF_INLINE
+#define S_SELF
+#define S_PASS
+#define S_F float
+#define S_V3 ArtfShade3
+#define S_FLAG bool
+#define S_WIDE 0
+#define S_C(x) (x)
+#define S_ADD(a, b) ((a) + (b))
+#define S_SUB(a, b) ((a) - (b))
+#define S_MUL(a, b) ((a) * (b))
+#define S_DIV(a, b) ((a) / (b))
+#define S_MIN(a, b) artfMinf(a, b)
+#define S_MAX(a, b) artfMaxf(a, b)
+#define S_SQRT(a) sqrtf(a)
+#define S_GT(a, b) ((a) > (b))
+#define S_SELECT(c, a, b) ((c) ? (a) : (b))
+#define S_PICK(c, a, b) ((c) ? (a) : (b))
+#define S_V3_OF(x, y, z) ((ArtfShade3){x, y, z})
+#define S_X(v) (v).x
+#define S_Y(v) (v).y
+#define S_Z(v) (v).z
+#define S_DOT3(a, b) artfShadeDot(a, b)
+#define S_NORMALIZE(a) artfShadeNormalize(a)
+#define S_LOG2(a) artfLog2Fast(a)
+#define S_EXP2(a) artfExp2Fast(a)
+#define S_COS(a) artfCosFast(a)
+#define S_CLAMP(a, lo, hi) artfClampf(a, lo, hi)
+#include "shading/shading.inc"
+
 /* A light's profile (artfLightSetProfile): vertical angles from 0 to 180 degrees, ends included, in rows by horizontal
  * angles from 0 to 360. */
 #define ARTF_PROFILE_V 96
@@ -549,7 +588,8 @@ ARTF_INLINE void artfShapeLight(const float* shape, const float* center, float b
     out->highlight = hw > 0 && before <= 0 ? 0.f : out->highlight;
 }
 
-/* The same for a light that may have no shape: a ball's or a point's, as nearestOfBall in kernels.inc. */
+/* The same for a light that may have no shape: a ball's or a point's, as shading.inc's BallNearest but for its
+ * rounding. */
 ARTF_INLINE void artfLightPlace(const float* shape, const float* center, float ball, const float* p, const float* n, const float* view, float rough, ArtfShapeLit* out) {
     if (shape[3] > 0) {
         artfShapeLight(shape, center, ball, p, n, view, rough, out);
@@ -575,30 +615,13 @@ ARTF_INLINE void artfLightPlace(const float* shape, const float* center, float b
     }
 }
 
-/* What a thin film makes of what a surface reflects head on, seen at cos (n . v): two beams, off its top and its
- * bottom, at red, green and blue's wavelengths, as much as amount says. */
+/* What a thin film makes of what a surface reflects head on, seen at cos (n . v): artfShadeIridescence, in place. */
 ARTF_INLINE void artfIridescence(float* f0, float cos, float amount, float ior, float thickness) {
-    const float sin2 = (1.f - cos * cos) / (ior * ior), inside = sqrtf(artfMaxf(1.f - sin2, 0));
-    const float r12 = (1.f - ior) / (1.f + ior);
-    static const float waves[3] = {1.f / 650.f, 1.f / 510.f, 1.f / 475.f};
-    for (int k = 0; k < 3; ++k) {
-        const float root = sqrtf(artfClampf(f0[k], 0, .99f)), under = (1.f + root) / (1.f - root);
-        const float r23 = (ior - under) / (ior + under);
-        const float twice = 2.f * r12 * r23 * artfCosFast(12.5663706f * ior * thickness * inside * waves[k]);
-        const float both = (r12 * r12 + r23 * r23 + twice) / (1.f + r12 * r12 * r23 * r23 + twice);
-        f0[k] += (both - f0[k]) * amount;
-    }
+    const ArtfShade3 c = artfShadeIridescence((ArtfShade3){f0[0], f0[1], f0[2]}, cos, amount, ior, thickness);
+    f0[0] = c.x;
+    f0[1] = c.y;
+    f0[2] = c.z;
 }
-
-/* Sheen, Charlie's (Estevez and Kulla, 2017): its distribution, with pi put back as lights here have it taken out,
- * times Neubelt's visibility. inverse: 1 / its alpha. */
-ARTF_INLINE float artfCharlie(float ndh, float ndl, float ndv, float inverse) {
-    const float sin2 = artfMaxf(1.f - ndh * ndh, 1e-7f);
-    const float d = (2.f + inverse) * artfExp2Fast(artfLog2Fast(sin2) * .5f * inverse) * .5f;
-    return d / (4.f * (ndl + ndv - ndl * ndv) + 1e-4f);
-}
-/* What sheen takes from all around, of what lights a surface: a fit by eye to the integral of the above. */
-ARTF_INLINE float artfSheenAround(float far, float rough) { return .14f * rough + (.5f - .2f * rough) * far; }
 
 #define ARTF_METER_X 32 /* auto exposure's grid */
 #define ARTF_METER_Y 18

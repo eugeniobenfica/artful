@@ -537,17 +537,16 @@ typedef struct Surface {
     float alpha;       /* how much of it is there */
     bool front;        /* the ray came to its front */
     bool shiny;
-    float rough, a2, k, ndv, open;
+    float rough, open;
+    artfShadeLobe lobe; /* its highlight's (shading.inc), drawn out or not */
     float f0[3], mirror[3]; /* what it reflects head on, and toward the eye */
     float emissive[3];
     /* past glTF's core (ArtfMaterialMore): what it has (ARTF_MORE_); how much coat, its lobe and normal; what the coat
      * leaves of what is under it; the sheen's color and 1 / its alpha, and the color of what comes from under the
-     * surface, as much as the coat leaves of them; 1 / how far that goes, by log2; highlights drawn out, as Reflecting
-     * in kernels.inc; what its inside takes, traced */
+     * surface, as much as the coat leaves of them; 1 / how far that goes, by log2; what its inside takes, traced */
     uint32_t flags;
-    float coat, coatA2, coatK, coatNdv, coatNormal[3], under, sheen[3], sheenInverse, subsurface[3], reach;
-    bool aniso;
-    float along[3], across[3], scale;
+    float coat, coatNormal[3], under, sheen[3], sheenInverse, subsurface[3], reach;
+    artfShadeLobe coatLobe;
     const float* absorb;
 } Surface;
 
@@ -675,21 +674,17 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     const float notMetal = 1.f - metal;
     out->open = 1.f + (occlusion[2] - 1.f) * m->occlusion;
     out->shiny = (m->specular > 0 || m->metallic > 0) && !(m->flags & ARTF_MATERIAL_UNLIT);
-    const float alphaRough = out->rough * out->rough, plusOne = out->rough + 1.f;
-    out->a2 = alphaRough * alphaRough;
-    out->k = plusOne * plusOne * .125f;
-    out->ndv = artfMaxf(-dot3(out->normal, d), 1e-4f);
-    const float y = 1.f - out->ndv, y2 = y * y, far = y2 * y2 * y;
+    const float ndv = artfMaxf(-dot3(out->normal, d), 1e-4f), far = artfShadeFifth(ndv);
+    out->lobe = artfShadeLobeOf(out->rough, ndv);
     const uint32_t flags = m->flags & ARTF_MATERIAL_UNLIT ? more->flags & ARTF_MORE_VOLUME : more->flags;
     out->flags = flags;
     out->absorb = more->absorb;
-    for (int i = 0; i < 3; ++i) out->f0[i] = .04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f) * notMetal + albedo[i] * metal;
-    if (flags & ARTF_MORE_IRIDESCENCE) artfIridescence(out->f0, out->ndv, more->iridescence, more->iridescenceIor, more->iridescenceThickness);
+    for (int i = 0; i < 3; ++i) out->f0[i] = artfShadeReflects(.04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f), notMetal, albedo[i], metal);
+    if (flags & ARTF_MORE_IRIDESCENCE) artfIridescence(out->f0, ndv, more->iridescence, more->iridescenceIor, more->iridescenceThickness);
     for (int i = 0; i < 3; ++i) {
-        out->mirror[i] = out->shiny ? out->f0[i] + (artfMaxf(1.f - out->rough, out->f0[i]) - out->f0[i]) * far : 0.f;
+        out->mirror[i] = out->shiny ? artfShadeMirror(out->f0[i], 1.f - out->rough, far, 1.f) : 0.f;
         out->albedo[i] = albedo[i] * notMetal;
     }
-    out->aniso = false;
     if (flags & ARTF_MORE_ANISOTROPY) {
         /* highlights drawn out, as in kernels.inc: the way u grows, into the world (by the inverse of toObject), square
          * to the normal, turned as asked */
@@ -707,14 +702,10 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         normalize3(t);
         const float* nn = out->normal;
         const float bt[3] = {nn[1] * t[2] - nn[2] * t[1], nn[2] * t[0] - nn[0] * t[2], nn[0] * t[1] - nn[1] * t[0]};
-        const float cs = more->anisotropyDirection[0], sn = more->anisotropyDirection[1], alpha = out->rough * out->rough;
-        const float il = 1.f / (alpha + (1.f - alpha) * more->anisotropy * more->anisotropy), iw = 1.f / artfMaxf(alpha, 1e-4f);
-        for (int i = 0; i < 3; ++i) {
-            out->along[i] = (t[i] * cs + bt[i] * sn) * il;
-            out->across[i] = (bt[i] * cs - t[i] * sn) * iw;
-        }
-        out->scale = il * iw;
-        out->aniso = true;
+        const float alpha = out->rough * out->rough;
+        /* (how long: artfShadeDrawnLong's, but for the order the strength is squared in) */
+        const float il = 1.f / (alpha + (1.f - alpha) * more->anisotropy * more->anisotropy);
+        artfShadeDraw(&out->lobe, true, (ArtfShade3){t[0], t[1], t[2]}, (ArtfShade3){bt[0], bt[1], bt[2]}, more->anisotropyDirection[0], more->anisotropyDirection[1], alpha, il);
     }
     /* a coat over all that, and sheen and what comes from under it beneath that: the coat takes what its Fresnel
      * reflects, and what is under keeps the rest, mirror included; the coat mirrors as smoothly as it is */
@@ -746,16 +737,13 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
                 for (int i = 0; i < 3; ++i) out->coatNormal[i] = out->front ? cn[i] : -cn[i];
             }
         }
-        const float a = coatRough * coatRough, plus = coatRough + 1.f;
-        const float coatNv = artfMaxf(-dot3(out->coatNormal, d), 1e-4f), cy = 1.f - coatNv, coatFar = cy * cy * cy * cy * cy;
+        const float coatNv = artfMaxf(-dot3(out->coatNormal, d), 1e-4f), coatFar = artfShadeFifthInRow(coatNv);
         out->coat = coat;
-        out->coatA2 = a * a;
-        out->coatK = plus * plus * .125f;
-        out->coatNdv = coatNv;
-        out->under = 1.f - coat * (.04f + .96f * coatFar);
+        out->coatLobe = artfShadeLobeOf(coatRough, coatNv);
+        out->under = 1.f - coat * artfShadeCoatFresnel(coatFar);
         out->sheenInverse = 1.f / (sheenRough * sheenRough);
         out->reach = 1.44269504f / more->subsurfaceRadius;
-        const float coatMirror = .04f + (artfMaxf(1.f - coatRough, .04f) - .04f) * coatFar;
+        const float coatMirror = artfShadeMirror(.04f, 1.f - coatRough, coatFar, 1.f);
         for (int i = 0; i < 3; ++i) {
             out->albedo[i] *= out->under;
             out->mirror[i] = out->mirror[i] * out->under + coat * coatMirror;
@@ -819,22 +807,19 @@ static void lightFrom(const ArtfScene* s, const float* p, const float* view, con
     if (through <= 0) return;
     float highlight[3] = {0, 0, 0};
     if (m->shiny) {
-        float half[3] = {view[0] + toLight[0], view[1] + toLight[1], view[2] + toLight[2]};
-        normalize3(half);
-        const float ndh = artfMaxf(dot3(m->normal, half), 0), vdh = artfMaxf(dot3(view, half), 0);
-        const float d = ndh * ndh * (m->a2 - 1.f) + 1.f, rest = 1.f - m->k;
-        const float seen = (m->ndv * rest + m->k) * (ndl * rest + m->k);
-        const float lit = m->a2 / (d * d) * ndl * m->material->specular / (seen * 4.f);
-        const float y = 1.f - vdh, far = y * y * y * y * y;
-        for (int k = 0; k < 3; ++k) highlight[k] = (m->f0[k] + (1.f - m->f0[k]) * far) * lit;
+        const ArtfShade3 n = {m->normal[0], m->normal[1], m->normal[2]}, v = {view[0], view[1], view[2]};
+        const ArtfShade3 half = artfShadeHalfway(v, (ArtfShade3){toLight[0], toLight[1], toLight[2]});
+        float vdh;
+        const float lit = artfShadeHighlight(&m->lobe, false, n, v, half, ndl, m->material->specular, &vdh), far = artfShadeFifthInRow(vdh);
+        for (int k = 0; k < 3; ++k) highlight[k] = artfShadeSchlick(m->f0[k], far) * lit;
     }
     for (int k = 0; k < 3; ++k) light[k] += path[k] * color[k] * strength * through * (m->albedo[k] * ndl + highlight[k]);
 }
 
 /* The same with what lies past glTF's core (Surface.flags), and for a light whose diffuse light is this share of
- * its highlight's (a rectangle's, to the side): the coat's lobe, sheen (artfCharlie), highlights drawn out, and light
- * under the surface, as addExtras in kernels.inc. What comes through from behind is found by a ray inside, toward the
- * light: how far it goes in there, and then what stands in the way. */
+ * its highlight's (a rectangle's, to the side): the coat's lobe, sheen (artfShadeCharlie), highlights drawn out, and
+ * light under the surface, as addExtras in kernels.inc. What comes through from behind is found by a ray inside, toward
+ * the light: how far it goes in there, and then what stands in the way. */
 static void lightFromMore(const ArtfScene* s, const float* p, const float* view, const Surface* m, const float* toLight, float limit, float strength, float share, const float* color, const float* path, float* light) {
     const float ndl = dot3(m->normal, toLight);
     const bool under = (m->flags & ARTF_MORE_SUBSURFACE) != 0;
@@ -845,37 +830,29 @@ static void lightFromMore(const ArtfScene* s, const float* p, const float* view,
     if (through > 0) {
         float highlight[3] = {0, 0, 0};
         if (m->shiny && ndl > 0) {
-            float half[3] = {view[0] + toLight[0], view[1] + toLight[1], view[2] + toLight[2]};
-            normalize3(half);
-            const float ndh = artfMaxf(dot3(m->normal, half), 0), vdh = artfMaxf(dot3(view, half), 0);
-            float distribution;
-            if (m->aniso) {
-                const float x = dot3(m->along, half), yy = dot3(m->across, half), q = x * x + yy * yy + ndh * ndh;
-                distribution = m->scale / (q * q);
-            } else {
-                const float d = ndh * ndh * (m->a2 - 1.f) + 1.f;
-                distribution = m->a2 / (d * d);
-            }
-            const float rest = 1.f - m->k, seen = (m->ndv * rest + m->k) * (ndl * rest + m->k);
-            const float base = distribution * ndl * m->material->specular / (seen * 4.f);
-            const float y = 1.f - vdh, far = y * y * y * y * y;
-            for (int k = 0; k < 3; ++k) highlight[k] = (m->f0[k] + (1.f - m->f0[k]) * far) * base * m->under;
+            const ArtfShade3 n = {m->normal[0], m->normal[1], m->normal[2]}, v = {view[0], view[1], view[2]};
+            const ArtfShade3 half = artfShadeHalfway(v, (ArtfShade3){toLight[0], toLight[1], toLight[2]});
+            float vdh;
+            const float base = artfShadeHighlight(&m->lobe, m->lobe.drawn, n, v, half, ndl, m->material->specular, &vdh), far = artfShadeFifthInRow(vdh);
+            for (int k = 0; k < 3; ++k) highlight[k] = artfShadeSchlick(m->f0[k], far) * base * m->under;
             if (m->coat > 0) {
-                /* the coat's own lobe: of no color, F0 .04, by its own normal */
-                const float cndl = dot3(m->coatNormal, toLight), cndh = artfMaxf(dot3(m->coatNormal, half), 0);
+                /* the coat's own lobe: of no color, F0 .04, by its own normal; its amount comes first here, in that
+                 * order (D and Seen are shading.inc's) */
+                const ArtfShade3 coatN = {m->coatNormal[0], m->coatNormal[1], m->coatNormal[2]};
+                const float cndl = dot3(m->coatNormal, toLight), cndh = artfMaxf(artfShadeDot(coatN, half), 0);
                 if (cndl > 0) {
-                    const float dc = cndh * cndh * (m->coatA2 - 1.f) + 1.f, restC = 1.f - m->coatK;
-                    const float seenC = (m->coatNdv * restC + m->coatK) * (cndl * restC + m->coatK);
-                    const float coat = m->coat * m->coatA2 / (dc * dc) * cndl / (seenC * 4.f) * (.04f + .96f * far);
+                    const artfShadeLobe* c = &m->coatLobe;
+                    const float dc = artfShadeGgxBelow(cndh, c->a2), seenC = artfShadeSeen(c->ndv, cndl, c->k);
+                    const float coat = m->coat * c->a2 / (dc * dc) * cndl / (seenC * 4.f) * artfShadeCoatFresnel(far);
                     for (int k = 0; k < 3; ++k) highlight[k] += coat;
                 }
             }
             if (m->flags & ARTF_MORE_SHEEN) {
-                const float sheen = artfCharlie(ndh, ndl, m->ndv, m->sheenInverse) * ndl;
+                const float sheen = artfShadeCharlie(artfMaxf(artfShadeDot(n, half), 0), ndl, m->lobe.ndv, m->sheenInverse) * ndl;
                 for (int k = 0; k < 3; ++k) highlight[k] += m->sheen[k] * sheen;
             }
         }
-        const float wrap = under ? artfMaxf(ndl + .5f, 0) / 1.5f - lit : 0.f;
+        const float wrap = under ? artfShadeWrap(ndl, lit) : 0.f;
         for (int k = 0; k < 3; ++k) sum[k] = through * ((m->albedo[k] * lit + m->subsurface[k] * wrap) * share + highlight[k]);
     }
     if (under && ndl < 0) {
@@ -973,7 +950,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                 for (int k = 0; k < 3; ++k) light[k] += path[k] * around[k] * f->sky[3];
             } else if (covered) {
                 const float up = d[1] * .5f + .5f;
-                for (int k = 0; k < 3; ++k) light[k] += path[k] * (f->ground[k] + (f->sky[k] - f->ground[k]) * up);
+                for (int k = 0; k < 3; ++k) light[k] += path[k] * artfShadeSkyGround(f->ground[k], f->sky[k] - f->ground[k], up);
             }
             break;
         }
@@ -1057,12 +1034,12 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             const float up = m.normal[1] * .5f + .5f;
             float around[3];
             if (env) artfEnvSample(env, ARTF_ENV_DIFFUSE, m.normal[0], m.normal[1], m.normal[2], around);
-            for (int k = 0; k < 3; ++k) light[k] += path[k] * m.albedo[k] * m.open * (env ? around[k] * f->sky[3] : f->ground[k] + (f->sky[k] - f->ground[k]) * up);
+            for (int k = 0; k < 3; ++k) light[k] += path[k] * m.albedo[k] * m.open * (env ? around[k] * f->sky[3] : artfShadeSkyGround(f->ground[k], f->sky[k] - f->ground[k], up));
             if (!m.shiny) break;
             if (bounces >= c->bounces) {
                 const float reflectedUp = mirror[1] * .5f + .5f;
                 if (env) artfEnvReflected(env, m.rough, mirror[0], mirror[1], mirror[2], around);
-                for (int k = 0; k < 3; ++k) light[k] += path[k] * m.mirror[k] * m.open * (env ? around[k] * f->sky[3] : f->ground[k] + (f->sky[k] - f->ground[k]) * reflectedUp);
+                for (int k = 0; k < 3; ++k) light[k] += path[k] * m.mirror[k] * m.open * (env ? around[k] * f->sky[3] : artfShadeSkyGround(f->ground[k], f->sky[k] - f->ground[k], reflectedUp));
                 break;
             }
             for (int k = 0; k < 3; ++k) {
@@ -1193,7 +1170,7 @@ bool artfTracedReflection(const ArtfScene* s, const ArtfFrameData* f, const floa
             for (int k = 0; k < 3; ++k) lit[k] *= f->sky[3] * m.open;
         } else {
             const float up = m.normal[1] * .5f + .5f;
-            for (int k = 0; k < 3; ++k) lit[k] = (f->ground[k] + (f->sky[k] - f->ground[k]) * up) * m.open;
+            for (int k = 0; k < 3; ++k) lit[k] = artfShadeSkyGround(f->ground[k], f->sky[k] - f->ground[k], up) * m.open;
         }
         const float sun = artfMaxf(dot3(m.normal, f->toSun), 0);
         for (int k = 0; k < 3; ++k) lit[k] += f->sunColor[k] * sun;
@@ -1335,7 +1312,7 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
                 for (int k = 0; k < 3; ++k) light[k] *= f->sky[3];
             } else {
                 const float up = d[1] * .5f + .5f;
-                for (int k = 0; k < 3; ++k) light[k] = f->ground[k] + (f->sky[k] - f->ground[k]) * up;
+                for (int k = 0; k < 3; ++k) light[k] = artfShadeSkyGround(f->ground[k], f->sky[k] - f->ground[k], up);
             }
         } else {
             Surface m;

@@ -34,6 +34,8 @@
  *                 last frame took
  *                 [--scene forest] [--hlod [cell]]: far trees merged by cubes of that side (Unreal's HLOD)
  *                 [--scene crowd]: figures that bend, each frame, with levels of detail as the lod feature says
+ *                 [--scene surfaces]: a coat, sheen, anisotropy, a thin film, light under the surface, under lights
+ *                 with a size, a shape and a profile
  *                 [--particles n]: an emitter of many, n of them at once, stepped each frame
  *                 [--stream-meshes [MB]]: meshes' levels held by distance, within that budget
  *                 [--render-scale s]: with --hdr, the scene drawn at s of the size and upscaled (with --temporal, as
@@ -221,6 +223,49 @@ static void sceneSpheres(ArtfScene* s) {
     artfSceneAddInstance(s, cube, artfSceneAddMaterial(s, &box), &t);
     artfSceneAddLight(s, artfVec3(-1.5f, 1.5f, 2.5f), artfVec3(.2f, .5f, 1.2f), 7.f);
     camera(s, 0, 2.4f, 6.5f);
+}
+
+/* what lies past glTF's core, under lights with a size, a shape and a profile: each piece of the shading model */
+static void sceneSurfaces(ArtfScene* s) {
+    ArtfMaterialDesc floorDesc = {artfVec3(.9f, .9f, .9f), checker(s), .5f, .4f, artfVec3(0, 0, 0)};
+    ArtfMesh plane = artfSceneAddPlane(s, 40.f, 10.f), sphere = artfSceneAddSphere(s, .7f, 48, 64);
+    ArtfTransform t = artfTransformAt(0, -1.2f, 0, 1);
+    artfSceneAddInstance(s, plane, artfSceneAddMaterial(s, &floorDesc), &t);
+    for (int i = 0; i < 8; ++i) {
+        ArtfMaterialDesc d = artfMaterialDefaults();
+        d.baseColor = artfVec3(.7f, .25f + .08f * (float)i, .2f);
+        d.roughness = .2f + .08f * (float)i;
+        d.specular = 1.f;
+        switch (i) {
+        case 0: d.clearcoat = 1.f; d.clearcoatRoughness = .05f; break;
+        case 1: d.sheen = artfVec3(.9f, .6f, .9f); d.sheenRoughness = .4f; break;
+        case 2: d.metallic = 1.f; d.anisotropy = .8f; d.anisotropyRotation = .5f; break;
+        case 3: d.iridescence = 1.f; d.iridescenceThickness = 500.f; d.metallic = .3f; break;
+        case 4: d.subsurface = artfVec3(.9f, .3f, .2f); d.subsurfaceRadius = .3f; break;
+        case 5: d.specularColor = artfVec3(.2f, .9f, .4f); break;
+        case 6: d.clearcoat = .7f; d.sheen = artfVec3(.3f, .8f, .9f); d.sheenRoughness = .7f; d.subsurface = artfVec3(.5f, .5f, .9f); break;
+        default: d.metallic = 1.f; break;
+        }
+        t = artfTransformAt(-3.15f + .9f * (float)i, -.5f + (float)(i & 1) * .3f, (float)(i % 3) * -.8f, 1);
+        artfSceneAddInstance(s, sphere, artfSceneAddMaterial(s, &d), &t);
+    }
+    artfSceneSetSun(s, artfVec3(-.3f, -1.f, -.4f), artfVec3(.4f, .38f, .35f));
+    ArtfLight ball = artfSceneAddLight(s, artfVec3(-2.5f, 1.2f, 1.5f), artfVec3(1.2f, .9f, .6f), 7.f);
+    artfLightSetSize(s, ball, .4f);
+    artfLightSetShadow(s, ball, true);
+    ArtfLight tube = artfSceneAddLight(s, artfVec3(0, 1.4f, 1.8f), artfVec3(.5f, .8f, 1.2f), 7.f);
+    artfLightSetSize(s, tube, .05f);
+    artfLightSetShape(s, tube, artfVec3(1, 0, 0), artfVec3(0, -1, 0), 2.f, 0);
+    ArtfLight rect = artfSceneAddLight(s, artfVec3(2.5f, 1.5f, 1.f), artfVec3(1.2f, 1.f, .9f), 7.f);
+    artfLightSetShape(s, rect, artfVec3(1, 0, 0), artfVec3(0, -1, -.3f), 1.2f, .6f);
+    artfLightSetShadow(s, rect, true);
+    ArtfLight lamp = artfSceneAddLight(s, artfVec3(1.f, 2.f, -1.5f), artfVec3(1.f, .5f, .3f), 8.f);
+    float profile[19];
+    for (int k = 0; k < 19; ++k) profile[k] = k < 6 ? 1.f : k < 12 ? .5f + .5f * (float)(k & 1) : .1f;
+    artfLightSetSpot(s, lamp, artfVec3(0, -1, .2f), .6f, 1.2f);
+    artfLightSetProfile(s, lamp, profile, 19, 1);
+    artfSceneAddLight(s, artfVec3(-1.f, .3f, 2.5f), artfVec3(.3f, .6f, .3f), 4.f);
+    camera(s, 0, 2.f, 6.f);
 }
 
 /* Hills from value noise, a fire and its smoke: terrain and particles, which need nothing of a backend. */
@@ -641,6 +686,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(sceneName, "outdoors")) sceneOutdoors(s);
     else if (!strcmp(sceneName, "forest")) sceneForest(s);
     else if (!strcmp(sceneName, "crowd")) sceneCrowd(s);
+    else if (!strcmp(sceneName, "surfaces")) sceneSurfaces(s);
     else if (isHole) sceneBlackHole(s, &hole);
     else sceneSpheres(s);
     if (pngAlpha) artfSceneSetBackgroundAlpha(s, 0);
