@@ -353,6 +353,22 @@
   with resizable BAR, the GPU's own), through a buffer made again each time: 60 to 120 ms for a frame of 1051 x 754
   on a Radeon RX 9060 XT, where the GPU drew it in 0.2. It now reads it from cached memory, through a buffer kept
   from one frame to the next: 0.6 ms.
+- Fixed: what bends, drawn at a lighter level of detail (the lod feature on, as `--scene crowd` has it), was not
+  traced as itself. Its mesh is then the instance's copy of a level, which has no place in the trees, and tracing took
+  its empty place (a root of 0) for it: rays met mesh 0's tree there, at rest, in shadows and reflections from rays,
+  paths and picking, and the ray tracing hardware had no bottom level for it (no shadow at all). Each frame, too, a
+  pose refitted that empty place: the level's posed vertices were written over mesh 0's in the trees, from vertex 0,
+  and past the end of them when the level had more. Now an instance drawing a level is traced as its copy of the whole
+  (`artfTracedMesh`), as the trees hold whole meshes; while tracing, that copy takes the level's pose whenever it
+  changes (`artfSceneSkinWholesPosed`), and is refitted in the trees and as its bottom level; a level is refitted
+  nowhere, and tracing poses on the CPU only what the trees hold. A new test (`scale/tracedSkinLod`) picks a tube bent
+  at a level where its pose put it, holds its shadow on the floor from rays to the whole's (with the levels off) on the
+  CPU and on Vulkan, through the hardware (whose one refit a new pose makes is the whole's) and without ray queries,
+  and casts rays at mesh 0 before and after levels were posed; made to fail without the fix, it does on all of those.
+  `artful-render --scene crowd --traced-shadows --backend vulkan` (2,500 figures) needs `ARTFUL_FEATURES=-lod` no more
+  for figures to cast shadows: 78 ms a frame, 66 of it on the CPU bending the wholes the trees hold (best of three, on
+  a shared machine; with `-lod`, 158). Only frames with such instances and rays change: those of the other scenes, and
+  every test's reference, are the same to the byte.
 
 ## 0.4.0
 

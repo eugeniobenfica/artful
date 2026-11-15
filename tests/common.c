@@ -298,3 +298,19 @@ double meanOf(const uint32_t* frame, int x, int y, int shift) {
         for (int i = -3; i <= 3; ++i) sum += CHANNEL(frame[(size_t)(y + j) * W + x + i], shift);
     return sum / 49;
 }
+
+/* A Vulkan renderer as on a device with no ray tracing hardware. */
+ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o) {
+#ifdef _WIN32
+    _putenv("ARTFUL_NO_RAY_QUERY=1");
+#else
+    setenv("ARTFUL_NO_RAY_QUERY", "1", 1);
+#endif
+    ArtfRenderer* r = artfRendererNew(o);
+#ifdef _WIN32
+    _putenv("ARTFUL_NO_RAY_QUERY=");
+#else
+    unsetenv("ARTFUL_NO_RAY_QUERY");
+#endif
+    return r;
+}

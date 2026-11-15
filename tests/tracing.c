@@ -299,22 +299,6 @@ void testTraceHardware(void) {
     artfRendererFree(gpu);
 }
 
-/* A Vulkan renderer as on a device with no ray tracing hardware. */
-static ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o) {
-#ifdef _WIN32
-    _putenv("ARTFUL_NO_RAY_QUERY=1");
-#else
-    setenv("ARTFUL_NO_RAY_QUERY", "1", 1);
-#endif
-    ArtfRenderer* r = artfRendererNew(o);
-#ifdef _WIN32
-    _putenv("ARTFUL_NO_RAY_QUERY=");
-#else
-    unsetenv("ARTFUL_NO_RAY_QUERY");
-#endif
-    return r;
-}
-
 /* A floor, a cube over it, a pane over it that lets half the light through, a light that casts, and the sun. */
 static ArtfScene* tracedScene(float sunSize, float lampSize) {
     ArtfScene* s = plainScene();

@@ -39,7 +39,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - Bones run on the GPU when Vulkan draws; targets, and bones on the CPU or Metal, go per instance on the CPU. What
   bends is not culled by its parts. Its levels are made when it is added with the lod feature on (not when the feature
   is turned on later), and each instance holds a copy of each level, a third more memory than the whole alone; an
-  instance chooses by its mesh at rest, not by how a pose moved it.
+  instance chooses by its mesh at rest, not by how a pose moved it. Rays meet the whole: while tracing, an instance
+  drawn at a lighter level has its whole bent too, on the CPU, as many vertices as without levels.
 - ASTC is its low dynamic range profile: a block in high dynamic range decodes to magenta on the CPU. The CPU makes
   blocks into pixels when first drawn, not sample by sample, for all mipmaps. A streamed texture is plain pixels.
 - A material in C picks its mipmap from neighbouring pixels along a row, on the CPU, so a surface slanted the other way

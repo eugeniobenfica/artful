@@ -106,7 +106,7 @@ static void buildNode(NodeList* nodes, uint32_t at, const Box* boxes, uint32_t* 
 }
 
 /* A mesh's vertices, triangles and tree go at the end of the scene's. Its levels of detail have none: rays
- * do not care for distance. */
+ * do not care for distance (an instance drawing a level of what bends is met as its copy of the whole). */
 static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
     const uint32_t firstVertex = (uint32_t)t->vertices.len, firstTriangle = (uint32_t)t->triangles.len, triangles = m->indexCount / 3;
     ArtfVertex* v = artfMalloc((size_t)m->vertexCount * sizeof *v);
@@ -223,11 +223,12 @@ static void buildTop(ArtfScene* s) {
         memset(&o, 0, sizeof o);
         /* (particles are left to what draws, but for a frame that is all traced) */
         if (!d->opacity || (d->flags & ARTF_INSTANCE_PARTICLE && !t->particles) || !invert(d->m, o.toObject)) continue;
-        o.root = t->roots.items[d->mesh];
+        const uint32_t mesh = artfTracedMesh(s, d->mesh);
+        o.root = t->roots.items[mesh];
         o.material = d->material;
         o.opacity = (float)d->opacity * (1.f / 65535.f);
         /* (what bends light must be met on the way out, too) */
-        o.twoSided = (s->materials.items[d->material].flags & ARTF_MATERIAL_DOUBLE || s->materials.items[d->material].ior > 0 ? 1u : 0u) | t->ranges.items[d->mesh].firstTriangle << 1;
+        o.twoSided = (s->materials.items[d->material].flags & ARTF_MATERIAL_DOUBLE || s->materials.items[d->material].ior > 0 ? 1u : 0u) | t->ranges.items[mesh].firstTriangle << 1;
         const ArtfTraceNode* root = &t->nodes.items[o.root];
         Box b;
         boxEmpty(&b);
@@ -254,7 +255,7 @@ static void buildTop(ArtfScene* s) {
         memcpy(seen->at, d->m, sizeof seen->at);
         seen->there = true;
         memcpy(worlds + (size_t)n * 12, d->m, 48);
-        meshes[n] = d->mesh;
+        meshes[n] = mesh;
         handles[n] = d->flags & ARTF_INSTANCE_PARTICLE ? 0 : (uint32_t)s->handleGenerations.items[handle - 1] << 24 | handle;
         boxes[n] = b;
         order[n] = n;
@@ -303,7 +304,12 @@ static void buildTop(ArtfScene* s) {
  * it had made the trees itself. */
 static void traceSync(ArtfScene* s, bool forPick) {
     ArtfTrace* t = &s->trace;
-    artfScenePosesApply(s);
+    artfSceneSkinWholesPosed(s);
+    /* what the trees hold, posed: not the levels of what bends, which the GPU may bend itself */
+    for (size_t i = 0; i < s->deforming.len; ++i) {
+        ArtfMeshData* m = &s->meshes.items[s->deforming.items[i]];
+        if (!m->isLod && m->pose.applied != m->deformVersion) artfMeshDeform(m);
+    }
     bool changed = false, made = false;
     const bool keep = forPick || t->held;
     /* a mesh went: the arrays start over, with what is left */
@@ -324,6 +330,8 @@ static void traceSync(ArtfScene* s, bool forPick) {
     }
     for (size_t i = 0; i < s->deforming.len; ++i) {
         const uint32_t mesh = s->deforming.items[i];
+        /* (a level has no place in the trees: its instance is met as its whole) */
+        if (s->meshes.items[mesh].isLod || s->meshes.items[mesh].removed) continue;
         ArtfTraceRange* range = &t->ranges.items[mesh];
         if (range->deformVersion == s->meshes.items[mesh].deformVersion) {
             /* (a pose that stays: nothing moved since the frame before) */
