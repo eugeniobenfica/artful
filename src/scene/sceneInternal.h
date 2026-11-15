@@ -4,7 +4,15 @@
 #define ARTFUL_SCENE_INTERNAL_H
 
 #include "artful/scene.h"
+#include "core/trig.h"
 #include <string.h>
+
+/* artfMat4Perspective, with the tangent worked out as the same bytes everywhere (core/trig.h) */
+static inline ArtfMat4 artfPerspective(float fovY, float aspect, float near_) {
+    const float f = 1.f / artfTan(fovY * .5f);
+    ArtfMat4 r = {{f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, 0, -1, 0, 0, near_, 0}};
+    return r;
+}
 
 #define ARTF_MESHLET_VERTICES 64
 #define ARTF_MESHLET_TRIANGLES 124

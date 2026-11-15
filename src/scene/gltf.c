@@ -666,7 +666,7 @@ static UvMap uvMapOf(Loader* l, const Json* p) {
     readNumbers(l, member(l, t, "offset"), map.offset, 2);
     readNumbers(l, member(l, t, "scale"), scale, 2);
     const float turn = (float)numberOf(l, t, "rotation", 0);
-    const float c = turn ? cosf(turn) : 1.f, sn = turn ? sinf(turn) : 0.f;
+    const float c = turn ? artfCos(turn) : 1.f, sn = turn ? artfSin(turn) : 0.f;
     /* u' = offset + R S u, with R = (cos sin; -sin cos), as the extension has it */
     map.m[0] = c * scale[0];
     map.m[1] = sn * scale[1];

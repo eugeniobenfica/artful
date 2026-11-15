@@ -1456,7 +1456,7 @@ bool artfScenePick(ArtfScene* s, const ArtfCamera* camera, float x, float y, int
         if (c->far_ > c->near_) limit = c->far_ - c->near_;
     } else {
         /* from the eye, through the pixel, starting at near as the frame does */
-        const float tanY = tanf(c->fovY * .5f);
+        const float tanY = artfTan(c->fovY * .5f);
         float l = 0;
         for (int k = 0; k < 3; ++k) {
             d[k] = (&f.x)[k] + (&r.x)[k] * px * tanY * aspect + (&u.x)[k] * py * tanY;

@@ -166,6 +166,7 @@ void testTerrainLayers(void) {
 
 static ArtfScene* groveScene(void) {
     ArtfScene* s = artfSceneNew();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     artfSceneSetBackground(s, artfVec3(0, 0, 0));
     const ArtfMesh ball = artfSceneAddSphere(s, .4f, 16, 24);
     ArtfMaterialDesc d = artfMaterialDefaults();
@@ -289,6 +290,7 @@ void testSkinLod(void) {
     uint32_t* b = artfMalloc((size_t)W * H * 4);
     uint32_t* c = artfMalloc((size_t)W * H * 4);
     ArtfScene* s = plainScene();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     artfSceneSetLodError(s, 8); /* (so that the first level comes where the tube still shows) */
     const ArtfMesh tube = addTube(s);
     const ArtfMeshData* source = &s->meshes.items[tube - 1];

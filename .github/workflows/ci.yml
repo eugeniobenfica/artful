@@ -66,8 +66,9 @@ jobs:
           cmake -S ../spirv-cross -B ../spirv-cross/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_SHARED=OFF -DSPIRV_CROSS_CLI=ON
           cmake --build ../spirv-cross/build --target spirv-cross
       # (Metal is built only with ARTFUL_METAL, and has never run: what the library takes, and what the shaders of now
-      # would make, both through Apple's compiler. shaders.inc was last made on Windows, with GCC and a newer
-      # SPIRV-Cross, so its bytes may differ from what this makes: that is said, not failed.)
+      # would make, both through Apple's compiler. shaders.inc was last made on Windows, by artful-shaders built with
+      # MSYS2's clang and MSYS2's SPIRV-Cross of the same tag: it should be what this makes, and if it is not, that is
+      # said, not failed.)
       - name: Metal's shaders, through Apple's compiler
         run: |
           mkdir spv metal taken

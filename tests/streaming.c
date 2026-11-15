@@ -331,6 +331,7 @@ void testMeshStreaming(ArtfBackend backend) {
     uint32_t* b = artfMalloc((size_t)W * H * 4);
     int reads = 0;
     ArtfScene* whole = plainScene();
+    artfSceneSetFeature(whole, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     ArtfVertex* v = artfMalloc(ballVertices() * sizeof *v);
     uint32_t* idx = artfMalloc(ballIndices() * 4);
     readBall(&reads, v, idx);
@@ -342,6 +343,7 @@ void testMeshStreaming(ArtfBackend backend) {
 
     reads = 0;
     ArtfScene* s = plainScene();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     const ArtfMesh mesh = artfSceneAddMeshStreamed(s, ballVertices(), ballIndices(), readBall, &reads);
     CHECK(mesh && reads == 1);
     const int lightest = (int)s->meshes.items[mesh - 1].lodCount;

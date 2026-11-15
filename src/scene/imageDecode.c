@@ -2,7 +2,9 @@
  * cascade's (src/image/image.c), copied and not linked: Artful does not depend on it. Pixels are BGRA, with
  * alpha as it is, as artfSceneAddTexture takes them. */
 #include "artful/gltf.h"
+#include "core/trig.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 
 typedef ARTF_VEC(uint8_t) Bytes;
@@ -24,7 +26,15 @@ static void pictureFree(Picture* p) {
 #define vecResize(v, n) do { artfVecReserve((v), (n)); (v)->len = (n); } while (0)
 #define vecAppend(v, p, n) do { size_t count_ = (n); artfVecReserve((v), (v)->len + count_); memcpy((v)->items + (v)->len, (p), count_ * sizeof *(v)->items); (v)->len += count_; } while (0)
 #define vecClear(v) ((v)->len = 0)
-#define ONCE(flag, fn) do { if (!(flag)) { fn(); (flag) = true; } } while (0)
+/* A table made the first time it is needed. A model's images are decoded on all cores at once, so: one thread makes it,
+ * the others wait for it, and all see it whole (on ARM, a plain flag can be seen set before the table is written). */
+#define ONCE(flag, fn) do { \
+        if (atomic_load_explicit(&(flag), memory_order_acquire) != 2) { \
+            int none_ = 0; \
+            if (atomic_compare_exchange_strong(&(flag), &none_, 1)) { fn(); atomic_store_explicit(&(flag), 2, memory_order_release); } \
+            else while (atomic_load_explicit(&(flag), memory_order_acquire) != 2) {} \
+        } \
+    } while (0)
 static size_t minz(size_t a, size_t b) { return a < b ? a : b; }
 
 /* ---- inflate --------------------------------------------------------------------------------- */
@@ -157,7 +167,7 @@ static bool inflateBlock(BitReader* br, Bytes* out, const Huffman* lit, const Hu
 }
 
 static Huffman fixedLit, fixedDist;
-static bool fixedOnce;
+static atomic_int fixedOnce;
 static void initFixed(void) {
     uint8_t l[288];
     for (int i = 0; i < 144; ++i) l[i] = 8;
@@ -538,10 +548,10 @@ static int decodeHuff(Jpeg* j, const HT* t) {
 }
 
 static float idctC[8][8];
-static bool idctOnce;
+static atomic_int idctOnce;
 static void initIdct(void) {
     for (int u = 0; u < 8; ++u)
-        for (int x = 0; x < 8; ++x) idctC[u][x] = (u == 0 ? sqrtf(0.125f) : 0.5f) * cosf((2 * x + 1) * u * 3.14159265f / 16);
+        for (int x = 0; x < 8; ++x) idctC[u][x] = (u == 0 ? sqrtf(0.125f) : 0.5f) * artfCos((2 * x + 1) * u * 3.14159265f / 16);
 }
 
 /* v rounded half away from zero (what lroundf gives), clamped to 0..255; without a library call */
@@ -609,7 +619,7 @@ static void decodeBlock(Jpeg* j, Comp* c, int* blk) {
 /* The components (upsampled) as RGB. */
 /* The chroma terms of YCbCr to RGB for each sample: 1.402 (Cr - 128) and so on, the same floats. */
 static struct { float crR[256], cbG[256], crG[256], cbB[256]; } kYcc;
-static bool yccOnce;
+static atomic_int yccOnce;
 static void initYcc(void) {
     for (int v = 0; v < 256; ++v) {
         const float c = (float)v - 128;

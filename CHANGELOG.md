@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **Run where it had not been run, on Windows x64** (no picture changes: the tests' hashes are the same): clang 23
+  (MSYS2's clang64) with the project's warnings, none, and all tests pass; AddressSanitizer and UndefinedBehaviorSanitizer
+  with clang on Windows, CI's flags, all tests, Vulkan on a real GPU among them, every kernel's instruction set as the
+  tests choose them, in all four of CI's modes, with what is allocated counted (LeakSanitizer does not run on Windows):
+  clean, 0 left. `tools/sanitize.sh` does it again; on Windows the tests ask for a 32 MB stack, as an unoptimized
+  `lightLanes` under ASan takes about a megabyte, Windows' whole stack (a few kilobytes optimized). Windows on ARM
+  (`aarch64-w64-mingw32`, clang, the NEON kernels) built with no warnings, with Vulkan and without; not run. What they
+  found, or what reading for them found:
+  - **sin, cos and tan were the C library's** where a scene is worked out (a sphere's and a torus's vertices, the
+    camera's projection and its rays when traced, a spot's cone, a glTF texture's turn, JPEG's cosines, the black
+    hole's view). MinGW's `sinf` and `cosf` are a step from the nearest float for one float in 13,000, so another C
+    library could give other vertices. Now `src/core/trig.h`: fdlibm's polynomials in doubles, rounded once, the same
+    bytes everywhere; checked against every float from -32 to 32, each the float nearest the true value. The public
+    `artfMat4Perspective` and `artfQuatAxisAngle` still call the C library, for programs that use them.
+  - **JPEG's and inflate's tables were made on first use with a plain flag**, while a model's images are decoded on
+    all cores: two threads could make them at once, and on ARM one could see the flag before the table. Now one
+    makes it and the others wait for it (C11 atomics, acquire and release).
+  - **The tests failed in two of CI's modes**, sanitizers or not: with `ARTFUL_FEATURES=+occlusion` the GPU's
+    passes are "scene, early" and "scene, late", which the test of pass times did not take for the scene (2 checks);
+    with `-lod,-cones`, tests of levels (many as one, levels of what bends, meshes that come and go) and the hashes of
+    the orthographic and temporal tests assumed the defaults (24). Those tests now set what they test, whatever
+    `ARTFUL_FEATURES` says, as others already did.
+  - On MSVC for ARM64, the workers' spin had no pause (`__yield()` now; GCC's `__asm__` is not MSVC's).
+  - `src/metal/shaders.inc` was behind the shaders (the shading model written once changed them): made again, from
+    artful-shaders built by clang and SPIRV-Cross 1.4.363 (MSYS2's, the tag CI builds), as `tools/mkmetal.py` says.
+    The last one had been made with GCC's artful-shaders, whose instructions come in another order. The bindings are
+    unchanged; Apple's compiler has not seen it here.
+
 - **The shading model written once** (internal): `src/shading/shading.inc` holds its formulas (Schlick's fifth power
   and Fresnel, the coat's, what a surface reflects head on, Trowbridge and Reitz's distribution drawn out or not, Smith's
   visibility, a light's lobe from the halfway vector, the mirror term from all around, the sky and the ground, Charlie's

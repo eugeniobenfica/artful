@@ -38,7 +38,16 @@ as one of macOS's, and copies of nothing from a null pointer, which UBSan stops 
 | A black hole in a real window, both backends | passes | not run |
 
 And across the two: **the same scene gives the same bytes on x86 and on ARM**, on the CPU, with lod off:
-even a black hole's chaotic fluid, after 1,800 steps.
+even a black hole's chaotic fluid, after 1,800 steps. What a scene works out once no longer asks the C library for a
+sine, a cosine or a tangent (`src/core/trig.h`): MinGW's were a step off the nearest float for one float in 13,000,
+which another system's would not have been.
+
+Since the shading model was written once, on Windows x64 with a Radeon RX 9060 XT, with what CI does not run on
+Windows: clang 23 (MSYS2) builds with no warnings and passes every test, and so does a build without Vulkan;
+AddressSanitizer and UndefinedBehaviorSanitizer (clang, CI's flags; `tools/sanitize.sh`), every test, Vulkan's among
+them, each kernel's instruction set, plainly, with one draw a mesh, with occlusion all along and with lod and cones
+off: clean, and every allocation given back. LeakSanitizer does not run on Windows; the library's own count stands for
+it. Windows on ARM (`aarch64-w64-mingw32`, the NEON kernels) builds with no warnings, and has not run.
 
 Occlusion's promise is held to exact equality: the same pixels with it and without, on both backends,
 including the frame in which a wall goes away and what it hid must appear.
@@ -55,6 +64,9 @@ Each of these could turn out to be a bug that users would meet. In the order to 
 | Linux on a real GPU and in a real window | Built and tested by CI, on a software Vulkan, with no window. | A Linux machine. |
 | macOS and iOS on a device | Built and tested by CI on macOS, on the CPU. The Metal backend compiles there, and its shaders pass Apple's compiler, but no line of it has run. | A Mac. |
 | armv7 and x86-64 Android | Built with no warnings, never run. | A device or an emulator. |
+| Windows on ARM | Built with clang (MSYS2's clangarm64 headers and libraries), NEON kernels and all, with no warnings; never run. MSVC for ARM64 has not been built: it would take the portable kernels. | A Snapdragon laptop. |
+| MSVC, since 0.4 | Built and tested only by CI; this machine has no MSVC. Reading found nothing GCC-only unguarded, and clang's `-Wpedantic -Wvla` finds nothing, but MSVC's C is its own. | CI, or Visual Studio. |
+| Metal's shaders of now | `src/metal/shaders.inc` was made again on Windows (clang's artful-shaders, SPIRV-Cross 1.4.363, as CI has them); Apple's compiler has not seen it. | CI's macOS job. |
 
 ### 2. Check what nothing here could check
 
