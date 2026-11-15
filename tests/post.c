@@ -609,6 +609,8 @@ void testTemporalBytes(void) {
     o.hdr = true;
     ArtfRenderer* r = artfRendererNew(&o);
     ArtfScene* s = richScene();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says: the hash is of the defaults) */
+    artfSceneSetFeature(s, ARTF_FEATURE_CONES, true);
     const ArtfShadowDesc soft = {512, 20, true};
     artfSceneSetShadows(s, &soft);
     artfSceneSetSunSize(s, .05f);
@@ -621,6 +623,8 @@ void testTemporalBytes(void) {
     const ArtfPostDesc temporal = {.screen.temporal = true};
     ArtfInstance ball;
     ArtfScene* moving = movingScene(&ball);
+    artfSceneSetFeature(moving, ARTF_FEATURE_LOD, true);
+    artfSceneSetFeature(moving, ARTF_FEATURE_CONES, true);
     artfSceneSetPost(moving, &temporal);
     for (int k = 0; k < 6; ++k) {
         placeBall(moving, ball, -.6f + (float)k * .2f);

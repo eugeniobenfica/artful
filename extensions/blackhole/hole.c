@@ -6,6 +6,7 @@
  * would every picture. Square roots are exact. */
 #include "holeInternal.h"
 #include "core/threads.h"
+#include "core/trig.h"
 
 /* Where a row of the map is: rows are even in 1 / r, which spends them near the hole, where the disc
  * is hot and fine. */
@@ -383,7 +384,7 @@ void artfHoleFrame(const ArtfHole* hole, const ArtfCamera* c, int width, int hei
     const ArtfVec3 forward = artfVec3Normalize(artfVec3Sub(c->target, c->position));
     const ArtfVec3 right = artfVec3Normalize(artfVec3Cross(forward, c->up));
     const ArtfVec3 up = artfVec3Cross(right, forward);
-    const float tanY = tanf(c->fovY * .5f), tanX = tanY * (float)width / (float)artfMaxi(height, 1);
+    const float tanY = artfTan(c->fovY * .5f), tanX = tanY * (float)width / (float)artfMaxi(height, 1);
 #define LOCAL(v, o, w) do { \
         const ArtfVec3 h_ = artfVec3(artfVec3Dot(v, ex), artfVec3Dot(v, ez), artfVec3Dot(v, ey)); \
         (o)[0] = artfVec3Dot(h_, er), (o)[1] = artfVec3Dot(h_, etheta), (o)[2] = artfVec3Dot(h_, ephi), (o)[3] = (w); \

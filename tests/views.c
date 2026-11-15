@@ -147,7 +147,7 @@ void testPassTimes(void) {
                 named = named && st.passes[k].name && st.passes[k].ms >= 0;
                 if (!st.passes[k].name) continue;
                 sum += st.passes[k].ms;
-                scene |= !strcmp(st.passes[k].name, backend ? "scene" : "tiles");
+                scene |= !strncmp(st.passes[k].name, backend ? "scene" : "tiles", 5); /* (with occlusion, "scene, early" and "scene, late") */
                 bloom |= !strcmp(st.passes[k].name, "bloom");
             }
             const double whole = backend ? st.gpuMs : st.cpuMs;
@@ -165,6 +165,8 @@ void testPassTimes(void) {
 /* A scene for it: a floor, things on it that shine and that do not, the sun with shadows, a lamp. */
 static ArtfScene* orthoScene(void) {
     ArtfScene* s = artfSceneNew();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says: the hash is of the defaults) */
+    artfSceneSetFeature(s, ARTF_FEATURE_CONES, true);
     static uint32_t px[64 * 64];
     for (int y = 0; y < 64; ++y)
         for (int x = 0; x < 64; ++x) px[y * 64 + x] = ((x / 8 + y / 8) & 1) ? 0xFFD0C8B0u : 0xFF404858u;

@@ -321,9 +321,9 @@ static ArtfMesh addGrid(ArtfScene* s, GridFn fn, const float* args, int rings, i
 
 static void spherePoint(const float* args, float u, float w, ArtfVertex* o) {
     float theta = u * 2 * PI, phi = w * PI;
-    o->nx = sinf(phi) * sinf(theta);
-    o->ny = cosf(phi);
-    o->nz = sinf(phi) * cosf(theta);
+    o->nx = artfSin(phi) * artfSin(theta);
+    o->ny = artfCos(phi);
+    o->nz = artfSin(phi) * artfCos(theta);
     o->px = o->nx * args[0];
     o->py = o->ny * args[0];
     o->pz = o->nz * args[0];
@@ -332,7 +332,7 @@ ArtfMesh artfSceneAddSphere(ArtfScene* s, float radius, int rings, int segments)
 
 static void torusPoint(const float* args, float u, float w, ArtfVertex* o) {
     float theta = u * 2 * PI, phi = w * 2 * PI;
-    float cx = sinf(theta), cz = cosf(theta), cp = cosf(phi), sp = sinf(phi);
+    float cx = artfSin(theta), cz = artfCos(theta), cp = artfCos(phi), sp = artfSin(phi);
     o->nx = cx * cp;
     o->ny = -sp;
     o->nz = cz * cp;
@@ -1026,7 +1026,7 @@ void artfLightSetSpot(ArtfScene* s, ArtfLight l, ArtfVec3 direction, float inner
     if (!l || l > ARTF_MAX_LIGHTS) return;
     ArtfLightData* d = &s->lights[l - 1];
     const ArtfVec3 n = artfVec3Normalize(direction);
-    const float in = cosf(inner), out = cosf(artfMaxf(outer, inner + 1e-3f));
+    const float in = artfCos(inner), out = artfCos(artfMaxf(outer, inner + 1e-3f));
     memcpy(d->direction, &n, sizeof d->direction);
     d->spotCut = out;
     d->spotScale = 1.f / (in - out);
@@ -1432,7 +1432,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     memset(out, 0, sizeof *out);
     const ArtfCamera* c = &s->camera;
     ArtfMat4 view = artfMat4LookAt(c->position, c->target, c->up);
-    ArtfMat4 proj = artfMat4Perspective(c->fovY, (float)width / (float)artfMaxi(height, 1), c->near_);
+    ArtfMat4 proj = artfPerspective(c->fovY, (float)width / (float)artfMaxi(height, 1), c->near_);
     if (c->orthoHeight > 0) {
         /* Depth from 1 at near to 0 at far, even along the view: far is where it is asked to be, or just past the
          * scene's bounds, so that all of it has a depth above 0. */

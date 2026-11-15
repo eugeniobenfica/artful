@@ -63,7 +63,7 @@ void artfScaleFree(ArtfScale* g) {
 /* What a frame chooses by: how far its eye is from a ball, and the scale levels go by (as artfSceneFrame's). */
 static float lodScaleOf(const ArtfScene* s, int width, int height) {
     if (!s->features[ARTF_FEATURE_LOD]) return 0;
-    const ArtfMat4 proj = artfMat4Perspective(s->camera.fovY, (float)width / (float)artfMaxi(height, 1), s->camera.near_);
+    const ArtfMat4 proj = artfPerspective(s->camera.fovY, (float)width / (float)artfMaxi(height, 1), s->camera.near_);
     return (float)height * .5f * proj.m[5] / s->lodError;
 }
 

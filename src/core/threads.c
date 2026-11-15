@@ -47,6 +47,9 @@ typedef pthread_cond_t Cond;
 #define spinPause() _mm_pause()
 #elif defined(__aarch64__) || defined(__arm__)
 #define spinPause() __asm__ volatile("yield")
+#elif defined(_M_ARM64) || defined(_M_ARM) /* (MSVC has no __asm__ there: the same instruction, as an intrinsic) */
+#include <intrin.h>
+#define spinPause() __yield()
 #else
 #define spinPause() ((void)0)
 #endif
