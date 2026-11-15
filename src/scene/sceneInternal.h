@@ -254,6 +254,7 @@ typedef struct ArtfIndirect {
     float* next;        /* what this step makes */
     uint32_t frames;
     uint64_t version;   /* a step changed them */
+    uint32_t serial;    /* artfSceneSetIndirect's calls: a GPU that gathers the probes itself starts over when it changes */
 } ArtfIndirect;
 ARTF_INLINE uint32_t artfIndirectCount(const ArtfIndirect* g) { return (uint32_t)(g->dims[0] * g->dims[1] * g->dims[2]); }
 

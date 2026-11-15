@@ -64,6 +64,10 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   stops it once probes see it, as far as an 8 x 8 map of directions can tell; a wall much thinner than the probes are
   apart, with probes on both sides near it, can still let some through; `throughWalls` leaves walls out, for less
   work. What it gives reflections is as rough as the probes are: a mirror shows its color, not what it would see.
+  Every probe takes its rays every frame, on either backend: none is left for a later frame, so the cost grows with the
+  grid (on the GPU, a group of 64 a probe). When Vulkan draws, the GPU gathers them, from the frame's own trees or
+  the hardware, and the scene's copy on the CPU is not stepped: a renderer made again (a device lost) starts them over.
+  A probe that lies on a surface may see it through the ray tracing hardware (a hit at 0) where the trees do not.
 - Particles are stepped on the calling thread, one instance each; they are not traced, unless the whole frame is.
   They bounce on a flat ground only, not on what the scene holds, and their wind is noise, not a fluid.
 - Emitters of many (`parallel`) go after all other layers, in the order of their places, not by depth: one nearer

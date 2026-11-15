@@ -710,7 +710,7 @@ void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc);
 
 /* ---- light that bounced, every frame ----
  * A grid of probes over a box (the scene's bounds, as they are when this is called, unless given): each frame each probe follows a few
- * rays through the scene (as tracing does, on the calling thread's cores, for both backends), and keeps what light
+ * rays through the scene (as tracing does: on the calling thread's cores in software, on the GPU when Vulkan draws), and keeps what light
  * reaches it from each way, mixed with what it had. Surfaces take light from all around from the probes near them, in
  * place of sky and ground or a picture: so light bounces from one surface to the next, once more each frame. Each
  * probe knows how far it sees each way, and a point it cannot see takes next to nothing from it: walls stop light. */

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Light that bounced is gathered on the GPU when Vulkan draws**: a compute pass before the frame
+  (`artfShaderProbes`, written with the SPIR-V builder like the rest) takes each probe's rays in a group of 64, through
+  the tracer's trees or, on a device with ray queries, the top level the frame already builds (binding 64), with the
+  tracer's code for what a ray meets, its shadow rays and the probes before; the same random directions as the CPU's,
+  added up in the CPU's order. The CPU's step stays for the software backend, and as the reference: a new test
+  (`tracing/probesGpu`) gathers a scene with walls, a closed box and a lamp both ways, with walls and through them,
+  through the hardware and through the trees, and holds the GPU's probes to the CPU's (after six steps they are a few
+  millionths of the brightest apart at most, how far they see a ten-millionth on average), the picture to the one drawn
+  from probes sent up from the CPU, and the GPU's steps to themselves, to the bit. On a Radeon RX 9060 XT at 1920 x 1080 (`artful-render --indirect --frames 300`, the best
+  of three runs), the CPU's time in a frame went from 0.26, 0.33 and 0.56 ms to 0.03, 0.03 and 0.05 (`spheres`, `heavy`,
+  `outdoors`: as without probes), for a pass of 0.09 to 0.10 ms on the GPU. One new binding,
+  70 (what a step writes); the probes' buffers are the renderer's, shared by both frames in flight.
+
 - **The shading model written once** (internal): `src/shading/shading.inc` holds its formulas (Schlick's fifth power
   and Fresnel, the coat's, what a surface reflects head on, Trowbridge and Reitz's distribution drawn out or not, Smith's
   visibility, a light's lobe from the halfway vector, the mirror term from all around, the sky and the ground, Charlie's

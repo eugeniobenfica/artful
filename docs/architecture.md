@@ -448,9 +448,23 @@ sixteen's.
 or a surface's own light, what the sun and lights give it (with shadow rays) and what the probes gave it the frame
 before. What comes back makes a first-order spherical harmonic, which a surface reads as the mean and two thirds of
 its lean along the normal (Ramamoorthi and Hanrahan), mixed with what the probe had. So light bounces once more each
-frame. The probes are made on the CPU's workers for both backends, and the GPU reads them from a buffer: both draw the
-same. A surface takes light from all around from the eight probes nearest a point a quarter of a cell out along its
+frame. A surface takes light from all around from the eight probes nearest a point a quarter of a cell out along its
 normal, in place of sky and ground or a picture.
+
+The software backend makes them on its workers (`artfSceneIndirectStep`, which stays the reference); Vulkan makes them
+itself, in a compute pass before the frame (`artfShaderProbes`), with the tracer's code: the same trees, or, on a device
+with ray queries, the hardware's top level, which the frame builds for its own rays anyway (binding 64). A group of 64
+takes a probe: one of them draws the rays' directions from the same random numbers in the same order as `randomInBall`,
+into what the group shares; each follows a ray, as `probeJob` does (the sky or the picture, a surface's own light, the
+sun and the sixteen lights with shadow rays, the probes before by `artfIndirectAt`'s arithmetic); then each of the 64
+texels of the map adds up the rays near it, and one adds up their light, both in the CPU's order. A step writes a second
+buffer (70) from the first (62), which is then copied over it for the pixels: the two are the renderer's, not a slot's,
+since each step reads what the one before made. So the two backends' probes are the same but for roundings: after six
+steps of a scene with walls, a few millionths of the brightest apart at most (`tracing/probesGpu`). On a Radeon RX
+9060 XT at 1920 x 1080 the step of 256 probes of 64 rays takes 0.09 to 0.10 ms of the GPU (`--passes`: "probes"), where
+the CPU's step and its upload took 0.23 to 0.62 ms of the frame's CPU time on a Ryzen 7 9700X (`--indirect` on
+`spheres`, `heavy` and `outdoors`, the best of 300 frames); a frame with probes now asks no more of the CPU than one
+without (0.03 to 0.06 ms).
 
 Each probe keeps how far it sees as well: the same rays, into an 8 x 8 map of directions on an octahedron, each
 texel the mean distance and the mean of its square over a narrow lobe (the cosine to the 32nd). A point a probe cannot

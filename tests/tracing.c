@@ -581,6 +581,95 @@ void testProbesWalls(void) {
     }
 }
 
+/* Light that bounced, gathered by the GPU (artfShaderProbes) against the CPU's step, which is the reference: the same
+ * rays the same ways, so the same probes but for roundings and a ray that grazes an edge. A floor, a red wall, a closed
+ * box with probes inside it, a lamp and the sun; with walls and through them, through the hardware where there is
+ * some and through the trees. */
+void testProbesGpu(void) {
+    enum { STEPS = 6 };
+    for (int through = 0; through < 2; ++through)
+        for (int way = 0; way < 2; ++way) {
+            ArtfScene* s = bleedScene();
+            addAt(s, artfSceneAddCube(s, 2), whiteMaterial(s), -2, .4f, 1.5f, 1); /* (no probe on its faces) */
+            artfSceneAddLight(s, artfVec3(.5f, 1.5f, 1), artfVec3(2, 1.6f, 1.2f), 6);
+            const ArtfIndirectDesc d = {{8, 4, 8}, 64, .5f, 1, {-4, -1.5f, -3}, {4, 3, 3}, through != 0};
+            artfSceneSetIndirect(s, &d);
+            const ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+            ArtfRenderer* r = way ? gpuWithoutRayQueries(&o) : artfRendererNew(&o);
+            if (!r) {
+                artfSceneFree(s);
+                printf("(no Vulkan here: the GPU's probes were not gathered)\n");
+                return;
+            }
+            for (int k = 0; k < STEPS; ++k) CHECK(artfRendererDraw(r, s));
+            const uint32_t count = artfIndirectCount(&s->indirect);
+            const size_t floats = (size_t)count * ARTF_PROBE_FLOATS;
+            float* gpu = artfMalloc(floats * 4);
+            const bool read = artfVulkanProbesRead(r, gpu, floats);
+            CHECK(read);
+            if (!way && !through) {
+                /* the same renderer with the probes gathered on the CPU and sent up, as before: the same picture; and
+                 * back on the GPU, from the start, the same probes to the bit */
+                uint32_t* a = artfMalloc(W * H * 4);
+                uint32_t* b = artfMalloc(W * H * 4);
+                float* again = artfMalloc(floats * 4);
+                CHECK(artfRendererReadPixels(r, a));
+                artfVulkanProbesOnCpu = true;
+                artfSceneSetIndirect(s, &d);
+                for (int k = 0; k < STEPS; ++k) CHECK(artfRendererDraw(r, s));
+                CHECK(artfRendererReadPixels(r, b));
+                artfVulkanProbesOnCpu = false;
+                const double apart = differentShare(a, b, 2);
+                printf("light that bounced, gathered by the GPU against by the CPU, drawn by the GPU: %.3f%% of pixels apart\n", apart * 100);
+                CHECK(apart < .001);
+                artfSceneSetIndirect(s, &d);
+                for (int k = 0; k < STEPS; ++k) CHECK(artfRendererDraw(r, s));
+                CHECK(artfVulkanProbesRead(r, again, floats) && !memcmp(again, gpu, floats * 4));
+                artfFree(a);
+                artfFree(b);
+                artfFree(again);
+            }
+            artfRendererFree(r);
+            /* the CPU's, from the start, from the same frame */
+            artfSceneSetIndirect(s, &d);
+            ArtfFrameData frame;
+            artfSceneFrame(s, W, H, &frame);
+            for (int k = 0; k < STEPS; ++k) artfSceneIndirectStep(s, &frame, NULL);
+            const float* cpu = s->indirect.probes;
+            if (read) {
+                /* the light, by how bright the brightest probe is; how far each sees, by itself */
+                double most = 0, worst = 0, sum = 0, mapSum = 0;
+                uint32_t apart = 0, inside = 0;
+                for (uint32_t i = 0; i < count; ++i)
+                    for (int k = 0; k < 3; ++k) most = fmax(most, cpu[i * 16 + k]);
+                for (uint32_t i = 0; i < count; ++i) {
+                    for (int k = 0; k < 16; ++k) {
+                        const double e = fabs((double)gpu[i * 16 + k] - cpu[i * 16 + k]) / most;
+                        worst = fmax(worst, e);
+                        sum += e;
+                    }
+                    inside += cpu[i * 16] + cpu[i * 16 + 1] + cpu[i * 16 + 2] == 0;
+                }
+                const float* gpuMaps = gpu + (size_t)count * 16;
+                const float* cpuMaps = cpu + (size_t)count * 16;
+                for (size_t k = 0; k < (size_t)count * ARTF_PROBE_MAP; ++k) {
+                    const double e = fabs((double)gpuMaps[k] - cpuMaps[k]) / fmax(fabs((double)cpuMaps[k]), 1e-3);
+                    mapSum += e;
+                    apart += e > .01;
+                }
+                const double mean = sum / (count * 16.0), mapMean = mapSum / ((double)count * ARTF_PROBE_MAP);
+                printf("probes gathered by the GPU%s%s against the CPU, after %d steps: light %.1e apart on average, %.1e at most "
+                       "(of the brightest); how far they see, %.1e on average, %u of %u texels past 1%%; %u probes in the dark\n",
+                       way ? " without ray queries" : "", through ? ", through walls," : "", STEPS, mean, worst, mapMean, apart, count * ARTF_PROBE_MAP, inside);
+                CHECK(mean < 1e-4 && worst < .01);
+                CHECK(mapMean < 1e-4 && apart < count * ARTF_PROBE_MAP / 500);
+                CHECK(inside > 0 && inside < count); /* (the box's: probes inside it see its backs) */
+            }
+            artfFree(gpu);
+            artfSceneFree(s);
+        }
+}
+
 /* ---- rays ---- */
 
 static void traceWith(ArtfScene* s, ArtfTraceMode mode, int samples, int bounces) {

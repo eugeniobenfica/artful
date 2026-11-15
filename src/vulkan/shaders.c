@@ -3669,6 +3669,336 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     return finish(s, size);
 }
 
+/* ---- light that bounced: the probes gathered on the GPU, as trace.c's probeJob ----
+ *
+ * A group of 64 for each probe. One of them draws the rays' directions in turn, from the same random numbers as the
+ * CPU's, into what the group shares; each then follows a ray, 64 at a time, through the trees or the hardware, with
+ * the tracer's code; then each adds up, for its texel of the map of how far the probe sees, the rays near it, and one
+ * adds up their light, both in the CPU's order. 62: what the probes held, read; 70: what they hold now, written. */
+
+_Static_assert(ARTF_PROBE_SIDE == 8, "a probe's map is 8 x 8: an invocation's texel is at (i & 7, i >> 3)");
+
+static void groupBarrier(Spv* s) { spvEmit(&s->code, 224 /* OpControlBarrier */, SPV_WORDS(UINT(2), UINT(2), UINT(0x108))); /* the group's, acquire and release, its memory */ }
+
+/* As artfIndirectAt, from the probes in `probes` (62): light from all around a surface at p facing n, over pi. */
+static SpvId indirectAtSpv(const Tracer* t, SpvId probes, SpvId p, SpvId n, bool walls, SpvId sumVar, SpvId weightsVar, SpvId counter) {
+    Spv* s = t->s;
+    const Resources* r = &t->r;
+    SpvId origin = spvShuffle3(s, frameVec(s, r, F_INDIRECT)), spacing = spvShuffle3(s, frameVec(s, r, F_INDIRECT + 1)), dims = spvShuffle3(s, frameVec(s, r, F_INDIRECT + 2));
+    /* (a little out along the normal: a probe on the surface's own side counts more) */
+    SpvId q = ADD_V3(p, SCALE_V3(MUL_V3(n, spacing), FLOAT(.25f)));
+    SpvId at = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvOp2(s, SPV_OP_FDiv, s->vec3, SUB_V3(q, origin), spacing), same3(s, 0.f)), SUB_V3(dims, same3(s, 1.f)));
+    SpvId base = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl1(s, SPV_GLSL_Floor, s->vec3, at), SUB_V3(dims, same3(s, 2.f)));
+    SpvId w = SUB_V3(at, base);
+    SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims)), dz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims));
+    SpvId bx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(base)), by = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(base)), bz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(base));
+    SpvId count = MUL_U(MUL_U(dx, dy), dz);
+    spvStore(s, sumVar, same3(s, 0.f));
+    spvStore(s, weightsVar, FLOAT(0.f));
+    spvStore(s, counter, UINT(0));
+    Loop corners;
+    loopOpen(s, &corners);
+    loopWhile(s, &corners, LESS_U(LOAD_U(counter), UINT(8)));
+    {
+        SpvId c = LOAD_U(counter);
+        SpvId cx = AND_U(c, UINT(1)), cy = AND_U(SHR_U(c, 1), UINT(1)), cz = SHR_U(c, 2);
+        SpvId x = ADD_U(bx, cx), y = ADD_U(by, cy), z = ADD_U(bz, cz);
+#define SIDE_OF(bit, f) PICK_F(NOT_EQ(bit, UINT(0)), f, SUB_F(FLOAT(1.f), f))
+        SpvId weight = MUL_F(MUL_F(SIDE_OF(cx, X(w)), SIDE_OF(cy, Y(w))), SIDE_OF(cz, Z(w)));
+#undef SIDE_OF
+        SpvId index = ADD_U(MUL_U(ADD_U(MUL_U(z, dy), y), dx), x), row = MUL_U(index, UINT(4));
+        if (walls) {
+            /* from the probe to the point: one behind the surface counts less, and one that cannot see it hardly at all */
+            SpvId there = ADD_V3(origin, MUL_V3(vec3Of(s, TO_F(x), TO_F(y), TO_F(z)), spacing));
+            SpvId dir = SUB_V3(q, there);
+            SpvId distance = SQRT_F(DOT3(dir, dir));
+            SpvId inv = PICK_F(MORE_F(distance, FLOAT(1e-6f)), DIV_F(FLOAT(1.f), MAX_F(distance, FLOAT(1e-6f))), FLOAT(0.f));
+            SpvId facing = MUL_F(SUB_F(FLOAT(1.f), MUL_F(DOT3(dir, n), inv)), FLOAT(.5f));
+            weight = MUL_F(weight, ADD_F(MUL_F(facing, facing), FLOAT(.2f)));
+            SpvId mean, square;
+            probeReachSpv(s, r, probes, ADD_U(MUL_U(count, UINT(16)), MUL_U(index, UINT(ARTF_PROBE_MAP))), dir, &mean, &square);
+            SpvId variance = MAX_F(SUB_F(square, MUL_F(mean, mean)), FLOAT(1e-4f)), past = SUB_F(distance, mean);
+            SpvId seen = DIV_F(variance, ADD_F(variance, MUL_F(past, past)));
+            weight = PICK_F(MORE_F(distance, mean), MUL_F(weight, MAX_F(MUL_F(MUL_F(seen, seen), seen), FLOAT(.002f))), weight);
+        }
+        spvStore(s, weightsVar, ADD_F(LOAD_F(weightsVar), weight));
+        SpvId c0 = spvShuffle3(s, bufferVec(s, r, probes, row));
+        SpvId lean = vec3Of(s, DOT3(spvShuffle3(s, bufferVec(s, r, probes, ADD_U(row, UINT(1)))), n), DOT3(spvShuffle3(s, bufferVec(s, r, probes, ADD_U(row, UINT(2)))), n),
+                            DOT3(spvShuffle3(s, bufferVec(s, r, probes, ADD_U(row, UINT(3)))), n));
+        spvStore(s, sumVar, ADD_V3(LOAD_V3(sumVar), SCALE_V3(spvGlsl2(s, SPV_GLSL_FMax, s->vec3, ADD_V3(c0, lean), same3(s, 0.f)), weight)));
+        spvStore(s, counter, ADD_U(c, UINT(1)));
+    }
+    loopClose(s, &corners);
+    SpvId weights = LOAD_F(weightsVar);
+    return SCALE_V3(LOAD_V3(sumVar), PICK_F(MORE_F(weights, FLOAT(1e-6f)), DIV_F(FLOAT(1.f), MAX_F(weights, FLOAT(1e-6f))), FLOAT(0.f)));
+}
+
+/* As lightFrom with a path of 1: a light toward `to` (of length 1), as far as limit, adds to `light` (a variable) what
+ * the surface reflects of it toward view, as much as what is in the way lets through. */
+static void probeLightFrom(const Tracer* t, const Met* m, SpvId lifted, SpvId view, SpvId to, SpvId limit, SpvId strength, SpvId color, SpvId on, SpvId light) {
+    Spv* s = t->s;
+    SpvId ndl = DOT3(m->normal, to), lit;
+    spvIfBegin(s, BOTH(on, BOTH(MORE_F(ndl, FLOAT(0.f)), MORE_F(strength, FLOAT(0.f)))), &lit);
+    {
+        lightThrough(t, lifted, to, limit);
+        /* (its highlight's lobe never drawn out: lightFrom's is not) */
+        Reflecting plain = m->reflecting;
+        plain.lobe.drawn = 0;
+        SpvId highlight = pick3(s, m->shiny, lightHighlight(s, &plain, m->normal, view, to, ndl, FLOAT(1.f)), same3(s, 0.f));
+        SpvId reflected = ADD_V3(SCALE_V3(m->albedo, ndl), highlight);
+        spvStore(s, light, ADD_V3(LOAD_V3(light), SCALE_V3(MUL_V3(color, reflected), MUL_F(strength, LOAD_F(t->through)))));
+    }
+    spvIfEnd(s, lit);
+}
+
+uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware, bool more, bool walls, int rays, float keep) {
+    enum { GROUP = ARTF_PROBE_SIDE * ARTF_PROBE_SIDE }; /* (one for each texel of a probe's map) */
+    Spv b, *s = &b;
+    spvInit(s);
+    spvCapability(s, 5301); /* ShaderNonUniform */
+    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    if (hardware) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
+    spvExtension(s, "SPV_EXT_descriptor_indexing");
+    Resources r;
+    declare(s, &r, false);
+    SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);
+    SpvId textures = spvResource(s, spvTypeArray(s, sampled, maxTextures, 0), SPV_STORAGE_UniformConstant, 6);
+    Tracer tracer, *t = &tracer;
+    tracerDeclare(s, t, &r, textures, sampled, graphs, graphCount, hardware);
+    t->more = more;
+    SpvId probes = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 62);
+    SpvId next = spvResource(s, blockOf(s, r.floatArray, true), SPV_STORAGE_StorageBuffer, 70);
+    SpvId uvec3 = spvTypeVector(s, s->uintType, 3);
+    SpvId groupVar = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, uvec3), SPV_STORAGE_Input), localVar = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, uvec3), SPV_STORAGE_Input);
+    spvDecorate(s, groupVar, SPV_DECORATE_BuiltIn, 26 /* WorkgroupId */);
+    spvDecorate(s, localVar, SPV_DECORATE_BuiltIn, 27 /* LocalInvocationId */);
+    SpvId pushBlock = spvTypeStruct(s, &s->uintType, 1);
+    spvDecorate(s, pushBlock, SPV_DECORATE_Block, -1);
+    spvMemberDecorate(s, pushBlock, 0, SPV_DECORATE_Offset, 0);
+    SpvId push = spvVariable(s, spvTypePointer(s, SPV_STORAGE_PushConstant, pushBlock), SPV_STORAGE_PushConstant);
+    /* what the group shares: of each ray, its direction and how far it went, and its light */
+    SpvId shared = spvTypeArray(s, s->vec4, GROUP, 0), ptrShared = spvTypePointer(s, 4 /* Workgroup */, s->vec4);
+    SpvId rayDir = spvVariable(s, spvTypePointer(s, 4, shared), 4), rayLight = spvVariable(s, spvTypePointer(s, 4, shared), 4);
+
+    SpvId main = spvBeginMain(s);
+    tracerVariables(t);
+    SpvId ptrU = spvTypePointer(s, SPV_STORAGE_Function, s->uintType), ptrF = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptr3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3);
+    t->state = VAR(ptrU);
+    SpvId chunkVar = VAR(ptrU), jVar = VAR(ptrU), tryVar = VAR(ptrU), acceptedVar = VAR(ptrU), lightIndex = VAR(ptrU), counter = VAR(ptrU);
+    SpvId ballVar = VAR(ptr3), lightVar = VAR(ptr3), sumVar = VAR(ptr3), meanVar = VAR(ptr3), leanVar[3];
+    for (int k = 0; k < 3; ++k) leanVar[k] = VAR(ptr3);
+    SpvId weightsVar = VAR(ptrF), reachVar = VAR(ptrF), reach2Var = VAR(ptrF), reachWeightVar = VAR(ptrF);
+
+    SpvId group = spvLoad(s, uvec3, groupVar), lid = spvExtract(s, s->uintType, spvLoad(s, uvec3, localVar), 0);
+    SpvId gx = spvExtract(s, s->uintType, group, 0), gy = spvExtract(s, s->uintType, group, 1);
+    SpvId frames = spvLoad(s, s->uintType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_PushConstant, s->uintType), push, &r.zero, 1));
+    SpvId origin = spvShuffle3(s, frameVec(s, &r, F_INDIRECT)), spacing = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 1)), dims = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 2));
+    SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims)), dz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims));
+    SpvId count = MUL_U(MUL_U(dx, dy), dz), index = ADD_U(MUL_U(gy, MUL_U(dx, dy)), gx);
+    /* (the groups: dims[0] x dims[1] across, dims[2] down) */
+    SpvId o = ADD_V3(origin, MUL_V3(vec3Of(s, TO_F(spvOp2(s, SPV_OP_UMod, s->uintType, gx, dx)), TO_F(spvOp2(s, SPV_OP_UDiv, s->uintType, gx, dx)), TO_F(gy)), spacing));
+    SpvId most = MUL_F(SQRT_F(DOT3(spacing, spacing)), FLOAT(1.5f));
+    /* this one's texel: the direction at its middle, unfolded */
+    SpvId toward;
+    {
+        SpvId a = SUB_F(MUL_F(DIV_F(ADD_F(TO_F(AND_U(lid, UINT(ARTF_PROBE_SIDE - 1))), FLOAT(.5f)), FLOAT((float)ARTF_PROBE_SIDE)), FLOAT(2.f)), FLOAT(1.f));
+        SpvId c = SUB_F(MUL_F(DIV_F(ADD_F(TO_F(SHR_U(lid, 3)), FLOAT(.5f)), FLOAT((float)ARTF_PROBE_SIDE)), FLOAT(2.f)), FLOAT(1.f));
+        SpvId z = SUB_F(SUB_F(FLOAT(1.f), ABS_F(a)), ABS_F(c));
+        SpvId below = LESS_F(z, FLOAT(0.f));
+#define SIGN_OF(v) PICK_F(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, v, FLOAT(0.f)), FLOAT(1.f), FLOAT(-1.f))
+        SpvId fa = MUL_F(SUB_F(FLOAT(1.f), ABS_F(c)), SIGN_OF(a)), fc = MUL_F(SUB_F(FLOAT(1.f), ABS_F(a)), SIGN_OF(c));
+#undef SIGN_OF
+        a = PICK_F(below, fa, a);
+        c = PICK_F(below, fc, c);
+        SpvId length = SQRT_F(ADD_F(ADD_F(MUL_F(a, a), MUL_F(c, c)), MUL_F(z, z)));
+        toward = vec3Of(s, DIV_F(a, length), DIV_F(c, length), DIV_F(z, length));
+    }
+    SpvId first = IS_EQ(lid, UINT(0));
+    spvStore(s, reachVar, FLOAT(0.f));
+    spvStore(s, reach2Var, FLOAT(0.f));
+    spvStore(s, reachWeightVar, FLOAT(0.f));
+    spvStore(s, meanVar, same3(s, 0.f));
+    for (int k = 0; k < 3; ++k) spvStore(s, leanVar[k], same3(s, 0.f));
+    spvStore(s, t->state, traceHash(s, ADD_U(ADD_U(MUL_U(index, UINT(9781u)), MUL_U(frames, UINT(6271u))), UINT(1u))));
+    SpvId env = MORE_F(W(frameVec(s, &r, F_SKY)), FLOAT(0.f));
+    SpvId sunColor = spvShuffle3(s, frameVec(s, &r, F_SUNCOLOR)), toSun = spvShuffle3(s, frameVec(s, &r, F_TOSUN));
+    SpvId sunOn = MORE_F(maxOf3(s, sunColor), FLOAT(0.f));
+    SpvId lightCount = AS_UINT(X(frameVec(s, &r, F_COUNTS)));
+
+    spvStore(s, chunkVar, UINT(0));
+    Loop chunks;
+    loopOpen(s, &chunks);
+    loopWhile(s, &chunks, LESS_U(LOAD_U(chunkVar), UINT((uint32_t)rays)));
+    {
+        SpvId chunk = LOAD_U(chunkVar);
+        SpvId here = UMIN(SUB_U(UINT((uint32_t)rays), chunk), UINT(GROUP)), merge;
+        /* the directions, by one, as randomInBall and normalize3: the CPU's random numbers, in its order */
+        spvIfBegin(s, first, &merge);
+        {
+            spvStore(s, jVar, UINT(0));
+            Loop each;
+            loopOpen(s, &each);
+            loopWhile(s, &each, LESS_U(LOAD_U(jVar), here));
+            {
+                spvStore(s, acceptedVar, UINT(0));
+                spvStore(s, tryVar, UINT(0));
+                Loop tries;
+                loopOpen(s, &tries);
+                loopWhile(s, &tries, LESS_U(LOAD_U(tryVar), UINT(16)));
+                {
+                    SpvId bx = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f)), by = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f)), bz = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f));
+                    SpvId v = vec3Of(s, bx, by, bz);
+                    spvStore(s, ballVar, v);
+                    SpvId inside = spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(v, v), FLOAT(1.f));
+                    spvStore(s, acceptedVar, spvSelect(s, s->uintType, inside, UINT(1), UINT(0)));
+                    breakIf(s, &tries, inside);
+                    spvStore(s, tryVar, ADD_U(LOAD_U(tryVar), UINT(1)));
+                }
+                loopClose(s, &tries);
+                SpvId d = pick3(s, NOT_EQ(LOAD_U(acceptedVar), UINT(0)), LOAD_V3(ballVar), same3(s, 0.f));
+                d = SCALE_V3(d, DIV_F(FLOAT(1.f), SQRT_F(MAX_F(DOT3(d, d), FLOAT(1e-30f)))));
+                SpvId j = LOAD_U(jVar);
+                spvStore(s, spvAccess(s, ptrShared, rayDir, &j, 1), vec4Of(s, d, FLOAT(0.f)));
+                spvStore(s, jVar, ADD_U(j, UINT(1)));
+            }
+            loopClose(s, &each);
+        }
+        spvIfEnd(s, merge);
+        groupBarrier(s);
+        /* each its ray: what it meets, how far, and what light comes back along it */
+        spvIfBegin(s, LESS_U(lid, here), &merge);
+        {
+            SpvId d = spvShuffle3(s, spvLoad(s, s->vec4, spvAccess(s, ptrShared, rayDir, &lid, 1)));
+            closest(t, o, d, FLOAT(3e37f), true);
+            SpvId hit = NOT_EQ(LOAD_U(t->bestInstance), UINT(0xFFFFFFFFu));
+            SpvId bestT = LOAD_F(t->bestT);
+            SpvId far = PICK_F(hit, MIN_F(bestT, most), most);
+            SpvId plain = shaderSkyGround3(s, spvShuffle3(s, frameVec(s, &r, F_GROUND)), spvShuffle3(s, frameVec(s, &r, F_SKY)), ADD_F(MUL_F(Y(d), FLOAT(.5f)), FLOAT(.5f)));
+            spvStore(s, lightVar, pick3(s, hit, same3(s, 0.f), plain));
+            SpvId met;
+            spvIfBegin(s, BOTH(NOT(hit), env), &met);
+            spvStore(s, lightVar, SCALE_V3(envSample(s, &r, UINT(ARTF_ENV_DIFFUSE - 1), d), W(frameVec(s, &r, F_SKY))));
+            spvIfEnd(s, met);
+            spvIfBegin(s, hit, &met);
+            {
+                Met m = surfaceAt(t, o, d);
+                /* (a probe inside something sees its backs: it takes nothing from them) */
+                SpvId front;
+                spvIfBegin(s, m.front, &front);
+                {
+                    SpvId p = ADD_V3(o, SCALE_V3(d, bestT));
+                    SpvId lifted = ADD_V3(p, SCALE_V3(m.normal, reachOf(s, p)));
+                    SpvId view = spvOp1(s, SPV_OP_FNegate, s->vec3, d);
+                    spvStore(s, lightVar, m.emissive);
+                    probeLightFrom(t, &m, lifted, view, toSun, FLOAT(3e37f), FLOAT(1.f), sunColor, sunOn, lightVar);
+                    spvStore(s, lightIndex, UINT(0));
+                    Loop lights;
+                    loopOpen(s, &lights);
+                    loopWhile(s, &lights, LESS_U(LOAD_U(lightIndex), lightCount));
+                    {
+                        SpvId li = LOAD_U(lightIndex);
+                        SpvId row = ADD_U(UINT(F_LIGHTS), MUL_U(li, UINT(F_LIGHT_ROWS)));
+                        SpvId lightA = frameVecAt(s, &r, row), lightB = frameVecAt(s, &r, ADD_U(row, UINT(1))), lightC = frameVecAt(s, &r, ADD_U(row, UINT(2)));
+                        SpvId toLight = SUB_V3(spvShuffle3(s, lightA), lifted);
+                        SpvId d2 = DOT3(toLight, toLight), distance = SQRT_F(MAX_F(d2, FLOAT(1e-8f)));
+                        SpvId fade = MAX_F(SUB_F(FLOAT(1.f), DIV_F(d2, MUL_F(W(lightA), W(lightA)))), FLOAT(0.f));
+                        SpvId to = spvOp2(s, SPV_OP_FDiv, s->vec3, toLight, vec3Of(s, distance, distance, distance));
+                        SpvId spot = MIN_F(MAX_F(MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(to, spvShuffle3(s, lightC))), W(lightC)), W(lightB)), FLOAT(0.f)), FLOAT(1.f));
+                        probeLightFrom(t, &m, lifted, view, to, distance, MUL_F(MUL_F(fade, fade), spot), spvShuffle3(s, lightB), spvConstBool(s, true), lightVar);
+                        spvStore(s, lightIndex, ADD_U(li, UINT(1)));
+                    }
+                    loopClose(s, &lights);
+                    /* what bounced to it before: the probes, as the last step left them */
+                    SpvId around = indirectAtSpv(t, probes, p, m.normal, walls, sumVar, weightsVar, counter);
+                    spvStore(s, lightVar, ADD_V3(LOAD_V3(lightVar), MUL_V3(m.albedo, around)));
+                }
+                spvIfEnd(s, front);
+            }
+            spvIfEnd(s, met);
+            SpvId light = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, LOAD_V3(lightVar), same3(s, 64.f)); /* (trace.c's LIGHT_LIMIT) */
+            spvStore(s, spvAccess(s, ptrShared, rayDir, &lid, 1), vec4Of(s, d, far));
+            spvStore(s, spvAccess(s, ptrShared, rayLight, &lid, 1), vec4Of(s, light, FLOAT(0.f)));
+        }
+        spvIfEnd(s, merge);
+        groupBarrier(s);
+        /* each its texel: how far the rays near its direction went (a narrow lobe each: the cosine to the 32nd) */
+        spvStore(s, jVar, UINT(0));
+        Loop texel;
+        loopOpen(s, &texel);
+        loopWhile(s, &texel, LESS_U(LOAD_U(jVar), here));
+        {
+            SpvId j = LOAD_U(jVar);
+            SpvId ray = spvLoad(s, s->vec4, spvAccess(s, ptrShared, rayDir, &j, 1));
+            SpvId far = W(ray), w = MAX_F(DOT3(spvShuffle3(s, ray), toward), FLOAT(0.f));
+            for (int k = 0; k < 5; ++k) w = MUL_F(w, w);
+            spvStore(s, reachVar, ADD_F(LOAD_F(reachVar), MUL_F(w, far)));
+            spvStore(s, reach2Var, ADD_F(LOAD_F(reach2Var), MUL_F(MUL_F(w, far), far)));
+            spvStore(s, reachWeightVar, ADD_F(LOAD_F(reachWeightVar), w));
+            spvStore(s, jVar, ADD_U(j, UINT(1)));
+        }
+        loopClose(s, &texel);
+        /* and one, the light: its mean, and how it leans */
+        spvIfBegin(s, first, &merge);
+        {
+            spvStore(s, jVar, UINT(0));
+            Loop each;
+            loopOpen(s, &each);
+            loopWhile(s, &each, LESS_U(LOAD_U(jVar), here));
+            {
+                SpvId j = LOAD_U(jVar);
+                SpvId d = spvShuffle3(s, spvLoad(s, s->vec4, spvAccess(s, ptrShared, rayDir, &j, 1)));
+                SpvId light = spvShuffle3(s, spvLoad(s, s->vec4, spvAccess(s, ptrShared, rayLight, &j, 1)));
+                spvStore(s, meanVar, ADD_V3(LOAD_V3(meanVar), light));
+                for (uint32_t k = 0; k < 3; ++k) spvStore(s, leanVar[k], ADD_V3(LOAD_V3(leanVar[k]), SCALE_V3(d, spvExtract(s, s->floatType, light, k))));
+                spvStore(s, jVar, ADD_U(j, UINT(1)));
+            }
+            loopClose(s, &each);
+        }
+        spvIfEnd(s, merge);
+        groupBarrier(s);
+        spvStore(s, chunkVar, ADD_U(chunk, UINT(GROUP)));
+    }
+    loopClose(s, &chunks);
+
+    /* mixed with what the probe had: none of it, the first step */
+    SpvId kept = PICK_F(NOT_EQ(frames, UINT(0)), FLOAT(keep), FLOAT(0.f)), taken = SUB_F(FLOAT(1.f), kept);
+    SpvId each = FLOAT(1.f / (float)rays);
+#define NEXT_AT(i) spvAccess(s, r.ptrStorageFloat, next, (const SpvId[2]){r.zero, (i)}, 2)
+    SpvId wrote;
+    spvIfBegin(s, first, &wrote);
+    {
+        SpvId at = MUL_U(index, UINT(16)), was[4];
+        for (uint32_t k = 0; k < 4; ++k) was[k] = bufferVec(s, &r, probes, ADD_U(MUL_U(index, UINT(4)), UINT(k)));
+        SpvId mean = LOAD_V3(meanVar);
+        for (uint32_t k = 0; k < 3; ++k) {
+            spvStore(s, NEXT_AT(ADD_U(at, UINT(k))), ADD_F(MUL_F(spvExtract(s, s->floatType, was[0], k), kept), MUL_F(MUL_F(spvExtract(s, s->floatType, mean, k), each), taken)));
+            SpvId lean = LOAD_V3(leanVar[k]);
+            for (uint32_t a = 0; a < 3; ++a)
+                spvStore(s, NEXT_AT(ADD_U(at, UINT(4 + 4 * k + a))), ADD_F(MUL_F(spvExtract(s, s->floatType, was[1 + k], a), kept), MUL_F(MUL_F(MUL_F(FLOAT(2.f), spvExtract(s, s->floatType, lean, a)), each), taken)));
+            spvStore(s, NEXT_AT(ADD_U(at, UINT(7 + 4 * k))), FLOAT(0.f));
+        }
+        spvStore(s, NEXT_AT(ADD_U(at, UINT(3))), FLOAT(0.f));
+    }
+    spvIfEnd(s, wrote);
+    {
+        /* (a direction no ray went near: as far as a probe sees) */
+        SpvId weight = LOAD_F(reachWeightVar), seen = MORE_F(weight, FLOAT(1e-6f)), over = DIV_F(FLOAT(1.f), MAX_F(weight, FLOAT(1e-6f)));
+        SpvId m = PICK_F(seen, MUL_F(LOAD_F(reachVar), over), most), m2 = PICK_F(seen, MUL_F(LOAD_F(reach2Var), over), MUL_F(most, most));
+        SpvId at = ADD_U(ADD_U(MUL_U(count, UINT(16)), MUL_U(index, UINT(ARTF_PROBE_MAP))), MUL_U(lid, UINT(2)));
+        SpvId was = bufferVec(s, &r, probes, SHR_U(at, 2)), odd = NOT_EQ(AND_U(lid, UINT(1)), UINT(0));
+        SpvId wasMean = PICK_F(odd, Z(was), X(was)), wasSquare = PICK_F(odd, W(was), Y(was));
+        spvStore(s, NEXT_AT(at), ADD_F(MUL_F(wasMean, kept), MUL_F(m, taken)));
+        spvStore(s, NEXT_AT(ADD_U(at, UINT(1))), ADD_F(MUL_F(wasSquare, kept), MUL_F(m2, taken)));
+    }
+#undef NEXT_AT
+    spvEndMain(s);
+
+    const SpvId inputs[2] = {groupVar, localVar};
+    spvEntryPoint(s, SPV_MODEL_GLCompute, main, inputs, 2);
+    spvExecutionMode(s, main, 17 /* LocalSize */, GROUP, 1, 1, 3);
+    return finish(s, size);
+}
+
 /* What was gathered, over what is there: premultiplied, in the frame's colors. */
 /* A pixel's list, in order: of what one instance left, its nearest; the rest, the farthest first, into one color that
  * goes over the frame. Depth is greater when nearer. */

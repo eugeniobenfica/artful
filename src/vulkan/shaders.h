@@ -43,6 +43,10 @@ uint32_t* artfShaderOverlayVertex(size_t* size);
 /* hardware: rays through the ray tracing hardware (binding 64, the top level), not the trees */
 /* more: materials past glTF's core, lights with a shape or a profile (the scene has some) */
 uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides, bool hardware, bool more);
+/* Light that bounced: a step of the probes (trace.c's probeJob), a group of 64 for each, dims[0] x dims[1] groups by
+ * dims[2]; from binding 62, what they held, into 70; the push constant is the step's number. walls: artfIndirectAt's
+ * test of what each probe sees, for the light that bounced before; rays and keep: ArtfIndirectDesc's. */
+uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware, bool more, bool walls, int rays, float keep);
 /* Taking out noise: time; a pass of the filter in space; and back to light. */
 uint32_t* artfShaderSkin(size_t* size);
 /* Emitters of many: each particle moved by the steps its emitter made, then an instance of the quad facing the eye. */

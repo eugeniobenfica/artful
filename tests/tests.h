@@ -153,6 +153,7 @@ void testTracedShadows(void);
 void testTracedMoved(void);
 void testTracedReflections(void);
 void testProbesWalls(void);
+void testProbesGpu(void);
 void testTrace(ArtfBackend backend);
 void testTraceData(void);
 void testTraceBothBackends(void);

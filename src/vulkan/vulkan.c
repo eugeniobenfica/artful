@@ -75,7 +75,8 @@ typedef struct Slot {
     GpuBuffer frame, instances, visible, indirect, template_, materials, overlayStaging, background, stream, layerList, trace;
     GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
     GpuBuffer decals;                  /* the decals that may show (63) */
-    GpuBuffer probes;                  /* light that bounced (62) */
+    GpuBuffer probes;                  /* light that bounced, gathered on the CPU (artfVulkanProbesOnCpu) */
+    VkBuffer probesBound, probesNextBound; /* what its set says bindings 62 and 70 are: its probes, or the GPU's */
     /* What rays read of the instances, this slot's, as they move: the trees' top and the table of instances (20, 21);
      * with the hardware, its instances, the top level built from them in the frame's own commands (64), and that
      * build's scratch. Each says which of tracing's versions it holds. */
@@ -361,7 +362,15 @@ typedef struct Vulkan {
     bool surfaceWide;               /* the surface target has its second word: motion is followed */
     GpuBuffer pastVertices;         /* what the vertex buffer held a frame ago, where a pose moves vertices (binding 68) */
     GpuBuffer postBlur;             /* motion blur's velocities (binding 69) */
-    ArtfPool* pool;                 /* workers for what the CPU does for the GPU: the probes */
+    ArtfPool* pool;                 /* workers for what the CPU does for the GPU: the probes, for tests */
+    /* Light that bounced, gathered here (artfShaderProbes): what the probes hold and what a step makes of them, which
+     * all frames share, as each step reads what the one before made (62, 70); its pipeline and what it was made for;
+     * the steps since they started over, and whose probes they are (a scene, and its artfSceneSetIndirect) */
+    GpuBuffer probesNow, probesNext;
+    VkPipeline probePipeline;
+    uint64_t probeKey, probeScene;
+    uint32_t probeFrames, probeSerial;
+    bool probeClear;
     ArtfLightData* lightScratch;    /* lights past the frame's own, and their lists, before they go up */
     uint32_t* listScratch;
     VkDeviceSize listScratchSize;
@@ -1283,7 +1292,7 @@ static bool pipelinesMake(Vulkan* v) {
     /* (and with the ray tracing hardware, the top level) */
     /* (64 bindings, 54 without floats; then what moves (68, 69) with them, the top level (64), the meshlets view's table
      * (65) and emitters of many (66, 67)) */
-    DescriptorSetLayoutBinding all[70];
+    DescriptorSetLayoutBinding all[71];
     uint32_t bindingCount = v->floats ? 64 : 54;
     memcpy(all, bindings, bindingCount * sizeof *all);
     if (v->floats) {
@@ -1303,6 +1312,9 @@ static bool pipelinesMake(Vulkan* v) {
     const DescriptorSetLayoutBinding swarmState = {66, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, swarmRows = {67, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL};
     all[bindingCount++] = swarmState;
     all[bindingCount++] = swarmRows;
+    /* (what a step of the probes makes: artfShaderProbes) */
+    const DescriptorSetLayoutBinding probesNext = {70, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL};
+    all[bindingCount++] = probesNext;
     const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, bindingCount, all};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     /* (set 1: light, the second light and the history, by the part each plays: see roleSets) */
@@ -1314,8 +1326,8 @@ static bool pipelinesMake(Vulkan* v) {
     const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 2, setLayouts, 2, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
-    /* (54 storage bindings of the 64, then 65 to 69) */
-    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 59}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
+    /* (54 storage bindings of the 64, then 65 to 70) */
+    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 60}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, v->rayQuery ? 4u : 3u, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -3185,7 +3197,8 @@ static void drawLayers(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene, uin
 /* ---- lights past the frame's own ---- */
 
 static void lightDescriptors(Vulkan* v, Slot* s) {
-    const DescriptorBufferInfo lights = {s->extraLights.buffer, 0, ~(VkDeviceSize)0}, lists = {s->tileLights.buffer, 0, ~(VkDeviceSize)0}, probes = {s->probes.buffer, 0, ~(VkDeviceSize)0};
+    if (!s->probesBound) s->probesBound = s->probes.buffer;
+    const DescriptorBufferInfo lights = {s->extraLights.buffer, 0, ~(VkDeviceSize)0}, lists = {s->tileLights.buffer, 0, ~(VkDeviceSize)0}, probes = {s->probesBound, 0, ~(VkDeviceSize)0};
     const DescriptorBufferInfo decals = {s->decals.buffer, 0, ~(VkDeviceSize)0};
     const WriteDescriptorSet writes[4] = {{ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 60, 0, 1, DESCRIPTOR_STORAGE, NULL, &lights, NULL},
                                           {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 61, 0, 1, DESCRIPTOR_STORAGE, NULL, &lists, NULL},
@@ -3194,19 +3207,122 @@ static void lightDescriptors(Vulkan* v, Slot* s) {
     v->vkUpdateDescriptorSets(v->device, 4, writes, 0, NULL);
 }
 
-/* A step of the probes, on this thread's workers, and what they hold into this slot's buffer. */
-static bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameData* frame) {
+/* What this slot's set says the probes are: 62, what pixels and a step read; 70, what a step writes (0: left as it is). */
+static void probeDescriptors(Vulkan* v, Slot* s, VkBuffer now, VkBuffer next) {
+    const DescriptorBufferInfo a = {now, 0, ~(VkDeviceSize)0}, b = {next, 0, ~(VkDeviceSize)0};
+    const WriteDescriptorSet writes[2] = {{ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 62, 0, 1, DESCRIPTOR_STORAGE, NULL, &a, NULL},
+                                          {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 70, 0, 1, DESCRIPTOR_STORAGE, NULL, &b, NULL}};
+    v->vkUpdateDescriptorSets(v->device, next ? 2 : 1, writes, 0, NULL);
+    s->probesBound = now;
+    if (next) s->probesNextBound = next;
+}
+
+bool artfVulkanProbesOnCpu = false;
+
+/* Light that bounced. On the GPU: the step's pipeline (artfShaderProbes), made for what the probes are, and the buffers
+ * all frames share; *gather says this frame takes a step (with the trees or the hardware's structures, which the caller
+ * keeps up to date). Or, for tests, a step on this thread's workers, and what they hold into this slot's buffer. */
+static bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameData* frame, bool* gather) {
+    *gather = false;
     if (frame->indirect[0][3] <= 0 || scene->trace.desc.mode != ARTF_TRACE_NONE) return true;
-    if (!v->pool) v->pool = artfPoolNew(0);
-    artfSceneIndirectStep(scene, frame, v->pool);
-    const VkDeviceSize need = (VkDeviceSize)artfIndirectCount(&scene->indirect) * ARTF_PROBE_FLOATS * 4;
-    if (s->probes.size < need) {
-        bufferFree(v, &s->probes);
-        if (!bufferNew(v, &s->probes, need, BUFFER_STORAGE, true)) return false;
-        lightDescriptors(v, s);
+    const ArtfIndirect* g = &scene->indirect;
+    const VkDeviceSize need = (VkDeviceSize)artfIndirectCount(g) * ARTF_PROBE_FLOATS * 4;
+    if (artfVulkanProbesOnCpu) {
+        if (!v->pool) v->pool = artfPoolNew(0);
+        artfSceneIndirectStep(scene, frame, v->pool);
+        if (s->probes.size < need) {
+            bufferFree(v, &s->probes);
+            if (!bufferNew(v, &s->probes, need, BUFFER_STORAGE, true)) return false;
+            s->probesBound = 0;
+        }
+        if (s->probesBound != s->probes.buffer) probeDescriptors(v, s, s->probes.buffer, 0);
+        memcpy(s->probes.mapped, scene->indirect.probes, (size_t)need);
+        v->probeScene = 0; /* (the GPU's start over, if it takes them back) */
+        return true;
     }
-    memcpy(s->probes.mapped, scene->indirect.probes, (size_t)need);
+    if (v->probesNow.size < need) {
+        /* (both slots' sets name them: neither may be in flight) */
+        v->vkDeviceWaitIdle(v->device);
+        bufferFree(v, &v->probesNow);
+        bufferFree(v, &v->probesNext);
+        if (!bufferNew(v, &v->probesNow, need, BUFFER_STORAGE | BUFFER_TRANSFER_SRC | BUFFER_TRANSFER_DST, false)) return false;
+        if (!bufferNew(v, &v->probesNext, need, BUFFER_STORAGE | BUFFER_TRANSFER_SRC | BUFFER_TRANSFER_DST, false)) return false;
+        for (int i = 0; i < SLOTS; ++i) probeDescriptors(v, &v->slots[i], v->probesNow.buffer, v->probesNext.buffer);
+        v->probeScene = 0;
+    }
+    if (s->probesBound != v->probesNow.buffer || s->probesNextBound != v->probesNext.buffer) probeDescriptors(v, s, v->probesNow.buffer, v->probesNext.buffer);
+    /* (what the shader is made for: how many rays, how much a probe keeps, walls, the hardware, materials past glTF's
+     * core; the scene's materials in C retire it when they change) */
+    const int rays = g->desc.rays > 0 ? g->desc.rays : 64;
+    const float keep = g->desc.hysteresis > 0 ? artfClampf(g->desc.hysteresis, 0, .999f) : .9f;
+    const bool walls = !g->desc.throughWalls, hardware = v->rayQuery, more = scene->moreMaterials > 0;
+    uint32_t keepBits;
+    memcpy(&keepBits, &keep, 4);
+    const uint64_t key = (uint64_t)keepBits << 32 | (uint64_t)rays << 3 | (walls ? 1u : 0u) | (hardware ? 2u : 0u) | (more ? 4u : 0u);
+    if (v->probePipeline && v->probeKey != key) {
+        pipelineRetire(v, v->probePipeline);
+        v->probePipeline = 0;
+    }
+    if (!v->probePipeline) {
+        size_t size;
+        uint32_t* code = artfShaderProbes(&size, v->maxTextures, scene->graphs.items, (uint32_t)scene->graphs.len, hardware, more, walls, rays, keep);
+        VkShaderModule module = shaderModule(v, code, size);
+        if (!module) return false;
+        const ComputePipelineCreateInfo info = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
+        const bool ok = v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &info, NULL, &v->probePipeline) == VK_OK;
+        v->vkDestroyShaderModule(v->device, module, NULL);
+        if (!ok) return false;
+        v->probeKey = key;
+    }
+    if (v->probeScene != scene->id || v->probeSerial != g->serial) {
+        /* (new probes: they start from nothing, as the CPU's do) */
+        v->probeScene = scene->id;
+        v->probeSerial = g->serial;
+        v->probeFrames = 0;
+        v->probeClear = true;
+    }
+    *gather = true;
     return true;
+}
+
+/* A step of the probes, in the frame's commands: from what they held, which the frames before read, into the next;
+ * then that into what this frame's pixels read. */
+static void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfIndirect* g) {
+    const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
+    if (v->probeClear) {
+        memoryBarrier(v, c, STAGE_FRAGMENT | STAGE_COMPUTE | STAGE_TRANSFER, STAGE_TRANSFER, readWrite | ACCESS_TRANSFER_WRITE, ACCESS_TRANSFER_WRITE);
+        v->vkCmdFillBuffer(c, v->probesNow.buffer, 0, ~(VkDeviceSize)0, 0);
+        v->probeClear = false;
+    }
+    memoryBarrier(v, c, STAGE_TRANSFER | STAGE_FRAGMENT | STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_TRANSFER_WRITE | readWrite, readWrite);
+    v->vkCmdBindPipeline(c, 1, v->probePipeline);
+    v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+    v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &v->probeFrames);
+    v->vkCmdDispatch(c, (uint32_t)(g->dims[0] * g->dims[1]), (uint32_t)g->dims[2], 1);
+    memoryBarrier(v, c, STAGE_COMPUTE | STAGE_FRAGMENT, STAGE_TRANSFER, ACCESS_SHADER_WRITE, ACCESS_TRANSFER_READ | ACCESS_TRANSFER_WRITE);
+    const BufferCopy all = {0, 0, (VkDeviceSize)artfIndirectCount(g) * ARTF_PROBE_FLOATS * 4};
+    v->vkCmdCopyBuffer(c, v->probesNext.buffer, v->probesNow.buffer, 1, &all);
+    memoryBarrier(v, c, STAGE_TRANSFER, STAGE_FRAGMENT | STAGE_COMPUTE, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
+    ++v->probeFrames;
+}
+
+bool artfVulkanProbesRead(ArtfRenderer* r, float* out, size_t floats) {
+    Vulkan* v = (Vulkan*)r;
+    if (v->lost || !v->probesNow.buffer || (VkDeviceSize)floats * 4 > v->probesNow.size) return false;
+    if (v->vkDeviceWaitIdle(v->device) != VK_OK) return false;
+    GpuBuffer read;
+    if (!bufferNewFor(v, &read, (VkDeviceSize)floats * 4, BUFFER_TRANSFER_DST, BUFFER_READ_BY_CPU)) {
+        bufferFree(v, &read);
+        return false;
+    }
+    VkCommandBuffer c = oneShotBegin(v);
+    const BufferCopy all = {0, 0, (VkDeviceSize)floats * 4};
+    v->vkCmdCopyBuffer(c, v->probesNow.buffer, read.buffer, 1, &all);
+    memoryBarrier(v, c, STAGE_TRANSFER, STAGE_HOST, ACCESS_TRANSFER_WRITE, ACCESS_HOST_READ);
+    const bool ok = oneShotEnd(v, c);
+    if (ok) memcpy(out, read.mapped, floats * 4);
+    bufferFree(v, &read);
+    return ok;
 }
 
 /* Into this slot's buffers: the lights, and each square's list (its fence was waited for). */
@@ -3541,6 +3657,8 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         v->tracePipeline = 0;
         pipelineRetire(v, v->reflectionTraced);
         v->reflectionTraced = 0;
+        pipelineRetire(v, v->probePipeline);
+        v->probePipeline = 0;
         v->graphCount = (uint32_t)scene->graphs.len;
     }
     v->graphScene = scene->id;
@@ -3554,9 +3672,11 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     }
     if (wide && scene->deforming.len && !pastVerticesRoom(v)) return false;
     if (tracing && !syncTrace(v, scene)) return false;
-    if ((tracedShadows || tracedReflections) && !syncTraced(v, scene, tracedReflections)) return false;
+    /* light that bounced, gathered here: its rays go through the same trees, or the hardware */
+    const bool probeRays = probes && scene->trace.desc.mode == ARTF_TRACE_NONE && !artfVulkanProbesOnCpu;
+    if ((tracedShadows || tracedReflections || probeRays) && !syncTraced(v, scene, tracedReflections)) return false;
     /* (what rays read of the instances: the slot's, once its fence is waited for) */
-    const bool topRays = tracing || tracedShadows || tracedReflections;
+    const bool topRays = tracing || tracedShadows || tracedReflections || probeRays;
     const bool topHardware = v->rayQuery && (tracing ? scene->trace.desc.hardware : true);
 
     {
@@ -3644,7 +3764,8 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     for (uint32_t k = 0; k < frame.lightCount; ++k)
         if (frame.lightShapes[k][2][3] > 0)
             memcpy((char*)s->extraLights.mapped + ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + (size_t)k * ARTF_PROFILE_FLOATS * sizeof(float), scene->lightProfile[(int)frame.lightShapes[k][2][3] - 1], ARTF_PROFILE_FLOATS * sizeof(float));
-    if (!syncLights(v, s, scene, &frame) || !syncIndirect(v, s, scene, &frame)) return false;
+    bool probeStep = false;
+    if (!syncLights(v, s, scene, &frame) || !syncIndirect(v, s, scene, &frame, &probeStep)) return false;
     syncSlot(v, s, scene);
     if (!syncSwarms(v, s, scene)) return false;
     uint32_t layerCount = 0, traceAdding = 0;
@@ -3832,6 +3953,10 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
         memoryBarrier(v, c, STAGE_TRANSFER, STAGE_VERTEX_SHADER, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
     }
     passMark(v, c, s, "cull");
+    if (probeStep) {
+        gatherProbes(v, c, s, &scene->indirect);
+        passMark(v, c, s, "probes");
+    }
 
     runSwarms(v, c, s);
     if (background) {
@@ -4185,6 +4310,9 @@ static void vkFree(ArtfRenderer* r) {
         if (v->shadowPass) v->vkDestroyRenderPass(v->device, v->shadowPass, NULL);
         if (v->tracePipeline) v->vkDestroyPipeline(v->device, v->tracePipeline, NULL);
         if (v->reflectionTraced) v->vkDestroyPipeline(v->device, v->reflectionTraced, NULL);
+        if (v->probePipeline) v->vkDestroyPipeline(v->device, v->probePipeline, NULL);
+        bufferFree(v, &v->probesNow);
+        bufferFree(v, &v->probesNext);
         if (v->traceShowPipeline) v->vkDestroyPipeline(v->device, v->traceShowPipeline, NULL);
         if (v->cutoutPipeline) v->vkDestroyPipeline(v->device, v->cutoutPipeline, NULL);
         if (v->layerListPipeline) v->vkDestroyPipeline(v->device, v->layerListPipeline, NULL);

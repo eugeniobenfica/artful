@@ -60,6 +60,9 @@ int main(int argc, char** argv) {
     SAVE("traceGuides", artfShaderTrace(&size, 1024, NULL, 0, true, false, false));
     SAVE("traceMore", artfShaderTrace(&size, 1024, NULL, 0, false, false, true));
     SAVE("traceMoreHardware", artfShaderTrace(&size, 1024, NULL, 0, true, true, true));
+    SAVE("probes", artfShaderProbes(&size, 1024, NULL, 0, false, false, true, 64, .9f));
+    SAVE("probesHardware", artfShaderProbes(&size, 1024, NULL, 0, true, false, true, 64, .9f));
+    SAVE("probesMoreThroughWalls", artfShaderProbes(&size, 1024, NULL, 0, true, true, false, 100, .5f));
     SAVE("skin", artfShaderSkin(&size));
     SAVE("swarm", artfShaderSwarm(&size));
     SAVE("meshletCull", artfShaderMeshletCull(&size, ARTF_CULL_ALL));
@@ -94,6 +97,7 @@ int main(int argc, char** argv) {
     SAVE("graphFragmentTraced", artfShaderSceneFragment(&size, 1024, true, scene->graphs.items, 1, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_TRACED));
     SAVE("graphFragmentPlainTraced", artfShaderSceneFragment(&size, 1024, false, scene->graphs.items, 1, 0, ARTF_SHADER_TRACED | ARTF_SHADER_RAY_QUERY));
     SAVE("graphReflectionTraced", artfShaderPostReflectionTraced(&size, 1024, scene->graphs.items, 1, true));
+    SAVE("graphProbes", artfShaderProbes(&size, 1024, scene->graphs.items, 1, false, true, true, 64, .9f));
     SAVE("graphFragmentMore", artfShaderSceneFragment(&size, 1024, true, scene->graphs.items, 1, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_COAT | ARTF_SHADER_SHAPES | ARTF_SHADER_SOFT));
     artfSceneFree(scene);
     SAVE("shadowVertex", artfShaderShadowVertex(&size));

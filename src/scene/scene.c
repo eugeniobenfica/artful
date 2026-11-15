@@ -1169,7 +1169,9 @@ void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc) {
     ArtfIndirect* g = &s->indirect;
     artfFree(g->probes);
     artfFree(g->next);
+    const uint32_t serial = g->serial + 1;
     memset(g, 0, sizeof *g);
+    g->serial = serial;
     if (!desc) return;
     g->desc = *desc;
     static const int start[3] = {8, 4, 8};
