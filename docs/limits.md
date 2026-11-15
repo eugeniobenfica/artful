@@ -123,13 +123,17 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   counts as large.
 - A terrain's layers are a material in C, with one set of texture coordinates; what is scattered over it is placed
   once, and does not follow if the heights change.
-- On the GPU, turning probes, their walls, fog that light goes through, soft shadows, a view, the first material past
-  glTF's core or the first light with a shape or a profile on or off after the first frame makes the scene's pixel
-  shaders again on a thread of their own: frames go on with the shaders they had, without that feature (or still with
-  it, when it was turned off) for as long as making them takes, a few frames, and `artfRendererWarm` waits for them.
-  Shadows from rays, a program's new materials in C, and the tracing shader are made before the frame that asks, which
-  waits for the compiler (not for the GPU); so does turning temporal antialiasing or motion blur on or off, for its
-  passes and pipelines.
+- On the GPU, turning probes, their walls, fog that light goes through, soft shadows, shadows from rays, a view, the
+  first material past glTF's core, the first light with a shape or a profile, temporal antialiasing or motion blur on or
+  off after the first frame, adding a material in C, or starting to trace makes what they need on a thread of its own
+  (the scene's pixel shaders, its passes, the tracing shader, reflections from rays): frames go on with what they had
+  for as long as making it takes, a few frames, and `artfRendererWarm` waits for it. Until then a frame is drawn without
+  the feature (or still with it, when it was turned off): shadows from rays are the maps' (with no maps, there are
+  none), temporal antialiasing and motion blur are off, tracing is rasterized, and reflections from rays are the
+  screen's. A new material in C is drawn by its material's own values (its color, texture, roughness, metal and
+  emission), as without its graph, in the tracing shader too. The frame that takes new passes (temporal antialiasing or
+  motion blur) waits for the GPU, to make its targets again. A scene other than the one whose materials in C the shaders
+  were made for has its own made before its frame, which waits for the compiler.
 - Decals are tested against each drawn pixel, all of those in view: dozens are cheap, hundreds cost. They go on what is
   solid, not on what blends, and read one mipmap, chosen for the box's distance.
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual

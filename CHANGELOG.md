@@ -29,6 +29,19 @@
   with the device idle. `artful-render --scene crowd --figures n` takes fewer figures: with `--traced-shadows` and
   `ARTFUL_FEATURES=-lod`, a frame of 50 took 46 ms and takes 4.8, one of 200 took 120 and takes 15 (best of three;
   static scenes as they were). CPU frames are the same bytes.
+- **Nothing a feature asks for is compiled in the frame** (Vulkan): shadows from rays, a new material in C, the tracing
+  shader (and the filter's), reflections from rays, and temporal antialiasing or motion blur (the scene's passes and
+  what is drawn in them) are made on threads of their own after the first frame, as the pixel shaders' other variants
+  already were. Until they are made, frames go on with what is there: the shadow maps, the material by its own values
+  (its color, texture, roughness, metal and emission, as without its graph), the frame rasterized, reflections from the
+  screen, no antialiasing over time or blur. `artfRendererWarm` waits for all of them, and the next frame makes before
+  it draws whatever is still missing, so that it is the frame that making them first would have drawn
+  (`backends/pipelinesAhead` checks it, byte for byte). The worst frame on turning each on, with the driver's cache
+  cold (Radeon RX 9060 XT, 320 x 200, the machine otherwise quiet): shadows from rays 0.8 to 1.2 s to 0.2 ms, a
+  material in C 0.3 s to 2 ms, tracing 0.15 to 0.2 s to 0.2 ms, temporal antialiasing 0.4 to 0.8 s to 0.5 ms, motion
+  blur 0.4 to 0.5 s to 1.2 ms; the frame that takes them then does what a first frame of the feature did besides
+  compiling (the trees rays walk, the targets made again after waiting for the GPU), 15 to 40 ms here, and compiles
+  nothing. The pipeline cache is the one the device always had, in memory from the first frame to the last.
 - **The shading model written once** (internal): `src/shading/shading.inc` holds its formulas (Schlick's fifth power
   and Fresnel, the coat's, what a surface reflects head on, Trowbridge and Reitz's distribution drawn out or not, Smith's
   visibility, a light's lobe from the halfway vector, the mirror term from all around, the sky and the ground, Charlie's

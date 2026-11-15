@@ -50,8 +50,9 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* options);
  * refuses. */
 extern int artfVulkanSubmitsLeft;
 extern bool artfVulkanRefuseSwapchain;
-/* For tests: every new variant of the scene's pixel shaders is made before the frame that asks for it, as on the
- * first frame, never on a thread of its own while frames go on without it. */
+/* For tests: every new pipeline a feature asks for (the scene's pixel shaders' variants, shadows from rays, a
+ * program's materials, the tracing shader, temporal antialiasing and motion blur) is made before the frame that asks
+ * for it, as on the first frame, never on a thread of its own while frames go on without it. */
 extern bool artfVulkanShadersWait;
 /* For tests: light that bounced gathered on the CPU's workers and sent up, as before the GPU gathered it itself (read
  * as each frame starts); and what the GPU's probes hold now, ARTF_PROBE_FLOATS of each (false: none, or not that many). */
@@ -59,6 +60,8 @@ extern bool artfVulkanProbesOnCpu;
 bool artfVulkanProbesRead(ArtfRenderer* r, float* out, size_t floats);
 /* For tests: bottom levels the ray tracing hardware built, [0], and refitted, [1], since the program began. */
 extern uint64_t artfVulkanBottomLevels[2];
+/* For tests: the frames temporal antialiasing has taken so far (each moves the place within the pixel). */
+uint32_t artfVulkanTemporalFrames(const ArtfRenderer* r);
 
 /* NULL when Vulkan cannot run here. */
 ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* options);

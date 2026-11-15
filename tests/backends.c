@@ -195,8 +195,119 @@ void testShadersAhead(void) {
     artfSceneFree(s);
     artfRendererFree(r);
 }
+
+/* What else a feature turned on mid-run asks Vulkan to make: shadows from rays, a material of the program's own, the
+ * tracing shader, temporal antialiasing and motion blur, with their passes. Made off the frame, frames go on until
+ * they are made: the first after asking is the one before it (with the shadow maps, rasterized, without antialiasing
+ * over time or blur), or for the material, the one its own values without the graph make; after artfRendererWarm, the
+ * frame is the one that waiting for them makes. The longest frame after asking, each way. */
+enum { AHEAD_TRACED, AHEAD_MATERIAL, AHEAD_TRACING, AHEAD_TEMPORAL, AHEAD_BLUR, AHEAD_COUNT };
+
+/* plain: the material without its graph */
+static void aheadTurnOn(ArtfScene* s, int k, bool plain) {
+    if (k == AHEAD_TRACED) {
+        const ArtfShadowDesc traced = {.resolution = 1024, .traced = true};
+        artfSceneSetShadows(s, &traced);
+    } else if (k == AHEAD_MATERIAL) {
+        ArtfMaterialDesc d = {artfVec3(.2f, .5f, .9f), 0, 0, .7f, artfVec3(0, 0, 0)};
+        if (!plain) {
+            ArtfGraph* g = artfGraphNew();
+            artfGraphSetOutput(g, ARTF_OUT_COLOR, stripes(g, 4.f));
+            d.graph = artfSceneAddGraph(s, g);
+            artfGraphFree(g);
+        }
+        addAt(s, addSquare(s, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu), artfSceneAddMaterial(s, &d), 1.5f, 1, 2, 1.5f);
+    } else if (k == AHEAD_TRACING) {
+        const ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 0, 2};
+        artfSceneSetTrace(s, &rays);
+    } else {
+        const ArtfPostDesc post = {.screen.temporal = k == AHEAD_TEMPORAL, .lens.motionBlur = k == AHEAD_BLUR ? .5f : 0};
+        artfSceneSetPost(s, &post);
+    }
+}
+
+typedef struct Ahead {
+    double longest;    /* from asking, to artfRendererWarm when ahead */
+    double taking;     /* ahead: the frame after artfRendererWarm, that takes what was made */
+    uint32_t temporal; /* the frames temporal antialiasing took */
+} Ahead;
+
+/* ahead: frames go on while what the feature asks for is made (standIn: the first, or the frame before asking), then
+ * artfRendererWarm and three frames. Otherwise made before the frame that asks, and as many frames from there as ahead
+ * took (three, or until temporal antialiasing has taken as many); plain: aheadTurnOn's. */
+static bool aheadRun(int k, bool ahead, bool plain, uint32_t* frame, uint32_t* standIn, Ahead* a) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    o.hdr = true;
+    ArtfRenderer* r = artfRendererNew(&o);
+    if (!r) return false;
+    ArtfScene* s = shadowScene();
+    const ArtfShadowDesc maps = {.resolution = 1024};
+    artfSceneSetShadows(s, &maps);
+    for (int i = 0; i < 3; ++i) CHECK(artfRendererDraw(r, s));
+    uint32_t* before = artfMalloc(W * H * 4);
+    CHECK(artfRendererReadPixels(r, before));
+    artfVulkanShadersWait = !ahead;
+    aheadTurnOn(s, k, plain);
+    a->longest = 0;
+    for (int i = 0; i < (ahead ? 4 : 1); ++i) {
+        const double t0 = artfNowMs();
+        CHECK(artfRendererDraw(r, s)); /* (frames go on) */
+        a->longest = fmax(a->longest, artfNowMs() - t0);
+        /* (the first frame after asking cannot have taken what it started) */
+        if (ahead && !i) {
+            CHECK(artfRendererReadPixels(r, standIn));
+            if (k != AHEAD_MATERIAL) CHECK(!memcmp(before, standIn, W * H * 4));
+        }
+    }
+    if (ahead) {
+        artfRendererWarm(r);
+        const double t0 = artfNowMs();
+        CHECK(artfRendererDraw(r, s));
+        a->taking = artfNowMs() - t0;
+        CHECK(artfRendererDraw(r, s));
+        CHECK(artfRendererDraw(r, s));
+        a->temporal = artfVulkanTemporalFrames(r);
+    } else if (a->temporal) {
+        while (artfVulkanTemporalFrames(r) < a->temporal) CHECK(artfRendererDraw(r, s));
+    } else {
+        CHECK(artfRendererDraw(r, s));
+        CHECK(artfRendererDraw(r, s));
+    }
+    CHECK(artfRendererReadPixels(r, frame));
+    artfVulkanShadersWait = true;
+    artfFree(before);
+    artfSceneFree(s);
+    artfRendererFree(r);
+    return true;
+}
+
+void testPipelinesAhead(void) {
+    static const char* const names[AHEAD_COUNT] = {"shadows from rays", "a material of the program's own", "tracing", "temporal antialiasing", "motion blur"};
+    uint32_t* waited = artfMalloc(W * H * 4);
+    uint32_t* ahead = artfMalloc(W * H * 4);
+    uint32_t* standIn = artfMalloc(W * H * 4);
+    for (int k = 0; k < AHEAD_COUNT; ++k) {
+        Ahead a, w;
+        /* (ahead first: the driver's own cache is colder for it) */
+        if (!aheadRun(k, true, false, ahead, standIn, &a)) break;
+        w.temporal = a.temporal;
+        aheadRun(k, false, false, waited, NULL, &w);
+        printf("%s turned on: the longest frame %.2f ms made off the frame (%.2f taking them), %.2f ms made before it\n", names[k], a.longest, a.taking, w.longest);
+        CHECK(!memcmp(waited, ahead, W * H * 4));
+        if (k == AHEAD_MATERIAL) {
+            /* until its shader is made, the material is drawn by its own values, as without its graph */
+            aheadRun(k, false, true, waited, NULL, &w);
+            CHECK(!memcmp(waited, standIn, W * H * 4));
+            CHECK(memcmp(ahead, standIn, W * H * 4));
+        }
+    }
+    artfFree(waited);
+    artfFree(ahead);
+    artfFree(standIn);
+}
 #else
 void testLostDevice(void) {}
 void testRefusedSwapchain(void) {}
 void testShadersAhead(void) {}
+void testPipelinesAhead(void) {}
 #endif

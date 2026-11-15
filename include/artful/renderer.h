@@ -115,10 +115,12 @@ void artfRendererSetOverlay(ArtfRenderer* r, const ArtfOverlay* overlay);
  * device is lost, and the renderer must be freed; the scene can go to a new one. */
 bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene);
 
-/* Vulkan makes the pixel shaders that a feature turned on after the first frame asks for (probes, fog's grid, a coat,
- * soft shadows, lights with a shape, a view) on a thread of its own, and frames go on without the feature until they
- * are made, a few frames later. This waits for those a draw has started, so that the next draw has them: for a
- * picture that must show the feature from the first frame that can. Software: nothing to wait for. */
+/* Vulkan makes what a feature turned on after the first frame asks for (the pixel shaders for probes, fog's grid, a
+ * coat, soft shadows, shadows from rays, lights with a shape, a view or a new material in C; the passes for temporal
+ * antialiasing and motion blur; the tracing shader; reflections from rays) on threads of its own, and frames go on
+ * without the feature until it is made, a few frames later. This waits for what a draw has started, and the next draw
+ * makes what is still missing before it draws, so that it has everything the scene asks for, as if made before the
+ * frame: for a picture that must show the feature from the first frame that can. Software: nothing to wait for. */
 void artfRendererWarm(ArtfRenderer* r);
 
 /* The last frame in dst, width * height BGRA pixels (after waiting for it, on a GPU). */

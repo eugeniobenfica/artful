@@ -478,15 +478,29 @@ taken still holds registers, and fewer pixels run at once for it: with all of th
 When one of them is turned on or off, the shaders are made again, as they are for new materials in C.
 
 Making them takes the driver a third of a second, cold, and no frame waits for that. After the first frame, a change of
-variant (probes, their walls, the fog's grid, a coat, soft shadows, shapes, a view) starts a thread that makes the five
-pipelines the scene's two pixel shaders go into (`shaderJobStart`), from a copy of the materials in C; frames go on
-with the pipelines they have, and so without the feature, and the frame after it is done takes the new ones. What can
-only be drawn with its variant (shadows from rays, which take the sixteen lights' maps away) or depends on the scene's
-materials in C is made before its frame, as the first frame's are. Either way an old pipeline is not destroyed at once,
-which would need the device idle, but when the slot that drew with it last has been waited for (`pipelineRetire`). A
-feature turned on mid-run thus shows a few frames late; `artfRendererWarm` waits for what is being made, and the tests
-make every variant before its frame (`artfVulkanShadersWait`). Turning soft shadows on in a scene of 100 spheres at
-1920 x 1080 took its frame 360 ms, with the driver's cache cold, and 2 ms warm; now 0.7 ms either way.
+variant (probes, their walls, the fog's grid, a coat, soft shadows, shapes, a view, shadows from rays), a new material
+in C, or turning temporal antialiasing or motion blur on or off starts a thread (`shaderJobStart`) that makes, from a
+copy of the materials in C, the pipelines the scene's two pixel shaders go into (and the layers' lists', if they are
+there); for the surface's second word, which only those two passes need, also the scene's five passes and the four
+pipelines drawn behind the scene. The tracing shader (with the filter's six, the first time) and reflections from rays
+have a thread of their own each (`computeJobStart`). Until it is done, `vkDraw` gives `vkDrawAs` the scene as the
+pipelines there can draw it, and puts it back after: shadows from rays as the pixel shaders have them (the maps until
+the traced variant comes), no temporal antialiasing or motion blur in passes that do not follow motion, the frame
+rasterized until the tracing shader comes, and reflections from the screen until those from rays do. A new material in
+C has no branch yet in the shaders there, so they draw it by its material's own values, which its graph starts from;
+the tracing shader there does too, and what it gathered starts over when the new one comes. The frame after a thread
+is done takes what it made (`pipelinesTake`); new passes need the device idle, to destroy the old ones and make the
+targets again, as they always did. The first frame makes what it asks for before it draws, as does the one after
+`artfRendererWarm` (which waits for the threads) and one whose scene is not the one the materials in C were made for.
+An old pipeline is not destroyed at once, which would need the device idle, but when the slot that drew with it last
+has been waited for (`pipelineRetire`). The driver's own cache is the device's `VkPipelineCache`, kept from the first
+frame to the last (and in a file, with `ArtfRendererOptions.pipelineCache`), which every thread makes into. A feature
+turned on mid-run thus shows a few frames late, and the tests make every pipeline before its frame
+(`artfVulkanShadersWait`). Turning soft shadows on in a scene of 100 spheres at 1920 x 1080 took its frame 360 ms, with
+the driver's cache cold, and 2 ms warm; now 0.7 ms either way. With the cache cold, turning on shadows from rays took
+its frame 0.8 to 1.2 s, a material in C 0.3, tracing 0.2, temporal antialiasing 0.4 to 0.8 and motion blur 0.4 to 0.5
+(`backends/pipelinesAhead`); now 2 ms at most, and the frame that takes them 15 to 40, compiling nothing (the trees rays
+walk, the targets again).
 
 ## Particles and terrain
 

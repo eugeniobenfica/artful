@@ -87,6 +87,7 @@ void testVulkan(void);
 void testLostDevice(void);
 void testRefusedSwapchain(void);
 void testShadersAhead(void);
+void testPipelinesAhead(void);
 /* layers.c: colors, layers, alpha, samples and decals */
 void testColorData(void);
 void testLayers(ArtfBackend backend);
