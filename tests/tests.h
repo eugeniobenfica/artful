@@ -52,6 +52,8 @@ ArtfRendererOptions options(ArtfBackend backend, int threads, bool portable);
 void setCamera(ArtfScene* s, float x, float y, float z, float tx, float ty, float tz);
 ArtfScene* richScene(void);
 double differentShare(const uint32_t* a, const uint32_t* b, int threshold);
+/* What a screen shows of light, as a byte, rounded: the sRGB curve itself, not the library's arithmetic for it. */
+int shownByte(double light);
 ArtfScene* plainScene(void);
 ArtfMaterial whiteMaterial(ArtfScene* s);
 ArtfMesh addSquare(ArtfScene* s, uint32_t a, uint32_t b, uint32_t c, uint32_t d);
@@ -84,6 +86,7 @@ ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o); /* as on a dev
 /* ---- the tests, by area ---- */
 /* metrics.c: what pictures are measured with */
 void testFlip(void);
+void testSrgb(void);
 /* core.c: the mesh's data, the CPU's promises, levels of detail, occlusion, handles and lifetimes */
 void testPacking(void);
 void testMeshlets(void);

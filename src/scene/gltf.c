@@ -641,8 +641,8 @@ static void makeNormals(ArtfVertex* v, uint32_t count, const uint32_t* indices, 
 }
 
 static uint32_t byteOf(float light) {
-    /* (a color in a file is light; Artful's bytes hold its square root) */
-    return (uint32_t)(sqrtf(artfClampf(light, 0, 1)) * 255.f + .5f);
+    /* (a color in a file is light; Artful's bytes are sRGB) */
+    return (uint32_t)(artfSrgbEncode(artfClampf(light, 0, 1)) * 255.f + .5f);
 }
 
 /* Which coordinates a primitive's textures read, and how KHR_texture_transform moves them: Artful's materials

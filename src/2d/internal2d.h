@@ -4,6 +4,7 @@
 
 #include "artful/2d.h"
 #include "core/threads.h"
+#include "core/color.h"
 
 #define TILE2D 64          /* a tile of the frame, a side: what a thread draws in its cache */
 #define MIPS2D 16
@@ -134,7 +135,7 @@ static inline float artf2DCoverAt(const Sprite2D* sp, float x, float y, float so
 
 /* ---- numbers that give the same bits everywhere ---- */
 
-extern float artf2DSquare[256]; /* a byte to the light it holds: (i / 255)^2 */
+extern float artf2DLight[256]; /* a byte to the light it holds: sRGB (artfSrgbDecode) */
 void artf2DTables(void);
 /* atan2, within 1e-5, of additions, multiplications and a division */
 static inline float artf2DAtan2(float y, float x) {
@@ -259,7 +260,7 @@ void artf2DPolygonRow(const Frame2D* f, const Item2D* it, int y, int x0, int x1,
 /* post2d.c */
 void artf2DBloom(Frame2D* f, float amount, float radius, ArtfPool* pool);
 
-/* A pixel out to bytes: exposure, the tone curve, the square root of light, premultiplied. */
+/* A pixel out to bytes: exposure, the tone curve, sRGB, premultiplied. */
 static inline void artf2DTone(const Frame2D* f, const float rgba[4], uint32_t* out) {
     float v[3];
     /* (light where nothing covers, as bloom leaves: as opaque as it is bright) */
@@ -275,7 +276,7 @@ static inline void artf2DTone(const Frame2D* f, const float rgba[4], uint32_t* o
         x = x > 0 ? artfMinf(x, 65504.f) : 0.f; /* (and not a number: nothing) */
         if (f->tone == ARTF_TONE2D_ACES) x = x * (x * 2.51f + .03f) / (x * (x * 2.43f + .59f) + .14f);
         else if (f->tone == ARTF_TONE2D_REINHARD) x = x / (1.f + x);
-        v[c] = sqrtf(artfClampf(x, 0, 1));
+        v[c] = artfSrgbEncode(artfClampf(x, 0, 1));
     }
     uint32_t p = (uint32_t)(alpha * 255.f + .5f) << 24;
     for (int c = 0; c < 3; ++c) p |= (uint32_t)(v[c] * alpha * 255.f + .5f) << (16 - 8 * c);

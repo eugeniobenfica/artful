@@ -90,6 +90,12 @@ void flipSummary(void) {
     flipLog = NULL;
 }
 
+int shownByte(double light) {
+    light = light < 0 ? 0 : light > 1 ? 1 : light;
+    const double shown = light <= .0031308 ? light * 12.92 : 1.055 * pow(light, 1 / 2.4) - .055;
+    return (int)(shown * 255.0 + .5);
+}
+
 /* Light that gives a surface's own color back: what is drawn is what was asked for. */
 ArtfScene* plainScene(void) {
     ArtfScene* s = artfSceneNew();
@@ -214,7 +220,7 @@ ArtfScene* bulbScene(float size) {
 }
 int greyCount(const uint32_t* f) {
     int n = 0;
-    for (int i = 0; i < W * H; ++i) n += CHANNEL(f[i], 8) > 25 && CHANNEL(f[i], 8) < 90;
+    for (int i = 0; i < W * H; ++i) n += CHANNEL(f[i], 8) > 25 && CHANNEL(f[i], 8) < 99; /* (light from .0096 to .125) */
     return n;
 }
 

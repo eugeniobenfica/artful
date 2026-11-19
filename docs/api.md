@@ -26,8 +26,8 @@ The headers say what each call does. This is the map, and the rules that hold fo
   out, something refused, shaders made for a feature turned on mid-run. The log says the same, as words.
 - **Structs grow.** Start from `artfRendererDefaults` and `artfMaterialDefaults`, or `= {0}`, and set fields by
   name. A vertex that is not zeroed must set `color`.
-- **Colors.** Materials, lights and fog are linear light. Bytes (textures, vertex colors, frames) are BGRA and
-  hold the square root of light. Frames and overlays are premultiplied; textures are not.
+- **Colors.** Materials, lights and fog are linear light. Bytes (textures, vertex colors, frames, the background) are
+  BGRA and sRGB, as pictures and screens are. Frames and overlays are premultiplied; textures are not.
 
 ## What 1.x will keep (proposed)
 

@@ -686,8 +686,8 @@ typedef struct ArtfLookDesc {
     ArtfVec3 midtones;      /* a pixel is of it (by its luminance: (1 - l)^2, 2 l (1 - l), l^2); 0, 0, 0: white */
     ArtfVec3 highlights;
     /* A look-up table of colors, as a .cube file has (artfLutDecodeCube): lutSize^3 RGB triples, red the fastest,
-     * applied last, between its points. What it takes is what a screen shows (each channel the square root of light,
-     * near enough to sRGB's). Copied by artfSceneSetPost. lutSize from 2 to 65; NULL: none. */
+     * applied last, between its points. What it takes is what a screen shows (sRGB, each channel). Copied by
+     * artfSceneSetPost. lutSize from 2 to 65; NULL: none. */
     const float* lut;
     int lutSize;
     float lutAmount;        /* how much of it: 0: all */

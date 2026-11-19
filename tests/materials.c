@@ -34,13 +34,13 @@ void testPhysical(ArtfBackend backend) {
         ArtfMaterial metal = artfSceneAddMaterial(s, &d);
         addAt(s, addSquare(s, 0, 0, 0, 0), metal, 0, 0, 0, 1);
         uint32_t p = middleOf(r, s, a, traced);
-        CHECK(near_(CHANNEL(p, 16), 255, 3) && near_(CHANNEL(p, 8), (int)(sqrtf(.5f) * 255.f), 3) && near_(CHANNEL(p, 0), (int)(sqrtf(.25f) * 255.f), 3));
+        CHECK(near_(CHANNEL(p, 16), 255, 3) && near_(CHANNEL(p, 8), shownByte(.5), 3) && near_(CHANNEL(p, 0), shownByte(.25), 3));
         /* and what is not metal, and black, reflects 4% of it */
         d.baseColor = artfVec3(0, 0, 0);
         d.metallic = 0;
         artfMaterialSet(s, metal, &d);
         p = middleOf(r, s, a, traced);
-        CHECK(near_(CHANNEL(p, 8), (int)(sqrtf(.04f) * 255.f), 3));
+        CHECK(near_(CHANNEL(p, 8), shownByte(.04), 3));
         artfSceneFree(s);
 
         /* a highlight, on black: the smoother, the brighter its peak */
@@ -93,7 +93,7 @@ void testPhysical(ArtfBackend backend) {
         d.occlusionMap = oneColor(s, 0xFF400000u); /* (a quarter open) */
         addAt(s, addPictureSquare(s), artfSceneAddMaterial(s, &d), 0, 0, 0, 1);
         p = middleOf(r, s, a, traced);
-        CHECK(near_(CHANNEL(p, 8), (int)(sqrtf(.25f) * 255.f), 4));
+        CHECK(near_(CHANNEL(p, 8), shownByte(.25), 4));
         artfSceneFree(s);
     }
     artfFree(a);
@@ -135,7 +135,7 @@ void testGraphs(ArtfBackend backend) {
         addAt(s, addSquare(s, 0, 0, 0, 0), m, 0, 0, 0, 1);
         artfMaterialSetParam(s, m, 1, .25f, 0, 0, 1);
         uint32_t p = middleOf(r, s, a, traced);
-        CHECK(near_(CHANNEL(p, 16), 128, 3) && CHANNEL(p, 8) == 0);
+        CHECK(near_(CHANNEL(p, 16), shownByte(.25), 3) && CHANNEL(p, 8) == 0);
         artfMaterialSetParam(s, m, 1, 0, 1, 0, 1);
         p = middleOf(r, s, a, traced);
         CHECK(CHANNEL(p, 16) == 0 && CHANNEL(p, 8) > 250);
@@ -150,7 +150,7 @@ void testGraphs(ArtfBackend backend) {
         artfGraphSetOutput(g, ARTF_OUT_EMISSIVE, artfExprVec(g, e, artfExprMul(g, c, c), artfExprNumber(g, 0)));
         addAt(s, addSquare(s, 0, 0, 0, 0), graphMaterial(s, g, ARTF_ALPHA_OPAQUE), 0, 0, 0, 1);
         p = middleOf(r, s, a, traced);
-        CHECK(near_(CHANNEL(p, 16), (int)(sqrtf(sinf(2.f)) * 255.f), 3) && near_(CHANNEL(p, 8), (int)(fabsf(cosf(2.f)) * 255.f), 3));
+        CHECK(near_(CHANNEL(p, 16), shownByte(sinf(2.f)), 3) && near_(CHANNEL(p, 8), shownByte(cosf(2.f) * cosf(2.f)), 3));
         artfSceneFree(s);
 
         /* alpha, roughness and metal, and a texture */

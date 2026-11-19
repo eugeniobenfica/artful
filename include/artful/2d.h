@@ -16,7 +16,7 @@
  * (artfScene2DSetTexture with premultiplied), redrawn each frame.
  *
  * The world's y goes down, as the frame's does. Angles are in radians, clockwise on the screen. Colors are linear
- * light; bytes hold the square root of light, as everywhere in Artful. */
+ * light; bytes are sRGB, as everywhere in Artful. */
 #ifndef ARTFUL_2D_H
 #define ARTFUL_2D_H
 

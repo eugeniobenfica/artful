@@ -137,8 +137,8 @@ ARTF_FORCE_INLINE void runLanes(const ArtfScene* s, const ArtfGraphData* g, cons
             for (int l = 0; l < lanes; ++l) {
                 float texel[4] = {1, 1, 1, 1};
                 if (t) artfTexelAtLevel(t, level, a[0][l], a[1][l], texel);
-                /* (bytes hold the square root of light) */
-                o[0][l] = texel[2] * texel[2]; o[1][l] = texel[1] * texel[1]; o[2][l] = texel[0] * texel[0]; o[3][l] = texel[3];
+                /* (bytes are sRGB) */
+                o[0][l] = artfSrgbDecode(texel[2]); o[1][l] = artfSrgbDecode(texel[1]); o[2][l] = artfSrgbDecode(texel[0]); o[3][l] = texel[3];
             }
             break;
         }

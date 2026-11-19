@@ -4,14 +4,11 @@
 
 #include <stdlib.h>
 
-float artf2DSquare[256];
+float artf2DLight[256];
 
 void artf2DTables(void) {
-    if (artf2DSquare[255] != 0) return;
-    for (int i = 0; i < 256; ++i) {
-        const float v = (float)i / 255.f;
-        artf2DSquare[i] = v * v;
-    }
+    if (artf2DLight[255] != 0) return;
+    for (int i = 0; i < 256; ++i) artf2DLight[i] = artfSrgbDecode((float)i / 255.f);
 }
 
 /* ---- handles ---- */
@@ -82,7 +79,7 @@ Texture2D* artf2DTexture(const ArtfScene2D* s, ArtfTexture2D h) {
 }
 
 static uint8_t byteOfLight(float v) {
-    const float b = sqrtf(artfClampf(v, 0, 1)) * 255.f + .5f;
+    const float b = artfSrgbEncode(artfClampf(v, 0, 1)) * 255.f + .5f;
     return (uint8_t)b;
 }
 
@@ -103,7 +100,7 @@ static void mipDown(Texture2D* t, int l) {
                     const float a = (float)(p >> 24) / 255.f;
                     for (int c = 0; c < 3; ++c) {
                         const int byte = p >> (16 - 8 * c) & 255;
-                        sum[c] += t->normalMap ? (float)byte : artf2DSquare[byte] * a;
+                        sum[c] += t->normalMap ? (float)byte : artf2DLight[byte] * a;
                     }
                     sum[3] += a;
                     ++n;
@@ -133,7 +130,7 @@ static void textureFill(Texture2D* t, const ArtfTexture2DDesc* d) {
             uint32_t p = d->pixels && d->width > 0 && d->height > 0 ? d->pixels[(size_t)y * stride + x] : 0xFFFFFFFFu;
             const uint32_t a = p >> 24;
             if (d->premultiplied && !d->normalMap && a < 255) {
-                /* (to straight: its bytes are the square root of light times alpha) */
+                /* (to straight: its bytes are sRGB times alpha) */
                 uint32_t q = a << 24;
                 for (int c = 0; c < 24; c += 8) {
                     const uint32_t v = a ? ((p >> c & 255) * 255 + a / 2) / a : 0;

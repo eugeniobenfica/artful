@@ -533,10 +533,13 @@ void testPictures(void) {
     ArtfScene* s = layeredScene();
     artfSceneSetBackgroundAlpha(s, 0);
     const uint64_t clear = pictureOf(s, true);
-    CHECK(rich == 0x818E1B446A10E12Bull);
-    CHECK(layered == 0x3A886E17A40AE14ull);
-    CHECK(smooth == 0x8DB1290E706CF72Full);
-    CHECK(clear == 0x3D52D43351D2EB2Full);
+    /* (since frames are sRGB; reviewed against those of the square root by FLIP: docs/plano-de-correcao.md, phase 2) */
+    const uint64_t want[4] = {0x9B8408C67FF5DA63ull, 0xA2F68670FEF44C6Full, 0xC63FC295153C1826ull, 0x9E6ED4F1676C0BB6ull};
+    const uint64_t got[4] = {rich, layered, smooth, clear};
+    for (int k = 0; k < 4; ++k) {
+        if (got[k] != want[k]) printf("picture %d: %016llx, where %016llx was\n", k, (unsigned long long)got[k], (unsigned long long)want[k]);
+        CHECK(got[k] == want[k]);
+    }
 }
 
 void testHandles(void) {

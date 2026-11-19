@@ -21,9 +21,9 @@ static inline void texel(const Texture2D* t, int level, int x, int y, float out[
         out[1] = (float)(p >> 8 & 255) * (2.f / 255.f) - 1.f;
         out[2] = (float)(p & 255) * (2.f / 255.f) - 1.f;
     } else {
-        out[0] = artf2DSquare[p >> 16 & 255] * a;
-        out[1] = artf2DSquare[p >> 8 & 255] * a;
-        out[2] = artf2DSquare[p & 255] * a;
+        out[0] = artf2DLight[p >> 16 & 255] * a;
+        out[1] = artf2DLight[p >> 8 & 255] * a;
+        out[2] = artf2DLight[p & 255] * a;
     }
     out[3] = a;
 }

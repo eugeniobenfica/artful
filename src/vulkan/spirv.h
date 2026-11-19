@@ -100,6 +100,13 @@ void spvKillIf(Spv* s, SpvId condition); /* a fragment shader leaves this pixel 
 void spvLoopMerge(Spv* s, SpvId merge, SpvId next);
 void spvBranchIf(Spv* s, SpvId condition, SpvId yes, SpvId no);
 
+/* core/color.h's arithmetic, a float at a time, in the same order: artfLog2Fast, artfExp2Fast, artfSrgbDecode and
+ * artfSrgbEncode (its polynomials). */
+SpvId spvLog2Fast(Spv* s, SpvId x);
+SpvId spvExp2Fast(Spv* s, SpvId x);
+SpvId spvSrgbDecode(Spv* s, SpvId shown);
+SpvId spvSrgbEncode(Spv* s, SpvId light);
+
 /* The module's words, the caller's (artfFree). */
 uint32_t* spvFinish(Spv* s, size_t* wordCount);
 

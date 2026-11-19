@@ -632,13 +632,13 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     for (int ch = 0; ch < 4; ++ch) {
         const int shift = ch == 3 ? 24 : 16 - ch * 8;
         float x = (float)(a->color >> shift & 255) * (1.f / 255.f), y = (float)(b->color >> shift & 255) * (1.f / 255.f), z = (float)(c->color >> shift & 255) * (1.f / 255.f);
-        if (ch < 3) { x *= x; y *= y; z *= z; }
+        if (ch < 3) { x = artfSrgbDecode(x); y = artfSrgbDecode(y); z = artfSrgbDecode(z); }
         color[ch] = x * wa + y * wb + z * wc;
     }
     float texel[4] = {1, 1, 1, 1};
     if (m->texture) artfTexelAt(&textures[m->texture], u, v, texel);
     float albedo[3];
-    for (int i = 0; i < 3; ++i) albedo[i] = m->baseColor[i] * texel[2 - i] * texel[2 - i] * color[i];
+    for (int i = 0; i < 3; ++i) albedo[i] = m->baseColor[i] * artfSrgbDecode(texel[2 - i]) * color[i];
     float metal = m->metallic * surface[0];
     out->rough = artfMaxf(m->roughness * surface[1], .045f);
     float graphAlpha = 1.f;
@@ -731,7 +731,7 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
             if (more->coatRoughnessMap) { artfTexelAt(&textures[more->coatRoughnessMap], u, v, texel); coatRough = artfMaxf(coatRough * texel[1], .045f); }
             if (more->sheenMap) {
                 artfTexelAt(&textures[more->sheenMap], u, v, texel);
-                for (int i = 0; i < 3; ++i) sheen[i] *= texel[2 - i] * texel[2 - i];
+                for (int i = 0; i < 3; ++i) sheen[i] *= artfSrgbDecode(texel[2 - i]);
             }
             if (more->sheenRoughnessMap) { artfTexelAt(&textures[more->sheenRoughnessMap], u, v, texel); sheenRough = artfMaxf(sheenRough * texel[3], .07f); }
             if (more->coatNormalMap) {

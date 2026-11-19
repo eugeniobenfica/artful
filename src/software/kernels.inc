@@ -374,6 +374,47 @@ V8_INLINE Lanes3 eyeLanes(const ArtfFrameData* frame, Lanes3 world) {
     return r;
 }
 
+/* artfLog2Fast and artfExp2Fast (core/color.h), eight lanes at a time: the same arithmetic in the same order. */
+V8_INLINE V8F gradeClamp(V8F v, V8F lo, V8F hi) { return v8fSelect(v8fLt(v, lo), v8fSelect(v8fGt(v, hi), v, hi), lo); }
+V8_INLINE V8F gradeLog2(V8F x) {
+    const V8I bits = v8fAsI(x);
+    const V8F e = v8fSub(v8iToF(v8iAnd(v8iShr(bits, 23), v8iSet(255))), v8fSet(127.f));
+    const V8F m = v8iAsF(v8iOr(v8iAnd(bits, v8iSet(0x7FFFFF)), v8iSet(0x3F800000)));
+    const V8F one = v8fSet(1.f), z = v8fDiv(v8fSub(m, one), v8fAdd(m, one)), z2 = v8fMul(z, z);
+    const V8F p = v8fAdd(one, v8fMul(z2, v8fAdd(v8fSet(.33333333f), v8fMul(z2, v8fAdd(v8fSet(.2f), v8fMul(z2, v8fSet(.14285714f)))))));
+    return v8fAdd(e, v8fMul(v8fMul(z, v8fSet(2.8853901f)), p));
+}
+V8_INLINE V8F gradeExp2(V8F x) {
+    x = gradeClamp(x, v8fSet(-100.f), v8fSet(100.f));
+    const V8I i = v8iSub(v8fToI(v8fAdd(x, v8fSet(128.f))), v8iSet(128));
+    const V8F u = v8fMul(v8fSub(x, v8iToF(i)), v8fSet(.69314718f));
+    V8F f = v8fAdd(v8fSet(.0083333333f), v8fMul(u, v8fSet(.0013888889f)));
+    f = v8fAdd(v8fSet(.041666668f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(.16666667f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(.5f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(1.f), v8fMul(u, f));
+    f = v8fAdd(v8fSet(1.f), v8fMul(u, f));
+    return v8fMul(f, v8iAsF(v8iShl(v8iAdd(i, v8iSet(127)), 23)));
+}
+/* artfSrgbDecode and artfSrgbEncode (core/color.h), eight lanes at a time: the same polynomials in the same order. */
+V8_INLINE V8F srgbDecodeLanes(V8F shown) {
+    static const float c[7] = ARTF_SRGB_DECODE;
+    V8F p = v8fSet(c[6]);
+    for (int k = 5; k >= 0; --k) p = v8fAdd(v8fMul(p, shown), v8fSet(c[k]));
+    return v8fSelect(v8fGt(shown, v8fSet(.04045f)), v8fMul(shown, v8fSet(1.f / 12.92f)), p);
+}
+V8_INLINE V8F srgbEncodeLanes(V8F light) {
+    static const float c[6] = ARTF_SRGB_ENCODE;
+    const V8F t = v8fSqrt(v8fSqrt(v8fMax(light, v8fSet(0.f))));
+    V8F p = v8fSet(c[5]);
+    for (int k = 4; k >= 0; --k) p = v8fAdd(v8fMul(p, t), v8fSet(c[k]));
+    return v8fSelect(v8fGt(light, v8fSet(.0031308f)), v8fMul(v8fMax(light, v8fSet(0.f)), v8fSet(12.92f)), p);
+}
+V8_INLINE Lanes3 srgbDecode3(Lanes3 c) {
+    const Lanes3 r = {srgbDecodeLanes(c.x), srgbDecodeLanes(c.y), srgbDecodeLanes(c.z)};
+    return r;
+}
+
 /* The shading model (shading/shading.inc), in lanes: lanes... */
 #define S_FN(name) lanes##name
 #define S_DEF V8_INLINE
@@ -661,13 +702,12 @@ V8_INLINE V8F toneMap(V8F x) {
     return v8fMin(v8fDiv(top, bottom), v8fSet(1.f));
 }
 
-/* Linear light to a pixel: the frame's colors are the square root of light, which is close to what
- * screens expect and costs one instruction. The GPU does the same. */
+/* Linear light to a pixel: the frame's colors are sRGB, as screens show them. The GPU does the same. */
 V8_INLINE V8I packColor(Lanes3 c) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f), scale = v8fSet(255.f), half = v8fSet(.5f);
-    V8I r = v8fToI(v8fAdd(v8fMul(v8fSqrt(v8fMin(v8fMax(c.x, zero), one)), scale), half));
-    V8I g = v8fToI(v8fAdd(v8fMul(v8fSqrt(v8fMin(v8fMax(c.y, zero), one)), scale), half));
-    V8I b = v8fToI(v8fAdd(v8fMul(v8fSqrt(v8fMin(v8fMax(c.z, zero), one)), scale), half));
+    V8I r = v8fToI(v8fAdd(v8fMul(srgbEncodeLanes(v8fMin(v8fMax(c.x, zero), one)), scale), half));
+    V8I g = v8fToI(v8fAdd(v8fMul(srgbEncodeLanes(v8fMin(v8fMax(c.y, zero), one)), scale), half));
+    V8I b = v8fToI(v8fAdd(v8fMul(srgbEncodeLanes(v8fMin(v8fMax(c.z, zero), one)), scale), half));
     return v8iOr(v8iOr(b, v8iShl(g, 8)), v8iOr(v8iShl(r, 16), v8iSet((int32_t)0xFF000000u)));
 }
 
@@ -675,9 +715,9 @@ V8_INLINE V8I packColor(Lanes3 c) {
 V8_INLINE V8I packLayer(Lanes3 c, V8F alpha) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f), half = v8fSet(.5f);
     const V8F a = v8fMin(v8fMax(alpha, zero), one), scale = v8fMul(a, v8fSet(255.f));
-    V8I r = v8fToI(v8fAdd(v8fMul(v8fSqrt(v8fMin(v8fMax(c.x, zero), one)), scale), half));
-    V8I g = v8fToI(v8fAdd(v8fMul(v8fSqrt(v8fMin(v8fMax(c.y, zero), one)), scale), half));
-    V8I b = v8fToI(v8fAdd(v8fMul(v8fSqrt(v8fMin(v8fMax(c.z, zero), one)), scale), half));
+    V8I r = v8fToI(v8fAdd(v8fMul(srgbEncodeLanes(v8fMin(v8fMax(c.x, zero), one)), scale), half));
+    V8I g = v8fToI(v8fAdd(v8fMul(srgbEncodeLanes(v8fMin(v8fMax(c.y, zero), one)), scale), half));
+    V8I b = v8fToI(v8fAdd(v8fMul(srgbEncodeLanes(v8fMin(v8fMax(c.z, zero), one)), scale), half));
     return v8iOr(v8iOr(b, v8iShl(g, 8)), v8iOr(v8iShl(r, 16), v8iShl(v8fToI(v8fAdd(scale, half)), 24)));
 }
 
@@ -852,7 +892,7 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lan
     return out;
 }
 
-/* What a view shows of eight pixels (ArtfView), as light: the frame shows its square root. As the GPU's pixel shader,
+/* What a view shows of eight pixels (ArtfView), as light: the frame shows it by sRGB. As the GPU's pixel shader,
  * in the same order. who: of each pixel, what it is colored by (viewWho); lights: how many reach it. */
 static Lanes3 viewLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, const Lanes3* base, Lanes3 n, V8F rough, V8F metal, const Lanes3* around, const Lanes3* own, Lanes3 world,
                         const uint32_t* who, V8F lights) {
@@ -907,8 +947,7 @@ static Lanes3 viewLanes(const ArtfSoftFrame* f, const ArtfFrameData* frame, cons
         d.z = v8fLoad(out[2]);
         break;
     }
-    const Lanes3 light = {v8fMul(d.x, d.x), v8fMul(d.y, d.y), v8fMul(d.z, d.z)};
-    return light;
+    return srgbDecode3(d); /* (light, which the frame shows as d) */
 }
 
 /* The color of eight pixels. A light out of reach adds exactly nothing, so which lights are looked
@@ -938,9 +977,9 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         V8F texel = v8fSet(1.f);
         Lanes3 t = SAMPLE(texture, material->flags & ARTF_MATERIAL_BLEND ? &texel : NULL);
         alpha = v8fMul(alpha, texel);
-        albedo.x = v8fMul(albedo.x, v8fMul(t.x, t.x));
-        albedo.y = v8fMul(albedo.y, v8fMul(t.y, t.y));
-        albedo.z = v8fMul(albedo.z, v8fMul(t.z, t.z));
+        albedo.x = v8fMul(albedo.x, srgbDecodeLanes(t.x));
+        albedo.y = v8fMul(albedo.y, srgbDecodeLanes(t.y));
+        albedo.z = v8fMul(albedo.z, srgbDecodeLanes(t.z));
     }
     if (colored) {
         albedo.x = v8fMul(albedo.x, tint.x);
@@ -988,9 +1027,9 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         if (more->coatRoughnessMap) coatRough = v8fMax(v8fMul(coatRough, SAMPLE(&textures[more->coatRoughnessMap], NULL).y), v8fSet(.045f));
         if (more->sheenMap) {
             const Lanes3 t = SAMPLE(&textures[more->sheenMap], NULL);
-            sheenColor.x = v8fMul(sheenColor.x, v8fMul(t.x, t.x));
-            sheenColor.y = v8fMul(sheenColor.y, v8fMul(t.y, t.y));
-            sheenColor.z = v8fMul(sheenColor.z, v8fMul(t.z, t.z));
+            sheenColor.x = v8fMul(sheenColor.x, srgbDecodeLanes(t.x));
+            sheenColor.y = v8fMul(sheenColor.y, srgbDecodeLanes(t.y));
+            sheenColor.z = v8fMul(sheenColor.z, srgbDecodeLanes(t.z));
         }
         if (more->sheenRoughnessMap) {
             V8F texel = one;
@@ -1061,9 +1100,9 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
             V8F texel = one;
             const Lanes3 c = sampleTexture(t->pixels + t->offsets[level], artfMaxi(t->width >> level, 1), artfMaxi(t->height >> level, 1), v8fAdd(lx, half), v8fAdd(lz, half), &texel);
             const V8F cover = v8fSelect(in, zero, v8fMul(v8fMul(texel, v8fSet(d->opacity)), v8fMul(facing, fade)));
-            albedo.x = v8fAdd(albedo.x, v8fMul(v8fSub(v8fMul(v8fSet(d->color[0]), v8fMul(c.x, c.x)), albedo.x), cover));
-            albedo.y = v8fAdd(albedo.y, v8fMul(v8fSub(v8fMul(v8fSet(d->color[1]), v8fMul(c.y, c.y)), albedo.y), cover));
-            albedo.z = v8fAdd(albedo.z, v8fMul(v8fSub(v8fMul(v8fSet(d->color[2]), v8fMul(c.z, c.z)), albedo.z), cover));
+            albedo.x = v8fAdd(albedo.x, v8fMul(v8fSub(v8fMul(v8fSet(d->color[0]), srgbDecodeLanes(c.x)), albedo.x), cover));
+            albedo.y = v8fAdd(albedo.y, v8fMul(v8fSub(v8fMul(v8fSet(d->color[1]), srgbDecodeLanes(c.y)), albedo.y), cover));
+            albedo.z = v8fAdd(albedo.z, v8fMul(v8fSub(v8fMul(v8fSet(d->color[2]), srgbDecodeLanes(c.z)), albedo.z), cover));
             if (d->roughness > 0) rough = v8fAdd(rough, v8fMul(v8fSub(v8fSet(d->roughness), rough), cover));
         }
     }
@@ -1519,12 +1558,11 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
         s->uv[i][0] = artfHalfToFloat(pv->u);
         s->uv[i][1] = artfHalfToFloat(pv->v);
         if (s->colored) {
-            /* (squared, as a texture's texels are) */
+            /* (sRGB, as a texture's texels are) */
             const uint32_t word = mesh->colors[mesh->meshletVertices[l->vertexOffset + li]];
-            const float r = (float)(word >> 16 & 255) * (1.f / 255.f), g = (float)(word >> 8 & 255) * (1.f / 255.f), b = (float)(word & 255) * (1.f / 255.f);
-            s->col[i][0] = r * r;
-            s->col[i][1] = g * g;
-            s->col[i][2] = b * b;
+            s->col[i][0] = artfSrgbDecode((float)(word >> 16 & 255) * (1.f / 255.f));
+            s->col[i][1] = artfSrgbDecode((float)(word >> 8 & 255) * (1.f / 255.f));
+            s->col[i][2] = artfSrgbDecode((float)(word & 255) * (1.f / 255.f));
             s->col[i][3] = (float)(word >> 24) * (1.f / 255.f);
         }
     }
@@ -1770,7 +1808,7 @@ V8_INLINE V8I backgroundHash(V8I x, V8I y, V8I z) {
 V8_INLINE V8F backgroundToneMap(V8F x) {
     const V8F top = v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.51f)), v8fSet(.03f)));
     const V8F bottom = v8fAdd(v8fMul(x, v8fAdd(v8fMul(x, v8fSet(2.43f)), v8fSet(.59f))), v8fSet(.14f));
-    return v8fSqrt(v8fMin(v8fDiv(top, bottom), v8fSet(1.f)));
+    return srgbEncodeLanes(v8fMin(v8fDiv(top, bottom), v8fSet(1.f)));
 }
 
 /* A tile's background: the light with its bloom, tone mapped. Glows fade over more pixels than a byte
@@ -1851,9 +1889,9 @@ static void postFromBytes(uint32_t* c, int count) {
         const V8I p = v8iLoad(c + i);
         const V8F a = v8fMul(v8iToF(v8iShr(p, 24)), inverse);
         const V8F r = v8fMul(v8iToF(v8iAnd(v8iShr(p, 16), byte)), inverse), g = v8fMul(v8iToF(v8iAnd(v8iShr(p, 8), byte)), inverse), b = v8fMul(v8iToF(v8iAnd(p, byte)), inverse);
-        /* (premultiplied in the frame's colors: light is their square, over alpha, times alpha) */
+        /* (premultiplied in the frame's colors: light is what they show over alpha, times alpha) */
         const V8F over = v8fDiv(v8fSet(1.f), v8fMax(a, v8fSet(1e-6f)));
-        const Lanes3 light = {v8fMul(v8fMul(r, r), over), v8fMul(v8fMul(g, g), over), v8fMul(v8fMul(b, b), over)};
+        const Lanes3 light = {v8fMul(srgbDecodeLanes(v8fMul(r, over)), a), v8fMul(srgbDecodeLanes(v8fMul(g, over)), a), v8fMul(srgbDecodeLanes(v8fMul(b, over)), a)};
         v8iStore(c + i, pack9e5(light));
         v8fStore((float*)(c + ARTF_POST_ALPHA + i), a);
         v8iStore(c + ARTF_POST_SURFACE + i, v8iSet(0));
@@ -2169,7 +2207,7 @@ static void environmentFill(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int o
                     v *= exposure;
                     v = v * (v * 2.51f + .03f) / (v * (v * 2.43f + .59f) + .14f);
                 }
-                bits |= (uint32_t)(sqrtf(artfClampf(v, 0, 1)) * alpha * 255.f + .5f) << (16 - 8 * k);
+                bits |= (uint32_t)(artfSrgbEncode(artfClampf(v, 0, 1)) * alpha * 255.f + .5f) << (16 - 8 * k);
             }
             w->color[y * ARTF_TILE + x] = bits;
         }
@@ -2282,10 +2320,10 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         backgroundFill(f, w, ox, oy, tw, th);
         if (f->post) postFromBytes(w->color, ARTF_TILE_PIXELS);
     } else if (f->post) {
-        /* the background as light: what shows, squared */
+        /* the background as light: what shows, as light */
         const float* bg = f->data.background;
         const float a = bg[3], over = a > 0 ? 1.f / a : 0.f;
-        const Lanes3 light = {v8fSet(bg[0] * bg[0] * over), v8fSet(bg[1] * bg[1] * over), v8fSet(bg[2] * bg[2] * over)};
+        const Lanes3 light = {v8fSet(artfSrgbDecode(bg[0] * over) * a), v8fSet(artfSrgbDecode(bg[1] * over) * a), v8fSet(artfSrgbDecode(bg[2] * over) * a)};
         const V8I packed = pack9e5(light);
         for (int i = 0; i < ARTF_TILE_PIXELS; i += 8) {
             v8iStore(w->color + i, packed);
@@ -2404,9 +2442,9 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
                     light[c] = exposure > 0 ? v * (v * 2.51f + .03f) / (v * (v * 2.43f + .59f) + .14f) : v;
                 }
                 const uint32_t top = (uint32_t)(alpha * 255.f + .5f) << 24
-                    | (uint32_t)(sqrtf(artfClampf(light[0], 0, 1)) * alpha * 255.f + .5f) << 16
-                    | (uint32_t)(sqrtf(artfClampf(light[1], 0, 1)) * alpha * 255.f + .5f) << 8
-                    | (uint32_t)(sqrtf(artfClampf(light[2], 0, 1)) * alpha * 255.f + .5f);
+                    | (uint32_t)(artfSrgbEncode(artfClampf(light[0], 0, 1)) * alpha * 255.f + .5f) << 16
+                    | (uint32_t)(artfSrgbEncode(artfClampf(light[1], 0, 1)) * alpha * 255.f + .5f) << 8
+                    | (uint32_t)(artfSrgbEncode(artfClampf(light[2], 0, 1)) * alpha * 255.f + .5f);
                 const uint32_t d = w->color[y * ARTF_TILE + x], rest = 255 - (top >> 24);
                 uint32_t t0 = (d & 255) * rest + 128, t1 = ((d >> 8) & 255) * rest + 128, t2 = ((d >> 16) & 255) * rest + 128, t3 = (d >> 24) * rest + 128;
                 t0 = (t0 + (t0 >> 8)) >> 8;
@@ -2470,27 +2508,6 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
 
 /* post.c's gradeShown, eight pixels at a time: the same arithmetic in the same order, each ternary a select, so that
  * what comes out is the same bits as one pixel at a time. */
-V8_INLINE V8F gradeClamp(V8F v, V8F lo, V8F hi) { return v8fSelect(v8fLt(v, lo), v8fSelect(v8fGt(v, hi), v, hi), lo); }
-V8_INLINE V8F gradeLog2(V8F x) {
-    const V8I bits = v8fAsI(x);
-    const V8F e = v8fSub(v8iToF(v8iAnd(v8iShr(bits, 23), v8iSet(255))), v8fSet(127.f));
-    const V8F m = v8iAsF(v8iOr(v8iAnd(bits, v8iSet(0x7FFFFF)), v8iSet(0x3F800000)));
-    const V8F one = v8fSet(1.f), z = v8fDiv(v8fSub(m, one), v8fAdd(m, one)), z2 = v8fMul(z, z);
-    const V8F p = v8fAdd(one, v8fMul(z2, v8fAdd(v8fSet(.33333333f), v8fMul(z2, v8fAdd(v8fSet(.2f), v8fMul(z2, v8fSet(.14285714f)))))));
-    return v8fAdd(e, v8fMul(v8fMul(z, v8fSet(2.8853901f)), p));
-}
-V8_INLINE V8F gradeExp2(V8F x) {
-    x = gradeClamp(x, v8fSet(-100.f), v8fSet(100.f));
-    const V8I i = v8iSub(v8fToI(v8fAdd(x, v8fSet(128.f))), v8iSet(128));
-    const V8F u = v8fMul(v8fSub(x, v8iToF(i)), v8fSet(.69314718f));
-    V8F f = v8fAdd(v8fSet(.0083333333f), v8fMul(u, v8fSet(.0013888889f)));
-    f = v8fAdd(v8fSet(.041666668f), v8fMul(u, f));
-    f = v8fAdd(v8fSet(.16666667f), v8fMul(u, f));
-    f = v8fAdd(v8fSet(.5f), v8fMul(u, f));
-    f = v8fAdd(v8fSet(1.f), v8fMul(u, f));
-    f = v8fAdd(v8fSet(1.f), v8fMul(u, f));
-    return v8fMul(f, v8iAsF(v8iShl(v8iAdd(i, v8iSet(127)), 23)));
-}
 V8_INLINE V8I gradeHash(V8I x) {
     x = v8iXor(x, v8iShr(x, 16));
     x = v8iMul(x, v8iSet((int32_t)0x7FEB352Du));
@@ -2501,6 +2518,16 @@ V8_INLINE V8I gradeHash(V8I x) {
 
 /* c: three planes of n colors as a screen shows them (n a multiple of 8, from 32-byte boundaries); at: the grain's
  * hash input of the first, those after it one more each. */
+static void shownLanes(float* const* c, int n, float contrast) {
+    const V8F zero = v8fSet(0.f), one = v8fSet(1.f), half = v8fSet(.5f), steeper = v8fSet(1.f + contrast);
+    for (int i = 0; i < n; i += 8)
+        for (int k = 0; k < 3; ++k) {
+            V8F s = srgbEncodeLanes(gradeClamp(v8fLoad(c[k] + i), zero, one));
+            if (contrast != 0) s = gradeClamp(v8fAdd(half, v8fMul(v8fSub(s, half), steeper)), zero, one);
+            v8fStore(c[k] + i, s);
+        }
+}
+
 static void gradeLanes(const ArtfFrameData* f, const float* lut, float* const* c, int n, uint32_t at) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
     const bool curves = f->grade2[0][3] > 0;
@@ -2835,4 +2862,4 @@ static void boxLanes(ArtfSoftPost* p, int y) {
     }
 }
 
-const ArtfKernels KERNELS = {KERNELS_NAME, KERNELS_SIMD, geometry, tile, depthTile, gradeLanes, temporalLanes, upscaleLanes, boxLanes};
+const ArtfKernels KERNELS = {KERNELS_NAME, KERNELS_SIMD, geometry, tile, depthTile, gradeLanes, shownLanes, temporalLanes, upscaleLanes, boxLanes};

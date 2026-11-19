@@ -78,12 +78,12 @@ void testLayers(ArtfBackend backend) {
     CHECK(a[mid] >> 24 == 255);
     artfSceneFree(s);
 
-    /* and it goes between vertices as light does: half of red and half of blue, in the frame's colors */
+    /* and it goes between vertices as light does: half of red and half of blue, as a screen shows them */
     s = plainScene();
     white = whiteMaterial(s);
     addAt(s, addSquare(s, 0xFFFF0000u, 0xFF0000FFu, 0xFF0000FFu, 0xFFFF0000u), white, 0, 0, 0, 1);
     drawInto(r, s, a);
-    CHECK(near_(CHANNEL(a[mid], 16), 180, 6) && near_(CHANNEL(a[mid], 0), 180, 6) && CHANNEL(a[mid], 8) == 0);
+    CHECK(near_(CHANNEL(a[mid], 16), shownByte(.5), 6) && near_(CHANNEL(a[mid], 0), shownByte(.5), 6) && CHANNEL(a[mid], 8) == 0);
     artfSceneFree(s);
 
     /* it multiplies the material, and its texture */

@@ -1,5 +1,6 @@
 /* artful — writing SPIR-V. A module's sections go into their own lists, and are joined at the end. */
 #include "vulkan/spirv.h"
+#include "core/color.h"
 
 enum {
     OP_Extension = 10, OP_ExtInstImport = 11, OP_MemoryModel = 14, OP_EntryPoint = 15, OP_ExecutionMode = 16, OP_Capability = 17,
@@ -225,6 +226,61 @@ SpvId spvGlsl2(Spv* s, uint32_t inst, SpvId type, SpvId a, SpvId b) {
     spvEmit(&s->code, SPV_OP_ExtInst, SPV_WORDS(type, id, s->glsl, inst, a, b));
     return id;
 }
+
+/* ---- core/color.h's arithmetic ---- */
+
+#define C_F(v) spvConstFloat(s, v)
+#define C_U(v) spvConstUint(s, v)
+#define F_ADD(a, b) spvOp2(s, SPV_OP_FAdd, s->floatType, a, b)
+#define F_SUB(a, b) spvOp2(s, SPV_OP_FSub, s->floatType, a, b)
+#define F_MUL(a, b) spvOp2(s, SPV_OP_FMul, s->floatType, a, b)
+#define F_DIV(a, b) spvOp2(s, SPV_OP_FDiv, s->floatType, a, b)
+
+SpvId spvLog2Fast(Spv* s, SpvId x) {
+    SpvId bits = spvOp1(s, SPV_OP_Bitcast, s->uintType, x);
+    SpvId e = F_SUB(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, bits, C_U(23)), C_U(255))), C_F(127.f));
+    SpvId m = spvOp1(s, SPV_OP_Bitcast, s->floatType, spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, bits, C_U(0x7FFFFFu)), C_U(0x3F800000u)));
+    SpvId z = F_DIV(F_SUB(m, C_F(1.f)), F_ADD(m, C_F(1.f))), z2 = F_MUL(z, z);
+    SpvId series = F_ADD(C_F(1.f), F_MUL(z2, F_ADD(C_F(.33333333f), F_MUL(z2, F_ADD(C_F(.2f), F_MUL(z2, C_F(.14285714f)))))));
+    return F_ADD(e, F_MUL(F_MUL(z, C_F(2.8853901f)), series));
+}
+
+SpvId spvExp2Fast(Spv* s, SpvId x) {
+    x = spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, x, C_F(-100.f)), C_F(100.f));
+    SpvId whole = spvGlsl1(s, SPV_GLSL_Floor, s->floatType, x);
+    SpvId u = F_MUL(F_SUB(x, whole), C_F(.69314718f));
+    SpvId f = C_F(.0013888889f);
+    const float c[6] = {.0083333333f, .041666668f, .16666667f, .5f, 1.f, 1.f};
+    for (int k = 0; k < 6; ++k) f = F_ADD(C_F(c[k]), F_MUL(u, f));
+    SpvId i = spvOp1(s, SPV_OP_ConvertFToS, s->intType, whole);
+    SpvId bits = spvOp2(s, SPV_OP_ShiftLeftLogical, s->uintType, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvOp2(s, SPV_OP_IAdd, s->intType, i, spvConstInt(s, 127))), C_U(23));
+    return F_MUL(f, spvOp1(s, SPV_OP_Bitcast, s->floatType, bits));
+}
+
+SpvId spvSrgbDecode(Spv* s, SpvId shown) {
+    static const float c[7] = ARTF_SRGB_DECODE;
+    SpvId p = C_F(c[6]);
+    for (int k = 5; k >= 0; --k) p = F_ADD(F_MUL(p, shown), C_F(c[k]));
+    SpvId above = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, shown, C_F(.04045f));
+    return spvSelect(s, s->floatType, above, p, F_MUL(shown, C_F(1.f / 12.92f)));
+}
+
+SpvId spvSrgbEncode(Spv* s, SpvId light) {
+    static const float c[6] = ARTF_SRGB_ENCODE;
+    SpvId floor0 = spvGlsl2(s, SPV_GLSL_FMax, s->floatType, light, C_F(0.f));
+    SpvId t = spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, floor0));
+    SpvId p = C_F(c[5]);
+    for (int k = 4; k >= 0; --k) p = F_ADD(F_MUL(p, t), C_F(c[k]));
+    SpvId above = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, light, C_F(.0031308f));
+    return spvSelect(s, s->floatType, above, p, F_MUL(floor0, C_F(12.92f)));
+}
+
+#undef C_F
+#undef C_U
+#undef F_ADD
+#undef F_SUB
+#undef F_MUL
+#undef F_DIV
 
 SpvId spvCompose(Spv* s, SpvId type, const SpvId* parts, uint32_t count) {
     uint32_t words[8] = {type, spvNewId(s)};

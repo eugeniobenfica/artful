@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Frames are sRGB** (the plan's phase 2.1): bytes, in and out, are what pictures and screens are, in place of the
+  square root of light. Two polynomials stand for the curve (`core/color.h`: degree six in what shows, degree five in
+  the fourth root of light), within 8e-6 of it, every byte back to itself (`metrics/srgb`), the same in C, in the
+  kernels' lanes and in the shaders (`spvSrgbDecode`, `spvSrgbEncode`, now in the SPIR-V writer for both libraries,
+  with `spvLog2Fast` and `spvExp2Fast`), so the CPU's bytes are still the same on every processor. Textures, vertex
+  colors, decals, sheen, materials in C, the background, a background pass, views, the tracer, the 2D renderer (its
+  table, its tone, its shaders) and glTF's vertex colors: all of it. A frame in floats is made sRGB eight pixels at a
+  time (`shownLanes`, a new kernel), with contrast, before it is graded. The pictures' hashes were made again
+  (`core/pictures`, `views/orthographic`, `post/temporalBytes`), each reviewed by FLIP against the square root's: from
+  .042 (`spheres`) to .13 (`outdoors`) of FLIP apart, mid-tones lighter as sRGB has them, the same on both backends,
+  which stay as far apart as they were (CPU against GPU: .0222 against .0225 on `spheres`). It costs: 14% on
+  `spheres` on one CPU thread, 7% on `heavy`, 2.5% less on `outdoors` in floats; 9% and 1% on the GPU. Metal's
+  shaders made again from the new SPIR-V (SPIRV-Cross of MSYS2, not yet through Apple's compiler); the 103 shaders pass
+  `spirv-val`. A picture's hash that does not match now prints what it is. **Not yet**: grading in a log space
+  (ACEScct); textures are still read between texels as bytes before they are made light.
+
 - **What 1.0 will hold to** (the plan's phase 1). **A mesh's handle has a generation**, in its top byte as an
   instance's has: places were used again already, and the handle of a mesh removed then stood for the one put in its
   place; now it stands for nothing, and calls with it say so (`streaming/meshHandles`: 20,000 meshes added and

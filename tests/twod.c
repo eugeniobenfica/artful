@@ -98,7 +98,7 @@ void test2DShapes(void) {
     half.unlit = true;
     ArtfSprite2D h = artfScene2DAddSprite(s, &half);
     artfRenderer2DDraw(r, s);
-    CHECK(near_(redAt(r, 25, 140), 180, 2) && redAt(r, 26, 140) == 255);
+    CHECK(near_(redAt(r, 25, 140), shownByte(.5), 2) && redAt(r, 26, 140) == 255);
     artfScene2DRemoveSprite(s, h);
     /* the triangle: its middle blue, outside it not; its slanted edges partly */
     CHECK(CHANNEL(pixelAt(r, 180, 65), 0) == 255 && CHANNEL(pixelAt(r, 165, 45), 0) == 0);
@@ -138,7 +138,7 @@ void test2DTextures(void) {
     artfSprite2DSet(s, sp, &d);
     artfRenderer2DDraw(r, s);
     const uint32_t mid = pixelAt(r, 64, 64);
-    CHECK(near_(CHANNEL(mid, 16), (int)(sqrtf(.5f) * 255.f + .5f), 3) && near_(CHANNEL(mid, 8), CHANNEL(mid, 16), 4));
+    CHECK(near_(CHANNEL(mid, 16), shownByte(.5), 3) && near_(CHANNEL(mid, 8), CHANNEL(mid, 16), 4));
     /* a half transparent texel from a frame (premultiplied): the same light as from a straight one */
     const uint32_t straight = 0x80FF0000u, premultiplied = 0x80800000u;
     ArtfTexture2DDesc a = {.pixels = &straight, .width = 1, .height = 1}, b = {.pixels = &premultiplied, .width = 1, .height = 1, .premultiplied = true};
@@ -153,7 +153,7 @@ void test2DTextures(void) {
     d.size = artfVec2(8, 8);
     artfScene2DAddSprite(s, &d);
     artfRenderer2DDraw(r, s);
-    CHECK(near_(redAt(r, 200, 64), (int)(sqrtf(.5f) * 255.f + .5f), 3));
+    CHECK(near_(redAt(r, 200, 64), shownByte(.5), 3));
     CHECK(artf2DTexture(s, d.texture)->levels == 7);
     artfScene2DFree(s);
     artfRenderer2DFree(r);
@@ -185,7 +185,7 @@ void test2DLights(void) {
     artfScene2DRemoveLight(s, light);
     artfScene2DSetAmbient(s, artfVec3(.25f, .25f, .25f));
     artfRenderer2DDraw(r, s);
-    CHECK(near_(redAt(r, 10, 10), 128, 1));
+    CHECK(near_(redAt(r, 10, 10), shownByte(.25), 1));
     artfScene2DSetAmbient(s, artfVec3(0, 0, 0));
 
     /* normal maps: a sprite facing left (x -1), lit from the left, then from the right */
@@ -348,7 +348,7 @@ void test2DPost(void) {
     artfScene2DSetPost(s, &p);
     addRect(s, 40, 40, 10, 10, artfVec3(1, 1, 1), true);
     artfRenderer2DDraw(r, s);
-    CHECK(near_(redAt(r, 40, 40), (int)(sqrtf(.5f / 1.5f) * 255.f + .5f), 1));
+    CHECK(near_(redAt(r, 40, 40), shownByte(.5 / 1.5), 1));
     artfScene2DFree(s);
     artfRenderer2DFree(r);
 }

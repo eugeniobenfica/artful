@@ -91,6 +91,7 @@ int main(int argc, char** argv) {
     artfVulkanShadersWait = true;
 #endif
     RUN("metrics/flip", testFlip());
+    RUN("metrics/srgb", testSrgb());
     RUN("core/packing", testPacking());
     RUN("core/meshlets", testMeshlets());
     RUN("core/instances", testInstances());

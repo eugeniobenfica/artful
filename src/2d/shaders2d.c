@@ -223,7 +223,7 @@ static SpvId tone(Sh* h, SpvId rgba, SpvId exposure, SpvId curve, SpvId swap) {
         SpvId aces = DIV_F(MUL_F(x, ADD_F(MUL_F(x, FLOAT(2.51f)), FLOAT(.03f))), ADD_F(MUL_F(x, ADD_F(MUL_F(x, FLOAT(2.43f)), FLOAT(.59f))), FLOAT(.14f)));
         SpvId reinhard = DIV_F(x, ADD_F(FLOAT(1.f), x));
         x = PICK_F(EQ_U(curve, UINT(ARTF_TONE2D_ACES)), aces, PICK_F(EQ_U(curve, UINT(ARTF_TONE2D_REINHARD)), reinhard, x));
-        SpvId v = SQRT_F(CLAMP_F(x, FLOAT(0.f), FLOAT(1.f)));
+        SpvId v = spvSrgbEncode(S, CLAMP_F(x, FLOAT(0.f), FLOAT(1.f)));
         SpvId byte = TO_U(ADD_F(MUL_F(MUL_F(v, alpha), FLOAT(255.f)), FLOAT(.5f)));
         SpvId shift = i == 1 ? UINT(8) : PICK_U(swap, UINT((uint32_t)(8 * i)), UINT((uint32_t)(16 - 8 * i)));
         out = OR_U(out, spvOp2(S, SPV_OP_ShiftLeftLogical, S->uintType, byte, shift));
@@ -247,7 +247,7 @@ static SpvId texelOf(Sh* h, SpvId first, SpvId width, SpvId normal, SpvId x, Spv
     for (int i = 0; i < 3; ++i) {
         SpvId byte = TO_F(AND_U(SHR_U(p, (uint32_t)(16 - 8 * i)), UINT(255)));
         SpvId v = DIV_F(byte, FLOAT(255.f));
-        SpvId light = MUL_F(MUL_F(v, v), a);
+        SpvId light = MUL_F(spvSrgbDecode(S, v), a);
         SpvId n = SUB_F(MUL_F(byte, FLOAT(2.f / 255.f)), FLOAT(1.f));
         c[i] = PICK_F(normal, n, light);
     }

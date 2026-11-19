@@ -119,6 +119,17 @@ Um arquivo novo, `src/shading/sampling.inc`, incluído nos mesmos contextos que 
 
 **Ao fechar a Fase 2:** regenerar hashes e referências, revisar cada diferença acima do limiar, e registrar no CHANGELOG que os bytes mudaram e por quê.
 
+
+### Estado da Fase 2 (19/11/2026)
+
+| # | Estado | Evidência e diferenças em relação ao planejado |
+|---|---|---|
+| 2.1 sRGB exato | **Feito.** | Mudou o caminho. A tabela de 256 entradas + busca binária não cabia porque vários pontos decodificam valores já filtrados, que não são bytes. Polinômios via log2/exp2 custaram +45% na CPU. Tabelas de 4.096 passos foram piores, porque os *gathers* são lentos neste Zen. Ficaram dois polinômios ajustados: grau 6 no valor exibido e grau 5 na raiz quarta da luz. Erro abaixo de 8e-6, todo byte volta a si mesmo, sem *gather* e sem `pow`, e a mesma conta em C, nas pistas e nos shaders. Custo: CPU +14% em `spheres` (uma thread), +7% em `heavy`, −2,5% em `outdoors` em floats (a codificação final foi para 8 pistas); GPU +9% e +1%. A filtragem de texturas continua sendo feita em bytes, antes de virar luz, como antes; filtrar em luz exigiria formatos `_SRGB` e classificar texturas de cor e de dados. |
+| 2.1 Curvas de tom | **Já existia.** | Khronos PBR Neutral (`ARTF_TONE_NEUTRAL`) já estava implementada. Uma LUT ACES 2.0/Tony fica para quem quiser carregar via `.cube`. |
+| 2.1 Gradação em ACEScct | **Pendente.** | Muda o significado de lift/gamma/gain e do domínio das LUTs; precisa de decisão sobre compatibilidade das LUTs existentes. |
+| Revisão das referências | **Feito.** | Os hashes de `core/pictures`, `views/orthographic` e `post/temporalBytes` foram regenerados. FLIP antes×depois: de 0,042 (`spheres`) a 0,13 (`outdoors`), igual nos dois backends. A concordância CPU×GPU ficou como estava (`spheres` 0,0225 → 0,0222). |
+| 2.2, 2.3, 2.4 | **Não iniciados.** | |
+
 ---
 
 ## Fase 3 — Robustez e prova (fecha a 1.0)

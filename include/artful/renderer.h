@@ -131,7 +131,7 @@ typedef enum ArtfView {
     ARTF_VIEW_INSTANCES,  /* a color for each instance */
     /* How many triangles cover each pixel, whatever is in front: a red that goes to yellow and white. The CPU draws
      * each pixel once, so this is the work its rasterizer does there, and the GPU's overdraw. With a frame in floats
-     * the square root of it shows. */
+     * it is light, and shows by sRGB. */
     ARTF_VIEW_OVERDRAW,
     ARTF_VIEW_DEPTH,      /* how far along the view: white at the eye, grey at 10 units, black far away */
     /* How far each pixel moved since the frame before, by the eye's motion and its instance's: red for x and green

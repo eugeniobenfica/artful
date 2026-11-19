@@ -444,7 +444,7 @@ uint8_t* artfTextureEncode(const ArtfTextureData* t, bool etc, uint32_t* format,
 static uint32_t read32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t read64(const uint8_t* p) { return read32(p) | (uint64_t)read32(p + 4) << 32; }
 
-/* sRGB formats are the same blocks: Artful squares colors itself, as it does for all bytes. */
+/* sRGB formats are the same blocks: Artful reads colors as sRGB itself, as it does all bytes. */
 static uint32_t knownFormat(uint32_t f) {
     switch (f) {
     case 131: case 132: return BC1_RGB;

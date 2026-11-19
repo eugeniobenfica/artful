@@ -56,7 +56,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - Auto exposure meters 576 points of the frame (2304 with a histogram), not all of it: a light smaller than the space
   between them can be missed, or counted for more than it covers. Its histogram has 64 bins of three eighths of a stop,
   from 1 / 4096 to 4096. Grading (lift, gamma, gain, the wheels, the look-up table, grain) is done in what a screen
-  shows, the square root of light, not in a log space as Unreal's is; a look-up table is read between its points, not
+  shows, sRGB, not in a log space as Unreal's is; a look-up table is read between its points, not
   by a tetrahedron, and a .cube file's domain is taken to be 0 to 1. The flare is three ghosts of what blooms, with no
   dirt on the lens. A background pass (the black hole) keeps its own exposure, bloom and tone mapping. Fog that
   light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is

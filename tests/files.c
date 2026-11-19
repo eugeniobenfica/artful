@@ -596,7 +596,7 @@ void testGltf(void) {
     uint32_t* a = artfMalloc((size_t)W * H * 4);
     drawInto(r, s, a);
     const size_t at = (size_t)(H / 2) * W + W / 2 + 36;
-    CHECK(near_(CHANNEL(a[at], 16), (int)(sqrtf(.5f) * 255.f), 2) && near_(CHANNEL(a[at], 8), (int)(sqrtf(.25f) * 255.f), 2));
+    CHECK(near_(CHANNEL(a[at], 16), shownByte(.5), 2) && near_(CHANNEL(a[at], 8), shownByte(.25), 2));
     artfSceneFree(s);
 
     /* what is wrong is left out, and nothing goes past what is there */

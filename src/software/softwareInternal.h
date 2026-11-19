@@ -205,6 +205,8 @@ typedef struct ArtfKernels {
     /* post.c's grading of n colors in three planes (n a multiple of 8, 32-byte aligned); at: the grain's hash input of
      * the first */
     void (*grade)(const ArtfFrameData* f, const float* lut, float* const* c, int n, uint32_t at);
+    /* post.c's light to what a screen shows (sRGB), then contrast, n (a multiple of 8) pixels of three planes, in place */
+    void (*shown)(float* const* c, int n, float contrast);
     /* post.c's temporal antialiasing of row y, from from to to, eight pixels at a time where it can: done[g] is set for
      * each group of eight it did */
     void (*temporal)(ArtfSoftPost* p, int y, int from, int to, uint8_t* done);

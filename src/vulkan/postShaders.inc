@@ -1311,7 +1311,7 @@ uint32_t* artfShaderPostFinal(size_t* size) {
     }
     SpvId mapped = pick3(s, P_LESS(curve, FLOAT(.5f)), aces, pick3(s, P_LESS(curve, FLOAT(1.5f)), neutral, pick3(s, P_LESS(curve, FLOAT(2.5f)), reinhard, v)));
     v = pick3(s, P_MORE(exposure, FLOAT(0.f)), mapped, v);
-    SpvId shown = spvGlsl1(s, SPV_GLSL_Sqrt, s->vec3, spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, v, same3(s, 0.f)), same3(s, 1.f)));
+    SpvId shown = srgbEncode3(s, spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, v, same3(s, 0.f)), same3(s, 1.f)));
     SpvId steeper = ADD_V3(same3(s, .5f), SCALE_V3(SUB_V3(shown, same3(s, .5f)), ADD_F(FLOAT(1.f), contrast)));
     steeper = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, steeper, same3(s, 0.f)), same3(s, 1.f));
     shown = pick3(s, spvOp2(s, 182, s->boolType, contrast, FLOAT(0.f)), steeper, shown);

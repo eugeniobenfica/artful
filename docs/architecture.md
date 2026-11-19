@@ -932,11 +932,23 @@ with `-muse-unaligned-vector-move`, which costs nothing on processors that have 
 
 ### Colors
 
-Lighting is linear; the frame holds the square root of light, and textures are squared on the way in.
-That is gamma 2 rather than exact sRGB: one instruction each way on the CPU, the same arithmetic on
-the GPU, and a BGRA frame like a window's, which cascade's page can be blended over in the space it
-was painted in. A vertex's color is a byte of the same kind, squared as a texel is, and goes between
-vertices as light.
+Lighting is linear; bytes are sRGB, as pictures and screens are: textures and vertex colors are made light on the way
+in, and the frame is made sRGB on the way out, a BGRA frame like a window's, which cascade's page can be blended over in
+the space it was painted in. A vertex's color is made light at its vertex, and goes between vertices as light.
+
+The curve is not the C library's pow, which differs from one system to the next, nor a table, whose gathers cost the
+CPU more than they save: it is two polynomials (`core/color.h`), fitted to the curve where it is a power, one of degree
+six in what shows, and one of degree five in the fourth root of light (two square roots, which are exact). Both are
+within 8e-6 of the curve, every byte goes to light and back to itself (`metrics/srgb`), and they run the same in C a
+float at a time, in the kernels eight lanes at a time (`srgbDecodeLanes`) and in the shaders (`spvSrgbDecode`): the
+same bytes on every processor. A frame in floats is made sRGB in `shownLanes`, eight pixels at a time, before it is
+graded.
+
+Until 0.4 the frame held the square root of light (gamma 2), one instruction each way. Against that, at 1280 x 720 on
+one thread of a Ryzen 7 9700X, `spheres` takes 14% longer (8.0 to 9.1 ms), `heavy` 7%, and `outdoors` in floats 2.5%
+less (the sRGB of a frame in floats went into lanes, where the square root had been a pixel at a time); on a Radeon RX
+9060 XT at 1920 x 1080, `spheres` 9% longer (.117 to .128 ms) and `outdoors` 1%. Textures are still read between texels
+as bytes, then made light, as before: the GPU's sampler reads them as UNORM, as the CPU's kernels do.
 
 ## Metal
 

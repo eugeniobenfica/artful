@@ -158,7 +158,7 @@ void testBackgroundPass(void) {
     CHECK(flat.frames == 1 && flat.simd != ARTF_SIMD_AUTO);
     /* the same color everywhere, whatever the background's alpha: the tone curve of .25, with a little noise */
     const double top = .25 * (.25 * 2.51 + .03), bottom = .25 * (.25 * 2.43 + .59) + .14;
-    const int expected = (int)(sqrt(top / bottom) * 255.0);
+    const int expected = shownByte(top / bottom);
     bool even = true;
     for (size_t i = 0; i < (size_t)W * H; ++i) even = even && a[i] >> 24 == 255 && abs(CHANNEL(a[i], 16) - expected) <= 1 && CHANNEL(a[i], 16) == CHANNEL(a[i], 0);
     CHECK(even);

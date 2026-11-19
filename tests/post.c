@@ -16,23 +16,23 @@ void testLook(ArtfBackend backend) {
     addAt(s, addSquare(s, 0, 0, 0, 0), white, 0, 0, 0, 1);
     artfSceneSetFog(s, artfVec3(0, 0, 0), .2f);
     drawInto(r, s, a);
-    CHECK(near_(CHANNEL(a[mid], 8), (int)(sqrtf(.4f) * 255.f), margin));
+    CHECK(near_(CHANNEL(a[mid], 8), shownByte(.4), margin));
     ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 16, 0};
     artfSceneSetTrace(s, &rays);
     for (int i = 0; i < 16; ++i) CHECK(artfRendererDraw(r, s));
     CHECK(artfRendererReadPixels(r, a));
-    CHECK(near_(CHANNEL(a[mid], 8), (int)(sqrtf(.4f) * 255.f), margin));
+    CHECK(near_(CHANNEL(a[mid], 8), shownByte(.4), margin));
     artfSceneSetTrace(s, NULL);
     artfSceneSetFog(s, artfVec3(0, 0, 0), 0);
 
     /* film: light of 1, exposed at 1, comes to the curve's .8 */
     artfSceneSetExposure(s, 1.f);
     drawInto(r, s, a);
-    CHECK(near_(CHANNEL(a[mid], 8), (int)(sqrtf(2.54f / 3.16f) * 255.f), margin));
+    CHECK(near_(CHANNEL(a[mid], 8), shownByte(2.54 / 3.16), margin));
     artfSceneSetTrace(s, &rays);
     for (int i = 0; i < 16; ++i) CHECK(artfRendererDraw(r, s));
     CHECK(artfRendererReadPixels(r, a));
-    CHECK(near_(CHANNEL(a[mid], 8), (int)(sqrtf(2.54f / 3.16f) * 255.f), margin));
+    CHECK(near_(CHANNEL(a[mid], 8), shownByte(2.54 / 3.16), margin));
     artfSceneFree(s);
 
     /* a spot: full in its cone, nothing past it, and the same point light without one */
@@ -525,7 +525,7 @@ void testPostKernels(void) {
 
 /* ---- temporal quality and speed ---- */
 
-#define TEMPORAL_BYTES 0x881775c1da02a664ull /* (what testTemporalBytes hashed before these came) */
+#define TEMPORAL_BYTES 0xfa06ab00d7342ea0ull /* (what testTemporalBytes hashed before these came; made again for sRGB) */
 
 /* Upscaling: the scene drawn at half the size and made whole by temporal antialiasing is close to it drawn at the
  * frame's size, and without temporal antialiasing too, a little softer; both backends alike. The overlay and what is

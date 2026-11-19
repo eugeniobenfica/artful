@@ -5,6 +5,7 @@
 
 #include "artful/scene.h"
 #include "core/trig.h"
+#include "core/color.h"
 #include <string.h>
 
 /* artfMat4Perspective, with the tangent worked out as the same bytes everywhere (core/trig.h) */
@@ -409,28 +410,7 @@ bool artfSceneShapedLights(const ArtfScene* s);
 ARTF_INLINE bool artfLightShaped(const ArtfFrameData* f, uint32_t i) { return f->lightShapes[i][0][3] > 0 || f->lightShapes[i][2][3] > 0; }
 
 
-/* log2 and 2^x by bits and polynomials, the same on every processor and in the shaders: for metering, where a few
- * millionths do not matter. log2 of x > 0; 2^x for x within +-100. */
-ARTF_INLINE float artfLog2Fast(float x) {
-    uint32_t bits;
-    memcpy(&bits, &x, 4);
-    const float e = (float)(int32_t)((bits >> 23) & 255) - 127.f;
-    bits = (bits & 0x7FFFFFu) | 0x3F800000u;
-    float m;
-    memcpy(&m, &bits, 4);
-    const float z = (m - 1.f) / (m + 1.f), z2 = z * z; /* log2 m = 2 / ln 2 atanh z */
-    return e + z * 2.8853901f * (1.f + z2 * (.33333333f + z2 * (.2f + z2 * .14285714f)));
-}
-ARTF_INLINE float artfExp2Fast(float x) {
-    x = x < -100.f ? -100.f : x > 100.f ? 100.f : x;
-    const int32_t i = (int32_t)(x + 128.f) - 128; /* floor */
-    const float u = (x - (float)i) * .69314718f;
-    const float f = 1.f + u * (1.f + u * (.5f + u * (.16666667f + u * (.041666668f + u * (.0083333333f + u * .0013888889f)))));
-    const uint32_t bits = (uint32_t)(i + 127) << 23;
-    float scale;
-    memcpy(&scale, &bits, 4);
-    return f * scale;
-}
+/* (artfLog2Fast, artfExp2Fast and sRGB: core/color.h) */
 /* What fog by height makes of the fog's density at a height: as much as that, times this. */
 ARTF_INLINE float artfFogHeight(const ArtfFrameData* f, float y) {
     if (!(f->fogFalloff > 0)) return 1.f;

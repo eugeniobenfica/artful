@@ -71,3 +71,31 @@ void testFlip(void) {
     artfFree(b);
     artfFree(map);
 }
+
+/* What frames are made of: sRGB, by core/color.h's polynomials. Every byte goes to light and back to itself; both
+ * ways are within 1e-5 of the curve the standard defines (worked out here in doubles, with pow); and the curve is
+ * monotonic, so that no lighter light shows darker. */
+void testSrgb(void) {
+    bool back = true, rising = true;
+    double worstDecode = 0, worstEncode = 0;
+    float before = -1;
+    for (int b = 0; b < 256; ++b) {
+        const float shown = (float)b / 255.f, light = artfSrgbDecode(shown);
+        const double exact = shown <= .04045 ? shown / 12.92 : pow((shown + .055) / 1.055, 2.4);
+        worstDecode = fmax(worstDecode, fabs(light - exact));
+        back = back && (int)(artfSrgbEncode(light) * 255.f + .5f) == b;
+        rising = rising && light > before;
+        before = light;
+    }
+    before = -1;
+    for (int i = 0; i <= 100000; ++i) {
+        const float light = (float)i / 100000.f, shown = artfSrgbEncode(light);
+        const double exact = light <= .0031308 ? light * 12.92 : 1.055 * pow(light, 1 / 2.4) - .055;
+        worstEncode = fmax(worstEncode, fabs(shown - exact));
+        rising = rising && shown >= before;
+        before = shown;
+    }
+    printf("sRGB: within %.2g of the curve decoding, %.2g encoding\n", worstDecode, worstEncode);
+    CHECK(back && rising && worstDecode < 1e-5 && worstEncode < 1e-5);
+    CHECK(artfSrgbEncode(-1.f) == 0 && artfSrgbDecode(0) == 0);
+}

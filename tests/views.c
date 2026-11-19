@@ -3,11 +3,11 @@
 
 /* ---- views and what passes take ---- */
 
-/* What a view shows of a count (artfViewHeat), as a frame holds it: with floats, its square root. */
+/* What a view shows of a count (artfViewHeat), as a frame holds it: with floats, as light, which shows by sRGB. */
 static void heatBytes(uint32_t count, bool floats, int* out) {
     float c[3];
     artfViewHeat(count, c);
-    for (int k = 0; k < 3; ++k) out[k] = (int)((floats ? sqrtf(c[k]) : c[k]) * 255.f + .5f);
+    for (int k = 0; k < 3; ++k) out[k] = floats ? shownByte(c[k]) : (int)(c[k] * 255.f + .5f);
 }
 
 static bool rgbNear(uint32_t p, const int* rgb, int margin) {
@@ -29,7 +29,7 @@ void testViews(void) {
             o.hdr = floats;
             ArtfRenderer* r = artfRendererNew(&o);
             if (!r) continue;
-            /* a square facing the eye at 5, with values that are whole bytes as they show */
+            /* a square facing the eye at 5, with colors whose bytes are known (shownByte) */
             ArtfScene* s = plainScene();
             ArtfMaterialDesc d = {artfVec3(.36f, .64f, .04f), 0, 0, .6f, artfVec3(.36f, 0, 0)};
             d.metallic = .2f;
@@ -38,10 +38,10 @@ void testViews(void) {
             artfSceneAddLight(s, artfVec3(0, 0, -30), artfVec3(1, 1, 1), 5.f); /* (out of reach) */
             float c[3];
             int colors[ARTF_VIEW_COUNT][3];
-            const int base[3] = {153, 204, 51};
+            const int base[3] = {shownByte(.36), shownByte(.64), shownByte(.04)};
             memcpy(colors[ARTF_VIEW_BASE_COLOR], base, sizeof base);
             memcpy(colors[ARTF_VIEW_AMBIENT], base, sizeof base); /* (a sky and ground of 1: what all around gives is the color) */
-            const int normal[3] = {128, 128, 255}, rough[3] = {153, 153, 153}, metal[3] = {51, 51, 51}, own[3] = {153, 0, 0}, white[3] = {255, 255, 255}, depth[3] = {170, 170, 170}, still[3] = {128, 128, 128};
+            const int normal[3] = {128, 128, 255}, rough[3] = {153, 153, 153}, metal[3] = {51, 51, 51}, own[3] = {shownByte(.36), 0, 0}, white[3] = {255, 255, 255}, depth[3] = {170, 170, 170}, still[3] = {128, 128, 128};
             memcpy(colors[ARTF_VIEW_NORMALS], normal, sizeof normal);
             memcpy(colors[ARTF_VIEW_ROUGHNESS], rough, sizeof rough);
             memcpy(colors[ARTF_VIEW_METALLIC], metal, sizeof metal);
@@ -250,10 +250,12 @@ void testOrthographic(void) {
     uint32_t* b = artfMalloc(W * H * 4);
     uint32_t* c = artfMalloc(W * H * 4);
     bool drawn = false, gpuDrawn = false;
-    /* perspective, as before there was this: the hashes of the frames the commit before it drew */
-    static const uint64_t before[ORTHO_SCENARIOS] = {0xE6A9A9FAD7DF5E12ull, 0x14711124B9342182ull, 0x5669C35191A4208Full, 0x8FAD2B4B2C45B748ull};
+    /* perspective, as before there was this: the hashes of the frames the commit before it drew (made again when frames
+     * became sRGB) */
+    static const uint64_t before[ORTHO_SCENARIOS] = {0xDDD26A5FBCB39FCEull, 0xEF4F899FAB4E5973ull, 0xB63F97DCD7C868ACull, 0x44B87B43C4341F59ull};
     for (int k = 0; k < ORTHO_SCENARIOS; ++k) {
         orthoFrame(ARTF_BACKEND_SOFTWARE, k, NULL, a, &drawn);
+        if (hashOf(a, W * H) != before[k]) printf("perspective %d: %016llx, where %016llx was\n", k, (unsigned long long)hashOf(a, W * H), (unsigned long long)before[k]);
         CHECK(hashOf(a, W * H) == before[k]);
     }
 

@@ -918,8 +918,9 @@ typedef struct FinalRow {
     bool balanced;
 } FinalRow;
 
-/* A pixel's light as a screen shows it, before grading, and its alpha. */
-POST_INLINE void finalShown(const ArtfSoftPost* p, const FinalRow* r, int x, int y, float* shown, float* alphaOut) {
+/* A pixel's light, through exposure and the tone curve (what the kernels then make into what a screen shows: shown),
+ * and its alpha. */
+POST_INLINE void finalLight(const ArtfSoftPost* p, const FinalRow* r, int x, int y, float* shown, float* alphaOut) {
     const ArtfSoftFrame* sf = r->sf;
     const size_t i = (size_t)y * p->width + x;
     const float alpha = artfClampf(sf->postLight[3][i], 0, 1);
@@ -964,10 +965,7 @@ POST_INLINE void finalShown(const ArtfSoftPost* p, const FinalRow* r, int x, int
             else if (r->curve == ARTF_TONE_REINHARD) v[c] = v[c] / (1.f + v[c]);
         }
     }
-    for (int c = 0; c < 3; ++c) {
-        shown[c] = sqrtf(artfClampf(v[c], 0, 1));
-        if (r->contrast != 0) shown[c] = artfClampf(.5f + (shown[c] - .5f) * (1.f + r->contrast), 0, 1);
-    }
+    for (int c = 0; c < 3; ++c) shown[c] = v[c];
     *alphaOut = alpha;
 }
 
@@ -990,9 +988,9 @@ POST_INLINE void finalOut(const ArtfSoftPost* p, int x, int y, const float* show
     p->pixels[(size_t)y * p->width + x] = out;
 }
 
-/* Exposure, the lens flare, the tone curve; then, in what a screen shows, grading: lift, gamma and gain, the color
- * wheels, the look-up table and the grain, which the kernels do eight pixels at a time (gradeLanes), a stretch of the
- * row at once. */
+/* Exposure, the lens flare, the tone curve; then what a screen shows (sRGB) and contrast, and in it grading: lift, gamma
+ * and gain, the color wheels, the look-up table and the grain, which the kernels do eight pixels at a time (shownLanes,
+ * gradeLanes), a stretch of the row at once. */
 enum { FINAL_STRETCH = 256 };
 
 static void finalRow(ArtfSoftPost* p, int y) {
@@ -1021,14 +1019,6 @@ static void finalRow(ArtfSoftPost* p, int y) {
     r.apart = r.chromatic * sqrtf(r.corner);
     r.dy = (float)y + .5f - r.cy;
     const bool graded = f->grade2[0][3] > 0 || f->grade2[3][3] > 0 || f->grade2[1][3] > 0;
-    if (!graded) {
-        for (int x = 0; x < p->width; ++x) {
-            float shown[3], alpha;
-            finalShown(p, &r, x, y, shown, &alpha);
-            finalOut(p, x, y, shown, alpha);
-        }
-        return;
-    }
     _Alignas(32) float planes[3][FINAL_STRETCH];
     float alphas[FINAL_STRETCH];
     float* const c[3] = {planes[0], planes[1], planes[2]};
@@ -1036,12 +1026,13 @@ static void finalRow(ArtfSoftPost* p, int y) {
     for (int from = 0; from < p->width; from += FINAL_STRETCH) {
         const int n = artfMini(FINAL_STRETCH, p->width - from), lanes = (n + 7) & ~7;
         for (int x = 0; x < n; ++x) {
-            float shown[3];
-            finalShown(p, &r, from + x, y, shown, &alphas[x]);
-            for (int k = 0; k < 3; ++k) planes[k][x] = shown[k];
+            float light[3];
+            finalLight(p, &r, from + x, y, light, &alphas[x]);
+            for (int k = 0; k < 3; ++k) planes[k][x] = light[k];
         }
         for (int x = n; x < lanes; ++x) planes[0][x] = planes[1][x] = planes[2][x] = 0;
-        p->kernels->grade(f, sf->scene->lut, c, lanes, (uint32_t)y * (uint32_t)p->width + (uint32_t)from + seed);
+        p->kernels->shown(c, lanes, r.contrast);
+        if (graded) p->kernels->grade(f, sf->scene->lut, c, lanes, (uint32_t)y * (uint32_t)p->width + (uint32_t)from + seed);
         for (int x = 0; x < n; ++x) {
             const float shown[3] = {planes[0][x], planes[1][x], planes[2][x]};
             finalOut(p, from + x, y, shown, alphas[x]);

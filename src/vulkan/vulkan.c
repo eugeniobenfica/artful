@@ -4510,9 +4510,9 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     memset(clears, 0, sizeof clears);
     memcpy(clears[0].color, frame.background, sizeof clears[0].color);
     if (v->floats) {
-        /* (the background as light: what shows, squared, as on the CPU) */
+        /* (the background as light: what shows, as light, as on the CPU) */
         const float alpha = frame.background[3], over = alpha > 0 ? 1.f / alpha : 0.f;
-        for (int k = 0; k < 3; ++k) clears[0].color[k] = frame.background[k] * frame.background[k] * over;
+        for (int k = 0; k < 3; ++k) clears[0].color[k] = artfSrgbDecode(frame.background[k] * over) * alpha;
     }
     const Rect2D area = {{0, 0}, {(uint32_t)v->sceneWidth, (uint32_t)v->sceneHeight}};
     /* (the height negative: y goes up in clip space, as on the CPU) */
