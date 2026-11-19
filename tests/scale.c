@@ -293,7 +293,7 @@ void testSkinLod(void) {
     artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     artfSceneSetLodError(s, 8); /* (so that the first level comes where the tube still shows) */
     const ArtfMesh tube = addTube(s);
-    const ArtfMeshData* source = &s->meshes.items[tube - 1];
+    const ArtfMeshData* source = &s->meshes.items[artfMeshIndexOf(s, tube)];
     CHECK(source->skinLodCount >= 2);
     const float error = source->skinLodErrors[0];
     const ArtfInstance i = addAt(s, tube, whiteMaterial(s), 0, -2, 0, 1);
@@ -387,7 +387,7 @@ void testTracedSkinLod(void) {
     const ArtfInstance i = addAt(s, tube, white, 0, -2, 0, 1);
     const ArtfInstanceData* d = &s->instances.items[2];
     const uint32_t home = d->mesh;
-    const float error = s->meshes.items[tube - 1].skinLodErrors[0];
+    const float error = s->meshes.items[artfMeshIndexOf(s, tube)].skinLodErrors[0];
     const float far = error * (float)H * .5f / tanf(.5f) / 32.f + 2.5f;
     setCamera(s, 0, .5f * far, .9f * far, 0, -1.5f, 0);
     const ArtfShadowDesc traced = {0, 0, false, true};
@@ -604,7 +604,7 @@ void testExtras(void) {
         for (int x = 0; x < 33; ++x) heights[z * 33 + x] = (float)((x - 16) * (x - 16) + (z - 16) * (z - 16)) / 512.f;
     const ArtfMesh hill = artfSceneAddTerrain(s, heights, 33, 33, .25f, 2.f, 1.f);
     CHECK(hill != 0);
-    CHECK(s->meshes.items[hill - 1].vertexCount == 33 * 33 && s->meshes.items[hill - 1].indexCount == 32 * 32 * 6);
+    CHECK(s->meshes.items[artfMeshIndexOf(s, hill)].vertexCount == 33 * 33 && s->meshes.items[artfMeshIndexOf(s, hill)].indexCount == 32 * 32 * 6);
     const ArtfTransform below = artfTransformAt(0, -1.5f, 0, 1);
     artfSceneAddInstance(s, hill, whiteMaterial(s), &below);
     ArtfEmitterDesc d;

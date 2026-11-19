@@ -23,6 +23,28 @@ void artfLog(const char* format, ...) {
     logFn(logUser, text);
 }
 
+static ArtfEventFn eventFn;
+static void* eventUser;
+
+void artfSetEvents(ArtfEventFn fn, void* user) {
+    eventFn = fn;
+    eventUser = user;
+}
+
+void artfEventSay(ArtfEventKind kind, const void* source, uint32_t handle, uint64_t bytes, const char* format, ...) {
+    if (!logFn && !eventFn) return;
+    char text[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    if (logFn) logFn(logUser, text);
+    if (eventFn) {
+        const ArtfEvent e = {kind, source, handle, bytes, text};
+        eventFn(eventUser, &e);
+    }
+}
+
 static void* checked(void* p) {
     if (p) return p;
     fputs("artful: out of memory\n", stderr);

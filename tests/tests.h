@@ -101,6 +101,7 @@ void testOcclusionUnderOverlay(void);
 void testPictures(void);
 void testHandles(void);
 void testLifetimes(void);
+void testThreadRule(void);
 void testOcclusionAuto(ArtfBackend backend);
 void testLodFade(ArtfBackend backend);
 void testGpuMeshlets(void);
@@ -108,6 +109,7 @@ void testCullSize(void);
 /* backends.c: the GPU against the CPU, and a device that is lost or refuses */
 void testVulkan(void);
 void testLostDevice(void);
+void testTextureMemory(void);
 void testRefusedSwapchain(void);
 void testShadersAhead(void);
 void testPipelinesAhead(void);
@@ -147,6 +149,7 @@ void testStreamedTexture(ArtfBackend backend);
 void testResidencyGraph(ArtfBackend backend);
 void testMeshPlaces(ArtfBackend backend);
 void testMeshStreaming(ArtfBackend backend);
+void testMeshHandles(void);
 /* shadows.c: shadows: maps, cascades, soft, and lights past the sixteen */
 void testShadows(ArtfBackend backend);
 void testShadowsBothBackends(void);

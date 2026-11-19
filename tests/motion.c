@@ -408,7 +408,7 @@ static size_t makeAnimatedGlb(uint8_t* out) {
     char json[3000];
     int n = snprintf(json, sizeof json,
         "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0,1,3]}],"
-        "\"nodes\":[{\"mesh\":0,\"translation\":[0,0,0]},{\"children\":[2]},{\"translation\":[0,1,0]},{\"mesh\":0,\"skin\":0}],"
+        "\"nodes\":[{\"mesh\":0,\"translation\":[0,0,0]},{\"children\":[2]},{\"name\":\"elbow\",\"translation\":[0,1,0]},{\"mesh\":0,\"skin\":0}],"
         "\"skins\":[{\"joints\":[1,2],\"inverseBindMatrices\":7}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":3,\"JOINTS_0\":5,\"WEIGHTS_0\":6},\"indices\":4}]}],"
         "\"animations\":[{\"name\":\"go\",\"samplers\":[{\"input\":0,\"output\":1},{\"input\":0,\"output\":2}],"
@@ -459,12 +459,38 @@ void testClips(void) {
     float leftmost = 9;
     for (int i = 0; i < 4; ++i) leftmost = artfMinf(leftmost, v[i].px);
     CHECK(fabsf(leftmost + 1.f) < .02f);
+    /* clips mixed: by their weights; only below a node; one of weight 1 is the clip */
+    const ArtfClipMix one = {0, .5f, 1, NULL};
+    CHECK(artfAnimationMix(s, m, &one, 1));
+    CHECK(fabsf(s->instances.items[0].m[3] - .5f) < 1e-4f);
+    const ArtfClipMix halves[2] = {{0, .5f, 1, NULL}, {0, 1.5f, 1, NULL}};
+    CHECK(artfAnimationMix(s, m, halves, 2));
+    CHECK(fabsf(s->instances.items[0].m[3] - 1.f) < 1e-4f);
+    const ArtfClipMix weighed[2] = {{0, .5f, 3, NULL}, {0, 1.5f, 1, NULL}};
+    CHECK(artfAnimationMix(s, m, weighed, 2));
+    CHECK(fabsf(s->instances.items[0].m[3] - .75f) < 1e-4f);
+    /* the second clip only moves the elbow: the part on node 0 is where the first puts it, and the arm halfway */
+    const ArtfClipMix layered[2] = {{0, .5f, 1, NULL}, {0, 1.9999f, 1, "elbow"}};
+    CHECK(artfAnimationMix(s, m, layered, 2));
+    CHECK(fabsf(s->instances.items[0].m[3] - .5f) < 1e-4f);
+    artfScenePosesApply(s);
+    artfMeshUnpack(&s->meshes.items[bent], v);
+    float mixedLeft = 9;
+    for (int i = 0; i < 4; ++i) mixedLeft = artfMinf(mixedLeft, v[i].px);
+    artfAnimationSet(s, m, 0, .5f);
+    artfScenePosesApply(s);
+    artfMeshUnpack(&s->meshes.items[bent], v);
+    float plainLeft = 9;
+    for (int i = 0; i < 4; ++i) plainLeft = artfMinf(plainLeft, v[i].px);
+    CHECK(mixedLeft < plainLeft - .05f); /* (turned further: -1.11 against -.84, as its corner swings past the joint) */
     /* a matching clip in a scene with no clip asked for stays as it is */
     artfSetLog(countLog, &logged);
     logged = 0;
     artfAnimationSet(s, m, 9, 0);
     artfAnimationSet(s, 99, 0, 0);
-    CHECK(logged == 2);
+    const ArtfClipMix noClip = {9, 0, 1, NULL}, noNode = {0, 0, 1, "wrist"};
+    CHECK(!artfAnimationMix(s, m, &noClip, 1) && !artfAnimationMix(s, m, &noNode, 1));
+    CHECK(logged == 4);
     artfSetLog(NULL, NULL);
     const ArtfTransform moved = artfTransformAt(5, 0, 0, 1);
     artfModelSetTransform(s, m, &moved);

@@ -1,5 +1,7 @@
 /* artful — the choice of a backend, and the calls every backend answers. */
 #include "render/rendererInternal.h"
+#include "scene/sceneInternal.h"
+#include "core/threads.h"
 
 const char* artfBackendName(ArtfBackend b) {
     switch (b) {
@@ -66,8 +68,14 @@ static void tryOcclusion(ArtfRenderer* r, ArtfScene* scene) {
 }
 
 bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene) {
+    scene->drawingThread = artfThreadId();
     const bool drawn = r->vt->draw(r, scene);
+    scene->drawingThread = 0;
     if (drawn && artfSceneFeature(scene, ARTF_FEATURE_OCCLUSION_AUTO)) tryOcclusion(r, scene);
+    if (!drawn && !r->lostSaid) {
+        r->lostSaid = true;
+        artfEventSay(ARTF_EVENT_DEVICE_LOST, r, 0, 0, "artful: the device is lost: free the renderer, and give the scene to a new one");
+    }
     return drawn;
 }
 void artfRendererWarm(ArtfRenderer* r) {

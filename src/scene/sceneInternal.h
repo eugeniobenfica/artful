@@ -89,7 +89,8 @@ typedef struct ArtfMeshData {
     bool ownsSkin;              /* copies of a mesh for instances share it */
     ArtfPose pose;
     bool removed;               /* its place waits for another mesh, with nothing in it */
-    uint32_t generation;        /* a new one in this place */
+    uint32_t generation;        /* a new one in this place, or what a GPU holds of it went or came (residency) */
+    uint32_t place;             /* a new mesh in this place: the top byte of its handle (artfMeshHandleOf) */
     uint64_t deformVersion;     /* a pose changed its vertices */
     /* Its lighter versions, the lightest last: meshes of the scene like any other. */
     uint32_t lods[ARTF_MAX_LODS];
@@ -781,6 +782,9 @@ typedef struct ArtfBackground {
 
 struct ArtfScene {
     uint64_t id; /* no two scenes of a program share one */
+    /* The thread drawing it, while artfRendererDraw does (artfThreadId), else 0: what a change from another thread is
+     * told by. Read without a lock, as a check of the rule and not a guarantee. */
+    volatile uintptr_t drawingThread;
     ARTF_VEC(ArtfMeshData) meshes;
     ARTF_VEC(ArtfTextureData) textures;     /* 0 is white */
     ARTF_VEC(ArtfMaterialData) materials;   /* 0 is grey */
@@ -870,6 +874,12 @@ uint32_t artfSceneMakeLevels(const ArtfMeshData* m, ArtfMeshData* made, float* e
 uint32_t artfSceneMeshPlace(ArtfScene* s, const ArtfMeshData* m);
 ArtfInstanceData* artfSceneInstance(ArtfScene* s, ArtfInstance i);
 void artfSceneInstanceChanged(ArtfScene* s, ArtfInstanceData* d);
+
+/* A mesh's handle: its place + 1 in the low 24 bits and its place's generation in the top 8, so that the handle of
+ * a mesh removed does not stand for the one put in its place after it (for 255 places over). */
+ArtfMesh artfMeshHandleOf(const ArtfScene* s, uint32_t index);
+/* Its place, or UINT32_MAX when the handle stands for nothing: 0, never given, or of a mesh removed. */
+uint32_t artfMeshIndexOf(const ArtfScene* s, ArtfMesh mesh);
 
 /* The mesh drawn in place of this one when its own triangles are not held: its first level that is. */
 ARTF_INLINE uint32_t artfMeshHeld(const ArtfScene* s, uint32_t mesh) {

@@ -194,8 +194,9 @@ static uint32_t takeMerges(ArtfScene* s, Merge* merges, uint32_t count, const Ar
         for (uint32_t i = 0; i < j->count; ++i) hold(g, h.members[i], 1);
         hold(g, h.proxy, 1);
         h.mesh = mesh;
-        memcpy(h.center, s->meshes.items[mesh - 1].center, sizeof h.center);
-        h.radius = s->meshes.items[mesh - 1].radius;
+        const ArtfMeshData* merged = &s->meshes.items[artfMeshIndexOf(s, mesh)];
+        memcpy(h.center, merged->center, sizeof h.center);
+        h.radius = merged->radius;
         h.distance = desc && desc->distance > 0 ? desc->distance : 0.f;
         h.error = j->error;
         artfVecPush(&g->hlods, h);
@@ -561,8 +562,8 @@ static bool readAgain(ArtfScene* s, uint32_t base, const Stream* stream, bool* w
 }
 
 void artfMeshSetResidentLevel(ArtfScene* s, ArtfMesh mesh, int level) {
-    if (!mesh || mesh > s->meshes.len || s->meshes.items[mesh - 1].removed) return;
-    const uint32_t base = mesh - 1;
+    const uint32_t base = artfMeshIndexOf(s, mesh);
+    if (base == UINT32_MAX) return;
     ArtfMeshData* m = &s->meshes.items[base];
     if (m->isLod || !m->lodCount) return;
     const uint32_t from = (uint32_t)artfClampi(level, 0, (int)m->lodCount);
@@ -589,8 +590,9 @@ void artfMeshSetResidentLevel(ArtfScene* s, ArtfMesh mesh, int level) {
 }
 
 int artfMeshResidentLevel(const ArtfScene* s, ArtfMesh mesh) {
-    if (!mesh || mesh > s->meshes.len) return 0;
-    return (int)s->meshes.items[mesh - 1].residentFrom;
+    const uint32_t index = artfMeshIndexOf(s, mesh);
+    if (index == UINT32_MAX) return 0;
+    return (int)s->meshes.items[index].residentFrom;
 }
 
 ArtfMesh artfSceneAddMeshStreamed(ArtfScene* s, uint32_t vertexCount, uint32_t indexCount, ArtfMeshReadFn read, void* user) {
@@ -603,13 +605,14 @@ ArtfMesh artfSceneAddMeshStreamed(ArtfScene* s, uint32_t vertexCount, uint32_t i
     if (!mesh) return 0;
     /* (a place used again: what read the mesh that was there goes) */
     ArtfScale* g = scaleOf(s);
+    const uint32_t index = artfMeshIndexOf(s, mesh);
     for (size_t i = 0; i < g->streams.len; ++i)
-        if (g->streams.items[i].mesh == mesh - 1) g->streams.items[i--] = g->streams.items[--g->streams.len];
-    const Stream stream = {mesh - 1, vertexCount, indexCount, read, user};
+        if (g->streams.items[i].mesh == index) g->streams.items[i--] = g->streams.items[--g->streams.len];
+    const Stream stream = {index, vertexCount, indexCount, read, user};
     artfVecPush(&g->streams, stream);
-    s->meshes.items[mesh - 1].streamed = true;
+    s->meshes.items[index].streamed = true;
     /* (only the lightest stays, until more is wanted) */
-    artfMeshSetResidentLevel(s, mesh, (int)s->meshes.items[mesh - 1].lodCount);
+    artfMeshSetResidentLevel(s, mesh, (int)s->meshes.items[index].lodCount);
     return mesh;
 }
 

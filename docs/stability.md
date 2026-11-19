@@ -4,6 +4,25 @@ An account of version 0.4.0: what has been proven, what has not, and what 1.0 ne
 means what it means for cascade: a program written for 1.x compiles against every 1.x, and what the
 documents promise holds on the systems they name.
 
+## Where it stands: tiers
+
+What each backend is on each system, by what was run (Phase 0 of the plan made skipped tests visible, so "run" means
+the test passed there, not that it returned early). **Stable**: run, its tests pass, and 1.0 will promise it.
+**Best effort**: built and partly run; it should work, and what is found is fixed, but it is not promised.
+**Experimental**: built, never run, or known to lack much.
+
+| | CPU | Vulkan | Metal | 2D, CPU | 2D, Vulkan |
+| --- | --- | --- | --- | --- | --- |
+| Windows x64 | stable: all tests, GCC, clang, MSVC (CI) | stable: AMD Vega 8, Radeon RX 9060 XT (ray tracing hardware), windows | | stable | stable: read back and in a window |
+| Android arm64 | stable: Galaxy S25 Ultra | best effort: the S25's Adreno 830, a window and going to the background; rotation not seen | | best effort: not yet run | best effort: not yet run |
+| Linux x64 | stable: GCC and clang, sanitizers (CI) | best effort: Mesa's software Vulkan (lavapipe), no window, no GPU | | best effort: not yet through CI | best effort: not yet through CI |
+| macOS | best effort: CI, no window | | experimental: never run | best effort: not yet through CI | |
+| iOS | experimental: never built with Apple's tools | | experimental | experimental | |
+| Windows on ARM | experimental: built, never run | experimental | | experimental | experimental |
+| Android armv7, x86-64 | experimental: built, never run | experimental | | experimental | experimental |
+
+Ray tracing hardware has been run on one GPU only (Radeon RX 9060 XT): best effort until another vendor's.
+
 ## What has been proven
 
 Run, not assumed. `artful-tests` has 184,977 checks.

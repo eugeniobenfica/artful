@@ -89,6 +89,15 @@ void testVulkan(void) {
 #ifdef ARTFUL_VULKAN
 /* A device lost in the middle of it all: false, and false after that; the renderer can be freed; and the scene
  * goes to a new one, which draws what the first did. */
+/* What events say: each kind, how many, and what of the last. */
+static int eventCounts[8];
+static const void* eventSource;
+static void countEvent(void* user, const ArtfEvent* e) {
+    (void)user;
+    if ((int)e->kind < 8) ++eventCounts[e->kind];
+    eventSource = e->source;
+}
+
 void testLostDevice(void) {
     ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
     ArtfRenderer* r = artfRendererNew(&o);
@@ -97,11 +106,16 @@ void testLostDevice(void) {
     uint32_t* b = artfMalloc((size_t)W * H * 4);
     ArtfScene* s = shadowScene();
     drawInto(r, s, a);
+    memset(eventCounts, 0, sizeof eventCounts);
+    artfSetEvents(countEvent, NULL);
     artfVulkanSubmitsLeft = 2;
     CHECK(artfRendererDraw(r, s) && artfRendererDraw(r, s));
     CHECK(!artfRendererDraw(r, s));
     artfVulkanSubmitsLeft = -1;
     CHECK(!artfRendererDraw(r, s));
+    /* (said once, by the renderer that lost it) */
+    CHECK(eventCounts[ARTF_EVENT_DEVICE_LOST] == 1 && eventSource == r);
+    artfSetEvents(NULL, NULL);
     CHECK(!artfRendererReadPixels(r, b));
     artfRendererFree(r);
     r = artfRendererNew(&o);
@@ -160,6 +174,48 @@ void testRefusedSwapchain(void) {
 void testRefusedSwapchain(void) { missing("window"); }
 #endif
 
+/* The GPU's memory run out, for a texture: it goes up without its largest mipmaps, or, when not even its smallest
+ * fits, it is white; each said by an event, and the frame goes on. */
+void testTextureMemory(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    if (!r) return;
+    ArtfScene* s = plainScene();
+    static uint32_t red[256 * 256], green[256 * 256];
+    for (int i = 0; i < 256 * 256; ++i) {
+        red[i] = 0xFFFF0000u;
+        green[i] = 0xFF00FF00u;
+    }
+    uint32_t* frame = artfMalloc((size_t)W * H * 4);
+    drawInto(r, s, frame);
+    memset(eventCounts, 0, sizeof eventCounts);
+    artfSetEvents(countEvent, NULL);
+    /* (room for 128 x 128 and what is under it, not for 256 x 256) */
+    artfVulkanTextureMemoryLimit = 128 * 128 * 4 * 2;
+    ArtfMaterialDesc d = {artfVec3(1, 1, 1), artfSceneAddTexture(s, red, 256, 256, 0), 0, 1, artfVec3(0, 0, 0)};
+    addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &d), -1.2f, 0, 0, 1);
+    drawInto(r, s, frame);
+    CHECK(eventCounts[ARTF_EVENT_OUT_OF_MEMORY] >= 1 && eventCounts[ARTF_EVENT_REFUSED] == 0 && eventCounts[ARTF_EVENT_DEVICE_LOST] == 0);
+    const uint32_t left = frame[(H / 2) * W + W / 2 - 50];
+    CHECK(CHANNEL(left, 16) > 200 && CHANNEL(left, 8) < 40); /* (red, from a smaller mipmap) */
+    /* not even its smallest: white */
+    artfVulkanTextureMemoryLimit = 0;
+    d.texture = artfSceneAddTexture(s, green, 256, 256, 0);
+    addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &d), 1.2f, 0, 0, 1);
+    drawInto(r, s, frame);
+    CHECK(eventCounts[ARTF_EVENT_REFUSED] == 1 && eventCounts[ARTF_EVENT_DEVICE_LOST] == 0);
+    const uint32_t right = frame[(H / 2) * W + W / 2 + 50];
+    CHECK(CHANNEL(right, 16) > 200 && CHANNEL(right, 8) > 200 && CHANNEL(right, 0) > 200);
+    /* and it is not tried again each frame */
+    drawInto(r, s, frame);
+    CHECK(eventCounts[ARTF_EVENT_REFUSED] == 1);
+    artfVulkanTextureMemoryLimit = -1;
+    artfSetEvents(NULL, NULL);
+    artfFree(frame);
+    artfSceneFree(s);
+    artfRendererFree(r);
+}
+
 /* Vulkan's pixel shaders of another variant, made off the frame: a view asked for after the first frame comes a few
  * frames later, and after artfRendererWarm the frame is the one that waiting for them makes. */
 void testShadersAhead(void) {
@@ -177,6 +233,8 @@ void testShadersAhead(void) {
     artfRendererSetView(r, ARTF_VIEW_LIT);
     drawInto(r, s, ahead);
     artfVulkanShadersWait = false;
+    memset(eventCounts, 0, sizeof eventCounts);
+    artfSetEvents(countEvent, NULL);
     artfRendererSetView(r, ARTF_VIEW_NORMALS);
     double longest = 0;
     for (int i = 0; i < 3; ++i) {
@@ -187,6 +245,8 @@ void testShadersAhead(void) {
     }
     artfRendererWarm(r);
     drawInto(r, s, ahead);
+    CHECK(eventCounts[ARTF_EVENT_SHADERS_READY] == 1 && eventSource == r); /* (the frame after they were made) */
+    artfSetEvents(NULL, NULL);
     printf("pixel shaders made off the frame: the longest frame after asking for a view %.2f ms\n", longest);
     CHECK(!memcmp(waited, ahead, W * H * 4));
     artfVulkanShadersWait = true;
@@ -307,6 +367,7 @@ void testPipelinesAhead(void) {
 }
 #else
 void testLostDevice(void) { missing("vulkan"); }
+void testTextureMemory(void) { missing("vulkan"); }
 void testRefusedSwapchain(void) { missing("vulkan"); }
 void testShadersAhead(void) { missing("vulkan"); }
 void testPipelinesAhead(void) { missing("vulkan"); }

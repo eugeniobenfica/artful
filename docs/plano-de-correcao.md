@@ -41,7 +41,7 @@ Sem esta fase, nenhuma das outras tem critério de pronto verificável.
 
 | # | Estado | Evidência |
 |---|---|---|
-| 0.1 | **Verificado, falta o commit.** | Uma cópia com apenas os arquivos versionáveis (rastreados + não rastreados não ignorados, sem `.claude/`) compila sem avisos com Vulkan ligado e desligado (GCC/MinGW, Ninja, Release). Os 157 testes passam nas duas. Instalada, a cópia atende a consumidores externos de `artful::artful` e `artful::2d` via `find_package`; os dois desenham. |
+| 0.1 | **Feito** (commits `7dc3fb0` e `0777f31`). | Uma cópia com apenas os arquivos versionáveis (rastreados + não rastreados não ignorados, sem `.claude/`) compila sem avisos com Vulkan ligado e desligado (GCC/MinGW, Ninja, Release). Os 157 testes passam nas duas. Instalada, a cópia atende a consumidores externos de `artful::artful` e `artful::2d` via `find_package`; os dois desenham. |
 | 0.2 | **Feito.** | `cmake/artfulTests.cmake.in` pergunta `artful-tests --list` quando o CTest roda e registra cada caso com `--exact`. São 157 testes; `ctest -j4` leva 36 s, contra 64 s do teste único. |
 | 0.3 | **Feito.** | `missing()` em `tests/main.c`. Os renderizadores de teste passam por invólucros que registram Vulkan ausente; janela e ray tracing por hardware são marcados onde os testes já os detectavam. Sem driver Vulkan, 83 testes saem como *skipped*. Com `ARTFUL_NO_RAY_QUERY=1`, 4 saem por falta de `rt`. Com `ARTFUL_REQUIRE=vulkan`, falham. |
 | 0.4 | **Parcial.** | O FLIP LDR e HDR está em `tools/flip.c`, escrito a partir do `FLIP.h` da NVIDIA (BSD-3), com a ferramenta `artful-flip`. O teste `metrics/flip` confere as propriedades do método. Cada `differentShare` grava o FLIP ao lado em `ARTFUL_FLIP_LOG`. **Falta:** comparar com o programa da NVIDIA (o critério de ±1e-4 não foi verificado) e trocar os limiares por limiares FLIP, o que exige primeiro coletar o log em várias máquinas. |
@@ -64,6 +64,21 @@ O que precisa estar decidido antes de congelar a API. Nenhum item aqui muda imag
 | 1.5 | **Contrato de threads**, mantendo a regra atual mas tornando-a verificável: em build de depuração, a cena registra a thread dona e afirma em cada chamada. | `src/scene/scene.c`, `src/render/renderer.c` | Um teste de depuração que chama a cena de outra thread durante um `artfRendererDraw` é detectado. | P |
 | 1.6 | **Camadas de suporte publicadas**: estável, melhor esforço e experimental, por backend × plataforma × recurso. Metal, Windows on ARM, armv7 e x86-64 Android entram como experimentais até rodarem. | `docs/stability.md`, `README.md` | Cada célula aponta para o teste ou máquina que a sustenta. | P |
 | 1.7 | **Mistura de clipes** na biblioteca: dois clipes com peso, e camadas por máscara de ossos. Hoje `artfAnimationSet` só amostra um clipe e todo integrador reescreve a mistura. | `src/scene/gltf.c`, `include/artful/gltf.h` | Um teste compara a mistura a uma referência calculada à mão, e a mistura é igual em CPU e GPU. | P |
+
+
+### Estado da Fase 1 (19/11/2026)
+
+| # | Estado | Evidência e diferenças em relação ao planejado |
+|---|---|---|
+| 1.1 | **Feito para malhas.** | As posições já eram reaproveitadas; o defeito real era outro: um handle antigo passava a apontar para a malha nova na mesma posição. Agora o byte alto é a geração da posição, num contador próprio (`place`), separado do `generation` que a residência usa para a GPU. O teste `streaming/meshHandles` faz 20.000 ciclos de adicionar e remover (não um milhão) e confirma que a cena não cresce e que o handle antigo é rejeitado com log. **Ao contrário do que o plano supunha, as texturas não têm geração no handle**; isso continua pendente e está registrado em `limits.md`. |
+| 1.2 | **Feito para texturas; o resto apenas avisa.** | A textura sobe sem os mipmaps maiores, ou fica branca com `ARTF_EVENT_REFUSED`, e o quadro segue (`backends/textureMemory`, com `artfVulkanTextureMemoryLimit` simulando a GPU cheia). Para malhas, instâncias e buffers do quadro, a falha continua derrubando o renderizador, agora com `ARTF_EVENT_OUT_OF_MEMORY` antes. Também não aplicado: liberar mipmaps de *outras* texturas pela residência antes de recusar. |
+| 1.3 | **Feito.** | `artfSetEvents`, com `ArtfEvent` tipado. Testes em `backends/lostDevice` (um único evento, vindo do renderizador perdido) e `backends/shadersAhead` (shaders prontos). O evento de 3.4 (`device_fault`) entra junto com o item 3.4. |
+| 1.4 | **Rascunho escrito; falta a decisão do dono.** | A seção "What 1.x will keep (proposed)" em `docs/api.md` propõe compatibilidade de fonte sem ABI binária. O CMake já corresponde: a biblioteca é só estática. |
+| 1.5 | **Feito, sempre ligado.** | Não só em depuração: o custo é uma comparação por chamada. A cena guarda a thread que a desenha; mudanças vindas de outra thread durante o desenho vão para o log (`core/threadRule`). A leitura é sem trava: serve para verificar a regra, sem garantir que a pegue sempre. O 2D não tem essa verificação. |
+| 1.6 | **Feito.** | Tabela de camadas em `docs/stability.md`, célula a célula pelo que rodou. O 2D fica em "melhor esforço" fora do Windows, porque ainda não passou pela CI. |
+| 1.7 | **Feito, sem a parte de GPU.** | `artfAnimationMix`: pesos, quaternions normalizados pelo menor caminho e máscara por nó nomeado (`only`). O teste `motion/clips` confere contra valores calculados à mão. "Igual em CPU e GPU" não se aplica, porque a pose é calculada na CPU para os dois backends. |
+
+Verificação: os 160 testes passam com Vulkan; sem Vulkan, 152.393 verificações e 84 omissões. Os testes novos passam limpos sob ASan/UBSan (clang) e sem avisos. MSVC e Linux não foram executados.
 
 ---
 

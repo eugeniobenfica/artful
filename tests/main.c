@@ -126,6 +126,7 @@ int main(int argc, char** argv) {
     RUN("post/look/software", testLook(ARTF_BACKEND_SOFTWARE));
     RUN("post/look/vulkan", testLook(ARTF_BACKEND_VULKAN));
     RUN("core/lifetimes", testLifetimes());
+    RUN("core/threadRule", testThreadRule());
     RUN("materials/physical/software", testPhysical(ARTF_BACKEND_SOFTWARE));
     RUN("materials/physical/vulkan", testPhysical(ARTF_BACKEND_VULKAN));
     RUN("shadows/shadowBytes", testShadowBytes());
@@ -202,6 +203,7 @@ int main(int argc, char** argv) {
     RUN("scale/swarm", testSwarm());
     RUN("streaming/meshStreaming/software", testMeshStreaming(ARTF_BACKEND_SOFTWARE));
     RUN("streaming/meshStreaming/vulkan", testMeshStreaming(ARTF_BACKEND_VULKAN));
+    RUN("streaming/meshHandles", testMeshHandles());
     RUN("tracing/traceHardware", testTraceHardware());
     RUN("views/views", testViews());
     RUN("backends/shadersAhead", testShadersAhead());
@@ -221,6 +223,7 @@ int main(int argc, char** argv) {
     RUN("layers/decals", testDecals());
     RUN("scale/extras", testExtras());
     RUN("backends/lostDevice", testLostDevice());
+    RUN("backends/textureMemory", testTextureMemory());
     RUN("backends/refusedSwapchain", testRefusedSwapchain());
     RUN("files/blocks", testBlocks());
     RUN("streaming/prepared", testPrepared());

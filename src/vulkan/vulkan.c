@@ -445,7 +445,12 @@ static bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usa
     if (type < 0 && use != BUFFER_GPU) type = memoryType(v, req.typeBits, MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT);
     if (type < 0) return false;
     MemoryAllocateInfo alloc = {ST_MEMORY_ALLOCATE_INFO, NULL, req.size, (uint32_t)type};
-    if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) return false;
+    if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) {
+        artfEventSay(ARTF_EVENT_OUT_OF_MEMORY, v, 0, req.size, "artful: the GPU's memory ran out, for a buffer of %llu bytes", (unsigned long long)req.size);
+        v->vkDestroyBuffer(v->device, b->buffer, NULL);
+        b->buffer = 0;
+        return false;
+    }
     v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
     b->size = info.size;
     b->serial = ++v->bufferSerial;
@@ -472,7 +477,14 @@ static bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, 
     int type = memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL);
     if (type < 0) return false;
     MemoryAllocateInfo alloc = {ST_MEMORY_ALLOCATE_INFO, NULL, req.size, (uint32_t)type};
-    if (v->vkAllocateMemory(v->device, &alloc, NULL, &g->memory) != VK_OK) return false;
+    const bool texture = (usage & IMAGE_SAMPLED) && (usage & IMAGE_TRANSFER_DST);
+    const bool tooLarge = texture && artfVulkanTextureMemoryLimit >= 0 && (long long)req.size > artfVulkanTextureMemoryLimit;
+    if (tooLarge || v->vkAllocateMemory(v->device, &alloc, NULL, &g->memory) != VK_OK) {
+        artfEventSay(ARTF_EVENT_OUT_OF_MEMORY, v, 0, req.size, "artful: the GPU's memory ran out, for an image of %llu bytes", (unsigned long long)req.size);
+        v->vkDestroyImage(v->device, g->image, NULL);
+        g->image = 0;
+        return false;
+    }
     v->vkBindImageMemory(v->device, g->image, g->memory, 0);
     ImageViewCreateInfo view = {ST_IMAGE_VIEW_CREATE_INFO, NULL, 0, g->image, 1 /* 2D */, format, {0, 0, 0, 0}, {aspect, 0, mips, 0, 1}};
     return v->vkCreateImageView(v->device, &view, NULL, &g->view) == VK_OK;
@@ -1894,8 +1906,21 @@ static bool upload(Vulkan* v, GpuBuffer* to, VkDeviceSize offset, const void* da
 
 static bool takesFormat(const Vulkan* v, uint32_t format) { return format >= 157 ? v->takesAstc : format >= 147 ? v->takesEtc : v->takesBc; }
 
-/* Blocks go up as they are, where the device takes them; plain pixels are made into blocks if that was asked. */
-static bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool compress) {
+long long artfVulkanTextureMemoryLimit = -1;
+
+/* What a texture that cannot be made at all shows: white, which every entry of the array must have anyway. */
+static void textureWhite(Vulkan* v, uint32_t index) {
+    const DescriptorImageInfo white = {v->sampler, v->textures.items[0].view, LAYOUT_SHADER_READ};
+    for (int k = 0; k < SLOTS; ++k) {
+        const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 6, index, 1, DESCRIPTOR_COMBINED, &white, NULL, NULL};
+        v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
+    }
+}
+
+/* Blocks go up as they are, where the device takes them; plain pixels are made into blocks if that was asked. When the
+ * GPU's memory has run out, it goes up without its largest mipmaps, as many as it takes; when not even the smallest
+ * fits, it is white, and said so (ARTF_EVENT_REFUSED). Only the white texture itself not fitting fails. */
+static bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool compress, ArtfTexture handle) {
     GpuImage image;
     uint32_t format = t->format, offsets[16];
     const uint8_t* source = t->blocks;
@@ -1920,15 +1945,35 @@ static bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool co
             h = artfMaxi(h / 2, 1);
         }
     }
-    /* what is resident: the mipmaps from that one down, as an image of their own */
-    const int first = artfMini(t->residentMip, t->mipCount - 1);
-    const uint32_t levels = (uint32_t)(t->mipCount - first);
-    int width = t->width, height = t->height;
-    for (int level = 0; level < first; ++level) {
-        width = artfMaxi(width / 2, 1);
-        height = artfMaxi(height / 2, 1);
+    /* what is resident: the mipmaps from that one down, as an image of their own; fewer, if that does not fit */
+    const int resident = artfMini(t->residentMip, t->mipCount - 1);
+    int first = resident, width = 0, height = 0;
+    for (;; ++first) {
+        width = t->width;
+        height = t->height;
+        for (int level = 0; level < first; ++level) {
+            width = artfMaxi(width / 2, 1);
+            height = artfMaxi(height / 2, 1);
+        }
+        if (imageNew(v, &image, format ? (int)format : FORMAT_BGRA8, width, height, (uint32_t)(t->mipCount - first), 1, IMAGE_SAMPLED | IMAGE_TRANSFER_DST, ASPECT_COLOR)) break;
+        imageFree(v, &image);
+        if (first + 1 < t->mipCount) continue;
+        artfFree(encoded);
+        if (!index) return false; /* (white itself) */
+        if (index < v->textures.len) {
+            imageFree(v, &v->textures.items[index]);
+            v->textures.items[index] = image;
+        } else {
+            artfVecPush(&v->textures, image);
+            artfVecPush(&v->textureMarks, 0);
+        }
+        v->textureMarks.items[index] = (uint64_t)t->generation << 8 | (uint64_t)resident;
+        textureWhite(v, index);
+        artfEventSay(ARTF_EVENT_REFUSED, v, handle, 0, "artful: texture %u does not fit in the GPU's memory, even at its smallest: it is white", handle);
+        return true;
     }
-    if (!imageNew(v, &image, format ? (int)format : FORMAT_BGRA8, width, height, levels, 1, IMAGE_SAMPLED | IMAGE_TRANSFER_DST, ASPECT_COLOR)) return false;
+    if (first > resident) artfLog("artful: texture %u is taken from mipmap %d, not %d, as the GPU's memory has run out", handle, first, resident);
+    const uint32_t levels = (uint32_t)(t->mipCount - first);
     BufferImageCopy regions[16];
     for (uint32_t level = 0, w = (uint32_t)width, h = (uint32_t)height; level < levels; ++level) {
         BufferImageCopy r = {(VkDeviceSize)offsets[(uint32_t)first + level], 0, 0, {ASPECT_COLOR, level, 0, 1}, {0, 0, 0}, {w, h, 1}};
@@ -1946,7 +1991,8 @@ static bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool co
     imageBarrier(v, c, image.image, levels, LAYOUT_TRANSFER_DST, LAYOUT_SHADER_READ, STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
     bool ok = oneShotEnd(v, c);
     bufferFree(v, &staging);
-    const uint64_t mark = (uint64_t)t->generation << 8 | (uint64_t)first;
+    /* (marked as what was asked, so that it is not tried again each frame) */
+    const uint64_t mark = (uint64_t)t->generation << 8 | (uint64_t)resident;
     if (index < v->textures.len) {
         imageFree(v, &v->textures.items[index]);
         v->textures.items[index] = image;
@@ -2174,17 +2220,13 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
             if (t->removed) {
                 /* (white in its place, which every entry of the array must have) */
                 if (i >= v->textures.len) continue;
-                const DescriptorImageInfo white = {v->sampler, v->textures.items[0].view, LAYOUT_SHADER_READ};
-                for (int k = 0; k < SLOTS; ++k) {
-                    const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 6, (uint32_t)i, 1, DESCRIPTOR_COMBINED, &white, NULL, NULL};
-                    v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
-                }
+                textureWhite(v, (uint32_t)i);
                 v->textureMarks.items[i] = mark;
                 continue;
             }
             bool compress = v->compressTextures && i;
             for (size_t m = 0; m < scene->materials.len && compress; ++m) compress = scene->materials.items[m].normalMap != i;
-            if (!uploadTexture(v, t, (uint32_t)i, compress)) return false;
+            if (!uploadTexture(v, t, (uint32_t)i, compress, (ArtfTexture)i)) return false;
         }
     }
 
@@ -3617,7 +3659,7 @@ static bool syncSwarms(Vulkan* v, Slot* s, const ArtfScene* scene) {
         memcpy(out + k * 4, &row, 4);
         float* at = out + (size_t)row * 4;
         const uint32_t head[8] = {(uint32_t)steps, artfSwarmPlaces(w), v->swarmAt.items[k], fresh ? 1u : 0u,
-                                  v->instanceCapacity * 2 + v->swarmAt.items[k], swarmCopiesAt(v) + v->swarmAt.items[k], scene->particleQuad - 1, 0};
+                                  v->instanceCapacity * 2 + v->swarmAt.items[k], swarmCopiesAt(v) + v->swarmAt.items[k], artfMeshIndexOf(scene, scene->particleQuad), 0};
         memcpy(at, head, sizeof head);
         float face[ARTF_SWARM_ROWS * 4];
         artfSwarmFaceRows(scene, w, face);
@@ -3645,7 +3687,7 @@ static void runSwarms(Vulkan* v, VkCommandBuffer c, Slot* s) {
 /* All of them, after the other layers, in one draw of the quad: each over what is there, in their order. */
 static void drawSwarms(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene) {
     if (!v->swarms.len || !scene->particleQuad) return;
-    const MeshRange* quad = &v->meshes.items[scene->particleQuad - 1];
+    const MeshRange* quad = &v->meshes.items[artfMeshIndexOf(scene, scene->particleQuad)];
     const VkDeviceSize zero = 0;
     v->vkCmdBindVertexBuffers(c, 0, 1, &v->vertices.buffer, &zero);
     v->vkCmdBindIndexBuffer(c, v->indices.buffer, 0, 1 /* 32 bits */);
@@ -4034,9 +4076,21 @@ static bool meshletIdsUp(Vulkan* v, const ArtfScene* scene) {
 
 /* What was being made off the frame, where it is done: taken (see shaderJobEnd). */
 static bool pipelinesTake(Vulkan* v, const ArtfScene* scene) {
-    if (v->shaderJob && (!v->shaderJob->task || artfTaskDone(v->shaderJob->task)) && !shaderJobEnd(v, scene, true)) return false;
+    bool taken = false;
+    if (v->shaderJob && (!v->shaderJob->task || artfTaskDone(v->shaderJob->task))) {
+        if (!shaderJobEnd(v, scene, true)) return false;
+        taken = true;
+    }
     for (int k = 0; k < MAKE_COMPUTE; ++k)
-        if (v->computeJobs[k] && (!v->computeJobs[k]->task || artfTaskDone(v->computeJobs[k]->task)) && !computeJobEnd(v, scene, k, true)) return false;
+        if (v->computeJobs[k] && (!v->computeJobs[k]->task || artfTaskDone(v->computeJobs[k]->task))) {
+            if (!computeJobEnd(v, scene, k, true)) return false;
+            taken = true;
+        }
+    if (taken && !v->shaderJob) {
+        bool pending = false;
+        for (int k = 0; k < MAKE_COMPUTE; ++k) pending = pending || v->computeJobs[k];
+        if (!pending) artfEventSay(ARTF_EVENT_SHADERS_READY, v, 0, 0, "artful: what the scene asked for is made, and drawn from this frame");
+    }
     return true;
 }
 

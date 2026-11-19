@@ -262,8 +262,8 @@ void testSimplify(void) {
     ArtfScene* s = artfSceneNew();
     artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     ArtfMesh cube = artfSceneAddCube(s, 1), sphere = artfSceneAddSphere(s, 1, 64, 96);
-    CHECK(s->meshes.items[cube - 1].lodCount == 0); /* too small to be worth it */
-    const ArtfMeshData* m = &s->meshes.items[sphere - 1];
+    CHECK(s->meshes.items[artfMeshIndexOf(s, cube)].lodCount == 0); /* too small to be worth it */
+    const ArtfMeshData* m = &s->meshes.items[artfMeshIndexOf(s, sphere)];
     CHECK(m->lodCount >= 3); /* (its seam goes too, on both sides at once; its poles stay) */
     uint32_t triangles = m->indexCount / 3;
     float error = 0;
@@ -341,7 +341,7 @@ void testSimplify(void) {
             idx[n++] = b; idx[n++] = c; idx[n++] = d;
         }
     ArtfMesh sheet = artfSceneAddMesh(s, v, (N + 1) * (N + 1), idx, n);
-    const ArtfMeshData* base = &s->meshes.items[sheet - 1];
+    const ArtfMeshData* base = &s->meshes.items[artfMeshIndexOf(s, sheet)];
     CHECK(base->lodCount >= 1);
     const ArtfMeshData* light = &s->meshes.items[base->lods[0]];
     CHECK(light->indexCount < base->indexCount / 2);
@@ -395,9 +395,9 @@ void testLod(void) {
     ArtfScene* later = artfSceneNew();
     artfSceneSetFeature(later, ARTF_FEATURE_LOD, false);
     ArtfMesh mesh = artfSceneAddSphere(later, 1, 32, 48);
-    CHECK(later->meshes.items[mesh - 1].lodCount == 0);
+    CHECK(later->meshes.items[artfMeshIndexOf(later, mesh)].lodCount == 0);
     artfSceneSetFeature(later, ARTF_FEATURE_LOD, true);
-    CHECK(later->meshes.items[mesh - 1].lodCount > 0);
+    CHECK(later->meshes.items[artfMeshIndexOf(later, mesh)].lodCount > 0);
     artfSceneFree(later);
 
     artfFree(full);
@@ -645,7 +645,7 @@ void testLodFade(ArtfBackend backend) {
     ArtfScene* s = plainScene();
     artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     const ArtfMesh mesh = artfSceneAddSphere(s, 1, 64, 96);
-    const ArtfMeshData* m = &s->meshes.items[mesh - 1];
+    const ArtfMeshData* m = &s->meshes.items[artfMeshIndexOf(s, mesh)];
     CHECK(m->lodCount >= 1);
     addAt(s, mesh, whiteMaterial(s), 0, 0, 0, 1);
     /* where the first level starts: a little past it, it is in its fade */
@@ -750,4 +750,52 @@ void testCullSize(void) {
     artfFree(a);
     artfFree(b[0]);
     artfFree(b[1]);
+}
+
+/* A scene belongs to one thread at a time: a change from another thread while it is drawn is said; one from the
+ * drawing thread itself, or from another between frames, is not. */
+typedef struct ChangeFromAfar {
+    ArtfScene* scene;
+    ArtfInstance instance;
+    bool fromAfar;
+} ChangeFromAfar;
+
+static void moveIt(void* user) {
+    ChangeFromAfar* c = user;
+    const ArtfTransform t = artfTransformAt(.1f, 0, 0, 1);
+    artfInstanceSetTransform(c->scene, c->instance, &t);
+}
+
+static void frameThatChanges(void* user, const ArtfCamera* camera, int width, int height, void* params) {
+    (void)camera; (void)width; (void)height; (void)params;
+    ChangeFromAfar* c = user;
+    if (c->fromAfar) artfTaskJoin(artfTaskStart(moveIt, c));
+    else moveIt(c);
+}
+
+static void rowsDark(void* user, const void* params, const ArtfBackgroundRows* rows) { (void)user; (void)params; (void)rows; }
+
+void testThreadRule(void) {
+    ArtfScene* s = plainScene();
+    ChangeFromAfar c = {s, addAt(s, artfSceneAddCube(s, 1), whiteMaterial(s), 0, 0, 0, 1), false};
+    ArtfBackgroundPass pass;
+    memset(&pass, 0, sizeof pass);
+    pass.user = &c;
+    pass.frame = frameThatChanges;
+    pass.rows = rowsDark;
+    artfSceneSetBackgroundPass(s, &pass);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    logged = 0;
+    artfSetLog(countLog, &logged);
+    CHECK(artfRendererDraw(r, s));
+    CHECK(logged == 0); /* (the drawing thread's own) */
+    artfTaskJoin(artfTaskStart(moveIt, &c));
+    CHECK(logged == 0); /* (another thread, between frames: it belongs to that one then) */
+    c.fromAfar = true;
+    CHECK(artfRendererDraw(r, s));
+    CHECK(logged == 1);
+    artfSetLog(NULL, NULL);
+    artfRendererFree(r);
+    artfSceneFree(s);
 }

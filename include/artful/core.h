@@ -56,6 +56,38 @@ typedef void (*ArtfLogFn)(void* user, const char* message);
 void artfSetLog(ArtfLogFn fn, void* user);
 void artfLog(const char* format, ...);
 
+/* What happened that a program may want to act on, not only read: each also goes to the log, as words. */
+typedef enum ArtfEventKind {
+    /* The GPU's device is gone: the 3D renderer that says so must be freed, and its scene given to a new one; the 2D
+     * renderer goes on, on the CPU. source: the renderer. */
+    ARTF_EVENT_DEVICE_LOST = 1,
+    /* The GPU's memory ran out (bytes: what was asked for). For a texture, it is taken without its largest mipmaps,
+     * as many as it takes to fit, or refused (ARTF_EVENT_REFUSED) and drawn white; the frame goes on. For anything
+     * else (meshes, instances, the frame's own buffers), the frame cannot be drawn, and the renderer says
+     * ARTF_EVENT_DEVICE_LOST after it. source: the renderer. */
+    ARTF_EVENT_OUT_OF_MEMORY,
+    /* What was asked for could not be taken, and is not drawn: handle, the mesh or the texture, as the scene gave it
+     * (0 when it was not one of them). source: the renderer. */
+    ARTF_EVENT_REFUSED,
+    /* What a feature turned on after the first frame needs (artfRendererWarm) is made: it is drawn from now on.
+     * source: the renderer. */
+    ARTF_EVENT_SHADERS_READY,
+} ArtfEventKind;
+
+typedef struct ArtfEvent {
+    ArtfEventKind kind;
+    const void* source;  /* what it happened to */
+    uint32_t handle;     /* see each kind */
+    uint64_t bytes;      /* see each kind */
+    const char* message; /* the same words as the log's; borrowed, for the call */
+} ArtfEvent;
+
+/* Events go to fn, from the thread that draws (any thread may set it). NULL: none. */
+typedef void (*ArtfEventFn)(void* user, const ArtfEvent* event);
+void artfSetEvents(ArtfEventFn fn, void* user);
+/* (Artful's own: says it, to the log and to the events) */
+void artfEventSay(ArtfEventKind kind, const void* source, uint32_t handle, uint64_t bytes, const char* format, ...);
+
 /* A monotonic clock, in milliseconds: for animating, and for measuring. */
 double artfNowMs(void);
 

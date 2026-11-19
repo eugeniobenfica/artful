@@ -24,4 +24,7 @@ ArtfTask* artfTaskStart(void (*fn)(void* user), void* user);
 bool artfTaskDone(ArtfTask* t);
 void artfTaskJoin(ArtfTask* t);
 
+/* The calling thread, as a number no other running thread has; never 0. */
+uintptr_t artfThreadId(void);
+
 #endif

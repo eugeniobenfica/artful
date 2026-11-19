@@ -209,6 +209,14 @@ static DWORD WINAPI taskMain(void* t) { taskRun(t); return 0; }
 static void* taskMain(void* t) { taskRun(t); return NULL; }
 #endif
 
+uintptr_t artfThreadId(void) {
+#ifdef _WIN32
+    return (uintptr_t)GetCurrentThreadId();
+#else
+    return (uintptr_t)pthread_self();
+#endif
+}
+
 ArtfTask* artfTaskStart(void (*fn)(void* user), void* user) {
     ArtfTask* t = ARTF_NEW(ArtfTask);
     t->fn = fn;

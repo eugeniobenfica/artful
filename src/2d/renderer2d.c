@@ -576,6 +576,7 @@ bool artfRenderer2DDraw(ArtfRenderer2D* r, ArtfScene2D* s) {
 #ifdef ARTFUL_VULKAN
     if (r->gpu && !artf2DVulkanDraw(r->gpu, f, s->gi.enabled ? &s->gi : NULL, !artf2DVulkanShows(r->gpu))) {
         /* (a device lost: the CPU takes over, from this frame on, into memory) */
+        artfEventSay(ARTF_EVENT_DEVICE_LOST, r, 0, 0, "artful-2d: the device is lost: the CPU draws from now on");
         shown = !artf2DVulkanShows(r->gpu);
         artf2DVulkanFree(r->gpu);
         r->gpu = NULL;

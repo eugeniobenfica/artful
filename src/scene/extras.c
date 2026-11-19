@@ -115,7 +115,7 @@ ArtfEmitter artfSceneAddEmitter(ArtfScene* s, const ArtfEmitterDesc* desc) {
         e->shades[k] = artfSceneAddMaterial(s, &m);
     }
     const ArtfMesh quad = quadOf(s);
-    if (desc->parallel) e->swarm = artfSwarmNew(s, &e->desc, (uint32_t)((EmitterList*)s->emitters)->len, e->shades[0], quad - 1);
+    if (desc->parallel) e->swarm = artfSwarmNew(s, &e->desc, (uint32_t)((EmitterList*)s->emitters)->len, e->shades[0], artfMeshIndexOf(s, quad));
     for (uint32_t i = 0; i < e->count; ++i) {
         e->particles[i].age = -1.f;
         e->instances[i] = artfSceneAddInstance(s, quad, e->shades[0], NULL);

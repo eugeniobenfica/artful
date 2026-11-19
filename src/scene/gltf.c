@@ -11,6 +11,7 @@
 
 typedef struct ModelNode {
     int32_t parent;
+    char name[64];             /* as the file names it; empty: none */
     float t[3], r[4], s[3];    /* as the file has it */
     float pose[10];            /* as a clip has it now: t, r, s */
     bool fixed;                /* the file gave a matrix: clips do not touch it */
@@ -960,7 +961,7 @@ static void placeNode(Loader* l, const Json* node, uint32_t index, int depth) {
             const ArtfMaterial used = material >= 0 && material < l->materialCount ? l->materials[material] : 0;
             const ArtfInstance instance = artfSceneAddInstance(l->scene, l->primitives[slot], used, &t);
             if (instance) {
-                const bool bends = skinned && l->scene->meshes.items[l->primitives[slot] - 1].skin;
+                const bool bends = skinned && l->scene->meshes.items[artfMeshIndexOf(l->scene, l->primitives[slot])].skin;
                 const ModelPart part = {instance, index, bends ? (int32_t)skin : -1};
                 artfVecPush(&l->model->parts, part);
                 ++l->instances;
@@ -983,6 +984,8 @@ static void readNodes(Loader* l, ModelData* d) {
     uint32_t i = 0;
     for (const Json* j = d->nodeCount ? nodeAt(l, l->nodes->first) : NULL; j; j = nodeAt(l, j->next), ++i) {
         ModelNode* n = &d->nodes[i];
+        const Json* name = member(l, j, "name");
+        if (name && name->kind == J_STRING) memcpy(n->name, name->text, artfMini((int)name->length, (int)sizeof n->name - 1));
         const float start[10] = {0, 0, 0, 0, 0, 0, 1, 1, 1, 1};
         memcpy(n->pose, start, sizeof start);
         readNumbers(l, member(l, j, "translation"), n->pose, 3);
@@ -1211,6 +1214,102 @@ void artfAnimationSet(ArtfScene* s, ArtfModel m, uint32_t clip, float time) {
         sampleChannel(ch, time, ch->path == PATH_W ? n->weightPose : n->pose + (ch->path == PATH_T ? 0 : ch->path == PATH_R ? 3 : 7));
     }
     applyPose(s, d);
+}
+
+/* Whether node i is below (or is) node top. */
+static bool nodeUnder(const ModelData* d, uint32_t i, uint32_t top) {
+    for (int32_t at = (int32_t)i, steps = 0; at >= 0 && steps <= (int32_t)d->nodeCount; at = d->nodes[at].parent, ++steps)
+        if ((uint32_t)at == top) return true;
+    return false;
+}
+
+bool artfAnimationMix(ArtfScene* s, ArtfModel m, const ArtfClipMix* clips, uint32_t count) {
+    ModelData* d = modelAt(s, m);
+    if (!d) return false;
+    /* first, that all is there: a mix asked wrong changes nothing */
+    uint32_t tops[64];
+    if (count > 64) {
+        artfLog("artful: a mix of %u clips: 64 at most", count);
+        return false;
+    }
+    for (uint32_t k = 0; k < count; ++k) {
+        if (clips[k].clip >= d->clipCount) {
+            artfLog("artful: model %u has no clip %u", m, clips[k].clip);
+            return false;
+        }
+        tops[k] = UINT32_MAX;
+        if (clips[k].only) {
+            for (uint32_t i = 0; i < d->nodeCount && tops[k] == UINT32_MAX; ++i)
+                if (!strcmp(d->nodes[i].name, clips[k].only)) tops[k] = i;
+            if (tops[k] == UINT32_MAX) {
+                artfLog("artful: model %u has no node named %s", m, clips[k].only);
+                return false;
+            }
+        }
+    }
+    /* each clip sampled over the file's pose, then each node takes its share */
+    float* sum = artfCalloc((size_t)d->nodeCount * 11 + 1, sizeof(float)); /* t, r, s, and the weight taken */
+    float* sample = artfMalloc(((size_t)d->nodeCount * 10 + 1) * sizeof(float));
+    uint32_t morphs = 0;
+    for (uint32_t i = 0; i < d->nodeCount; ++i) morphs += d->nodes[i].weightCount;
+    float* morphSum = artfCalloc((size_t)morphs + 1, sizeof(float));
+    float* morphSample = artfMalloc(((size_t)morphs + 1) * sizeof(float));
+    for (uint32_t k = 0; k < count; ++k) {
+        const ModelClip* c = &d->clips[clips[k].clip];
+        float time = clips[k].time;
+        if (c->duration > 0) time -= floorf(time / c->duration) * c->duration;
+        for (uint32_t i = 0, w = 0; i < d->nodeCount; w += d->nodes[i++].weightCount) {
+            const ModelNode* n = &d->nodes[i];
+            memcpy(sample + (size_t)i * 10, n->t, 12);
+            memcpy(sample + (size_t)i * 10 + 3, n->r, 16);
+            memcpy(sample + (size_t)i * 10 + 7, n->s, 12);
+            if (n->weightCount) memcpy(morphSample + w, n->weights, (size_t)n->weightCount * 4);
+        }
+        for (uint32_t i = 0; i < c->channelCount; ++i) {
+            const ModelChannel* ch = &c->channels[i];
+            if (ch->path == PATH_W) {
+                uint32_t w = 0;
+                for (uint32_t j = 0; j < ch->node; ++j) w += d->nodes[j].weightCount;
+                sampleChannel(ch, time, morphSample + w);
+            } else {
+                sampleChannel(ch, time, sample + (size_t)ch->node * 10 + (ch->path == PATH_T ? 0 : ch->path == PATH_R ? 3 : 7));
+            }
+        }
+        const float weight = artfMaxf(clips[k].weight, 0);
+        for (uint32_t i = 0, w = 0; i < d->nodeCount; w += d->nodes[i++].weightCount) {
+            if (weight <= 0 || (tops[k] != UINT32_MAX && !nodeUnder(d, i, tops[k]))) continue;
+            float* to = sum + (size_t)i * 11;
+            const float* from = sample + (size_t)i * 10;
+            /* (a quaternion and its opposite are one turn: each is taken on the side of the first taken) */
+            const float side = to[10] > 0 && to[3] * from[3] + to[4] * from[4] + to[5] * from[5] + to[6] * from[6] < 0 ? -1.f : 1.f;
+            for (int q = 0; q < 10; ++q) to[q] += from[q] * weight * (q >= 3 && q < 7 ? side : 1.f);
+            to[10] += weight;
+            for (uint32_t q = 0; q < d->nodes[i].weightCount; ++q) morphSum[w + q] += morphSample[w + q] * weight;
+        }
+    }
+    for (uint32_t i = 0, w = 0; i < d->nodeCount; w += d->nodes[i++].weightCount) {
+        ModelNode* n = &d->nodes[i];
+        const float* to = sum + (size_t)i * 11;
+        if (to[10] <= 0) {
+            memcpy(n->pose, n->t, 12);
+            memcpy(n->pose + 3, n->r, 16);
+            memcpy(n->pose + 7, n->s, 12);
+            if (n->weightCount) memcpy(n->weightPose, n->weights, (size_t)n->weightCount * 4);
+            continue;
+        }
+        const float inverse = 1.f / to[10];
+        for (int q = 0; q < 10; ++q) n->pose[q] = to[q] * inverse;
+        const float length = sqrtf(n->pose[3] * n->pose[3] + n->pose[4] * n->pose[4] + n->pose[5] * n->pose[5] + n->pose[6] * n->pose[6]);
+        if (length > 0)
+            for (int q = 3; q < 7; ++q) n->pose[q] /= length;
+        for (uint32_t q = 0; q < n->weightCount; ++q) n->weightPose[q] = morphSum[w + q] * inverse;
+    }
+    artfFree(sum);
+    artfFree(sample);
+    artfFree(morphSum);
+    artfFree(morphSample);
+    applyPose(s, d);
+    return true;
 }
 
 void artfModelSetTransform(ArtfScene* s, ArtfModel m, const ArtfTransform* transform) {

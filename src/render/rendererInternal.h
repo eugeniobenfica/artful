@@ -22,6 +22,7 @@ struct ArtfRenderer {
     int trialFrame;
     double trialMs[2];
     ArtfView view; /* artfRendererSetView's: each backend reads it as a frame starts */
+    bool lostSaid; /* ARTF_EVENT_DEVICE_LOST went out: once */
 };
 
 /* The passes of a frame and what each took, as the CPU's clock sees them: each mark ends the pass it names, which
@@ -50,6 +51,9 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* options);
  * refuses. */
 extern int artfVulkanSubmitsLeft;
 extern bool artfVulkanRefuseSwapchain;
+/* For tests: a texture whose image would take more than this many bytes cannot be made, as when the GPU's memory has
+ * run out. Below 0: no such limit. */
+extern long long artfVulkanTextureMemoryLimit;
 /* For tests: every new pipeline a feature asks for (the scene's pixel shaders' variants, shadows from rays, a
  * program's materials, the tracing shader, temporal antialiasing and motion blur) is made before the frame that asks
  * for it, as on the first frame, never on a thread of its own while frames go on without it. */

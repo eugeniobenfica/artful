@@ -47,9 +47,24 @@ uint32_t artfModelClipCount(const ArtfScene* s, ArtfModel m);
 /* Borrowed; empty when the file gave none. */
 const char* artfModelClipName(const ArtfScene* s, ArtfModel m, uint32_t clip);
 float artfModelClipDuration(const ArtfScene* s, ArtfModel m, uint32_t clip);
-/* Puts a model as a clip has it at this time, in seconds, from the start again past its end. Mixing clips is
- * up to the program: artfInstanceSetJoints takes what it makes of them. */
+/* Puts a model as a clip has it at this time, in seconds, from the start again past its end. */
 void artfAnimationSet(ArtfScene* s, ArtfModel m, uint32_t clip, float time);
+
+/* One clip of a mix: at its own time, as much as weight, over the nodes under the one named only (that node and all
+ * below it: an upper body, a hand), or over all of them when only is NULL. */
+typedef struct ArtfClipMix {
+    uint32_t clip;
+    float time;   /* in seconds, from the start again past its end */
+    float weight; /* how much of it; a node takes each clip that reaches it by its share of their weights */
+    const char* only;
+} ArtfClipMix;
+
+/* Puts a model as several clips mixed: walking into running, a wave over a walk. Each node takes, from the clips that
+ * reach it, where they put it, each by its weight over those reaching it: positions and scales by their mean,
+ * rotations by the normalized mean of their quaternions (the shortest way round), the weights of targets by their
+ * mean. A node no clip reaches, or reached with no weight, stays as the file has it. One clip of weight 1 is
+ * artfAnimationSet. false: a clip that is not there, or a node not named so (said through artfSetLog). */
+bool artfAnimationMix(ArtfScene* s, ArtfModel m, const ArtfClipMix* clips, uint32_t count);
 
 /* Decodes a PNG or a JPEG into BGRA pixels with their alpha as it is, for artfSceneAddTexture. The caller
  * owns them (artfFree). NULL: it is neither, or it is damaged. */

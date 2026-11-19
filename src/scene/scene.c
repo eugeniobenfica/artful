@@ -1,6 +1,7 @@
 /* artful — the scene. */
 #include "scene/sceneInternal.h"
 #include "scene/simplifyInternal.h"
+#include "core/threads.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -110,21 +111,41 @@ static uint32_t makeLevels(const ArtfMeshData* m, ArtfMeshData* made, float* err
     return count2;
 }
 
+/* A scene belongs to one thread at a time (docs/api.md): a change from another while a renderer draws it is said, as
+ * it is found. The scene's own changes while it is drawn are on the drawing thread, and are not one. */
+static void changing(const ArtfScene* s, const char* what) {
+    const uintptr_t drawing = s->drawingThread;
+    if (drawing && drawing != artfThreadId())
+        artfLog("artful: %s changed from another thread while the scene was drawn: a scene belongs to one thread at a time", what);
+}
+
 /* A place for a mesh: one that was left, or a new one. What was there is seen to have gone. */
 static uint32_t meshPlace(ArtfScene* s, const ArtfMeshData* m) {
+    changing(s, "a mesh");
     if (!s->freeMeshes.len) {
         artfVecPush(&s->meshes, *m);
         return (uint32_t)s->meshes.len - 1;
     }
     const uint32_t index = s->freeMeshes.items[--s->freeMeshes.len];
-    const uint32_t generation = s->meshes.items[index].generation + 1;
+    const uint32_t generation = s->meshes.items[index].generation + 1, place = s->meshes.items[index].place + 1;
     s->meshes.items[index] = *m;
     s->meshes.items[index].generation = generation;
+    s->meshes.items[index].place = place;
     ++s->meshRemovals;
     return index;
 }
 
 uint32_t artfSceneMakeLevels(const ArtfMeshData* m, ArtfMeshData* made, float* errors) { return makeLevels(m, made, errors); }
+
+ArtfMesh artfMeshHandleOf(const ArtfScene* s, uint32_t index) { return (index + 1) | (s->meshes.items[index].place & 255u) << 24; }
+
+uint32_t artfMeshIndexOf(const ArtfScene* s, ArtfMesh mesh) {
+    const uint32_t number = mesh & 0xFFFFFFu;
+    if (!number || number > s->meshes.len) return UINT32_MAX;
+    const ArtfMeshData* m = &s->meshes.items[number - 1];
+    if (m->removed || (m->place & 255u) != mesh >> 24) return UINT32_MAX;
+    return number - 1;
+}
 uint32_t artfSceneMeshPlace(ArtfScene* s, const ArtfMeshData* m) { return meshPlace(s, m); }
 
 /* What was made goes into the scene, after its mesh. */
@@ -175,7 +196,7 @@ ArtfMesh artfSceneAddPreparedMesh(ArtfScene* s, ArtfPreparedMesh* p) {
     const uint32_t index = meshPlace(s, &p->mesh);
     if (p->levelCount) takeLevels(s, index, p->levels, p->errors, p->levelCount);
     artfFree(p);
-    return index + 1;
+    return artfMeshHandleOf(s, index);
 }
 
 /* Is a mesh, or a copy of its skin, still drawn? (An instance of what bends may take one of its levels.) */
@@ -191,32 +212,35 @@ static bool meshInUse(const ArtfScene* s, uint32_t index) {
 
 static void forgetMesh(ArtfScene* s, uint32_t index) {
     ArtfMeshData* m = &s->meshes.items[index];
-    const uint32_t generation = m->generation;
+    const uint32_t generation = m->generation, place = m->place;
     artfMeshFini(m);
     memset(m, 0, sizeof *m);
     m->removed = true;
     m->generation = generation;
+    m->place = place;
     artfVecPush(&s->freeMeshes, index);
     ++s->meshRemovals;
 }
 
 bool artfSceneRemoveMesh(ArtfScene* s, ArtfMesh mesh) {
-    if (!mesh || mesh > s->meshes.len || s->meshes.items[mesh - 1].removed) {
+    changing(s, "a mesh");
+    const uint32_t index = artfMeshIndexOf(s, mesh);
+    if (index == UINT32_MAX) {
         artfLog("artful: mesh %u is not there", mesh);
         return false;
     }
-    if (meshInUse(s, mesh - 1)) {
+    if (meshInUse(s, index)) {
         artfLog("artful: mesh %u is still in use", mesh);
         return false;
     }
-    const ArtfMeshData* m = &s->meshes.items[mesh - 1];
+    const ArtfMeshData* m = &s->meshes.items[index];
     uint32_t lods[ARTF_MAX_LODS], skinLods[ARTF_MAX_LODS];
     const uint32_t count = m->lodCount, skinCount = m->skinLodCount;
     memcpy(lods, m->lods, sizeof lods);
     memcpy(skinLods, m->skinLods, sizeof skinLods);
     for (uint32_t i = 0; i < count; ++i) forgetMesh(s, lods[i]);
     for (uint32_t i = 0; i < skinCount; ++i) forgetMesh(s, skinLods[i]);
-    forgetMesh(s, mesh - 1);
+    forgetMesh(s, index);
     return true;
 }
 
@@ -225,7 +249,7 @@ ArtfMesh artfSceneAddMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_t ver
     if (!artfMeshBuild(&m, vertices, vertexCount, indices, indexCount, NULL, NULL, 0)) return 0;
     const uint32_t index = meshPlace(s, &m);
     if (s->features[ARTF_FEATURE_LOD]) addLods(s, index);
-    return index + 1;
+    return artfMeshHandleOf(s, index);
 }
 
 ArtfMesh artfSceneAddSkinnedMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const ArtfVertexSkin* skin) {
@@ -233,7 +257,7 @@ ArtfMesh artfSceneAddSkinnedMesh(ArtfScene* s, const ArtfVertex* vertices, uint3
     if (!artfMeshBuild(&m, vertices, vertexCount, indices, indexCount, skin, NULL, 0)) return 0;
     const uint32_t index = meshPlace(s, &m);
     artfSceneSkinLevels(s, index);
-    return index + 1;
+    return artfMeshHandleOf(s, index);
 }
 
 ArtfMesh artfSceneAddMorphMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const ArtfVertexSkin* skin, const ArtfMorphTarget* targets, uint32_t targetCount) {
@@ -241,7 +265,7 @@ ArtfMesh artfSceneAddMorphMesh(ArtfScene* s, const ArtfVertex* vertices, uint32_
     if (!artfMeshBuild(&m, vertices, vertexCount, indices, indexCount, skin, targets, targetCount)) return 0;
     const uint32_t index = meshPlace(s, &m);
     artfSceneSkinLevels(s, index);
-    return index + 1;
+    return artfMeshHandleOf(s, index);
 }
 
 void artfSceneSetFeature(ArtfScene* s, ArtfFeature feature, bool on) {
@@ -373,6 +397,7 @@ void artfPreparedTextureFree(ArtfPreparedTexture* p) {
 
 /* In the place of one that went, or a new one. */
 ArtfTexture artfSceneStoreTexture(ArtfScene* s, const ArtfTextureData* t) {
+    changing(s, "a texture");
     ++s->textureVersion;
     s->decodedTextures = 0;
     if (s->freeTextures.len) {
@@ -434,6 +459,7 @@ ArtfTexture artfSceneAddTexture(ArtfScene* s, const uint32_t* pixels, int width,
 }
 
 bool artfSceneRemoveTexture(ArtfScene* s, ArtfTexture texture) {
+    changing(s, "a texture");
     if (!texture || texture >= s->textures.len || s->textures.items[texture].removed) {
         artfLog("artful: texture %u is not there", texture);
         return false;
@@ -697,6 +723,7 @@ ArtfMaterialDesc artfMaterialDefaults(void) {
 }
 
 ArtfMaterial artfSceneAddMaterial(ArtfScene* s, const ArtfMaterialDesc* desc) {
+    changing(s, "a material");
     ArtfMaterialData m = materialData(s, desc);
     artfVecPush(&s->materials, m);
     const ArtfMaterialMore more = materialMore(s, desc);
@@ -708,6 +735,7 @@ ArtfMaterial artfSceneAddMaterial(ArtfScene* s, const ArtfMaterialDesc* desc) {
 }
 
 void artfMaterialSet(ArtfScene* s, ArtfMaterial m, const ArtfMaterialDesc* desc) {
+    changing(s, "a material");
     if (m >= s->materials.len) return;
     const ArtfMaterialData old = s->materials.items[m];
     s->materials.items[m] = materialData(s, desc);
@@ -739,6 +767,7 @@ void artfMaterialSetParam(ArtfScene* s, ArtfMaterial m, uint32_t index, float x,
 
 /* What a handle stands for; NULL, and said so, when it stands for nothing. */
 static ArtfInstanceData* instanceOf(ArtfScene* s, ArtfInstance i) {
+    changing(s, "an instance");
     const uint32_t number = HANDLE_NUMBER(i);
     if (number && number <= s->handleSlots.len && s->handleGenerations.items[number - 1] == HANDLE_GENERATION(i)) return &s->instances.items[s->handleSlots.items[number - 1]];
     artfLog("artful: instance %u is not there", i);
@@ -792,10 +821,15 @@ static void setTransform(ArtfInstanceData* d, const ArtfTransform* t) {
 }
 
 ArtfInstance artfSceneAddInstance(ArtfScene* s, ArtfMesh mesh, ArtfMaterial material, const ArtfTransform* transform) {
-    if (!mesh || mesh > s->meshes.len || s->meshes.items[mesh - 1].removed) return 0;
+    changing(s, "an instance");
+    const uint32_t meshIndex = artfMeshIndexOf(s, mesh);
+    if (meshIndex == UINT32_MAX) {
+        artfLog("artful: mesh %u is not there", mesh);
+        return 0;
+    }
     ArtfInstanceData d;
     memset(&d, 0, sizeof d);
-    d.mesh = mesh - 1;
+    d.mesh = meshIndex;
     if (s->meshes.items[d.mesh].skin) {
         /* each instance bends alone: it has a copy of its own, that all that draws sees as any other mesh */
         ArtfMeshData copy;
@@ -1013,6 +1047,7 @@ ArtfLight artfSceneAddLight(ArtfScene* s, ArtfVec3 position, ArtfVec3 color, flo
 }
 
 void artfLightSet(ArtfScene* s, ArtfLight l, ArtfVec3 position, ArtfVec3 color, float radius) {
+    changing(s, "a light");
     if (!l || l > ARTF_MAX_LIGHTS) return;
     ArtfLightData d = {{position.x, position.y, position.z}, artfMaxf(radius, 1e-3f), {color.x, color.y, color.z}, 1.f, {0, 0, 0}, -1.f};
     s->lights[l - 1] = d;
@@ -1033,6 +1068,7 @@ void artfLightSetSpot(ArtfScene* s, ArtfLight l, ArtfVec3 direction, float inner
 }
 
 void artfSceneRemoveLight(ArtfScene* s, ArtfLight l) {
+    changing(s, "a light");
     if (l && l <= ARTF_MAX_LIGHTS) {
         s->lightOn[l - 1] = false;
         s->lightSize[l - 1] = 0;
@@ -1041,7 +1077,10 @@ void artfSceneRemoveLight(ArtfScene* s, ArtfLight l) {
     }
 }
 
-void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera) { s->camera = *camera; }
+void artfSceneSetCamera(ArtfScene* s, const ArtfCamera* camera) {
+    changing(s, "the camera");
+    s->camera = *camera;
+}
 void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color) { s->background = color; }
 
 /* Of the lights past the frame's own, those that cast shadows this frame, the most needed first: that ask for them, in

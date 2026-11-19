@@ -116,8 +116,8 @@ void testPrepared(void) {
     const ArtfMesh direct = artfSceneAddMesh(a, v, (N + 1) * (N + 1), idx, n);
     const ArtfMesh made = artfSceneAddPreparedMesh(b, artfPrepareMesh(v, (N + 1) * (N + 1), idx, n, true));
     CHECK(direct && made);
-    CHECK(a->meshes.items[direct - 1].lodCount == b->meshes.items[made - 1].lodCount);
-    CHECK(b->meshes.items[made - 1].lodCount > 0);
+    CHECK(a->meshes.items[artfMeshIndexOf(a, direct)].lodCount == b->meshes.items[artfMeshIndexOf(b, made)].lodCount);
+    CHECK(b->meshes.items[artfMeshIndexOf(b, made)].lodCount > 0);
     static uint32_t px[32 * 32];
     for (int i = 0; i < 32 * 32; ++i) px[i] = 0xFF204060u;
     const ArtfTexture t = artfSceneAddPreparedTexture(b, artfPrepareTexture(px, 32, 32, 0));
@@ -346,7 +346,7 @@ void testMeshStreaming(ArtfBackend backend) {
     artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (whatever ARTFUL_FEATURES says) */
     const ArtfMesh mesh = artfSceneAddMeshStreamed(s, ballVertices(), ballIndices(), readBall, &reads);
     CHECK(mesh && reads == 1);
-    const int lightest = (int)s->meshes.items[mesh - 1].lodCount;
+    const int lightest = (int)s->meshes.items[artfMeshIndexOf(s, mesh)].lodCount;
     CHECK(lightest >= 2 && artfMeshResidentLevel(s, mesh) == lightest);
     ArtfSceneMemory memory;
     artfSceneMemory(s, &memory);
@@ -388,4 +388,37 @@ void testMeshStreaming(ArtfBackend backend) {
     artfFree(a);
     artfFree(b);
     artfRendererFree(r);
+}
+
+/* A mesh's handle has its place's generation: a handle of a mesh removed stands for nothing, even when another mesh took
+ * its place, and places are used again, so that adding and removing for ever does not grow the scene. */
+void testMeshHandles(void) {
+    ArtfScene* s = plainScene();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, false);
+    const ArtfVertex v[3] = {{0, 0, 0, 0, 0, 1, 0, 0, 0}, {1, 0, 0, 0, 0, 1, 1, 0, 0}, {0, 1, 0, 0, 0, 1, 0, 1, 0}};
+    const uint32_t idx[3] = {0, 1, 2};
+    const ArtfMaterial white = whiteMaterial(s);
+    const ArtfMesh first = artfSceneAddMesh(s, v, 3, idx, 3);
+    CHECK(artfSceneRemoveMesh(s, first));
+    const ArtfMesh second = artfSceneAddMesh(s, v, 3, idx, 3);
+    CHECK(second != first && (second & 0xFFFFFFu) == (first & 0xFFFFFFu)); /* (the same place, another generation) */
+    logged = 0;
+    artfSetLog(countLog, &logged);
+    CHECK(artfSceneAddInstance(s, first, white, NULL) == 0);
+    CHECK(!artfSceneRemoveMesh(s, first));
+    CHECK(artfMeshResidentLevel(s, first) == 0);
+    CHECK(logged == 2);
+    artfSetLog(NULL, NULL);
+    const ArtfInstance i = artfSceneAddInstance(s, second, white, NULL);
+    CHECK(i != 0);
+    artfSceneRemoveInstance(s, i);
+    CHECK(artfSceneRemoveMesh(s, second));
+    const size_t places = s->meshes.len;
+    for (int k = 0; k < 20000; ++k) {
+        const ArtfMesh m = artfSceneAddMesh(s, v, 3, idx, 3);
+        CHECK(m != 0);
+        CHECK(artfSceneRemoveMesh(s, m));
+    }
+    CHECK(s->meshes.len == places);
+    artfSceneFree(s);
 }

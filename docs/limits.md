@@ -147,7 +147,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   draws none. The black hole (extensions/blackhole) is one: it bends only its own disc and stars.
   Its gas is painted, as the film's was, and moved by a two-dimensional fluid with no magnetic field; both
   are maps, which show their texels when the eye comes close.
-- A removed mesh gives back GPU memory, but its handle's place in the scene stays used. Residency keeps textures'
+- A removed mesh gives back GPU memory and its place in the scene; the next mesh takes the place with another
+  generation in its handle. A removed texture's place is taken again with the same handle, which then stands for the
+  new texture. Residency keeps textures'
   mipmaps in main memory. A glTF file's JSON is read on the calling thread, and its images and meshes made on
   all cores; all of it can go to another thread with `artfPrepareModel`. A scene holds up to 1024 textures on the GPU (beyond that they
   draw white).

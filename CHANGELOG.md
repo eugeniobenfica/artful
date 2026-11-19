@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **What 1.0 will hold to** (the plan's phase 1). **A mesh's handle has a generation**, in its top byte as an
+  instance's has: places were used again already, and the handle of a mesh removed then stood for the one put in its
+  place; now it stands for nothing, and calls with it say so (`streaming/meshHandles`: 20,000 meshes added and
+  removed, and the scene does not grow). Tests that read a mesh by its handle take `artfMeshIndexOf`. **Events**:
+  `artfSetEvents` hears, typed (`ArtfEvent`), what a program acts on: a device lost (once, by the renderer that lost
+  it; the 2D renderer, as it goes on on the CPU), the GPU's memory run out, something refused, and the shaders a
+  feature turned on mid-run asked for, made. **The GPU's memory run out for a texture** no longer loses the device: it
+  goes up without its largest mipmaps, as many as it takes, or is drawn white, and is not tried again each frame
+  (`backends/textureMemory`, with `artfVulkanTextureMemoryLimit` standing for a full GPU); for anything else the frame
+  still fails, now said. **One thread at a time**: a mesh, texture, material, instance, light or the camera changed
+  from another thread while the scene is drawn is said through the log (`core/threadRule`). **Clips mixed**:
+  `artfAnimationMix`, each clip at its own time and weight, over a whole model or only below a node it names
+  (`motion/clips`). Docs: the rules of `docs/api.md` with what 1.x would keep (source, not binary, compatibility:
+  proposed), and tiers in `docs/stability.md`, by what was run. 160 tests pass; without Vulkan, 152,393 checks with 84
+  skipped; the new tests clean under AddressSanitizer and UndefinedBehaviorSanitizer.
+
 - **Tests that say what they did not run, a measure of pictures, and frames kept to compare** (the plan's phase 0,
   `docs/plano-de-correcao.md`). CTest now has each of `artful-tests`' 157 tests as one of its own (asked of
   `artful-tests --list` when CTest runs, each run alone with `--exact`), and `ctest -j4` takes 36 s where the one test

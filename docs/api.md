@@ -9,16 +9,41 @@ The headers say what each call does. This is the map, and the rules that hold fo
 ## Rules
 
 - **Nothing is shared with a renderer while it draws.** Use a scene from one thread, and change it between
-  `artfRendererDraw` calls.
+  `artfRendererDraw` calls. A scene and a renderer belong to one thread at a time; another thread may take them
+  over between frames. A mesh, a texture, a material, an instance, a light or the camera changed from another thread
+  while the scene is drawn is said through `artfSetLog` (a check of the rule, not a guarantee). `artfPrepareMesh`,
+  `artfPrepareTexture` and `artfPrepareModel` touch no scene, and run on any thread.
 - **A scene outlives renderers.** A renderer that is lost is freed, a new one takes the same scene, and
   nothing is loaded again.
-- **Handles are numbers; 0 is none.** An instance's handle stops working when it is removed: calls with it do
-  nothing, and say so through `artfSetLog`.
-- **Running out of memory aborts.** No call returns NULL for that.
+- **Handles are numbers; 0 is none.** An instance's or a mesh's handle stops working when it is removed: calls with
+  it do nothing, and say so through `artfSetLog`. Their places are used again, each with a generation in the handle's
+  top byte, so the handle of one removed does not stand for the one put in its place (for 255 such over one place).
+  Textures' handles are their places alone, for now: one removed may stand for the next put in its place.
+- **Running out of memory.** Main memory running out aborts: no call returns NULL for that. The GPU's memory running
+  out does not: a texture goes up without its largest mipmaps, or is drawn white, and anything else makes the frame
+  fail as a lost device does. Each is said by an event.
+- **Events.** `artfSetEvents` hears what a program may want to act on, typed: a device lost, the GPU's memory run
+  out, something refused, shaders made for a feature turned on mid-run. The log says the same, as words.
 - **Structs grow.** Start from `artfRendererDefaults` and `artfMaterialDefaults`, or `= {0}`, and set fields by
   name. A vertex that is not zeroed must set `color`.
 - **Colors.** Materials, lights and fog are linear light. Bytes (textures, vertex colors, frames) are BGRA and
   hold the square root of light. Frames and overlays are premultiplied; textures are not.
+
+## What 1.x will keep (proposed)
+
+To be decided before 1.0; as it stands, for the owner to confirm:
+
+- **Source compatibility.** A program written for 1.0 compiles and behaves the same against every 1.x: no function,
+  type, enum value or field is removed or changes meaning in 1.x. New ones are added. What is to go is marked
+  deprecated in a minor version and kept until 2.0.
+- **No binary compatibility.** Artful is a static library, built with the program; 1.x promises nothing of its ABI
+  (struct sizes and layouts may grow between minor versions). A program rebuilds against the version it ships. This is
+  what Filament and wgpu promise, and what keeps structs free to grow.
+- **Structs grow at their end**, with zero meaning what was before: start from the defaults or `= {0}`.
+- **Pictures.** What a frame shows may change in a minor version, for the better, and is said in the changelog with
+  the measure of it; the same scene on the same version gives the same bytes on the CPU, on every processor.
+- **Files.** What Artful writes to disk (the pipeline cache, and any cache to come) is read by later 1.x, or thrown
+  away and made again: never misread.
 
 ## A first frame
 
@@ -31,6 +56,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfRendererResize` | A new size. |
 | `ArtfRendererOptions.renderScale` | With `hdr`: the scene drawn smaller and upscaled, with temporal antialiasing as TSR does. |
 | `artfSetLog` | Why something did not work. |
+| `artfSetEvents` | The same, typed, for what a program acts on: a device lost, the GPU's memory run out, something refused, shaders ready. |
 
 ## What is in a scene
 
@@ -38,6 +64,7 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | --- | --- |
 | `artfSceneLoadGltf`, `artfSceneLoadGltfMemory` | All a glTF file holds. |
 | `artfSceneLoadModel`, `artfModelSetTransform`, `artfAnimationSet` | The same as a model you can move, with its clips. |
+| `artfAnimationMix` | Clips mixed by weight, each over all of a model or only below a node it names. |
 | `artfModelCameraCount`, `artfModelCamera` | A file's cameras, for `artfSceneSetCamera`. |
 | `artfSceneAddSkinnedMesh`, `artfInstanceSetJoints` | Your own bones, with levels of detail. |
 | `artfSceneAddMesh` | Your own triangles. |
