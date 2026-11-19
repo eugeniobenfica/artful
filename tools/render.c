@@ -42,7 +42,9 @@
  *                 [--render-scale s]: with --hdr, the scene drawn at s of the size and upscaled (with --temporal, as
  *                 TSR does); [--sharpen x]: after temporal antialiasing or upscaling
  *
- * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features.
+ * With --frames it prints what a frame took. ARTFUL_FEATURES sets the scene's features. [--json file]: with --frames,
+ * what each frame took, written to a file for tools/bench.py to compare: its percentiles, the first frame (with the
+ * scene's building before it), the passes of the last and the scene's memory.
  *
  * blackhole also takes: [--time t] [--samples n] [--doppler 0..1] [--distance masses] [--spin a]
  *                       [--tilt degrees] [--roll degrees] [--fov degrees] [--exposure x]
@@ -528,6 +530,67 @@ static void sceneModel(ArtfScene* s, const char* path) {
     setCamera(s, &c);
 }
 
+/* ---- what frames took, as JSON (--json) ---- */
+
+static int byDouble(const void* a, const void* b) {
+    const double x = *(const double*)a, y = *(const double*)b;
+    return (x > y) - (x < y);
+}
+
+/* p50, p95, p99 and the most of n times, as JSON */
+static void percentiles(FILE* f, const double* times, int n) {
+    double* sorted = malloc(sizeof(double) * (size_t)n);
+    memcpy(sorted, times, sizeof(double) * (size_t)n);
+    qsort(sorted, (size_t)n, sizeof(double), byDouble);
+    const double p50 = sorted[(n - 1) / 2], p95 = sorted[(int)((n - 1) * .95)], p99 = sorted[(int)((n - 1) * .99)];
+    fprintf(f, "{\"p50\": %.4f, \"p95\": %.4f, \"p99\": %.4f, \"max\": %.4f}", p50, p95, p99, sorted[n - 1]);
+    free(sorted);
+}
+
+static void jsonString(FILE* f, const char* text) {
+    fputc('"', f);
+    for (const char* p = text; *p; ++p) {
+        if (*p == '"' || *p == '\\') fputc('\\', f);
+        if ((unsigned char)*p >= 32) fputc(*p, f);
+    }
+    fputc('"', f);
+}
+
+static bool writeBench(const char* path, int argc, char** argv, const ArtfRenderer* r, const ArtfScene* s, const ArtfRendererOptions* o,
+                       const char* sceneName, int frames, double totalMs, double firstMs, double sinceStartMs, const double* cpuTimes,
+                       const double* gpuTimes, bool gpu, const ArtfFrameStats* last) {
+    FILE* f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "{\n  \"tool\": \"artful-render\", \"version\": \"%d.%d.%d\",\n  \"arguments\": [", ARTF_VERSION_MAJOR, ARTF_VERSION_MINOR, ARTF_VERSION_PATCH);
+    for (int i = 1; i < argc; ++i) {
+        if (i > 1) fputs(", ", f);
+        jsonString(f, argv[i]);
+    }
+    fputs("],\n  \"scene\": ", f);
+    jsonString(f, sceneName);
+    fputs(", \"renderer\": ", f);
+    jsonString(f, artfRendererDescription(r));
+    fprintf(f, ", \"backend\": \"%s\", \"width\": %d, \"height\": %d,\n", artfBackendName(artfRendererBackend(r)), o->width, o->height);
+    fprintf(f, "  \"frames\": %d, \"msPerFrame\": %.4f, \"firstFrameMs\": %.3f, \"untilLastFrameMs\": %.3f,\n", frames, totalMs / frames, firstMs, sinceStartMs);
+    fputs("  \"cpuMs\": ", f);
+    percentiles(f, cpuTimes, frames);
+    if (gpu) {
+        fputs(",\n  \"gpuMs\": ", f);
+        percentiles(f, gpuTimes, frames);
+    }
+    ArtfSceneMemory m;
+    artfSceneMemory(s, &m);
+    fprintf(f, ",\n  \"memory\": {\"meshes\": %zu, \"textures\": %zu, \"residentMeshes\": %zu, \"residentTextures\": %zu},\n", m.meshes, m.textures, m.residentMeshes, m.residentTextures);
+    fputs("  \"passes\": {", f);
+    for (uint32_t k = 0; k < last->passCount; ++k) {
+        if (k) fputs(", ", f);
+        jsonString(f, last->passes[k].name);
+        fprintf(f, ": %.4f", last->passes[k].ms);
+    }
+    fputs("}\n}\n", f);
+    return fclose(f) == 0;
+}
+
 int main(int argc, char** argv) {
     artfSetLog(printLog, NULL);
     const char* model = NULL;
@@ -555,6 +618,7 @@ int main(int argc, char** argv) {
     int frames = 0, fieldSide = 100;
     ArtfView view = ARTF_VIEW_LIT;
     bool passes = false;
+    const char* json = NULL;
     float hlodCell = 0, streamBudget = -1;
     uint32_t particles = 0;
     HoleOptions hole = {0, 0, 74.1f, 3.44f, 0, 19.f, 1.f, .6f, 0, 0, -1.f, 1, false, 0, .9f, -1.f, -1000.f, -1000.f}; /* (the eye of the film's own pictures) */
@@ -645,6 +709,7 @@ int main(int argc, char** argv) {
             if (!artfViewFromName(argv[++i], &view)) { fprintf(stderr, "no view called %s\n", argv[i]); return 2; }
         }
         else if (!strcmp(a, "--passes")) passes = true;
+        else if (!strcmp(a, "--json") && i + 1 < argc) json = argv[++i];
         else if (!strcmp(a, "--trace") && i + 1 < argc) trace.mode = !strcmp(argv[++i], "paths") ? ARTF_TRACE_PATHS : ARTF_TRACE_RAYS;
         else if (!strcmp(a, "--trace-samples") && i + 1 < argc) traceSamples = atoi(argv[++i]);
         else if (!strcmp(a, "--bounces") && i + 1 < argc) trace.bounces = atoi(argv[++i]);
@@ -840,7 +905,17 @@ int main(int argc, char** argv) {
         const bool gpu = artfRendererBackend(r) == ARTF_BACKEND_VULKAN;
         /* A GPU's frame ends when its pixels can be read, not when the call returns: the frames are
          * timed as a run, to the last pixel, and reading itself is taken out. */
+        double firstMs = 0;
+        if (json) {
+            /* the first frame: what it takes to show anything, shaders and uploads included */
+            const double f0 = artfNowMs();
+            artfRendererDraw(r, s);
+            artfRendererReadPixels(r, sink);
+            firstMs = artfNowMs() - f0;
+        }
         if (gpu) artfRendererReadPixels(r, sink);
+        double* cpuTimes = calloc((size_t)frames, sizeof(double));
+        double* gpuTimes = calloc((size_t)frames, sizeof(double));
         const double start = artfNowMs();
         for (int i = 0; i < frames; ++i) {
             if (isHole) {
@@ -854,6 +929,8 @@ int main(int argc, char** argv) {
             const double b = artfNowMs() - a;
             best = b < best ? b : best;
             artfRendererStats(r, &st);
+            cpuTimes[i] = b;
+            gpuTimes[i] = st.gpuMs;
             cull += st.cullMs;
             geometry += st.geometryMs;
             raster += st.rasterMs;
@@ -881,6 +958,12 @@ int main(int argc, char** argv) {
             for (uint32_t k = 0; k < st.passCount; ++k) printf("    %-24s %8.3f ms  %5.1f%%\n", st.passes[k].name, st.passes[k].ms, sum > 0 ? st.passes[k].ms * 100.0 / sum : 0.0);
             printf("    %-24s %8.3f ms\n", "all", sum);
         }
+        if (json && !writeBench(json, argc, argv, r, s, &o, sceneName, frames, total, firstMs, artfNowMs() - t0, cpuTimes, gpuTimes, gpu, &st)) {
+            fprintf(stderr, "could not write %s\n", json);
+            return 1;
+        }
+        free(cpuTimes);
+        free(gpuTimes);
     }
     if (out) {
         uint32_t* pixels = malloc((size_t)o.width * o.height * 4);

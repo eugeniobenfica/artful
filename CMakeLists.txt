@@ -140,6 +140,18 @@ if(ARTFUL_BUILD_TOOLS)
 endif()
 
 if(ARTFUL_BUILD_TOOLS)
+  # how far apart two pictures look, by FLIP: a gate for pictures kept to compare against
+  add_executable(artful-flip tools/flipImages.c tools/flip.c)
+  target_link_libraries(artful-flip PRIVATE artful)
+  if(UNIX)
+    target_link_libraries(artful-flip PRIVATE m)
+  endif()
+  if(MINGW)
+    target_link_options(artful-flip PRIVATE -static)
+  endif()
+endif()
+
+if(ARTFUL_BUILD_TOOLS)
   # a lit 2D room to a PNG, and what its frames take: it links artful-2d alone
   add_executable(artful-render2d tools/render2d.c)
   target_link_libraries(artful-render2d PRIVATE artful-2d)
@@ -170,16 +182,27 @@ if(ARTFUL_BUILD_TESTS)
   # one program, a file for each area: artful-tests [word...] runs the tests whose names hold a word; --list names them
   add_executable(artful-tests tests/main.c tests/common.c
     tests/core.c tests/backends.c tests/layers.c tests/materials.c tests/files.c tests/streaming.c tests/shadows.c
-    tests/post.c tests/tracing.c tests/sky.c tests/motion.c tests/scale.c tests/views.c tests/blackhole.c tests/twod.c)
+    tests/post.c tests/tracing.c tests/sky.c tests/motion.c tests/scale.c tests/views.c tests/blackhole.c tests/twod.c
+    tests/metrics.c tools/flip.c)
   target_link_libraries(artful-tests PRIVATE artful artful-blackhole artful-2d)
-  target_include_directories(artful-tests PRIVATE src extensions/blackhole)
+  target_include_directories(artful-tests PRIVATE src extensions/blackhole tools)
   if(ARTFUL_VULKAN)
     target_compile_definitions(artful-tests PRIVATE ARTFUL_VULKAN) # (without it, what sets Vulkan's own switches is left out)
   endif()
   if(MINGW)
     target_link_options(artful-tests PRIVATE -static)
   endif()
-  add_test(NAME artful-tests COMMAND artful-tests)
+  if(CMAKE_CROSSCOMPILING)
+    add_test(NAME artful-tests COMMAND artful-tests)
+  else()
+    # one CTest test for each of artful-tests' own, asked of it when CTest runs (artful-tests --list): each runs
+    # alone (--exact), and one that could not reach what it needs (Vulkan, a window, ray tracing hardware) is
+    # skipped, not passed (exit 77); ARTFUL_REQUIRE=vulkan,rt,window makes those failures
+    file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/artfulTestsExe-$<CONFIG>.txt CONTENT "$<TARGET_FILE:artful-tests>")
+    set(artful_tests_dir ${CMAKE_CURRENT_BINARY_DIR})
+    configure_file(cmake/artfulTests.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/artfulTests.cmake @ONLY)
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES ${CMAKE_CURRENT_BINARY_DIR}/artfulTests.cmake)
+  endif()
 endif()
 
 # cmake --install build --prefix <dir>, then find_package(artful) with <dir> in CMAKE_PREFIX_PATH

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Tests that say what they did not run, a measure of pictures, and frames kept to compare** (the plan's phase 0,
+  `docs/plano-de-correcao.md`). CTest now has each of `artful-tests`' 157 tests as one of its own (asked of
+  `artful-tests --list` when CTest runs, each run alone with `--exact`), and `ctest -j4` takes 36 s where the one test
+  took 64. A test that could not reach what it needs says so (`missing("vulkan")`, `"rt"`, `"window"`: a renderer asked
+  for by name that cannot be made, a window that cannot be opened, rays that did not go through the hardware), and is
+  skipped (exit 77), not passed, even when the rest of it ran; `ARTFUL_REQUIRE=vulkan,rt,window` makes that a failure.
+  With no Vulkan driver, 83 are skipped. FLIP (Andersson et al., 2020; HDR-FLIP, 2021) is written again in C from
+  NVIDIA's reference (`tools/flip.c`, not part of the library): `artful-flip` compares two pictures, with
+  `--max-mean` and `--max-p99` as a gate, and with `ARTFUL_FLIP_LOG=file` the tests write FLIP beside the share of
+  pixels each comparison already takes, for thresholds by FLIP to be set from later; nothing passes or fails by it
+  yet. A test (`metrics/flip`) holds it to what the metric defines: alike is 0, green against blue 1, a bar one picture
+  has is seen there and not far from it, a byte apart is next to nothing, and HDR-FLIP tells a sun twice as bright.
+  It has not been compared with NVIDIA's own program here. `artful-render --json file` writes what frames took (p50,
+  p95, p99 of the CPU's and the GPU's time, the first frame, the passes, the scene's memory), and `tools/bench.py`
+  draws seven sequences (`run`, keeping the best of a few) and compares two runs (`compare`: the p50 by 5%, the rest by
+  25%, never under 0.05 ms). On a Radeon RX 9060 XT at 1920 x 1080 over 600 frames, three runs of `city` give a p50
+  within 0.2% and a p95 within 2%; the p99 moves by half, from frames that the system delays now and then.
+
 - **2D in a window, two frames at once, textures sent alone** (Vulkan): `ArtfRenderer2DOptions.surface` and `noVsync`
   show frames through a swapchain of the 2D renderer's own (BGRA or RGBA, its images copied into; out of date, resized
   or minimized, it is made again). Two slots: a draw waits only for the frame before the last, and a frame read back is

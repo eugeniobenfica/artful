@@ -58,7 +58,36 @@ double differentShare(const uint32_t* a, const uint32_t* b, int threshold) {
         for (int c = 0; c < 24; c += 8) worst = artfMaxi(worst, abs((int)(a[i] >> c & 255) - (int)(b[i] >> c & 255)));
         different += worst > threshold;
     }
-    return (double)different / (W * H);
+    const double share = (double)different / (W * H);
+    flipRecord(a, b, threshold, share);
+    return share;
+}
+
+/* FLIP beside the share, for every comparison: written to ARTFUL_FLIP_LOG, to set thresholds by it later. */
+static FILE* flipLog;
+static bool flipLogOpened;
+static int flipCompared;
+
+void flipRecord(const uint32_t* a, const uint32_t* b, int threshold, double share) {
+    if (!flipLogOpened) {
+        flipLogOpened = true;
+        const char* path = getenv("ARTFUL_FLIP_LOG");
+        if (path && *path) {
+            flipLog = fopen(path, "a");
+            if (flipLog && ftell(flipLog) == 0) fputs("test,threshold,share,flipMean,flipP99,flipMax\n", flipLog);
+        }
+    }
+    if (!flipLog) return;
+    const FlipStats f = flipFrames(a, b, W, H, 0, NULL);
+    fprintf(flipLog, "%s,%d,%.6f,%.6f,%.6f,%.6f\n", currentTest(), threshold, share, f.mean, f.p99, f.max);
+    ++flipCompared;
+}
+
+void flipSummary(void) {
+    if (!flipLog) return;
+    printf("FLIP: %d comparisons written to %s\n", flipCompared, getenv("ARTFUL_FLIP_LOG"));
+    fclose(flipLog);
+    flipLog = NULL;
 }
 
 /* Light that gives a surface's own color back: what is drawn is what was asked for. */
@@ -312,5 +341,25 @@ ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o) {
 #else
     unsetenv("ARTFUL_NO_RAY_QUERY");
 #endif
+    return r;
+}
+
+/* (the library's own, under what tests.h puts in their place) */
+#undef artfRendererNew
+#undef artfRenderer2DNew
+
+ArtfRenderer* testRendererNew(const ArtfRendererOptions* o) {
+    ArtfRenderer* r = artfRendererNew(o);
+    bool refused = false; /* (a test that makes Vulkan refuse on purpose) */
+#ifdef ARTFUL_VULKAN
+    refused = artfVulkanRefuseSwapchain;
+#endif
+    if (!r && o->backend == ARTF_BACKEND_VULKAN && !refused) missing("vulkan");
+    return r;
+}
+
+ArtfRenderer2D* testRenderer2DNew(const ArtfRenderer2DOptions* o) {
+    ArtfRenderer2D* r = artfRenderer2DNew(o);
+    if (!r && o->backend == ARTF_BACKEND2D_VULKAN) missing("vulkan");
     return r;
 }

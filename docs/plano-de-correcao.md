@@ -1,0 +1,202 @@
+# Plano de correção e refinamento, em fases
+
+**19 de novembro de 2026** · deriva de [relatorio-versao-estavel-e-refinamento.md](relatorio-versao-estavel-e-refinamento.md) e de [relatorio-tecnico-estabilidade.md](relatorio-tecnico-estabilidade.md).
+
+Cada item diz **o que muda**, **onde** e **quando está pronto**. Os tamanhos são estimativas: P (dias), M (semanas), G (meses).
+
+## Princípios que ordenam as fases
+
+1. **Primeiro o instrumento, depois a mudança.** Toda correção posterior altera imagens. Sem uma métrica perceptual e sem testes que digam o que foi omitido, não há como distinguir regressão de melhoria. Por isso a Fase 0 vem antes de qualquer algoritmo.
+2. **Mudanças que alteram bytes vão juntas.** O projeto fixa hashes de imagem e a igualdade entre kernels. sRGB exato, nova sequência de amostragem, compensação de energia e antialiasing especular mudam os bytes de quase todo quadro. Agrupá-las numa janela (Fase 2) permite regenerar as referências uma vez, revisando a diferença com FLIP, em vez de quatro.
+3. **O contrato congela depois das mudanças de comportamento visível, e antes dos sistemas grandes.** A 1.0 sai ao fim da Fase 3. Geometria virtualizada, luzes estocásticas e backends novos entram em 1.x como recursos opcionais.
+4. **Arquitetura antes de crescer.** O IR de shaders e o grafo de quadro (Fase 4) vêm antes de DAG, luzes estocásticas e Metal (Fases 5 e 6). Cada um desses toca `shaders.c` (4.781 linhas) e `vulkan.c` (5.171) em muitos pontos; fazê-los antes da reorganização multiplica o trabalho de migração.
+5. **Toda técnica nova entra atrás de uma opção, com A/B reproduzível.** Só vira padrão depois de comparada em custo e imagem nos dois backends.
+
+```
+Fase 0 ─► Fase 1 ─► Fase 2 ─► Fase 3 ═► 1.0
+ base      contrato   bytes     robustez
+                                   │
+                                   ▼
+                     Fase 4 ─► Fase 5 ─► Fase 6
+                     arquitetura conteúdo  plataformas
+```
+
+A Fase 3 (robustez) pode correr em paralelo com o fim da Fase 2: são arquivos diferentes (ferramentas, CI, `vulkan.c` de apresentação).
+
+---
+
+## Fase 0 — Base reproduzível e instrumentos
+
+Sem esta fase, nenhuma das outras tem critério de pronto verificável.
+
+| # | O que muda | Onde | Pronto quando | Tam. |
+|---|---|---|---|---|
+| 0.1 | Versionar o trabalho em andamento: biblioteca 2D, testes e ferramenta (hoje não rastreados), mais as mudanças locais em CMake e testes. | `include/artful/2d.h`, `src/2d/`, `tests/twod.c`, `tools/render2d.c`, `CMakeLists.txt` | Um checkout limpo compila com Vulkan ligado e desligado e passa os testes. Um consumidor externo usa `find_package(artful)` com `artful::artful` e `artful::2d`. | P |
+| 0.2 | Um teste do CTest por caso. O executor já tem `--list` e filtro por nome (`tests/main.c`). Gerar a lista após o build, como faz `gtest_discover_tests`, e registrar cada nome. | `CMakeLists.txt`, script CMake novo | `ctest` mostra os ~200 casos individualmente. | P |
+| 0.3 | Distinguir **omitido** de **aprovado**. Casos que retornam cedo por falta de Vulkan, janela ou ray tracing passam a sair com um código de omissão, mapeado em `SKIP_RETURN_CODE`. Uma variável `ARTFUL_REQUIRE=vulkan,window,rt` transforma omissão em falha para perfis certificados. | `tests/common.c`, `tests/tests.h`, os casos que retornam cedo | Num build sem Vulkan, o CTest lista os casos de GPU como *skipped*. Com `ARTFUL_REQUIRE=vulkan`, falham. | P |
+| 0.4 | Portar o FLIP (LDR e HDR) para C, como ferramenta de teste, e trocar as comparações "N% de pixels acima de 24/255" por limiares FLIP por caso. Manter o critério antigo em paralelo até calibrar. | `tests/flip.c` (novo), `tests/common.c` | Os resultados batem com a referência C++ do FLIP numa amostra de imagens (erro médio dentro de 1e-4). Cada comparação CPU×GPU registra o FLIP médio e o percentil 99. | M |
+| 0.5 | Linha de base de desempenho e imagem: sequências determinísticas (cena aberta, cidade ocluída, personagem, transparência, luzes densas, sala 2D), com p50/p95/p99, primeiro quadro, memória e tempo por passe. Guardar como JSON versionado. | `tools/render.c` (modo `--bench --json`), `docs/` ou repositório à parte | Duas execuções seguidas na mesma máquina ficam dentro de 3% no p50. Existe um script que compara duas execuções e aponta regressões. | M |
+
+### Estado da Fase 0 (19/11/2026)
+
+| # | Estado | Evidência |
+|---|---|---|
+| 0.1 | **Verificado, falta o commit.** | Uma cópia com apenas os arquivos versionáveis (rastreados + não rastreados não ignorados, sem `.claude/`) compila sem avisos com Vulkan ligado e desligado (GCC/MinGW, Ninja, Release). Os 157 testes passam nas duas. Instalada, a cópia atende a consumidores externos de `artful::artful` e `artful::2d` via `find_package`; os dois desenham. |
+| 0.2 | **Feito.** | `cmake/artfulTests.cmake.in` pergunta `artful-tests --list` quando o CTest roda e registra cada caso com `--exact`. São 157 testes; `ctest -j4` leva 36 s, contra 64 s do teste único. |
+| 0.3 | **Feito.** | `missing()` em `tests/main.c`. Os renderizadores de teste passam por invólucros que registram Vulkan ausente; janela e ray tracing por hardware são marcados onde os testes já os detectavam. Sem driver Vulkan, 83 testes saem como *skipped*. Com `ARTFUL_NO_RAY_QUERY=1`, 4 saem por falta de `rt`. Com `ARTFUL_REQUIRE=vulkan`, falham. |
+| 0.4 | **Parcial.** | O FLIP LDR e HDR está em `tools/flip.c`, escrito a partir do `FLIP.h` da NVIDIA (BSD-3), com a ferramenta `artful-flip`. O teste `metrics/flip` confere as propriedades do método. Cada `differentShare` grava o FLIP ao lado em `ARTFUL_FLIP_LOG`. **Falta:** comparar com o programa da NVIDIA (o critério de ±1e-4 não foi verificado) e trocar os limiares por limiares FLIP, o que exige primeiro coletar o log em várias máquinas. |
+| 0.5 | **Feito, exceto o 2D.** | `artful-render --json` e `tools/bench.py` (`run`, `compare`). Na RX 9060 XT, 1080p, 600 quadros, três execuções: `city` com p50 dentro de 0,2% e `city` com oclusão dentro de 0,1%. O p99 varia até ~50% por picos esporádicos, e por isso o comparador usa 25% para as caudas. O `artful-render2d` ainda não escreve JSON. |
+
+Não executados nesta etapa: sanitizadores, MSVC e Linux nas mudanças de teste. A CI continua chamando `artful-tests` diretamente, sem `ctest`.
+
+---
+
+## Fase 1 — Contrato público
+
+O que precisa estar decidido antes de congelar a API. Nenhum item aqui muda imagens.
+
+| # | O que muda | Onde | Pronto quando | Tam. |
+|---|---|---|---|---|
+| 1.1 | **Handles de malha com geração**, como as texturas já têm: índice nos bits baixos e geração nos altos. A posição de uma malha removida volta a uma lista livre. As verificações hoje feitas em `scene.c:204` e `:795` (`mesh > s->meshes.len \|\| removed`) passam a comparar a geração. | `src/scene/scene.c`, `sceneInternal.h`, usos de `ArtfMesh` nos backends | Um teste adiciona e remove um milhão de malhas: o número de posições não passa do pico simultâneo, e um handle antigo é rejeitado com log. | M |
+| 1.2 | **Falta de memória na GPU.** RAM continua abortando. Para VRAM: ao falhar uma alocação, o renderizador derruba mipmaps e níveis não essenciais pela política de residência, tenta de novo e, se ainda falhar, recusa o recurso (textura branca, malha não desenhada) e avisa por callback. | `src/vulkan/vulkan.c` (alocador de spans), residência em `scene.c` | Um teste com orçamento artificialmente baixo mantém quadros válidos e emite o aviso, sem `VK_ERROR_OUT_OF_DEVICE_MEMORY` sem tratamento. | M |
+| 1.3 | **Callback de eventos**, além do log de texto: perda de dispositivo, VRAM esgotada, recurso recusado, variante de shader pronta. Estrutura com tipo e dados, para a aplicação reagir sem analisar strings. | `include/artful/core.h`, `src/core/base.c` | Os eventos de 1.2 e 3.4 chegam pela callback nos testes. | P |
+| 1.4 | **Decisão sobre ABI**, por escrito. Recomendação: prometer compatibilidade **de fonte** em 1.x e não prometer ABI binária, como Filament e wgpu. Se a decisão for prometer ABI: biblioteca dinâmica com SONAME, macro de exportação com `visibility("hidden")` por padrão, e campo de tamanho no início de cada struct de opções. | `docs/api.md`, `CMakeLists.txt`, cabeçalhos | O documento existe e o CMake corresponde a ele. Se houver ABI, um teste compila um consumidor contra os cabeçalhos da versão N e liga contra a N+1. | P a M |
+| 1.5 | **Contrato de threads**, mantendo a regra atual mas tornando-a verificável: em build de depuração, a cena registra a thread dona e afirma em cada chamada. | `src/scene/scene.c`, `src/render/renderer.c` | Um teste de depuração que chama a cena de outra thread durante um `artfRendererDraw` é detectado. | P |
+| 1.6 | **Camadas de suporte publicadas**: estável, melhor esforço e experimental, por backend × plataforma × recurso. Metal, Windows on ARM, armv7 e x86-64 Android entram como experimentais até rodarem. | `docs/stability.md`, `README.md` | Cada célula aponta para o teste ou máquina que a sustenta. | P |
+| 1.7 | **Mistura de clipes** na biblioteca: dois clipes com peso, e camadas por máscara de ossos. Hoje `artfAnimationSet` só amostra um clipe e todo integrador reescreve a mistura. | `src/scene/gltf.c`, `include/artful/gltf.h` | Um teste compara a mistura a uma referência calculada à mão, e a mistura é igual em CPU e GPU. | P |
+
+---
+
+## Fase 2 — Janela de mudanças que alteram bytes
+
+Tudo aqui muda pixels. Executar em sequência, regenerar as referências e os hashes **uma vez** no fim, com a diferença revisada pelo FLIP da Fase 0. Cada item entra primeiro atrás de uma opção, para A/B, e vira padrão ao fechar a fase.
+
+### 2.1 Cor (P a M)
+
+- **sRGB exato** no lugar da gama 2. Hoje texturas são elevadas ao quadrado na entrada e o quadro guarda a raiz (`kernels.inc:1522`, `:2285`, `gltf.c:644`, e o equivalente nos shaders). Na GPU, usar formatos `_SRGB` para textura e alvo faz a conversão em hardware. Na CPU, usar tabela de 256 entradas na entrada e, na saída, uma aproximação racional com arredondamento fixo, igual em todos os kernels.
+- **Gradação em ACEScct** (lift, gamma, gain, rodas, LUT) em vez do espaço de exibição. É um `log2` com pé linear; `artfLog2Fast` já existe.
+- **Curva Khronos PBR Neutral** como opção de tom, e LUT 3D para ACES 2.0 ou Tony McMapface.
+- **Pronto quando:** um quadro de cinza médio (18%) sai no valor sRGB esperado ±1; uma LUT `.cube` feita no DaVinci Resolve reproduz a imagem de referência com FLIP abaixo do limiar; CPU e GPU continuam dentro da tolerância.
+- **Risco:** a codificação em gama 2 também serve para compor sobre o Cascade e na sobreposição. Verificar a composição premultiplicada antes de trocar.
+
+### 2.2 Amostragem (M)
+
+Um arquivo novo, `src/shading/sampling.inc`, incluído nos mesmos contextos que `shading.inc`: C escalar, oito pistas e SPIR-V. A sequência fica escrita uma vez.
+
+- **Sobol com embaralhamento de Owen por hash** (Burley 2020), só com inteiros, no lugar de `hashOf` + `randomInBall` (11 usos em `trace.c` e `shaders.c`; `particles.c` mantém o hash, que lá dá a cada partícula seus números a partir do nascimento e precisa continuar igual entre CPU e GPU).
+- **Embaralhamento por pixel com ruído azul** (Heitz 2019 ou máscaras FAST), numa tabela pequena embutida no código, sem arquivo.
+- Direções por mapeamento de quadrado para esfera, sem rejeição. Mantém a regra de não usar `sin`/`cos` da libc.
+- **Pronto quando:** o traçado converge para a mesma imagem de 512 amostras; com 4 amostras, o erro contra ela cai (meta: pelo menos 30% menos FLIP); CPU e GPU continuam iguais à tolerância atual; os kernels seguem com bytes iguais.
+
+### 2.3 Integrador (M)
+
+- **Amostragem do ambiente por importância:** distribuição 2D por partes sobre o mapa octaédrico 0, com a variante compensada do PBRT para MIS. A CDF é construída uma vez em `environment.c`, com busca por inteiros.
+- **VNDF por calotas esféricas** (Dupuy e Benyoub 2023) para o lóbulo GGX, e escolha difuso/especular pela energia de cada lóbulo, não ao acaso.
+- **MIS** entre a amostra de luz e a da BSDF, para o sol com tamanho, as luzes com tamanho e o ambiente.
+- **Cones de raio** para o mipmap das texturas no traçado. Hoje lê sempre o maior.
+- **Pronto quando:** um HDRI com sol pequeno deixa de produzir vaga-lumes (contagem de pixels acima de 10× a média da vizinhança cai para perto de zero com 16 amostras); a energia média da imagem convergida não muda além de 0,5%; o tempo por amostra sobe no máximo 15%.
+
+### 2.4 Materiais (P)
+
+- **Compensação de espalhamento múltiplo** (Turquin): um fator 1 + F0·(1/E − 1) por uma tabela de E(μ, rugosidade), em `shading.inc`.
+- **Antialiasing especular geométrico** (Tokuyoshi e Kaplanyan): alarga a rugosidade pelas derivadas da normal. A CPU já calcula derivadas entre pistas para o mipmap; a GPU tem `dFdx`/`dFdy`.
+- **Pronto quando:** uma "fornalha branca" (esfera metálica rugosa num ambiente uniforme) devolve ≥ 98% da energia; uma grade de normal map fino cintila menos com a câmera parada (variação temporal medida).
+
+**Ao fechar a Fase 2:** regenerar hashes e referências, revisar cada diferença acima do limiar, e registrar no CHANGELOG que os bytes mudaram e por quê.
+
+---
+
+## Fase 3 — Robustez e prova (fecha a 1.0)
+
+Pode começar durante a Fase 2.
+
+| # | O que muda | Onde | Pronto quando | Tam. |
+|---|---|---|---|---|
+| 3.1 | **Fuzzing guiado por cobertura**: um alvo libFuzzer por leitor (glTF/GLB, PNG, JPEG, HDR, KTX2 e blocos, IES, meshopt), sob ASan e UBSan, com corpus semente e dicionário de JSON. | `tools/fuzz/` (novo), alvo CMake opcional | Cada alvo roda 24 horas sem achado novo. Os achados viram casos de regressão em `tests/files.c`. | M |
+| 3.2 | **Corpus de conformidade**: a lista "Testing" do glTF-Sample-Assets e arquivos gerados pelo `gltfpack` com meshopt. Cada um carrega, e os principais têm imagem de referência. | `tests/files.c`, script de download para CI | Todos carregam; nenhuma falha silenciosa; o que não é suportado é logado. | M |
+| 3.3 | **Pré-rotação no Android.** Hoje, com `upright`, o swapchain recebe transformação identidade com os lados trocados, e o compositor gira (`vulkan.c:703`, `:723`). Passar a usar `currentTransform`, manter a extensão na orientação nativa e girar o espaço de recorte na projeção. Vale para a cena, a sobreposição e os passes em tela; os efeitos que dependem de direção de tela (motion vectors, TAA) giram com ela. Recriar ao receber `VK_SUBOPTIMAL_KHR`. | `src/vulkan/vulkan.c`, `src/scene/views.c` ou onde a projeção é montada, `src/2d/vulkan2d.c` | Num aparelho girado nas quatro orientações: a imagem é a mesma do retrato girada; o tempo de quadro não sobe na paisagem. | M |
+| 3.4 | **Perda de dispositivo diagnosticável:** habilitar `VK_EXT_device_fault` quando existir e registrar o relatório pela callback de 1.3. | `src/vulkan/vulkan.c` | Com a falha injetada, o evento chega; num aparelho com a extensão, o relatório é lido. | P |
+| 3.5 | **Probes persistidas na cena**: a GPU copia o estado de volta periodicamente ou ao perder o dispositivo, e o renderizador novo continua dele. Hoje recomeçam do zero. | `src/scene/trace.c`, `src/vulkan/vulkan.c` | Após recriar o renderizador, a GI do primeiro quadro difere da anterior abaixo do limiar FLIP. | P |
+| 3.6 | **Ganchos de ritmo e térmica**: `renderScale` dinâmico por orçamento de tempo de quadro, e um campo para a aplicação informar folga térmica (vinda da ADPF ou similar). A biblioteca não depende da ADPF; só expõe o controle. Medir aqui os workers que giram em espera. | `include/artful/renderer.h`, `src/software/software.c`, `src/core/threads.c` | Num telefone, em 30 minutos de carga constante, o tempo de quadro fica dentro do alvo enquanto a resolução interna se ajusta; o consumo com e sem a espera ativa está medido. | M |
+| 3.7 | **Hardware real na CI**: um runner próprio com GPU AMD (o desktop atual) e um laço de jogo no Firebase Test Lab em dois ou três telefones. Lista de testes instáveis por plataforma, com meta de no máximo uma falha espúria por semana. | `.github/workflows/` | Cada PR roda os testes de GPU com `ARTFUL_REQUIRE=vulkan,rt` no runner; os telefones rodam diariamente. | M |
+| 3.8 | **Ensaio de longa duração**: quatro horas de troca contínua de ativos com orçamento fixo, registrando pico e tendência de RAM e VRAM, handles e alocações restantes. | `tools/soak.c` (novo) | Sem tendência de crescimento na última hora; zero alocações ao encerrar. | P |
+| 3.9 | **Linux com GPU e janela; Mac com o backend de CPU.** É o mínimo para as camadas de 1.6 deixarem de dizer "nunca executado" nas plataformas que a 1.0 anunciar. | máquinas | Tabela de 1.6 preenchida com a execução. | P (com acesso) |
+
+**Saída da 1.0:** fases 0 a 3 fechadas; API congelada com a regra de 1.4; camadas de 1.6 publicadas.
+
+---
+
+## Fase 4 — Arquitetura (1.x, antes dos sistemas grandes)
+
+### 4.1 IR de shaders (G)
+
+O objetivo é que cada shader seja descrito uma vez e emitido para SPIR-V, MSL e WGSL, sem compilador externo.
+
+1. Definir um IR em SSA mínimo: tipos, operações aritméticas, controle estruturado, recursos com binding. As macros `S_ADD`, `S_MUL`, `S_SELECT` de `shading.inc` já são essa linguagem em forma textual; o grafo de materiais (`artfExpr*`) é outro IR em miniatura.
+2. Escrever o emissor SPIR-V a partir do IR e migrar um shader por vez. **Critério de cada migração:** `artful-shaders` produz as **mesmas palavras SPIR-V** que antes (comparação binária), ou uma diferença justificada que passa `spirv-val` e mantém as imagens.
+3. Emitir `NonSemantic.Shader.DebugInfo.100` apontando para os arquivos C, para depuração no RenderDoc.
+4. Escrever o emissor MSL, em texto, compilado pelo Metal em execução. Isso fecha a lacuna dos materiais em C no Metal, que hoje não alcança a tradução antecipada.
+5. Emissor WGSL fica para a Fase 6.
+
+**Pronto quando:** todos os shaders 3D e 2D passam pelo IR com saída SPIR-V igual à atual, e o MSL de pelo menos as 17 variantes de hoje compila no compilador da Apple na CI.
+
+### 4.2 Grafo de quadro (G)
+
+1. Descrever cada passe de `vulkan.c` com o que lê e escreve. Começar só pela descrição, gerando um diagrama, sem mudar a execução.
+2. Gerar barreiras e transições a partir do grafo; comparar com as atuais sob a validação de sincronização (que já roda na CI).
+3. Descartar passes sem consumidor e reutilizar memória transitória entre alvos que não coexistem.
+4. Fazer o backend de CPU percorrer o mesmo grafo, com passes por tile ou por quadro.
+
+**Pronto quando:** a validação de sincronização segue limpa; a memória de alvos em 1080p com pós completo cai (meta: 30%); `vulkan.c` se divide em módulos por passe sem perda de desempenho na linha de base da Fase 0.
+
+### 4.3 Ferramenta de cozimento (M)
+
+`artful-cook` grava malhas preparadas (meshlets, níveis, árvore do traçado), mipmaps e HLOD num formato versionado, com a garantia de que versões novas leem arquivos antigos. Pré-requisito do DAG de clusters, cuja construção não cabe no carregamento.
+
+**Pronto quando:** carregar a cena `forest` cozida leva menos de 10% do tempo da carga crua, e o resultado é byte a byte o mesmo.
+
+---
+
+## Fase 5 — Alcance de conteúdo (1.x)
+
+Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição), com o caminho atual mantido até o novo provar-se melhor nas cenas da linha de base.
+
+| # | O que muda | Pronto quando | Tam. |
+|---|---|---|---|
+| 5.1 | **Probes escaláveis** (Majercik 2021): estados (ativa, dormente, dentro de parede), realocação, atualização por orçamento de raios em vez de todas a cada quadro, volumes em cascata seguindo a câmera. Remove a caixa fixa. | Mesmo orçamento de raios: porta abrindo e luz acesa de súbito convergem em no máximo 2× os quadros atuais; luminância vazada por parede fina menor que a atual contra referência traçada. | M |
+| 5.2 | **Luzes em clusters**: fatias de profundidade em `artfSceneLightTiles` (`scene.c:1106`), contagem de luzes omitidas por tile exposta em `artfRendererStats`. | Num corredor de vários andares, zero luzes omitidas onde hoje há; custo de construção abaixo de 0,2 ms. | P |
+| 5.3 | **LTC** para retângulos e tubos, com `acos` determinístico. | Contra referência traçada, erro de iluminação de área abaixo do da aproximação de ponto representativo. | M |
+| 5.4 | **Upscaler**: travas para detalhe fino, máscaras reativa e de composição, reprojeção Lanczos, detector de cintilação, mistura adaptativa no lugar de 9:1 fixo. | Grade fina a 50% de escala: variação temporal com câmera parada cai pelo menos pela metade; fumaça sobre fundo contrastado sem rastro além de 4 quadros. | M |
+| 5.5 | **DAG de clusters**: construção no cozimento (simplificador com bordas travadas, operação em subconjunto e erro por atributo); seleção do corte calculada uma vez, como a escolha de nível já é hoje, e desenhada pelos dois backends pelo caminho indireto existente. Sem mesh shaders e sem atômicos de 64 bits nesta etapa. | `city` e `heavy` com o mesmo erro em pixels desenham menos triângulos que os 3 níveis atuais; nenhum estalo acima do limiar com `lod-fade` desligado; CPU e GPU escolhem o mesmo corte. | G |
+| 5.6 | **Raios contra corte grosso** do DAG, com regra consistente entre raio primário e secundário; **BVH largo** (4 filhos, quantizado) com reinserção após a construção. | Memória das árvores cai; o auto-sombreamento entre nível desenhado e traçado some sem o deslocamento de um milésimo; a travessia em compute numa GPU integrada fica mais rápida. | M |
+| 5.7 | **Luzes estocásticas por tile** (estilo HypeHype/ReSTIR DI) com raios de sombra e um **denoiser de sombra dedicado**; **A-SVGF** no denoiser atual. Remove a distinção entre as 16 luzes e as demais. | Cena com 200 luzes com sombra: custo constante independente do número de luzes; imagem dentro do limiar FLIP de uma referência com todas as luzes avaliadas. | G |
+| 5.8 | **Transparência por transmitância em froxels** (estilo AVBOIT), reaproveitando a grade da névoa, no lugar das listas de 96 bytes/pixel. | Memória fixa; interpenetração correta nos casos do teste de camadas; custo abaixo das listas em 1080p. | M |
+| 5.9 | **Saída HDR e gama larga**: `VK_EXT_swapchain_colorspace` (HDR10, scRGB, Display-P3), enumerada em execução; saída de 10 bits ou float no backend de CPU. Depende de 2.1. | Num monitor HDR, o pico configurado chega à tela; no Android, Display-P3 de 10 bits quando oferecido. | M |
+| 5.10 | **Basis Universal** (ETC1S, UASTC LDR) e **Zstandard**, transcodificadores em C. | Os arquivos `KHR_texture_basisu` do corpus carregam e coincidem com a saída do transcodificador de referência. | M |
+| 5.11 | **Céu**: LUT de perspectiva aérea aplicada à cena; nuvens marchadas a um quarto da resolução e compostas contra a profundidade. | Montanhas distantes ganham a cor do ar; uma torre atravessa as nuvens. | M |
+| 5.12 | **Materiais**: texturas das extensões glTF hoje ignoradas; iridescência de Belcour e Barla; camadas no estilo OpenPBR no grafo em C; SSS separável (verificar antes a patente associada à difusão de Burley). | Os modelos de extensão do glTF-Sample-Assets coincidem com o visualizador de referência dentro do limiar. | M a G |
+
+**Ordem sugerida dentro da fase:** 5.1, 5.2 e 5.4 primeiro (baratos, atacam limites documentados); depois 5.5 e 5.6 (dependem de 4.3); depois 5.7 (depende de 2.2 e se beneficia de 5.6). 5.8 a 5.12 são independentes e entram por demanda de consumidor.
+
+---
+
+## Fase 6 — Alcance de plataforma
+
+| # | O que muda | Depende de | Pronto quando | Tam. |
+|---|---|---|---|---|
+| 6.1 | **Metal executado**: o backend passa a ler os shaders do emissor MSL de 4.1, e o lado C é atualizado para os bindings de hoje. | 4.1, um Mac | Todos os testes de imagem rodam em Metal dentro do limiar contra a CPU; promovido a "melhor esforço" e depois "estável". | G |
+| 6.2 | **WebGPU**: emissor WGSL e um backend sobre `webgpu.h`. O backend de CPU em WebAssembly com SIMD vem antes, por ser só compilar o que existe. | 4.1, 4.2 | A cena `spheres` roda em Chrome e Safari, nos dois caminhos. | G |
+| 6.3 | **Caminho sem descriptor indexing** (arranjos de texturas por material) para GPUs como a Mali-G52, que hoje caem para a CPU. | 4.2 | Um dispositivo sem a funcionalidade desenha na GPU. | M |
+
+---
+
+## Fora do plano, por decisão
+
+Upscalers e compressão neurais, Virtual Shadow Maps e texturas virtuais completos, estruturas de aceleração por cluster de fornecedor, Draco, cabelo por fios, volumes heterogêneos e splats gaussianos. Os motivos estão na seção 8 do relatório. Reavaliar quando um consumidor concreto pedir.
+
+## Riscos do plano
+
+- **A Fase 2 muda os bytes que o projeto prometeu manter.** Isso é aceitável antes da 1.0 (o [roadmap](roadmap.md) permite quebrar), mas só se a revisão de cada diferença for feita com o FLIP e registrada. Sem a Fase 0 pronta, não começar.
+- **O IR de shaders é a peça mais arriscada.** Mitigação: migração shader a shader com igualdade binária do SPIR-V como critério, de modo que o projeto nunca fique num estado intermediário quebrado.
+- **O DAG de clusters pode emperrar** em malhas facetadas e costuras de UV, como relatado por quem o reimplementou. Mitigação: manter os 3 níveis como recurso ativo até o DAG vencer em todas as cenas da linha de base.
+- **Acesso a hardware** (Mac, Linux com GPU, telefones variados) é o gargalo de 3.7, 3.9 e 6.1, não o código.

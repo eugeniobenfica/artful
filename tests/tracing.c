@@ -294,6 +294,7 @@ void testTraceHardware(void) {
     }
     artfSetLog(NULL, NULL);
     printf(hardware ? "(rays went through the ray tracing hardware)\n" : "(no ray tracing hardware here: the trees were held to themselves)\n");
+    if (!hardware) missing("rt");
     artfFree(a);
     artfFree(b);
     artfRendererFree(gpu);
@@ -414,6 +415,7 @@ void testTracedShadows(void) {
         artfFree(frames[k][1]);
     }
     printf(hardware ? "(shadows from rays went through the ray tracing hardware)\n" : "(no ray tracing hardware here)\n");
+    if (!hardware) missing("rt");
     artfFree(a);
     artfFree(b);
 }
@@ -540,6 +542,7 @@ void testTracedRefit(void) {
         /* (with the hardware: the floor, the cube, the strip and the strip's own copy the instance bends, built once, and
          * the copy refitted each frame after) */
         const bool hardware = built > 0;
+        if (!hardware) missing("rt");
         if (hardware) {
             CHECK(built == 4);
             CHECK(refitted == (uint64_t)frames - 1);
@@ -575,6 +578,8 @@ void testTracedRefit(void) {
     artfFree(a);
     artfFree(b);
     artfFree(c);
+#else
+    missing("vulkan");
 #endif
 }
 
@@ -766,6 +771,8 @@ void testProbesGpu(void) {
             artfFree(gpu);
             artfSceneFree(s);
         }
+#else
+    missing("vulkan");
 #endif
 }
 

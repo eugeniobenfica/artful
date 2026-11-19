@@ -686,6 +686,8 @@ void test2DVulkanFrames(void) {
     artfScene2DFree(s);
     artfRenderer2DFree(cpu);
     artfRenderer2DFree(gpu);
+#else
+    missing("vulkan");
 #endif
 }
 
@@ -696,7 +698,7 @@ __declspec(dllimport) int __stdcall DestroyWindow(void*);
  * as the CPU draws them; with no vsync too, and after a resize. */
 void test2DWindow(void) {
     void* window = CreateWindowExA(0, "STATIC", "artful-2d", 0xCF0000u, 0, 0, W2 + 40, H2 + 60, NULL, NULL, NULL, NULL);
-    if (!window) return;
+    if (!window) { missing("window"); return; }
     for (int vsync = 0; vsync < 2; ++vsync) {
         ArtfRenderer2DOptions o = {.width = W2, .height = H2, .backend = ARTF_BACKEND2D_VULKAN, .noVsync = !vsync};
         o.surface.kind = ARTF_SURFACE_WIN32;
@@ -729,5 +731,5 @@ void test2DWindow(void) {
     DestroyWindow(window);
 }
 #else
-void test2DWindow(void) {}
+void test2DWindow(void) { missing("window"); }
 #endif

@@ -26,6 +26,26 @@ extern int checks, failures;
 long artfAllocationsAlive(void);
 #endif
 
+/* ---- main.c: what a test could not reach here ("vulkan", "rt" for ray tracing hardware, "window"): the test is
+ * then skipped rather than passed, unless ARTFUL_REQUIRE names it ---- */
+void missing(const char* what);
+const char* currentTest(void);
+
+/* A renderer asked for by name that cannot be made here says so to missing(): every test makes its renderers
+ * through these (common.c). */
+ArtfRenderer* testRendererNew(const ArtfRendererOptions* o);
+#define artfRendererNew testRendererNew
+#include "artful/2d.h"
+ArtfRenderer2D* testRenderer2DNew(const ArtfRenderer2DOptions* o);
+#define artfRenderer2DNew testRenderer2DNew
+
+/* ---- how far apart two frames look: FLIP (tools/flip.h), 0 alike to about 1 ---- */
+#include "flip.h"
+/* With ARTFUL_FLIP_LOG=file, every pair of frames differentShare compares is measured by FLIP too and written to it
+ * (test, threshold, share, FLIP's mean, 99th percentile and most): what thresholds by FLIP will be set from. */
+void flipSummary(void);
+void flipRecord(const uint32_t* a, const uint32_t* b, int threshold, double share);
+
 /* ---- common.c: helpers and scenes more than one area takes ---- */
 uint64_t hashOf(const uint32_t* p, size_t n);
 ArtfRendererOptions options(ArtfBackend backend, int threads, bool portable);
@@ -62,6 +82,8 @@ double meanOf(const uint32_t* frame, int x, int y, int shift);
 ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o); /* as on a device with no ray tracing hardware */
 
 /* ---- the tests, by area ---- */
+/* metrics.c: what pictures are measured with */
+void testFlip(void);
 /* core.c: the mesh's data, the CPU's promises, levels of detail, occlusion, handles and lifetimes */
 void testPacking(void);
 void testMeshlets(void);

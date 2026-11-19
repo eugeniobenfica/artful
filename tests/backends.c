@@ -130,7 +130,7 @@ __declspec(dllimport) int __stdcall DestroyWindow(void*);
 /* A driver that refuses a swapchain, first and on a resize: the window is free again for whatever comes next. */
 void testRefusedSwapchain(void) {
     void* window = CreateWindowExA(0, "STATIC", "artful", 0xCF0000u, 0, 0, W, H, NULL, NULL, NULL, NULL);
-    if (!window) return;
+    if (!window) { missing("window"); return; }
     ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
     o.surface.kind = ARTF_SURFACE_WIN32;
     o.surface.a = window;
@@ -157,7 +157,7 @@ void testRefusedSwapchain(void) {
     DestroyWindow(window);
 }
 #else
-void testRefusedSwapchain(void) {}
+void testRefusedSwapchain(void) { missing("window"); }
 #endif
 
 /* Vulkan's pixel shaders of another variant, made off the frame: a view asked for after the first frame comes a few
@@ -306,8 +306,8 @@ void testPipelinesAhead(void) {
     artfFree(standIn);
 }
 #else
-void testLostDevice(void) {}
-void testRefusedSwapchain(void) {}
-void testShadersAhead(void) {}
-void testPipelinesAhead(void) {}
+void testLostDevice(void) { missing("vulkan"); }
+void testRefusedSwapchain(void) { missing("vulkan"); }
+void testShadersAhead(void) { missing("vulkan"); }
+void testPipelinesAhead(void) { missing("vulkan"); }
 #endif

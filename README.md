@@ -481,6 +481,14 @@ build/artful-render --out picture.png
 ```
 
 `build/artful-tests shadows post/look` runs only the tests whose names hold one of the words, and `--list` names them.
+`ctest --test-dir build -j4` runs each as a test of its own: one that could not reach what it needs here (Vulkan, a
+window, ray tracing hardware) is reported as skipped, not passed, and `ARTFUL_REQUIRE=vulkan,rt,window` makes that a
+failure, for a machine that is meant to have it.
+
+`artful-flip a.png b.png` says how far apart two pictures look, by FLIP (0 alike, about 1 as far as green from blue);
+with `ARTFUL_FLIP_LOG=file`, the tests write FLIP beside each comparison they make. `python tools/bench.py run
+build/artful-render baseline/` draws the sequences kept to be compared, and `tools/bench.py compare before/ after/` names
+what got slower.
 
 A C11 compiler and CMake 3.16: GCC or Clang (MinGW-w64 on Windows). Nothing else, not even the Vulkan
 SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful)`.
@@ -492,7 +500,7 @@ SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful
 | Option | Default | |
 | --- | :---: | --- |
 | `ARTFUL_VULKAN` | `ON` | the GPU backend; off, a lighter library, drawing on the CPU |
-| `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-render2d`, `artful-blackhole` (the window), `artful-shaders`, `artful-tests` |
+| `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-render2d`, `artful-blackhole` (the window), `artful-shaders`, `artful-flip`, `artful-tests` |
 | `ARTFUL_BLACKHOLE` | top level | the black hole, `artful-blackhole` (`artful::blackhole`), a library apart; the tools and tests build it too |
 | `ARTFUL_METAL` | `OFF` | the Metal backend (Apple only): never run, and without most of what came after 0.4 |
 | `ARTFUL_CASCADE_DIR` | empty | cascade's source folder: builds the bridge to it (`artful::cascade`), its example and its tests |
@@ -515,7 +523,8 @@ src/vulkan/       the GPU backend: vulkanApi.h, spirv.c and the shaders in shade
 src/metal/        the GPU backend for Apple's systems, never run and built only when asked: metal.c, and shaders.inc,
                   which is generated
 extensions/       built apart, on the public API: blackhole/ (artful-blackhole, include/artful/blackhole.h)
-tools/            artful-render, artful-render2d, artful-blackhole, artful-shaders, mkmetal.py; androidTest.sh for a device
+tools/            artful-render, artful-render2d, artful-blackhole, artful-shaders, artful-flip (flip.c), mkmetal.py,
+                  bench.py; androidTest.sh for a device
 tests/            a file for each area (core.c, post.c, tracing.c...), what they share in tests.h, main.c runs them
 integrations/     bridges to other libraries, each a target of its own and named by nothing above
   cascade/        artful::cascade: include/artful/cascade.h, its example, its window tests, its APK

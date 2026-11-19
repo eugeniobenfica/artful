@@ -447,6 +447,7 @@ void testTracedSkinLod(void) {
         const uint64_t before[2] = {artfVulkanBottomLevels[0], artfVulkanBottomLevels[1]};
         drawInto(gpus[g], s, b);
         const bool hardware = artfVulkanBottomLevels[0] > before[0];
+        if (!g && !hardware) missing("rt");
         const double first = differentShare(a, b, 24);
         /* posed again: the whole refitted, with the hardware, and only it */
         bendTube(s, i, .9f);
@@ -461,6 +462,8 @@ void testTracedSkinLod(void) {
         if (hardware) CHECK(artfVulkanBottomLevels[0] + artfVulkanBottomLevels[1] - was[0] - was[1] == 1);
         if (g) CHECK(artfVulkanBottomLevels[0] == was[0] && artfVulkanBottomLevels[1] == was[1]);
     }
+#else
+    missing("vulkan");
 #endif
     artfSceneSetShadows(s, NULL);
     artfSceneRemoveInstance(s, i);
