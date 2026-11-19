@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+- **2D in a window, two frames at once, textures sent alone** (Vulkan): `ArtfRenderer2DOptions.surface` and `noVsync`
+  show frames through a swapchain of the 2D renderer's own (BGRA or RGBA, its images copied into; out of date, resized
+  or minimized, it is made again). Two slots: a draw waits only for the frame before the last, and a frame read back is
+  waited for when it is read. A texture that changes goes up alone, written over itself if it fits (`artfScene2DSetTexture`
+  each frame with a 3D frame no longer sends every other texture again). The GPU's time is by timestamps. The demo's
+  room at 1280 x 720 on a Radeon RX 9060 XT: 1.8 ms a frame in a window (`artful-render2d --window --no-vsync`), 2.5
+  read back each frame, with 0.4 ms of the CPU; both within a step of a byte of the CPU's picture. Tests:
+  `2d/vulkanFrames` (frames on their way read as the CPU draws them; only the texels that changed sent, and nothing
+  when nothing did; a texture that grows, one that goes and one that comes) and `2d/window` (a real window, with vsync
+  and without, and resized), clean under AddressSanitizer and UndefinedBehaviorSanitizer. **API:** `ArtfSurface` moved to
+  `core.h` (the same type for both renderers); `artfRenderer2DDraw` returns false when the GPU was lost and the frame
+  was not shown; `artfRenderer2DPixels` takes a renderer that is not const (it may wait) and is NULL in a window; new
+  `artfRenderer2DReadPixels`.
+- **Building without Vulkan builds the tests again**: `tracing/tracedRefit`, `tracing/probesGpu` and
+  `scale/tracedSkinLod` read Vulkan's counters and switches unguarded, which a build with `ARTFUL_VULKAN=OFF` could not
+  link; without it, their GPU parts are left out.
+
+- **Drawing in 2D: `artful-2d`**, a library of its own (`include/artful/2d.h`, `src/2d`), that takes only the core:
+  the core is now a target of its own too, `artful-core` (`artful::core`), which the 3D library takes, so a program
+  that draws only in 2D links nothing of 3D. What is drawn: sprites, each a picture or a shape (rectangles with round
+  corners, ellipses, polygons concave or with holes, lines with round ends), in layers, under a camera that moves,
+  turns and zooms; textures with mipmaps, repeating, a part of a sheet, `nearest` for pixel art. What lights them:
+  points, spots and suns, with normal maps (y up, as tools make them) and highlights; soft shadows from what casts them,
+  as wide as their light (a map of how far light goes in each direction, read as PCSS does), an outline's own pixels
+  lit as if it were not there; light that glowing sprites give off and that bounces off what casts shadows, from one
+  frame to the next, by radiance cascades (Sannikov, 2023) at a share of the frame; then bloom, exposure and a tone
+  curve. All on the CPU: tiles of 64 pixels, one a thread, so that any number of threads gives the same bytes; no sine
+  or arctangent from the C library in a pixel (`artf2DAtan2`, within 1e-5). Its frames are premultiplied BGRA, as a 3D
+  one's: one goes over a 3D scene as its overlay, and a 3D frame comes into a 2D scene as a texture.
+  `artful-render2d` draws a room of stone, lit by a torch, the moon through a door and glowing crystals, to a PNG, and
+  says what its frames take: on 16 threads at 1280 x 720, 18 ms with all of it (shadows 0.1, gi 3.7, tiles
+  11.7, bloom 2.7), 8 ms with no shadows, gi or bloom; at 1920 x 1080, 41. Ten tests (`artful-tests 2d`): shapes and
+  their edges, textures, lights, shadows hard and soft, gi and its bounce, bloom and tone, the same bytes on 1, 3 and
+  16 threads, handles and picking, a 2D frame over a 3D one and the 3D one back as a texture; clean under
+  AddressSanitizer and UndefinedBehaviorSanitizer, every allocation given back.
+
+- **2D through Vulkan**: `ArtfRenderer2DOptions.backend` (`ARTF_BACKEND2D_AUTO`, Vulkan where it runs), with
+  `artfRenderer2DBackend` and `artfRenderer2DDescription`. Thirteen compute shaders written with the SPIR-V writer,
+  which moved to `artful-core` so that both libraries build theirs with it (and `spirv-val` takes each, through
+  `artful-shaders`): gi's cascades with their exact distances and the bounce kept on the GPU, the tiles with their
+  lights, normal maps, shadow maps and highlights, bloom's levels and the tone curve. The CPU keeps the light work: the
+  scene brought into the frame and the shadow maps. The demo's room (`artful-render2d --backend vulkan`) at 1280 x 720
+  takes 2.4 ms a frame on a Radeon RX 9060 XT, against 18 on the CPU's 16 threads; at 1920 x 1080, 4.4 against 41;
+  and the two pictures are within a step of a byte (237 values of 2.8 million a step apart). A test (`2d/vulkan`) holds
+  the GPU to the CPU over frames of a scene with all of it, without bloom, without gi, over a clear background, and a
+  texture changed between frames; clean under AddressSanitizer and UndefinedBehaviorSanitizer.
+
 - **Light that bounced is gathered on the GPU when Vulkan draws**: a compute pass before the frame
   (`artfShaderProbes`, written with the SPIR-V builder like the rest) takes each probe's rays in a group of 64, through
   the tracer's trees or, on a device with ray queries, the top level the frame already builds (binding 64), with the

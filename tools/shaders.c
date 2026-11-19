@@ -4,6 +4,7 @@
 #include "scene/sceneInternal.h"
 #include "vulkan/shaders.h"
 #include "holeInternal.h" /* (extensions/blackhole) */
+#include "2d/vulkan2d.h"
 
 #include <stdio.h>
 
@@ -24,6 +25,19 @@ int main(int argc, char** argv) {
     uint32_t* code;
     int failed = 0;
 #define SAVE(name, call) code = call; failed |= save(argv[1], name, code, size)
+    SAVE("2dTiles", artf2DShaderTiles(&size));
+    SAVE("2dBloomDown", artf2DShaderBloomDown(&size));
+    SAVE("2dBloomUp", artf2DShaderBloomUp(&size));
+    SAVE("2dFinish", artf2DShaderFinish(&size));
+    SAVE("2dReflect", artf2DShaderReflect(&size));
+    SAVE("2dGiScene", artf2DShaderGiScene(&size));
+    SAVE("2dGiRows", artf2DShaderGiDistance(&size, false));
+    SAVE("2dGiColumns", artf2DShaderGiDistance(&size, true));
+    SAVE("2dGiEven", artf2DShaderGiCascade(&size, false));
+    SAVE("2dGiOdd", artf2DShaderGiCascade(&size, true));
+    SAVE("2dGiGather", artf2DShaderGiGather(&size));
+    SAVE("2dGiSpread0", artf2DShaderGiSpread(&size, 0));
+    SAVE("2dGiSpread1", artf2DShaderGiSpread(&size, 1));
     SAVE("cullAll", artfShaderCull(&size, ARTF_CULL_ALL));
     SAVE("cullEarly", artfShaderCull(&size, ARTF_CULL_EARLY));
     SAVE("cullLate", artfShaderCull(&size, ARTF_CULL_LATE));

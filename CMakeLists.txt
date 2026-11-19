@@ -4,7 +4,8 @@ project(artful VERSION 0.4.0 DESCRIPTION "A 3D renderer in plain C11, with no de
 # Plain C11: no third-party libraries, and no SDK: Vulkan is loaded at run time and its shaders are
 # built by the library itself.
 #
-#   src/core/       memory, threads
+#   src/core/       memory, threads: artful-core, which the others take
+#   src/2d/         drawing in 2D, lit, on the CPU: artful-2d, on the core alone
 #   src/scene/      what is drawn: meshes (packed, ordered, cut into meshlets), textures, instances
 #   src/render/     the choice of a backend
 #   src/software/   the CPU backend: kernels.inc is built once for each instruction set
@@ -41,8 +42,13 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# The core (memory, threads, the log, the clock): what the 3D library and the 2D one share, and all the 2D one takes.
+add_library(artful-core STATIC src/core/base.c src/core/threads.c)
+add_library(artful::core ALIAS artful-core)
+set_target_properties(artful-core PROPERTIES EXPORT_NAME core)
+target_include_directories(artful-core PRIVATE src)
+
 add_library(artful STATIC
-  src/core/base.c src/core/threads.c
   src/scene/scene.c src/scene/blocks.c src/scene/meshBuild.c src/scene/simplify.c src/scene/trace.c src/scene/background.c
   src/scene/gltf.c src/scene/imageDecode.c src/scene/graph.c src/scene/texture.c src/scene/environment.c src/scene/sky.c src/scene/motion.c src/scene/extras.c src/scene/meshopt.c src/scene/scale.c src/scene/particles.c
   src/scene/lights.c
@@ -50,21 +56,32 @@ add_library(artful STATIC
   src/software/software.c src/software/post.c src/software/shadows.c src/software/denoise.c src/software/kernelsPortable.c)
 add_library(artful::artful ALIAS artful)
 target_include_directories(artful PRIVATE src)
-if(NOT artful_top)
-  target_include_directories(artful PUBLIC include)
-endif()
+target_link_libraries(artful PUBLIC artful-core)
 
-if(MSVC)
-  # (C11 atomics, in MSVC, are still behind a flag: Visual Studio 2022 17.5 or later)
-  target_compile_options(artful PRIVATE /W3 /utf-8 /Gy /fp:precise /std:c11 /experimental:c11atomics)
-  target_compile_definitions(artful PRIVATE _CRT_SECURE_NO_WARNINGS)
-else()
-  # -ffp-contract=off: no a*b+c fused into one rounding, so that the kernels draw the same pixels
-  target_compile_options(artful PRIVATE -Wall -Wno-parentheses -Wno-unused-function -ffp-contract=off -ffunction-sections -fdata-sections)
-  if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(artful PRIVATE -O3 -fno-math-errno -fno-trapping-math)
+# artful-2d: pictures and shapes, lit, with soft shadows and gi, on the CPU. It takes only the core: a program that
+# draws only in 2D links nothing of the 3D library.
+add_library(artful-2d STATIC src/2d/scene2d.c src/2d/draw2d.c src/2d/shadow2d.c src/2d/gi2d.c src/2d/post2d.c src/2d/renderer2d.c)
+add_library(artful::2d ALIAS artful-2d)
+set_target_properties(artful-2d PROPERTIES EXPORT_NAME 2d)
+target_include_directories(artful-2d PRIVATE src)
+target_link_libraries(artful-2d PUBLIC artful-core)
+
+foreach(artful_target artful-core artful artful-2d)
+  if(NOT artful_top)
+    target_include_directories(${artful_target} PUBLIC include)
   endif()
-endif()
+  if(MSVC)
+    # (C11 atomics, in MSVC, are still behind a flag: Visual Studio 2022 17.5 or later)
+    target_compile_options(${artful_target} PRIVATE /W3 /utf-8 /Gy /fp:precise /std:c11 /experimental:c11atomics)
+    target_compile_definitions(${artful_target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+  else()
+    # -ffp-contract=off: no a*b+c fused into one rounding, so that the kernels draw the same pixels
+    target_compile_options(${artful_target} PRIVATE -Wall -Wno-parentheses -Wno-unused-function -ffp-contract=off -ffunction-sections -fdata-sections)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+      target_compile_options(${artful_target} PRIVATE -O3 -fno-math-errno -fno-trapping-math)
+    endif()
+  endif()
+endforeach()
 
 # Kernels for what each processor may have; which of them runs is chosen at run time, so only their
 # own files may use it.
@@ -88,8 +105,12 @@ elseif(artful_cpu MATCHES "aarch64|arm64" AND NOT MSVC)
 endif()
 
 if(ARTFUL_VULKAN)
-  target_sources(artful PRIVATE src/vulkan/vulkan.c src/vulkan/spirv.c src/vulkan/shaders.c)
+  # (the SPIR-V writer is the core's: the 3D library and the 2D one both build their shaders with it)
+  target_sources(artful-core PRIVATE src/vulkan/spirv.c)
+  target_sources(artful PRIVATE src/vulkan/vulkan.c src/vulkan/shaders.c)
   target_compile_definitions(artful PRIVATE ARTFUL_VULKAN)
+  target_sources(artful-2d PRIVATE src/2d/vulkan2d.c src/2d/shaders2d.c)
+  target_compile_definitions(artful-2d PRIVATE ARTFUL_VULKAN)
 endif()
 # (never run: see src/metal/metal.c and docs/limits.md)
 if(APPLE AND ARTFUL_METAL)
@@ -99,10 +120,10 @@ endif()
 
 find_package(Threads)
 if(Threads_FOUND AND NOT WIN32)
-  target_link_libraries(artful PUBLIC Threads::Threads)
+  target_link_libraries(artful-core PUBLIC Threads::Threads)
 endif()
 if(UNIX)
-  target_link_libraries(artful PUBLIC m ${CMAKE_DL_LIBS})
+  target_link_libraries(artful-core PUBLIC m ${CMAKE_DL_LIBS})
 endif()
 
 if(ARTFUL_BLACKHOLE OR ARTFUL_BUILD_TOOLS OR ARTFUL_BUILD_TESTS)
@@ -118,6 +139,15 @@ if(ARTFUL_BUILD_TOOLS)
   endif()
 endif()
 
+if(ARTFUL_BUILD_TOOLS)
+  # a lit 2D room to a PNG, and what its frames take: it links artful-2d alone
+  add_executable(artful-render2d tools/render2d.c)
+  target_link_libraries(artful-render2d PRIVATE artful-2d)
+  if(MINGW)
+    target_link_options(artful-render2d PRIVATE -static)
+  endif()
+endif()
+
 if(ARTFUL_BUILD_TOOLS AND WIN32)
   # a black hole in a window, to fly around (artful-blackhole.exe: the target of that name is the extension)
   add_executable(artful-blackhole-window WIN32 tools/blackhole.c)
@@ -130,8 +160,8 @@ endif()
 
 if(ARTFUL_BUILD_TOOLS AND ARTFUL_VULKAN)
   # the shaders as files, for spirv-val: CI checks them, as nothing here can
-  add_executable(artful-shaders tools/shaders.c src/vulkan/shaders.c src/vulkan/spirv.c)
-  target_link_libraries(artful-shaders PRIVATE artful artful-blackhole)
+  add_executable(artful-shaders tools/shaders.c src/vulkan/shaders.c)
+  target_link_libraries(artful-shaders PRIVATE artful artful-blackhole artful-2d)
   target_include_directories(artful-shaders PRIVATE src extensions/blackhole)
 endif()
 
@@ -140,8 +170,8 @@ if(ARTFUL_BUILD_TESTS)
   # one program, a file for each area: artful-tests [word...] runs the tests whose names hold a word; --list names them
   add_executable(artful-tests tests/main.c tests/common.c
     tests/core.c tests/backends.c tests/layers.c tests/materials.c tests/files.c tests/streaming.c tests/shadows.c
-    tests/post.c tests/tracing.c tests/sky.c tests/motion.c tests/scale.c tests/views.c tests/blackhole.c)
-  target_link_libraries(artful-tests PRIVATE artful artful-blackhole)
+    tests/post.c tests/tracing.c tests/sky.c tests/motion.c tests/scale.c tests/views.c tests/blackhole.c tests/twod.c)
+  target_link_libraries(artful-tests PRIVATE artful artful-blackhole artful-2d)
   target_include_directories(artful-tests PRIVATE src extensions/blackhole)
   if(ARTFUL_VULKAN)
     target_compile_definitions(artful-tests PRIVATE ARTFUL_VULKAN) # (without it, what sets Vulkan's own switches is left out)
@@ -157,8 +187,10 @@ if(artful_top)
   include(GNUInstallDirs)
   include(CMakePackageConfigHelpers)
   set(artful_cmake_dir ${CMAKE_INSTALL_LIBDIR}/cmake/artful)
-  target_include_directories(artful PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-  install(TARGETS artful EXPORT artfulTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  foreach(artful_target artful-core artful artful-2d)
+    target_include_directories(${artful_target} PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+  endforeach()
+  install(TARGETS artful-core artful artful-2d EXPORT artfulTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
   install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
   if(TARGET artful-blackhole)
     # (artful::blackhole, beside artful::artful)

@@ -1182,6 +1182,60 @@ map of 2048 by 1024, which shows its texels when the eye comes close. The disc i
 What the scene holds is drawn straight over all this: a ship in front of the hole shows, but it is not
 bent, and its light does not go through the bloom.
 
+## Two dimensions
+
+`artful-2d` is a renderer of its own, on the core alone (`src/2d`), not a mode of the 3D one: a 2D frame has no depth
+to test, no meshes to cull and no materials to compile, and a program that draws only in 2D should not carry them.
+
+**A frame** (`renderer2d.c`) brings the scene into the frame's pixels first: each sprite's map from its own space,
+its box, its texture's mipmap (one for the whole sprite, as a 2D camera scales it evenly), its outline if it casts
+shadows; each light's place, range and cone. Sprites go into tiles of 64 pixels in their layers' order, and lights into
+the tiles they reach. Then the lights' shadow maps, one a thread; gi; and the tiles, one a thread: each blends its
+sprites over its pixels in its own buffer of floats, in the cache, and writes them out once. No pixel is shared by two
+threads and none depends on the order they run in: the same bytes on any number of them.
+
+**Edges** are a distance: a rectangle with round corners, an ellipse (Quilez's estimate) and a line give each pixel
+how far it is from their edge, and a pixel's width of that is its coverage. A polygon is four rows of samples in each
+pixel, each exact across (the spans between its crossings, by non-zero winding), so concave ones and holes are as
+smooth.
+
+**Shadows** (`shadow2d.c`): a point light keeps, for each of up to 4096 directions around it, how far its light goes;
+each edge of each outline is walked across the directions it spans, and its distance along each is exact. The sun's
+map is the same across its light, a bin a pixel. A pixel looks up its direction (an arctangent of additions and a
+division) and compares. A light with a radius looks either side first for what is in the way and how far (PCSS,
+Fernando 2005): a pixel at d behind an edge at b, of a light r wide, is in a penumbra r (d - b) / b wide, and 16 looks
+across it, each between two bins, say how much of the light it sees. An outline's own pixels must not be shadowed by
+itself, so each bin keeps whose outline is nearest and the nearest of any other.
+
+**gi** (`gi2d.c`) is radiance cascades (Sannikov, 2023), on texels of `scale` pixels. What casts shadows and what
+glows is solid, and sends its light: what glows, and what was on a wall in the last frame times its color and the
+bounce, so that light bounces once more each frame. A field of exact distances (Felzenszwalb and Huttenlocher) lets
+rays leap across what is empty. Cascade c has probes 2^c texels apart, with 4^(c+1) rays from (4^c - 1) / 3 texels out
+to (4^(c+1) - 1) / 3: each cascade costs as much as the first, and enough of them reach across the frame. From the top
+down, what a ray did not meet is taken from the 4 rays above nearest in direction, at the 4 probes above nearest. The
+light at a texel is cascade 0's 4 rays averaged; solid texels take their neighbours', and pixels read between texels.
+
+**Through Vulkan** (`vulkan2d.c`, `shaders2d.c`, `giShaders2d.inc`) the same frame is made by compute shaders that
+the library writes itself with the SPIR-V writer the 3D backend uses (now the core's), with the same arithmetic as
+the CPU's: no SDK, no compiler. The CPU brings the scene into the frame and makes the lights' shadow maps (a fraction
+of a millisecond), and sends them up with the textures (when they changed) through one staging buffer. Then, in one
+submission: gi (what is solid, a texel an invocation; the exact distances, a row and then a column an invocation, each
+with scratch of its own; each cascade, a ray an invocation; cascade 0 gathered and spread into what is solid), the
+tiles (a pixel an invocation, its tile's sprites over it in order, its tile's lights with their maps), bloom's levels
+and the tone curve, and what walls send on, kept on the GPU for the next frame. The frame is copied into the window's
+image and shown (an RGBA window: the tone curve writes red where blue goes), or copied back into memory. A polygon's
+coverage is the CPU's four rows a pixel, each exact while no more than two of its edges cross the pixel there: the two
+backends' frames agree within a step of a byte (the demo's room: 252 values of 2.8 million one step apart, none more,
+read back or shown in a window). A device that is lost hands the frame to the CPU, which goes on from there.
+
+Two frames are on their way at once: each slot has its own commands, fence, staging, readback and timestamps, and a
+draw waits only for the slot it takes, the frame before the last. The buffers the shaders read are one set, shared by
+both: each frame's commands begin with a barrier after the frame before them, so the GPU orders them and the CPU does
+not wait; a buffer that must grow waits for both first. A frame read back is waited for when it is read
+(`artfRenderer2DPixels`), not when it is drawn. Textures keep their place in their buffer by their version: one that
+changed is written over itself if it still fits, else after the last, and only it goes up; the table of where each
+level starts is sent again whenever anything moved.
+
 ## Where it could go next
 
 In the order that would pay the most, for the scenes that hurt today:

@@ -199,3 +199,23 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 [What stands between this and a stable version](stability.md), and
 [the study behind these choices](performanceAndPlatforms.md).
 
+## In 2D (`artful-2d`)
+
+- Through Vulkan, a window's images are copied into, not drawn into: it takes a swapchain whose images take a copy, of
+  BGRA or RGBA bytes (most do). A frame shown is not read back unless asked (`artfRenderer2DReadPixels`), which waits
+  for the GPU. Two frames at most are on their way. A texture that changes goes up alone, where it was if it still fits;
+  what textures leave behind is taken back only when they are all laid out again (more than half of the room left
+  behind, or none left). The scene brought into the frame and the lights' shadow maps are made on the CPU each frame.
+  No Metal. On the CPU its pixels are made one at a time, not eight at a time as the 3D kernels' are, which is where
+  most of its time goes.
+- The two backends agree within a step of a byte, not to the byte: the GPU's sines, square roots and divisions are its
+  own, and a polygon's coverage is exact across a pixel only while no more than two of its edges cross it on a row.
+- gi sees what is on the screen: what glows off it gives no light, and a wall off it stops none. A ray that leaves the
+  screen finds nothing. Light that bounces is the last frame's, so it trails what moves by a frame. Its cascades blend
+  the ones above with no correction for what is between probes: near thin walls, a little light leaks, and there is
+  some ringing around what glows strongly. What glows also stops gi's rays, as a wall does.
+- Shadows come from outlines: a sprite's rectangle (round corners left out), ellipse, polygon or line, not from the
+  alpha of its picture; occluders for anything else. A spot's map is as round as a point's. Walls cast no shadow on
+  themselves, and a wall's pixels light only as their normal map says.
+- No text, no gradients, no strokes around shapes, no blend modes but over: a shape's outline is a line or a polygon
+  of its own.

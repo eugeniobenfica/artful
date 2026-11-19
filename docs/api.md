@@ -102,13 +102,38 @@ The headers say what each call does. This is the map, and the rules that hold fo
 | `artfRendererWarm` | Vulkan makes what a feature turned on mid-run needs while frames go on without it: this waits for that, and the next frame has all it asks for. |
 | `artfRendererSetView`, `artfViewName`, `artfViewFromName` | What the frame shows: the picture, or one thing that went into it (`ArtfView`). |
 
+## In 2D
+
+`#include "artful/2d.h"`, and the library `artful-2d` (`artful::2d`), which takes only the core. The same rules: handles
+are numbers and 0 is none, structs grow (start from `artfSprite2DDefaults`, `artfLight2DDefaults`, `artfGI2DDefaults`),
+colors are linear light, frames premultiplied BGRA. The world's y goes down, as the frame's; angles are clockwise.
+
+| | |
+| --- | --- |
+| `artfScene2DNew`, `artfScene2DFree` | A 2D scene. |
+| `artfRenderer2DNew`, `artfRenderer2DDraw`, `artfRenderer2DPixels`, `artfRenderer2DResize` | What draws it, and its frame. A renderer keeps what gi gathered: one for each view. |
+| `ArtfRenderer2DOptions.backend`, `artfRenderer2DBackend`, `artfRenderer2DDescription` | Vulkan where it runs, else the CPU (`ARTF_BACKEND2D_AUTO`); or one by name. |
+| `artfScene2DAddTexture`, `artfScene2DSetTexture`, `artfScene2DRemoveTexture` | Pixels, straight or premultiplied (a 3D frame), or a normal map; mipmaps made. They repeat past their edges. |
+| `artfScene2DAddSprite`, `artfSprite2DSet`, `artfSprite2DPlace`, `artfScene2DRemoveSprite` | A picture or a shape (`ARTF_SHAPE_RECT`, `ELLIPSE`, `POLYGON`, `LINE`) in a layer: its texture or a part of it (`uvMin`, `uvMax`), `nearest` for pixel art, a normal map, its own light (`emissive`, `emissiveMap`), a highlight, `unlit`, `castsShadow`. |
+| `artfScene2DAddOccluder`, `artfScene2DRemoveOccluder` | An outline that stops light and is not drawn. |
+| `artfScene2DAddLight`, `artfLight2DSet`, `artfScene2DRemoveLight` | Points, spots and suns; `radius` makes shadows soft, `height` how they rake across normal maps, `mask` what they light. |
+| `artfScene2DSetAmbient` | Light all over. |
+| `artfScene2DSetGI` | Light from what glows, that walls stop and send on, by radiance cascades, at a share of the frame (`scale`). |
+| `artfScene2DSetPost` | Exposure, a tone curve, bloom. |
+| `artfScene2DSetCamera`, `artfScene2DToWorld`, `artfScene2DToFrame` | The view: where, how near, turned; from pixels to the world and back. |
+| `artfScene2DPick` | The sprite on top at a point. |
+| `artfScene2DSetBackground` | What shows where nothing is; alpha 0 to go over a 3D frame (`artfRendererSetOverlay`). |
+| `ArtfRenderer2DOptions.surface`, `noVsync` | Vulkan: frames shown in a window, through a swapchain of its own. |
+| `artfRenderer2DReadPixels` | The last frame into memory, whatever the backend, shown in a window or not. |
+| `artfRenderer2DStats` | What a frame took: shadows, gi, tiles, after; on Vulkan, the GPU's part (`gpuMs`, by timestamps). |
+
 ## Using it from CMake
 
 As a subfolder:
 
 ```cmake
 add_subdirectory(artful)
-target_link_libraries(app PRIVATE artful::artful)
+target_link_libraries(app PRIVATE artful::artful)   # 3D; artful::2d for 2D, or both
 ```
 
 Installed, with `cmake --install build --prefix <dir>`:

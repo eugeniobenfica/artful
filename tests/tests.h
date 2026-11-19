@@ -191,5 +191,19 @@ void testPick(void);
 void testFluid(void);
 void testBackgroundPass(void);
 void testBlackHole(void);
+/* twod.c: drawing in 2D (artful-2d) */
+void test2DAtan(void);
+void test2DShapes(void);
+void test2DTextures(void);
+void test2DLights(void);
+void test2DShadows(void);
+void test2DGI(void);
+void test2DPost(void);
+void test2DSameBytes(void);
+void test2DHandles(void);
+void test2DOver3D(void);
+void test2DVulkan(void);
+void test2DVulkanFrames(void);
+void test2DWindow(void);
 
 #endif

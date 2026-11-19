@@ -170,6 +170,19 @@ int main(int argc, char** argv) {
     if (chosen("blackhole/fluid")) testFluid();
     if (chosen("blackhole/backgroundPass")) testBackgroundPass();
     if (chosen("blackhole/blackHole")) testBlackHole();
+    if (chosen("2d/atan")) test2DAtan();
+    if (chosen("2d/shapes")) test2DShapes();
+    if (chosen("2d/textures")) test2DTextures();
+    if (chosen("2d/lights")) test2DLights();
+    if (chosen("2d/shadows")) test2DShadows();
+    if (chosen("2d/gi")) test2DGI();
+    if (chosen("2d/post")) test2DPost();
+    if (chosen("2d/sameBytes")) test2DSameBytes();
+    if (chosen("2d/handles")) test2DHandles();
+    if (chosen("2d/over3D")) test2DOver3D();
+    if (chosen("2d/vulkan")) test2DVulkan();
+    if (chosen("2d/vulkanFrames")) test2DVulkanFrames();
+    if (chosen("2d/window")) test2DWindow();
     if (listing) return 0;
 #ifdef ARTFUL_COUNT_ALLOCATIONS
     printf("allocations still alive: %ld\n", artfAllocationsAlive());

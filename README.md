@@ -61,6 +61,7 @@ same scene is drawn on the CPU.
 | **Memory** | Compression on load; meshes and textures that can be removed; streaming of textures' mipmaps and meshes' levels, run by the program, by Artful or by both. |
 | **Overlay** | A picture over the scene, updated by damage rectangles: what a host needs to put an interface on top. |
 | **Black hole** | Light traced through the curved space of a spinning hole, pixel by pixel, then high dynamic range, bloom and tone mapping: in real time, and the same picture on both backends. |
+| **2D** | A library of its own, `artful-2d`, on the core alone: pictures and shapes (rectangles with round corners, ellipses, polygons, lines) in layers, under a camera that moves, turns and zooms; lit by points, spots and a sun, with normal maps and highlights, soft shadows as wide as their light, light that glowing things give off and walls send on (radiance cascades), then bloom and a tone curve. On every core, the same bytes on any number of threads; or on the GPU through Vulkan, by compute shaders of its own, with the same picture: a lit room at 1920 x 1080 in 4.4 ms. Its frames go over a 3D one, and a 3D one into it. |
 
 ## Quick start
 
@@ -417,6 +418,59 @@ to the last pixel of a run of frames.
 Each SDK holds the static library, its headers and a CMake package for `find_package(artful)`; checksums are in
 `SHA256SUMS.txt`. On Linux and macOS, build it from the sources: it takes a few seconds.
 
+### In 2D
+
+`artful-2d` (`artful::2d`) draws pictures and shapes, lit, through Vulkan where it runs and on the CPU elsewhere, with
+the same picture (within a step of a byte). It takes only Artful's core: a program that draws only in 2D links nothing
+of the 3D renderer.
+
+```c
+#include "artful/2d.h" /* the library artful-2d (artful::2d) */
+
+ArtfScene2D* scene = artfScene2DNew();
+ArtfSprite2DDesc floor_ = artfSprite2DDefaults();
+floor_.size = artfVec2(640, 360);
+floor_.texture = bricks;                 /* artfScene2DAddTexture */
+floor_.normalMap = bricksRelief;         /* ... with .normalMap = true */
+artfScene2DAddSprite(scene, &floor_);
+
+ArtfSprite2DDesc wall = artfSprite2DDefaults();
+wall.position = artfVec2(90, 0);
+wall.size = artfVec2(20, 200);
+wall.castsShadow = true;
+wall.layer = 1;
+artfScene2DAddSprite(scene, &wall);
+
+ArtfLight2DDesc torch = artfLight2DDefaults();
+torch.position = artfVec2(-100, 0);
+torch.color = artfVec3(1, .6f, .3f);
+torch.range = 300;
+torch.radius = 6;                        /* as wide as a flame: soft shadows */
+artfScene2DAddLight(scene, &torch);
+
+ArtfGI2DDesc gi = artfGI2DDefaults();    /* what glows lights the room, and walls bounce it */
+artfScene2DSetGI(scene, &gi);
+
+ArtfRenderer2D* renderer = artfRenderer2DNew(&(ArtfRenderer2DOptions){.width = 1280, .height = 720});
+artfRenderer2DDraw(renderer, scene);
+const uint32_t* pixels = artfRenderer2DPixels(renderer); /* premultiplied BGRA, as a 3D frame */
+```
+
+```bash
+build/artful-render2d --out room.png
+build/artful-render2d --backend software --out room.png
+build/artful-render2d --window --no-vsync --frames 300
+```
+
+In a window: give `ArtfRenderer2DOptions.surface` the window's handle, as for 3D, and Vulkan shows each frame through a
+swapchain of its own, with two frames on their way at once. The room of the demo, at 1280 x 720 on a Radeon RX 9060 XT:
+1.8 ms a frame in a window, 2.5 read back into memory each frame, 20 on the CPU's 16 threads; at 1920 x 1080 in a
+window, 4.2.
+
+Over a 3D scene: give the 2D scene a clear background (`artfScene2DSetBackground(scene, color, 0)`) and its frame to
+the 3D renderer as its overlay (`artfRendererSetOverlay`). A 3D frame goes into a 2D scene as a texture, with
+`premultiplied`, and `artfScene2DSetTexture` each frame.
+
 ## Building
 
 ```bash
@@ -438,7 +492,7 @@ SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful
 | Option | Default | |
 | --- | :---: | --- |
 | `ARTFUL_VULKAN` | `ON` | the GPU backend; off, a lighter library, drawing on the CPU |
-| `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-blackhole` (the window), `artful-shaders`, `artful-tests` |
+| `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-render2d`, `artful-blackhole` (the window), `artful-shaders`, `artful-tests` |
 | `ARTFUL_BLACKHOLE` | top level | the black hole, `artful-blackhole` (`artful::blackhole`), a library apart; the tools and tests build it too |
 | `ARTFUL_METAL` | `OFF` | the Metal backend (Apple only): never run, and without most of what came after 0.4 |
 | `ARTFUL_CASCADE_DIR` | empty | cascade's source folder: builds the bridge to it (`artful::cascade`), its example and its tests |
@@ -450,8 +504,9 @@ SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful
 <br>
 
 ```
-include/artful/   the API: core.h, scene.h, renderer.h
-src/core/         memory, threads
+include/artful/   the API: core.h, scene.h, renderer.h; 2d.h, for artful-2d
+src/core/         memory, threads: artful-core, which the others take
+src/2d/           drawing in 2D (artful-2d): the scene, its tiles, shadow maps, gi, bloom
 src/scene/        scenes; meshBuild.c packs and orders meshes, simplify.c makes lighter ones, trace.c follows
                   rays, gltf.c and imageDecode.c read files
 src/render/       the choice of a backend
@@ -460,7 +515,7 @@ src/vulkan/       the GPU backend: vulkanApi.h, spirv.c and the shaders in shade
 src/metal/        the GPU backend for Apple's systems, never run and built only when asked: metal.c, and shaders.inc,
                   which is generated
 extensions/       built apart, on the public API: blackhole/ (artful-blackhole, include/artful/blackhole.h)
-tools/            artful-render, artful-blackhole, artful-shaders, mkmetal.py; androidTest.sh for a device
+tools/            artful-render, artful-render2d, artful-blackhole, artful-shaders, mkmetal.py; androidTest.sh for a device
 tests/            a file for each area (core.c, post.c, tracing.c...), what they share in tests.h, main.c runs them
 integrations/     bridges to other libraries, each a target of its own and named by nothing above
   cascade/        artful::cascade: include/artful/cascade.h, its example, its window tests, its APK

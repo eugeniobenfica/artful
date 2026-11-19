@@ -59,6 +59,24 @@ void artfLog(const char* format, ...);
 /* A monotonic clock, in milliseconds: for animating, and for measuring. */
 double artfNowMs(void);
 
+/* ---- a window ------------------------------------------------------------------------------ */
+
+/* A window to show frames in, as the system names it: for artfRendererNew and artfRenderer2DNew. */
+typedef enum ArtfSurfaceKind {
+    ARTF_SURFACE_NONE,    /* frames stay in memory: artfRendererReadPixels */
+    ARTF_SURFACE_WIN32,   /* a: the HWND */
+    ARTF_SURFACE_XLIB,    /* a: the Display*, b: the Window */
+    ARTF_SURFACE_WAYLAND, /* a: the wl_display*, b: the wl_surface* */
+    ARTF_SURFACE_ANDROID, /* a: the ANativeWindow* */
+    ARTF_SURFACE_METAL    /* a: the CAMetalLayer* */
+} ArtfSurfaceKind;
+
+typedef struct ArtfSurface {
+    ArtfSurfaceKind kind;
+    void* a;
+    void* b;
+} ArtfSurface;
+
 /* ---- numbers ----------------------------------------------------------------------------- */
 
 ARTF_INLINE float artfMinf(float a, float b) { return b < a ? b : a; }

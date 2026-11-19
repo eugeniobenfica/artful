@@ -484,6 +484,7 @@ static void carryStrip(ArtfScene* s, ArtfInstance i, float x, float z, float ang
  * against a GPU that builds it whole. A refit from the wrong positions, or one that did nothing, leaves a shadow where
  * the strip was. Then a mesh that comes is built alone, and one that goes takes none built again but what bends. */
 void testTracedRefit(void) {
+#ifdef ARTFUL_VULKAN /* (its counters and switches are Vulkan's: without it, nothing to run) */
     ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
     ArtfRenderer* stepped = artfRendererNew(&o);
     o.backend = ARTF_BACKEND_SOFTWARE;
@@ -574,6 +575,7 @@ void testTracedRefit(void) {
     artfFree(a);
     artfFree(b);
     artfFree(c);
+#endif
 }
 
 /* How much redder than green a part of the frame is. */
@@ -681,6 +683,7 @@ void testProbesWalls(void) {
  * box with probes inside it, a lamp and the sun; with walls and through them, through the hardware where there is
  * some and through the trees. */
 void testProbesGpu(void) {
+#ifdef ARTFUL_VULKAN /* (its counters and switches are Vulkan's: without it, nothing to run) */
     enum { STEPS = 6 };
     for (int through = 0; through < 2; ++through)
         for (int way = 0; way < 2; ++way) {
@@ -763,6 +766,7 @@ void testProbesGpu(void) {
             artfFree(gpu);
             artfSceneFree(s);
         }
+#endif
 }
 
 /* ---- rays ---- */

@@ -438,6 +438,7 @@ void testTracedSkinLod(void) {
     CHECK(floor > W * H / 2 && shadow > 400 && apart <= shadow / 50);
     artfFree(e);
     artfSceneSetFeature(s, ARTF_FEATURE_LOD, true);
+#ifdef ARTFUL_VULKAN /* (the GPU's: what its counters say) */
     for (int g = 0; g < 2; ++g) {
         if (!gpus[g]) continue;
         bendTube(s, i, 1.2f);
@@ -460,6 +461,7 @@ void testTracedSkinLod(void) {
         if (hardware) CHECK(artfVulkanBottomLevels[0] + artfVulkanBottomLevels[1] - was[0] - was[1] == 1);
         if (g) CHECK(artfVulkanBottomLevels[0] == was[0] && artfVulkanBottomLevels[1] == was[1]);
     }
+#endif
     artfSceneSetShadows(s, NULL);
     artfSceneRemoveInstance(s, i);
     CHECK(artfSceneRemoveMesh(s, tube));

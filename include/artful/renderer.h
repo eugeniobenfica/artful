@@ -26,21 +26,6 @@ typedef enum ArtfBackend { ARTF_BACKEND_AUTO, ARTF_BACKEND_VULKAN, ARTF_BACKEND_
 
 const char* artfBackendName(ArtfBackend b);
 
-typedef enum ArtfSurfaceKind {
-    ARTF_SURFACE_NONE,    /* frames stay in memory: artfRendererReadPixels */
-    ARTF_SURFACE_WIN32,   /* a: the HWND */
-    ARTF_SURFACE_XLIB,    /* a: the Display*, b: the Window */
-    ARTF_SURFACE_WAYLAND, /* a: the wl_display*, b: the wl_surface* */
-    ARTF_SURFACE_ANDROID, /* a: the ANativeWindow* */
-    ARTF_SURFACE_METAL    /* a: the CAMetalLayer* */
-} ArtfSurfaceKind;
-
-typedef struct ArtfSurface {
-    ArtfSurfaceKind kind;
-    void* a;
-    void* b;
-} ArtfSurface;
-
 /* What the CPU's kernels may use. Each gives the same pixels: this is for tests and for measuring. */
 typedef enum ArtfSimd {
     ARTF_SIMD_AUTO,     /* the widest this processor has */
