@@ -6,6 +6,9 @@
  * the rest of it ran. ARTFUL_REQUIRE=vulkan,rt,window makes each it names a failure instead: for a machine that
  * is meant to have it. */
 #include "tests.h"
+#ifdef ARTFUL_VULKAN
+#include "vulkan/spirv.h"
+#endif
 
 static int wordCount;
 static char** words;
@@ -89,6 +92,7 @@ int main(int argc, char** argv) {
 #ifdef ARTFUL_VULKAN
     /* (a feature asked for is drawn on the next frame, as each test expects; testShadersAhead checks the other way) */
     artfVulkanShadersWait = true;
+    artfSpvCheck = true; /* (every shader built is checked as an IR too: testShaderIr) */
 #endif
     RUN("metrics/flip", testFlip());
     RUN("metrics/srgb", testSrgb());
@@ -235,6 +239,7 @@ int main(int argc, char** argv) {
     RUN("layers/decals", testDecals());
     RUN("scale/extras", testExtras());
     RUN("backends/lostDevice", testLostDevice());
+    RUN("backends/shaderIr", testShaderIr());
     RUN("backends/textureMemory", testTextureMemory());
     RUN("backends/refusedSwapchain", testRefusedSwapchain());
     RUN("files/blocks", testBlocks());
@@ -263,6 +268,9 @@ int main(int argc, char** argv) {
     RUN("2d/vulkanFrames", test2DVulkanFrames());
     RUN("2d/window", test2DWindow());
     if (listing) return 0;
+#ifdef ARTFUL_VULKAN
+    CHECK(artfSpvChecksFailed == 0); /* (every shader built was a sound IR) */
+#endif
 #ifdef ARTFUL_COUNT_ALLOCATIONS
     printf("allocations still alive: %ld\n", artfAllocationsAlive());
     CHECK(artfAllocationsAlive() == 0);

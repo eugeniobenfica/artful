@@ -5,6 +5,7 @@
 #include "vulkan/shaders.h"
 #include "holeInternal.h" /* (extensions/blackhole) */
 #include "2d/vulkan2d.h"
+#include "vulkan/spirv.h"
 
 #include <stdio.h>
 
@@ -21,6 +22,7 @@ static int save(const char* folder, const char* name, uint32_t* code, size_t siz
 
 int main(int argc, char** argv) {
     if (argc < 2) { fputs("artful-shaders folder\n", stderr); return 2; }
+    artfSpvCheck = true; /* (each module's IR checked too: irCheck) */
     size_t size;
     uint32_t* code;
     int failed = 0;
@@ -146,5 +148,6 @@ int main(int argc, char** argv) {
     SAVE("postTileMost", artfShaderPostTileMost(&size));
     SAVE("postUpscale", artfShaderPostUpscale(&size));
     SAVE("postSharpen", artfShaderPostSharpen(&size));
-    return failed;
+    if (artfSpvChecksFailed) fprintf(stderr, "%d shaders' IR not sound\n", artfSpvChecksFailed);
+    return failed || artfSpvChecksFailed;
 }

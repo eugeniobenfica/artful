@@ -1,19 +1,22 @@
 /* artful — writing SPIR-V. Vulkan takes shaders as SPIR-V, which is what a shader compiler makes; to
- * need none, the library builds its few shaders itself, as SSA, with these calls. */
+ * need none, the library builds its few shaders itself, as SSA, with these calls. They build the shader as an IR
+ * (shaderir/ir.h), which spvFinish writes as SPIR-V's words, and which other languages can be written from. */
 #ifndef ARTFUL_SPIRV_H
 #define ARTFUL_SPIRV_H
 
 #include "artful/core.h"
+#include "shaderir/ir.h"
 
 typedef uint32_t SpvId;
-typedef ARTF_VEC(uint32_t) SpvWords;
+/* A section of the module, which spvEmit adds to. */
+typedef struct SpvWords { IrModule* m; uint8_t section; } SpvWords;
 
 typedef struct Spv {
+    IrModule ir;          /* what is built */
     SpvWords head;        /* capabilities, extensions, imports, the memory model, the entry point */
     SpvWords annotations;
     SpvWords types;       /* types, constants and global variables */
     SpvWords code;
-    SpvId bound;
     SpvId glsl;           /* the GLSL.std.450 set */
     SpvId voidType, boolType, uintType, intType, floatType, vec2, vec3, vec4;
     SpvId block;          /* the label of the block being written */
@@ -109,5 +112,8 @@ SpvId spvSrgbEncode(Spv* s, SpvId light);
 
 /* The module's words, the caller's (artfFree). */
 uint32_t* spvFinish(Spv* s, size_t* wordCount);
+/* For tools and tests: each module is checked as it is finished (irCheck), and what is wrong is logged and counted. */
+extern bool artfSpvCheck;
+extern int artfSpvChecksFailed;
 
 #endif

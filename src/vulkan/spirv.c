@@ -1,4 +1,4 @@
-/* artful — writing SPIR-V. A module's sections go into their own lists, and are joined at the end. */
+/* artful — writing SPIR-V. What is written goes into an IR (shaderir/ir.h), its four sections apart; irSpirv joins them. */
 #include "vulkan/spirv.h"
 #include "core/color.h"
 
@@ -11,12 +11,9 @@ enum {
     OP_AtomicIAdd = 234, OP_LoopMerge = 246, OP_SelectionMerge = 247, OP_Label = 248, OP_Branch = 249, OP_BranchConditional = 250, OP_Return = 253
 };
 
-void spvEmit(SpvWords* to, uint32_t op, const uint32_t* operands, uint32_t n) {
-    artfVecPush(to, (n + 1) << 16 | op);
-    for (uint32_t i = 0; i < n; ++i) artfVecPush(to, operands[i]);
-}
+void spvEmit(SpvWords* to, uint32_t op, const uint32_t* operands, uint32_t n) { irAppend(to->m, to->section, op, operands, n); }
 
-SpvId spvNewId(Spv* s) { return ++s->bound; }
+SpvId spvNewId(Spv* s) { return irNewId(&s->ir); }
 
 /* A string's words, NUL included. */
 static uint32_t packString(const char* text, uint32_t* out) {
@@ -32,10 +29,9 @@ static SpvId typeOf(Spv* s, uint32_t op, const uint32_t* operands, uint32_t n);
 SpvId spvTypeOpaque(Spv* s, uint32_t op) { return typeOf(s, op, NULL, 0); }
 
 static SpvId typeOf(Spv* s, uint32_t op, const uint32_t* operands, uint32_t n) {
-    for (size_t i = 0; i < s->types.len;) {
-        const uint32_t head = s->types.items[i], length = head >> 16;
-        if ((head & 0xFFFF) == op && length == n + 2 && (!n || !memcmp(&s->types.items[i + 2], operands, (size_t)n * 4))) return s->types.items[i + 1];
-        i += length;
+    for (size_t k = 0; k < s->ir.insts.len; ++k) {
+        const IrInst* i = &s->ir.insts.items[k];
+        if (i->section == IR_TYPES && i->op == op && i->count == n && (!n || !memcmp(irOperands(&s->ir, i), operands, (size_t)n * 4))) return i->result;
     }
     uint32_t words[16];
     words[0] = spvNewId(s);
@@ -46,6 +42,11 @@ static SpvId typeOf(Spv* s, uint32_t op, const uint32_t* operands, uint32_t n) {
 
 void spvInit(Spv* s) {
     memset(s, 0, sizeof *s);
+    irInit(&s->ir);
+    s->head = (SpvWords){&s->ir, IR_HEAD};
+    s->annotations = (SpvWords){&s->ir, IR_ANNOTATIONS};
+    s->types = (SpvWords){&s->ir, IR_TYPES};
+    s->code = (SpvWords){&s->ir, IR_CODE};
     spvCapability(s, 1); /* Shader */
     s->glsl = spvNewId(s); /* (the import itself comes after the extensions: spvEntryPoint) */
     s->voidType = typeOf(s, OP_TypeVoid, NULL, 0);
@@ -58,12 +59,7 @@ void spvInit(Spv* s) {
     s->vec4 = typeOf(s, OP_TypeVector, SPV_WORDS(s->floatType, 4));
 }
 
-void spvFini(Spv* s) {
-    artfVecFree(&s->head);
-    artfVecFree(&s->annotations);
-    artfVecFree(&s->types);
-    artfVecFree(&s->code);
-}
+void spvFini(Spv* s) { irFree(&s->ir); }
 
 void spvCapability(Spv* s, uint32_t capability) { spvEmit(&s->head, OP_Capability, SPV_WORDS(capability)); }
 
@@ -137,8 +133,10 @@ SpvId spvTypeSampledImage2DMS(Spv* s, SpvId* imageType) {
 
 /* (OpConstant has its type before its id, unlike a type: so it has its own search) */
 static SpvId constantOf(Spv* s, SpvId type, uint32_t value) {
-    for (size_t i = 0; i < s->types.len; i += s->types.items[i] >> 16)
-        if ((s->types.items[i] & 0xFFFF) == OP_Constant && s->types.items[i + 1] == type && s->types.items[i + 3] == value) return s->types.items[i + 2];
+    for (size_t k = 0; k < s->ir.insts.len; ++k) {
+        const IrInst* i = &s->ir.insts.items[k];
+        if (i->section == IR_TYPES && i->op == OP_Constant && i->type == type && i->count == 1 && irOperands(&s->ir, i)[0] == value) return i->result;
+    }
     SpvId id = spvNewId(s);
     spvEmit(&s->types, OP_Constant, SPV_WORDS(type, id, value));
     return id;
@@ -392,20 +390,16 @@ void spvKillIf(Spv* s, SpvId condition) {
 void spvLoopMerge(Spv* s, SpvId merge, SpvId next) { spvEmit(&s->code, OP_LoopMerge, SPV_WORDS(merge, next, 0)); }
 void spvBranchIf(Spv* s, SpvId condition, SpvId yes, SpvId no) { spvEmit(&s->code, OP_BranchConditional, SPV_WORDS(condition, yes, no)); }
 
+bool artfSpvCheck = false;
+int artfSpvChecksFailed = 0;
+
 uint32_t* spvFinish(Spv* s, size_t* wordCount) {
-    const size_t total = 5 + s->head.len + s->annotations.len + s->types.len + s->code.len;
-    uint32_t* out = artfMalloc(total * 4);
-    out[0] = 0x07230203;
-    out[1] = 0x00010300; /* SPIR-V 1.3: Vulkan 1.1 and up, StorageBuffer without an extension */
-    out[2] = 0;
-    out[3] = s->bound + 1;
-    out[4] = 0;
-    size_t at = 5;
-    const SpvWords* sections[4] = {&s->head, &s->annotations, &s->types, &s->code};
-    for (int i = 0; i < 4; ++i) {
-        if (sections[i]->len) memcpy(out + at, sections[i]->items, sections[i]->len * 4);
-        at += sections[i]->len;
+    if (artfSpvCheck) {
+        char why[256];
+        if (!irCheck(&s->ir, why, sizeof why)) {
+            ++artfSpvChecksFailed;
+            artfLog("artful: a shader's IR is not sound: %s", why);
+        }
     }
-    *wordCount = total;
-    return out;
+    return irSpirv(&s->ir, wordCount);
 }

@@ -186,6 +186,8 @@ O objetivo é que cada shader seja descrito uma vez e emitido para SPIR-V, MSL e
 
 **Pronto quando:** todos os shaders 3D e 2D passam pelo IR com saída SPIR-V igual à atual, e o MSL de pelo menos as 17 variantes de hoje compila no compilador da Apple na CI.
 
+**Estado da 4.1:** passos 1 e 2 feitos, para todos os shaders de uma vez. Em vez de migrar shader a shader, o construtor (`spirv.c`) passou a gravar no IR (`src/shaderir/`), e o SPIR-V sai do IR (`irSpirv`). O IR tem instruções em SSA nas quatro seções, tipo, resultado, operandos classificados (id, literal, string) pela gramática dos 102 opcodes em uso, consultas (`irDef`, `irTypeOf`), verificador (`irCheck`) e forma de texto (`irPrint`). Por escolha, o vocabulário de operações é o próprio do SPIR-V: os shaders já são escritos contra ele, e sua gramática dá a semântica. **Critério:** os 103 shaders (3D e 2D) saem com as mesmas palavras SPIR-V, byte a byte (clang). Cada módulo passa no `irCheck`, no `artful-shaders` e em toda a suíte, e um teste confere que o verificador acusa cada defeito plantado. O tempo de construção não mudou (~60 ms para todos). **Falta:** DebugInfo (passo 3), o emissor MSL (passo 4, validável só no compilador da Apple na CI) e WGSL (Fase 6).
+
 ### 4.2 Grafo de quadro (G)
 
 1. Descrever cada passe de `vulkan.c` com o que lê e escreve. Começar só pela descrição, gerando um diagrama, sem mudar a execução.

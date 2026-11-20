@@ -113,6 +113,7 @@ void testCullSize(void);
 /* backends.c: the GPU against the CPU, and a device that is lost or refuses */
 void testVulkan(void);
 void testLostDevice(void);
+void testShaderIr(void);
 void testTextureMemory(void);
 void testRefusedSwapchain(void);
 void testShadersAhead(void);

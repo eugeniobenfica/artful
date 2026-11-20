@@ -978,6 +978,17 @@ There is no validator in the loop at run time (CI and `artful-shaders` put every
 arithmetic on both sides, and a test compares their pictures: they differ by more than 24 of 255 in
 0.05% of the pixels of its scene. (The driver accepting a module proves less than that picture does.)
 
+**An IR under the builder** (`src/shaderir/`). What the builder writes goes into an IR first: a module of
+instructions in SSA, in its four sections, each an operation, the type and id of what it makes, and operands each known
+as an id, a literal or a word of a string, by SPIR-V's grammar for the 102 operations the shaders use; control
+structured, as SPIR-V's merges say. `irDef` and `irTypeOf` say what made a value and of what type it is, `irCheck` what
+is wrong with a module (an id made twice or by nothing, a type that is not one, code outside a function or a block),
+`irPrint` shows it as text, and `irSpirv` writes the words. Operations keep SPIR-V's numbers: every shader was written
+against them, and its grammar says what each means; a writer for Metal or WGSL goes operation by operation over this.
+All the shaders, 3D and 2D, go through it now, and write the same words they wrote before: the 103 that
+`artful-shaders` saves are the same bytes, built by clang, and each is a sound IR there and while the tests run
+(`artfSpvCheck`); building them all takes the 60 ms it took.
+
 ## The CPU: a tile-based GPU in software
 
 `src/software/kernels.inc`. An immediate-mode rasterizer spends its time in memory: every triangle

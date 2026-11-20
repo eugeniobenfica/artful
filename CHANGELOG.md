@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Shaders as an IR** (the plan's phase 4.1, its first two steps). The SPIR-V builder writes into an IR
+  (`src/shaderir/`): instructions in SSA with their sections, types, results and operands' kinds (id, literal, string),
+  structured control, what made each value and its type (`irDef`, `irTypeOf`), what is wrong with a module (`irCheck`),
+  a text form (`irPrint`), and SPIR-V's words from it (`irSpirv`). All 103 shaders, 3D and 2D, go through it and write
+  the same bytes as before; `artful-shaders` and the tests check every module's IR (`artfSpvCheck`); building them all
+  takes as long as it did. Metal's and WGSL's writers are to come.
+
 - **Readers fuzzed, and what that found** (the plan's phase 3.1). A libFuzzer target for each reader of what comes from
   outside (`tools/fuzz/`, CMake's `ARTFUL_FUZZ`, clang; with MinGW, libFuzzer linked by name): glTF and GLB, PNG and
   JPEG, HDR, KTX2 and its blocks, BC7 and ASTC blocks alone, IES, `.cube`, meshopt's buffers; seeds from

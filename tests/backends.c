@@ -401,3 +401,61 @@ void testRefusedSwapchain(void) { missing("vulkan"); }
 void testShadersAhead(void) { missing("vulkan"); }
 void testPipelinesAhead(void) { missing("vulkan"); }
 #endif
+
+#ifdef ARTFUL_VULKAN
+#include "shaderir/ir.h"
+#include "vulkan/spirv.h"
+#endif
+
+/* Shaders as an IR (shaderir/ir.h): what the SPIR-V writer builds, read back as instructions with their kinds and
+ * types; and what is wrong with a module, found. (That every shader's IR is sound and writes the words it wrote before
+ * is checked by artful-shaders, and while these tests run: artfSpvCheck.) */
+void testShaderIr(void) {
+#ifdef ARTFUL_VULKAN
+    Spv b, *s = &b;
+    spvInit(s);
+    SpvId out = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
+    SpvId main = spvBeginMain(s);
+    SpvId half = spvConstFloat(s, .5f);
+    SpvId sum = spvOp2(s, SPV_OP_FAdd, s->floatType, half, half);
+    const SpvId parts[4] = {sum, sum, sum, half};
+    spvStore(s, out, spvCompose(s, s->vec4, parts, 4));
+    spvEndMain(s);
+    spvEntryPoint(s, SPV_MODEL_Fragment, main, &out, 1);
+    char why[256];
+    CHECK(irCheck(&s->ir, why, sizeof why));
+    /* the sum's type and what made it; the constant's value a literal, the entry point's name a string */
+    const IrInst* add = irDef(&s->ir, sum);
+    CHECK(add && add->op == SPV_OP_FAdd && irTypeOf(&s->ir, sum) == s->floatType && irKinds(&s->ir, add)[0] == IR_OPERAND_ID);
+    const IrInst* constant = irDef(&s->ir, half);
+    CHECK(constant && irKinds(&s->ir, constant)[0] == IR_OPERAND_LITERAL && irOperands(&s->ir, constant)[0] == 0x3F000000u);
+    bool named = false;
+    for (size_t k = 0; k < s->ir.insts.len; ++k) {
+        const IrInst* i = &s->ir.insts.items[k];
+        if (i->op == 15) named = irKinds(&s->ir, i)[0] == IR_OPERAND_LITERAL && irKinds(&s->ir, i)[1] == IR_OPERAND_ID && irKinds(&s->ir, i)[2] == IR_OPERAND_STRING &&
+                                 irKinds(&s->ir, i)[i->count - 1] == IR_OPERAND_ID;
+    }
+    CHECK(named);
+    /* written again from the IR: the same words, and their header */
+    size_t words;
+    uint32_t* code = irSpirv(&s->ir, &words);
+    CHECK(code[0] == 0x07230203 && code[3] == s->ir.bound + 1 && words > 5);
+    artfFree(code);
+    /* what is wrong is found: an id nothing makes; a block that does not end; a type that is not one */
+    spvEmit(&s->code, SPV_OP_FAdd, SPV_WORDS(s->floatType, spvNewId(s), half, 999u));
+    CHECK(!irCheck(&s->ir, why, sizeof why) && strstr(why, "made by nothing"));
+    printf("an IR with what is wrong: %s\n", why);
+    spvFini(s);
+    spvInit(s);
+    spvBeginMain(s);
+    spvEmit(&s->code, 56 /* OpFunctionEnd */, NULL, 0);
+    CHECK(!irCheck(&s->ir, why, sizeof why) && strstr(why, "inside a block"));
+    spvFini(s);
+    spvInit(s);
+    spvBeginMain(s);
+    spvOp2(s, SPV_OP_FAdd, spvConstFloat(s, 1.f), spvConstFloat(s, 1.f), spvConstFloat(s, 1.f));
+    spvEndMain(s);
+    CHECK(!irCheck(&s->ir, why, sizeof why) && strstr(why, "not a type"));
+    spvFini(s);
+#endif
+}
