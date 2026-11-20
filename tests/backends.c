@@ -404,7 +404,20 @@ void testPipelinesAhead(void) { missing("vulkan"); }
 
 #ifdef ARTFUL_VULKAN
 #include "shaderir/ir.h"
+#include "shaderir/msl.h"
 #include "vulkan/spirv.h"
+
+/* Every shader the tests build, written as Metal too (shaderir/msl.h): all but ray queries must be. */
+int metalFailures = 0;
+void writeMetal(const IrModule* m) {
+    char why[256];
+    char* metal = irMsl(m, NULL, why, sizeof why);
+    if (metal) artfFree(metal);
+    else if (!strstr(why, "ray queries")) {
+        ++metalFailures;
+        printf("a shader not written as Metal: %s\n", why);
+    }
+}
 #endif
 
 /* Shaders as an IR (shaderir/ir.h): what the SPIR-V writer builds, read back as instructions with their kinds and
@@ -415,6 +428,7 @@ void testShaderIr(void) {
     Spv b, *s = &b;
     spvInit(s);
     SpvId out = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
+    spvDecorate(s, out, SPV_DECORATE_Location, 0);
     SpvId main = spvBeginMain(s);
     SpvId half = spvConstFloat(s, .5f);
     SpvId sum = spvOp2(s, SPV_OP_FAdd, s->floatType, half, half);
@@ -436,6 +450,10 @@ void testShaderIr(void) {
                                  irKinds(&s->ir, i)[i->count - 1] == IR_OPERAND_ID;
     }
     CHECK(named);
+    /* as Metal: the entry point and what goes out, and the arithmetic */
+    char* metal = irMsl(&s->ir, NULL, why, sizeof why);
+    CHECK(metal && strstr(metal, "fragment main0_out main0(") && strstr(metal, "[[color(0)]]") && strstr(metal, "0.5f + 0.5f") && strstr(metal, "return out;"));
+    artfFree(metal);
     /* written again from the IR: the same words, and their header */
     size_t words;
     uint32_t* code = irSpirv(&s->ir, &words);

@@ -1,13 +1,46 @@
 /* artful-shaders — writes the GPU's shaders to a folder, for spirv-val and spirv-dis.
  *
- *   artful-shaders folder */
+ *   artful-shaders folder [--ir]: and each one's IR as text (name.ir), and as Metal (name.metal, shaderir/msl.h) */
 #include "scene/sceneInternal.h"
 #include "vulkan/shaders.h"
 #include "holeInternal.h" /* (extensions/blackhole) */
 #include "2d/vulkan2d.h"
 #include "vulkan/spirv.h"
+#include "shaderir/msl.h"
 
 #include <stdio.h>
+#include <string.h>
+
+static const char* folderOut;
+static const char* current; /* the shader being made */
+static bool withIr;
+
+static void finished(const IrModule* m) {
+    if (!withIr || !current) return;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s.ir", folderOut, current);
+    FILE* f = fopen(path, "w");
+    if (f) {
+        irPrint(m, f);
+        fclose(f);
+    }
+    /* and as Metal: as mkmetal.py had SPIRV-Cross write it, the shadow's vertices upside down */
+    char why[256];
+    const IrMslOptions options = {!strcmp(current, "shadowVertex")};
+    char* metal = irMsl(m, &options, why, sizeof why);
+    snprintf(path, sizeof path, "%s/%s.metal", folderOut, current);
+    if (!metal) {
+        fprintf(stderr, "%s: no Metal: %s\n", current, why);
+        remove(path);
+        return;
+    }
+    f = fopen(path, "w");
+    if (f) {
+        fputs(metal, f);
+        fclose(f);
+    }
+    artfFree(metal);
+}
 
 static int save(const char* folder, const char* name, uint32_t* code, size_t size) {
     char path[1024];
@@ -23,10 +56,13 @@ static int save(const char* folder, const char* name, uint32_t* code, size_t siz
 int main(int argc, char** argv) {
     if (argc < 2) { fputs("artful-shaders folder\n", stderr); return 2; }
     artfSpvCheck = true; /* (each module's IR checked too: irCheck) */
+    folderOut = argv[1];
+    withIr = argc > 2 && !strcmp(argv[2], "--ir");
+    artfSpvFinished = finished;
     size_t size;
     uint32_t* code;
     int failed = 0;
-#define SAVE(name, call) code = call; failed |= save(argv[1], name, code, size)
+#define SAVE(name, call) current = name; code = call; failed |= save(argv[1], name, code, size)
     SAVE("2dTiles", artf2DShaderTiles(&size));
     SAVE("2dBloomDown", artf2DShaderBloomDown(&size));
     SAVE("2dBloomUp", artf2DShaderBloomUp(&size));

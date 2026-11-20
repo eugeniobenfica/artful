@@ -115,5 +115,7 @@ uint32_t* spvFinish(Spv* s, size_t* wordCount);
 /* For tools and tests: each module is checked as it is finished (irCheck), and what is wrong is logged and counted. */
 extern bool artfSpvCheck;
 extern int artfSpvChecksFailed;
+/* For tools: called with each module's IR as it is finished (NULL: nothing). */
+extern void (*artfSpvFinished)(const IrModule* m);
 
 #endif

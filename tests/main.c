@@ -8,6 +8,8 @@
 #include "tests.h"
 #ifdef ARTFUL_VULKAN
 #include "vulkan/spirv.h"
+extern int metalFailures;
+void writeMetal(const IrModule* m);
 #endif
 
 static int wordCount;
@@ -93,6 +95,7 @@ int main(int argc, char** argv) {
     /* (a feature asked for is drawn on the next frame, as each test expects; testShadersAhead checks the other way) */
     artfVulkanShadersWait = true;
     artfSpvCheck = true; /* (every shader built is checked as an IR too: testShaderIr) */
+    artfSpvFinished = writeMetal; /* (and written as Metal: shaderir/msl.h) */
 #endif
     RUN("metrics/flip", testFlip());
     RUN("metrics/srgb", testSrgb());
@@ -270,6 +273,7 @@ int main(int argc, char** argv) {
     if (listing) return 0;
 #ifdef ARTFUL_VULKAN
     CHECK(artfSpvChecksFailed == 0); /* (every shader built was a sound IR) */
+    CHECK(metalFailures == 0); /* (and could be written as Metal, ray queries aside) */
 #endif
 #ifdef ARTFUL_COUNT_ALLOCATIONS
     printf("allocations still alive: %ld\n", artfAllocationsAlive());

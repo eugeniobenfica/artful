@@ -392,6 +392,7 @@ void spvBranchIf(Spv* s, SpvId condition, SpvId yes, SpvId no) { spvEmit(&s->cod
 
 bool artfSpvCheck = false;
 int artfSpvChecksFailed = 0;
+void (*artfSpvFinished)(const IrModule* m) = NULL;
 
 uint32_t* spvFinish(Spv* s, size_t* wordCount) {
     if (artfSpvCheck) {
@@ -401,5 +402,6 @@ uint32_t* spvFinish(Spv* s, size_t* wordCount) {
             artfLog("artful: a shader's IR is not sound: %s", why);
         }
     }
+    if (artfSpvFinished) artfSpvFinished(&s->ir);
     return irSpirv(&s->ir, wordCount);
 }

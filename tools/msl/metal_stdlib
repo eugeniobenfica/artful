@@ -1,0 +1,115 @@
+// artful — a stand-in for Metal's standard library, for clang++ -fsyntax-only (tools/msl/check.py): what the Metal
+// that shaderir/msl.c writes uses, typed as Metal types it, so that a name wrong, a type mismatched or a statement
+// malformed is found on a machine with no Metal compiler. It is not Metal: the real check is Apple's compiler (CI).
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+
+#define device
+#define constant
+#define thread
+#define threadgroup
+#define kernel
+#define fragment
+#define vertex
+
+typedef unsigned int uint;
+#define ARTF_VEC_TYPES(T)                                   \
+    typedef T T##2 __attribute__((ext_vector_type(2)));     \
+    typedef T T##3 __attribute__((ext_vector_type(3)));     \
+    typedef T T##4 __attribute__((ext_vector_type(4)));
+ARTF_VEC_TYPES(float)
+ARTF_VEC_TYPES(uint)
+ARTF_VEC_TYPES(int)
+ARTF_VEC_TYPES(bool)
+
+namespace metal {
+
+template <class T, size_t N> struct array {
+    T e[N];
+    T& operator[](size_t i) { return e[i]; }
+    const T& operator[](size_t i) const { return e[i]; }
+};
+
+// (a vector or a scalar, flattened: what make_floatN and the like are built of)
+#define ARTF_PUT(V, n_)                                                             \
+    template <class E> inline void put(E* out, int& n, V v) {                       \
+        for (int i = 0; i < n_; ++i) out[n++] = (E)v[i];                            \
+    }
+template <class E> inline void put(E* out, int& n, float v) { out[n++] = (E)v; }
+template <class E> inline void put(E* out, int& n, uint v) { out[n++] = (E)v; }
+template <class E> inline void put(E* out, int& n, int v) { out[n++] = (E)v; }
+template <class E> inline void put(E* out, int& n, bool v) { out[n++] = (E)v; }
+ARTF_PUT(float2, 2) ARTF_PUT(float3, 3) ARTF_PUT(float4, 4)
+ARTF_PUT(uint2, 2) ARTF_PUT(uint3, 3) ARTF_PUT(uint4, 4)
+ARTF_PUT(int2, 2) ARTF_PUT(int3, 3) ARTF_PUT(int4, 4)
+ARTF_PUT(bool2, 2) ARTF_PUT(bool3, 3) ARTF_PUT(bool4, 4)
+
+#define ARTF_MAKE(T, N)                                                             \
+    template <class... A> inline T##N make_##T##N(A... a) {                         \
+        static_assert(sizeof...(A) >= 1, "a vector of nothing");                    \
+        T e[16];                                                                    \
+        int n = 0;                                                                  \
+        (put<T>(e, n, a), ...);                                                     \
+        T##N v;                                                                     \
+        for (int i = 0; i < N; ++i) v[i] = n == 1 ? e[0] : e[i];                    \
+        return v;                                                                   \
+    }
+ARTF_MAKE(float, 2) ARTF_MAKE(float, 3) ARTF_MAKE(float, 4)
+ARTF_MAKE(uint, 2) ARTF_MAKE(uint, 3) ARTF_MAKE(uint, 4)
+ARTF_MAKE(int, 2) ARTF_MAKE(int, 3) ARTF_MAKE(int, 4)
+ARTF_MAKE(bool, 2) ARTF_MAKE(bool, 3) ARTF_MAKE(bool, 4)
+
+struct sampler {};
+struct level {
+    float v;
+    explicit level(float x) : v(x) {}
+};
+template <class T> struct vec4of;
+template <> struct vec4of<float> { typedef float4 type; };
+template <> struct vec4of<uint> { typedef uint4 type; };
+template <> struct vec4of<int> { typedef int4 type; };
+template <class T> struct texture2d {
+    typename vec4of<T>::type sample(sampler, float2) const;
+    typename vec4of<T>::type sample(sampler, float2, level) const;
+    typename vec4of<T>::type read(uint2, uint lod = 0) const;
+    uint get_width(uint lod = 0) const;
+    uint get_height(uint lod = 0) const;
+    uint get_num_mip_levels() const;
+};
+template <class T> struct texture2d_ms {
+    typename vec4of<T>::type read(uint2, uint sample) const;
+    uint get_width() const;
+    uint get_height() const;
+};
+
+template <class T, class F> inline T as_type(F f) {
+    static_assert(sizeof(T) == sizeof(F), "as_type of another size");
+    return __builtin_bit_cast(T, f);
+}
+
+#define ARTF_ONE(name) template <class T> T name(T x);
+#define ARTF_TWO(name) template <class T> T name(T a, T b);
+ARTF_ONE(abs) ARTF_ONE(floor) ARTF_ONE(ceil) ARTF_ONE(fract) ARTF_ONE(sin) ARTF_ONE(cos) ARTF_ONE(exp) ARTF_ONE(log)
+ARTF_ONE(exp2) ARTF_ONE(log2) ARTF_ONE(sqrt) ARTF_ONE(rsqrt) ARTF_ONE(normalize) ARTF_ONE(dfdx) ARTF_ONE(dfdy)
+ARTF_ONE(fwidth) ARTF_ONE(clz) ARTF_ONE(popcount) ARTF_ONE(reverse_bits)
+ARTF_TWO(fmin) ARTF_TWO(fmax) ARTF_TWO(min) ARTF_TWO(max) ARTF_TWO(atan2) ARTF_TWO(pow)
+template <class T> T clamp(T x, T lo, T hi);
+template <class T> T mix(T a, T b, T t);
+template <class T> T fma(T a, T b, T c);
+template <class T, class C> T select(T a, T b, C c);
+template <class V> auto dot(V a, V b) -> decltype(a.x);
+template <class V> auto length(V a) -> decltype(a.x);
+template <class V> auto distance(V a, V b) -> decltype(a.x);
+float3 cross(float3 a, float3 b);
+float4 unpack_unorm4x8_to_float(uint x);
+void discard_fragment();
+
+enum class mem_flags : int { mem_none = 0, mem_device = 1, mem_threadgroup = 2 };
+inline mem_flags operator|(mem_flags a, mem_flags b) { return (mem_flags)((int)a | (int)b); }
+void threadgroup_barrier(mem_flags);
+struct atomic_uint { uint v; };
+enum memory_order { memory_order_relaxed };
+uint atomic_fetch_add_explicit(atomic_uint* object, uint operand, memory_order order);
+
+} // namespace metal

@@ -80,6 +80,15 @@ jobs:
           for f in metal/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /dev/null; done
           git diff --quiet src/metal/shaders.inc || echo "::warning::src/metal/shaders.inc is not what this SPIRV-Cross makes of the shaders of now"
           cp taken/shaders.inc src/metal/shaders.inc
+      # (the Metal Artful writes itself, from the shaders' IR: src/shaderir/msl.c. Every shader it writes goes through
+      # Apple's compiler, and those Metal runs must bind as SPIRV-Cross's do; what it cannot write yet, ray queries, it
+      # says, and leaves out)
+      - name: Metal from the IR, through Apple's compiler
+        run: |
+          mkdir ours
+          build/artful-shaders ours --ir
+          for f in ours/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /dev/null || exit 1; done
+          python3 tools/msl/compare.py taken ours
 
   windows:
     runs-on: windows-latest

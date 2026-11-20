@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Metal from the shaders' IR** (the plan's phase 4.1, step 4). `irMsl` (`src/shaderir/msl.c`) writes Metal's shading
+  language from any shader's IR, laid out as SPIRV-Cross's (one argument buffer for each set, resources in declaration
+  order, `bNSmplr` samplers, `main0`), structured control from the IR's merges, phis as variables. All 94 shaders but
+  the 9 with ray queries are written: the 17 Metal runs bind exactly as SPIRV-Cross's (`tools/msl/compare.py`), all
+  pass a syntax check against a stand-in for Metal's library (`tools/msl/check.py`), and CI's macOS job now puts each
+  through Apple's compiler. `artful-shaders dir --ir` writes each shader's IR and Metal. `src/metal/shaders.inc` stays
+  SPIRV-Cross's until Apple's compiler has passed these.
+
 - **Shaders as an IR** (the plan's phase 4.1, its first two steps). The SPIR-V builder writes into an IR
   (`src/shaderir/`): instructions in SSA with their sections, types, results and operands' kinds (id, literal, string),
   structured control, what made each value and its type (`irDef`, `irTypeOf`), what is wrong with a module (`irCheck`),

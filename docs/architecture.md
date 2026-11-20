@@ -989,6 +989,22 @@ All the shaders, 3D and 2D, go through it now, and write the same words they wro
 `artful-shaders` saves are the same bytes, built by clang, and each is a sound IR there and while the tests run
 (`artfSpvCheck`); building them all takes the 60 ms it took.
 
+**Metal from the IR** (`src/shaderir/msl.c`, `irMsl`). Laid out as SPIRV-Cross lays out what `tools/mkmetal.py` makes,
+so that `metal.c` binds both alike: an argument buffer for each descriptor set at its `[[buffer(n)]]`, its resources as
+the module declares them, each `bN` for binding N, a texture's sampler after it as `bNSmplr`, an array taking as many
+ids as it has; push constants after the sets; `main0`, what comes in by location in `main0_in` (integers flat without
+saying so), what goes out in `main0_out`, `gl_PerVertex`'s builtins each its own, a position that is invariant said
+so; padding where Vulkan's offsets are past Metal's. Control is the IR's: an if from its selection merge, a loop
+(`for (;;)`) from its loop merge and continue target, a branch to the merge a `break`, to the header a `continue`, to
+the continue target its block and then `continue`; a phi is a variable each edge into its block sets. Values are
+variables declared at the function's top, so that no scope hides one; pointers, textures and constants are written where
+they are used. Ray queries it does not write (Metal's backend has none). `artful-shaders dir --ir` writes each shader's
+IR and Metal; the 17 Metal runs bind as SPIRV-Cross's do, resource for resource and in their entry points
+(`tools/msl/compare.py`); all 94 it writes pass `clang++ -fsyntax-only` against a stand-in for Metal's library
+(`tools/msl/check.py`, `tools/msl/metal_stdlib`), which finds names, types and statements wrong but proves less than
+Apple's compiler, which CI runs on each of them; every shader the tests build is written as Metal too. The library
+still takes SPIRV-Cross's (`src/metal/shaders.inc`) until Apple's compiler has passed these.
+
 ## The CPU: a tile-based GPU in software
 
 `src/software/kernels.inc`. An immediate-mode rasterizer spends its time in memory: every triangle
