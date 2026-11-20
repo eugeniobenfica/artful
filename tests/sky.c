@@ -57,6 +57,7 @@ void testEnvironment(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("light from all around, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0116); /* (measured 0.0016 on a Radeon RX 9060 XT) */
         CHECK(apart < .01);
         artfRendererFree(gpu);
     }
@@ -141,6 +142,7 @@ void testSky(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("a sky, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0328); /* (measured 0.0082 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
     }
     /* fog by height, in fog that light goes through: thinner above, on both backends alike */
@@ -156,6 +158,7 @@ void testSky(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("fog by height, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0456); /* (measured 0.0114 on a Radeon RX 9060 XT) */
         CHECK(apart < .01);
     }
     artfSceneFree(s);

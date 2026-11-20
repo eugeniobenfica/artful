@@ -32,11 +32,19 @@ jobs:
           VK_KHRONOS_VALIDATION_VALIDATE_SYNC: true
           VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC: true
           ARTFUL_TEST_TRACE: 1
+          ARTFUL_FLIP_LOG: flip-linux-${{ matrix.cc }}.csv
         run: |
           build/artful-tests
           ARTFUL_SINGLE_DRAW=1 build/artful-tests
           ARTFUL_FEATURES=+occlusion build/artful-tests
           ARTFUL_FEATURES=-lod,-cones build/artful-tests
+      # (what FLIP measured of each comparison here, to set thresholds by it: docs/plano-de-correcao.md, 0.4)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flip-linux-${{ matrix.cc }}
+          path: flip-linux-${{ matrix.cc }}.csv
+          if-no-files-found: ignore
       - name: Without Vulkan (what needs it is left out)
         run: |
           cmake -S . -B build-novulkan -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DARTFUL_VULKAN=OFF
@@ -58,10 +66,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: brew install ninja
-      - run: |
+      - env:
+          ARTFUL_FLIP_LOG: flip-macos.csv
+        run: |
           cmake -S . -B build -G Ninja -DARTFUL_METAL=ON
           cmake --build build
           build/artful-tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flip-macos
+          path: flip-macos.csv
+          if-no-files-found: ignore
       # (the SPIRV-Cross of the Vulkan SDK that wrote shaders.inc: another version names its variables otherwise)
       - name: SPIRV-Cross, as in Vulkan SDK 1.4.363
         run: |

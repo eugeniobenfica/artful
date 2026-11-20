@@ -109,6 +109,7 @@ void testViews(void) {
         for (int v = 1; v < ARTF_VIEW_COUNT; ++v) {
             const double apart = differentShare(frames[0][floats][v], frames[1][floats][v], 24);
             if (apart > .002) printf("the view %s%s, the GPU against the CPU: %.3f%% of pixels apart\n", artfViewName((ArtfView)v), floats ? " in floats" : "", apart * 100);
+            FLIP_ALIKE(0.076); /* (measured 0.0190 on a Radeon RX 9060 XT) */
             CHECK(apart < .01);
         }
         /* (and not all the same picture; the spheres far away are lighter levels) */
@@ -352,6 +353,7 @@ void testOrthographic(void) {
             drawInto(gpu, s, b);
             const double apart = differentShare(a, b, 24);
             printf("orthographic, four samples a pixel, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+            FLIP_ALIKE(0.136); /* (measured 0.0339 on a Radeon RX 9060 XT) */
             CHECK(apart < .005);
             artfSceneFree(s);
             artfRendererFree(cpu);
@@ -373,6 +375,7 @@ void testOrthographic(void) {
         CHECK(hashOf(a, W * H) == hashOf(c, W * H));
         const double apart = differentShare(a, b, 24);
         printf("orthographic, %s, the GPU against the CPU: %.2f%% of pixels apart\n", k == 0 ? "drawn" : k == 1 ? "all after the frame" : k == 2 ? "fog that light goes through" : "traced", apart * 100);
+        FLIP_ALIKE(0.147); /* (measured 0.0367 on a Radeon RX 9060 XT) */
         CHECK(apart < most[k]);
         /* and not the perspective's picture */
         orthoFrame(ARTF_BACKEND_SOFTWARE, k, NULL, b, &drawn);

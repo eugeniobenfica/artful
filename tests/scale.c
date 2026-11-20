@@ -120,6 +120,7 @@ void testTerrainLayers(void) {
     if (a[1][0] || a[1][W * H / 2]) {
         const double apart = differentShare(a[0], a[1], 24);
         printf("terrain layers, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0129); /* (measured 0.0029 on a Radeon RX 9060 XT) */
         CHECK(apart < .01);
     }
     artfFree(a[0]);
@@ -641,6 +642,7 @@ void testExtras(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("particles and terrain, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0123); /* (measured 0.0023 on a Radeon RX 9060 XT) */
         CHECK(apart < .02);
         artfRendererFree(gpu);
     }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Phase 0.4 done.** `tools/flipCompare.py` measures `artful-flip` against NVIDIA's own FLIP (`flip-evaluator`) on ten
+  pairs, LDR, HDR and frames of both backends: 9.9e-6 apart at most, where the plan asked 1e-4. The 40 comparisons of
+  the GPU against the CPU in the tests check FLIP's mean too (`FLIP_ALIKE`), beside the share of pixels they checked;
+  CI keeps what FLIP measured there (`ARTFUL_FLIP_LOG`), to set the thresholds by other machines too.
+
 - **Phase 1 done.** Textures' handles have a generation, as meshes' do: a removed texture's place is taken again with
   another handle, and the old one is refused, and said, where it is given (materials, graphs, decals, residency).
   The GPU's memory running out no longer takes the renderer down: a mesh that does not fit is refused

@@ -14,7 +14,7 @@ identificado; macOS com `scale/skinLod`). Run 44764119231 em andamento, com `ART
 - [x] 0.1 Versionar o trabalho em andamento
 - [x] 0.2 Um teste do CTest por caso
 - [x] 0.3 Omitido (77) ≠ aprovado; `ARTFUL_REQUIRE`
-- [~] 0.4 FLIP em C — falta comparar com o programa da NVIDIA (±1e-4) e trocar limiares "% de pixels" por FLIP
+- [x] 0.4 FLIP em C — bate com a NVIDIA a 1e-5; 40 comparações CPU×GPU com limite FLIP (calibrado numa máquina; CI coleta as outras)
 - [x] 0.5 Linha de base de desempenho — `--json` no 3D e no 2D, `tools/bench.py --render2d` (2D na CPU varia 4,3%, acima dos 3%)
 
 ## Fase 1 — Contrato público

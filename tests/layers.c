@@ -564,6 +564,7 @@ void testDecals(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("a decal, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0104); /* (measured 0.0004 on a Radeon RX 9060 XT) */
         CHECK(apart < .01);
         artfRendererFree(gpu);
     }

@@ -280,6 +280,7 @@ void testCoat(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("a clear coat and sheen, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0111); /* (measured 0.0011 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
         ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 32, 0};
         artfSceneSetTrace(s, &rays);
@@ -287,6 +288,7 @@ void testCoat(void) {
         for (int k = 0; k < 32; ++k) drawInto(gpu, s, b);
         const double tracedApart = differentShare(a, b, 24);
         printf("a clear coat and sheen traced, the GPU against the CPU: %.2f%% of pixels apart\n", tracedApart * 100);
+        FLIP_ALIKE(0.0109); /* (measured 0.0009 on a Radeon RX 9060 XT) */
         CHECK(tracedApart < .01);
         artfSceneFree(s);
         artfRendererFree(cpu);
@@ -348,6 +350,7 @@ void testSizedLights(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("a light with a size, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0127); /* (measured 0.0027 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
     }
     /* traced: the cube's shadow has a soft edge */
@@ -363,6 +366,7 @@ void testSizedLights(void) {
         for (int k = 0; k < 64; ++k) drawInto(gpu, s, a);
         const double apart = differentShare(a, b, 24);
         printf("traced, a light with a size, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0126); /* (measured 0.0026 on a Radeon RX 9060 XT) */
         CHECK(apart < .02);
     }
     /* removed, it is a point again when its place is taken */
@@ -436,6 +440,7 @@ void testLightShapes(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("a %s, the GPU against the CPU: %.2f%% of pixels apart\n", kind == 1 ? "tube" : "rectangle", apart * 100);
+        FLIP_ALIKE(0.0128); /* (measured 0.0028 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
         artfSceneFree(s);
     }
@@ -453,6 +458,7 @@ void testLightShapes(void) {
         for (int k = 0; k < 24; ++k) drawInto(gpu, panel, a);
         const double apart = differentShare(a, b, 24);
         printf("traced, a rectangle, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0122); /* (measured 0.0022 on a Radeon RX 9060 XT) */
         CHECK(apart < .02);
     }
     artfSceneFree(point);
@@ -537,6 +543,7 @@ void testAreaLights(void) {
             drawInto(gpu, s, b);
             const double apart = differentShare(a, b, 8);
             if (apart >= .005) printf("a %s, roughness %.2f, the GPU against the CPU: %.2f%% of pixels apart\n", kind ? "tube" : "rectangle", roughs[k], apart * 100);
+            FLIP_ALIKE(0.0115); /* (measured 0.0015 on a Radeon RX 9060 XT) */
             CHECK(apart < .005);
             artfSceneFree(s);
         }
@@ -588,6 +595,7 @@ void testProfiles(void) {
     if (gpu) {
         const double apart = differentShare(a, b, 24);
         printf("a profile, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.011); /* (measured 0.0010 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
         const ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 64, 0};
         artfSceneSetTrace(s, &rays);
@@ -595,6 +603,7 @@ void testProfiles(void) {
         for (int k = 0; k < 24; ++k) drawInto(gpu, s, b);
         const double traced = differentShare(a, b, 24);
         printf("a profile traced, the GPU against the CPU: %.2f%% of pixels apart; %.0f to the side\n", traced * 100, meanOf(a, W / 2 + 70, H * 3 / 4, 8));
+        FLIP_ALIKE(0.0108); /* (measured 0.0008 on a Radeon RX 9060 XT) */
         CHECK(traced < .02 && meanOf(a, W / 2 + 70, H * 3 / 4, 8) < wide * .5);
         const ArtfTraceDesc none = {ARTF_TRACE_NONE, 0, 0, 0};
         artfSceneSetTrace(s, &none);
@@ -733,6 +742,7 @@ void testMoreMaterials(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 24);
         printf("past glTF's core (%d), the GPU against the CPU: %.2f%% of pixels apart\n", kind, apart * 100);
+        FLIP_ALIKE(0.0115); /* (measured 0.0015 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
         if (kind == 5 || kind == 4) {
             ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 32, 0};
@@ -741,6 +751,7 @@ void testMoreMaterials(void) {
             for (int k = 0; k < 16; ++k) drawInto(gpu, s, b);
             const double traced = differentShare(a, b, 24);
             printf("past glTF's core (%d) traced, the GPU against the CPU: %.2f%% of pixels apart\n", kind, traced * 100);
+            FLIP_ALIKE(0.0109); /* (measured 0.0009 on a Radeon RX 9060 XT) */
             CHECK(traced < .02);
         }
         artfSceneFree(s);
@@ -773,6 +784,7 @@ void testMoreMaterials(void) {
                 for (int j = 0; j < 8; ++j) drawInto(gpu, s, b);
                 const double traced = differentShare(a, b, 24);
                 printf("a glass's inside traced, the GPU against the CPU: %.2f%% of pixels apart\n", traced * 100);
+                FLIP_ALIKE(0.0112); /* (measured 0.0012 on a Radeon RX 9060 XT) */
                 CHECK(traced < .02);
             }
             artfSceneFree(s);

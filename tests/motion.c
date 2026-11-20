@@ -51,6 +51,7 @@ void testMotion(void) {
     if (blurred[1][0] || blurred[1][W * H / 2]) {
         const double apart = differentShare(blurred[0], blurred[1], 24);
         printf("motion blur, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0108); /* (measured 0.0008 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
     }
     artfFree(a);
@@ -142,6 +143,7 @@ void testSkinnedMotion(void) {
     if (blurred[1][0] || blurred[1][W * H / 2]) {
         const double apart = differentShare(blurred[0], blurred[1], 24);
         printf("a bending strip blurred, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0101); /* (measured 0.0001 on a Radeon RX 9060 XT) */
         CHECK(apart < .005);
     }
     artfFree(a);
@@ -257,6 +259,7 @@ void testBlurEdges(void) {
     if (blurred[1][0] || blurred[1][W * H / 2]) {
         const double apart = differentShare(blurred[0], blurred[1], 24);
         printf("motion blur before a still ball, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0124); /* (measured 0.0024 on a Radeon RX 9060 XT) */
         CHECK(apart < .01);
     }
     artfFree(still);

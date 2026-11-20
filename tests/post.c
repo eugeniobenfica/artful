@@ -184,6 +184,7 @@ void testFloats(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 16);
         printf("all effects and probes, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0244); /* (measured 0.0061 on a Radeon RX 9060 XT) */
         CHECK(apart < .03);
         /* lights past the frame's own */
         artfSceneSetPost(s, NULL);
@@ -200,6 +201,7 @@ void testFloats(void) {
         CHECK(meanOf(a, W / 2, H * 3 / 4, 16) > 30);
         const double lightsApart = differentShare(a, b, 16);
         printf("100 lights past the frame's own, the GPU against the CPU: %.2f%% of pixels apart\n", lightsApart * 100);
+        FLIP_ALIKE(0.0144); /* (measured 0.0036 on a Radeon RX 9060 XT) */
         CHECK(lightsApart < .02);
         artfSceneFree(s);
         artfRendererFree(cpu);
@@ -312,6 +314,7 @@ void testLightClusters(void) {
         artfRendererStats(gpu, &stats);
         const double apart = differentShare(a, b, 16);
         printf("the corridor, the GPU against the CPU: %.2f%% of pixels apart; lights left out on the GPU: %u; lit: %.1f\n", apart * 100, stats.lightsOmitted, meanOf(a, W / 2, H * 3 / 5, 8));
+        FLIP_ALIKE(0.0121); /* (measured 0.0021 on a Radeon RX 9060 XT) */
         CHECK(stats.lightsOmitted == 0);
         CHECK(apart < .02);
         CHECK(meanOf(a, W / 2, H * 3 / 5, 8) > 10);
@@ -415,6 +418,7 @@ void testGrading(void) {
             drawInto(gpu, s, b);
             const double apart = differentShare(a, b, 16);
             printf("the look with curve %d, the GPU against the CPU: %.2f%% of pixels apart\n", curve, apart * 100);
+            FLIP_ALIKE(0.0136); /* (measured 0.0034 on a Radeon RX 9060 XT) */
             CHECK(apart < .02);
             artfSceneFree(s);
         }
@@ -590,6 +594,7 @@ void testLookMore(void) {
         drawInto(gpu, s, b);
         const double apart = differentShare(a, b, 16);
         printf("the look's histogram, grading, table, grain and flare, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0276); /* (measured 0.0069 on a Radeon RX 9060 XT) */
         CHECK(apart < .02);
         artfSceneFree(s);
         artfFree(swapped);
@@ -692,6 +697,7 @@ void testUpscale(void) {
     if (half[1][0] || half[1][W * H / 2]) {
         const double apart = differentShare(half[0], half[1], 24);
         printf("upscaled, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0116); /* (measured 0.0016 on a Radeon RX 9060 XT) */
         CHECK(apart < .02);
     }
     /* a scale of 1 is no scale */
@@ -886,6 +892,7 @@ void testFloatsSamples(void) {
     drawInto(gpu, s, b);
     const double apart = differentShare(a, b, 16);
     printf("four samples in floats, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+    FLIP_ALIKE(0.0432); /* (measured 0.0108 on a Radeon RX 9060 XT) */
     CHECK(apart < .03);
     drawInto(single, s, b);
     CHECK(differentShare(a, b, 4) > .002); /* (edges come out otherwise) */

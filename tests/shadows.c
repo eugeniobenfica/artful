@@ -255,6 +255,7 @@ void testSoftShadows(void) {
     if (c[1][0] || c[1][W * H / 2]) {
         const double apart = differentShare(c[0], c[1], 24);
         printf("soft shadows, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0112); /* (measured 0.0012 on a Radeon RX 9060 XT) */
         CHECK(apart < .01);
     }
     artfFree(a);
@@ -310,6 +311,7 @@ void testSoftShadowsTurning(void) {
     if (turned[1][0] || turned[1][W * H / 2]) {
         const double apart = differentShare(turned[0], turned[1], 24);
         printf("soft shadows turned, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0168); /* (measured 0.0042 on a Radeon RX 9060 XT) */
         CHECK(apart < .01);
     }
     artfFree(a);
@@ -351,6 +353,7 @@ void testExtraShadows(void) {
         drawInto(gpu, s, a);
         const double apart = differentShare(a, b, 24);
         printf("its shadow, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0121); /* (measured 0.0021 on a Radeon RX 9060 XT) */
         CHECK(apart < .02);
         artfRendererFree(gpu);
     }

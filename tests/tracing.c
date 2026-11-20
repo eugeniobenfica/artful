@@ -246,6 +246,7 @@ void testProbeReflections(void) {
     if (b[1][0] || b[1][W * H / 2]) {
         const double apart = differentShare(b[0], b[1], 24);
         printf("light that bounced in a metal floor, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        FLIP_ALIKE(0.0115); /* (measured 0.0015 on a Radeon RX 9060 XT) */
         CHECK(apart < .02);
     }
     artfFree(a);
@@ -412,6 +413,7 @@ void testTracedShadows(void) {
         if (frames[k][0] && frames[k][1]) {
             const double apart = differentShare(frames[k][0], frames[k][1], 24);
             printf("shadows from rays%s, the GPU against the CPU: %.2f%% of pixels apart\n", k == 0 ? "" : k == 1 ? ", soft from a light" : ", soft from the sun", apart * 100);
+            FLIP_ALIKE(0.0133); /* (measured 0.0033 on a Radeon RX 9060 XT) */
             CHECK(apart < .01);
         }
         artfFree(frames[k][0]);
@@ -455,6 +457,7 @@ void testTracedMoved(void) {
         drawInto(cpu, s, c);
         const double apart = differentShare(a, b, 0), cpuApart = differentShare(b, c, 24);
         printf("shadows from rays of what bones bend, refitted as it moved, against built whole at once: %.3f%% of pixels apart; the GPU against the CPU: %.2f%%\n", apart * 100, cpuApart * 100);
+        FLIP_ALIKE(0.01); /* (measured 0.0000 on a Radeon RX 9060 XT) */
         CHECK(apart == 0);
         CHECK(cpuApart < .01);
         /* and it was bent: the shadow is not where it was */
@@ -540,6 +543,7 @@ void testTracedRefit(void) {
         printf("shadows from rays of a strip that bones carry far, %d frames: the GPU against the CPU at worst %.3f%% of pixels apart, "
                "refitted against built whole %.3f%%; %u bottom levels built, %u refitted\n",
                frames, worst * 100, worstFresh * 100, (unsigned)built, (unsigned)refitted);
+        FLIP_ALIKE(0.0106); /* (measured 0.0006 on a Radeon RX 9060 XT) */
         CHECK(worst < .005);
         CHECK(worstFresh == 0);
         /* (with the hardware: the floor, the cube, the strip and the strip's own copy the instance bends, built once, and
@@ -562,6 +566,7 @@ void testTracedRefit(void) {
             drawInto(cpu, s, b);
             const double after = differentShare(a, b, 24);
             printf("after a mesh came and one went: the GPU against the CPU %.3f%% of pixels apart\n", after * 100);
+            FLIP_ALIKE(0.0105); /* (measured 0.0005 on a Radeon RX 9060 XT) */
             CHECK(after < .005);
             /* a refit moves the boxes, not the tree: after 60 the strip is built whole again (vulkan.c's RT_REFITS) */
             const uint64_t was[2] = {artfVulkanBottomLevels[0], artfVulkanBottomLevels[1]};
@@ -1356,6 +1361,7 @@ void testRayCones(void) {
         drawSamples(cpu, s, 64, settled);
         const double far = differentShare(first, settled, 24);
         printf("ray cones, the GPU against the CPU: %.2f%% of pixels apart\n", far * 100);
+        FLIP_ALIKE(0.0106); /* (measured 0.0006 on a Radeon RX 9060 XT) */
         CHECK(far < .01);
         artfRendererFree(cpu);
         artfRendererFree(gpu);
