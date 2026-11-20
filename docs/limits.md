@@ -65,7 +65,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   dirt on the lens. A background pass (the black hole) keeps its own exposure, bloom and tone mapping. Fog that
   light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is
   wide, and it reaches 4 / density along the view. It is not traced. Metal leaves all of it out.
-- Lights past the first 16 are listed up to 64 for each 64 x 64 square of the frame, and are left out of tracing and of
+- Lights past the first 16 are listed for each 64 x 64 square of the frame and, on the GPU, each of its 16 slices of
+  depth, as many as reach it (up to 4M places in all, `ArtfFrameStats.lightsOmitted` counts any past that); they are
+  left out of tracing and of
   what the probes gather. Of those that ask for shadows, the 32 that matter most each frame (near the eye, wide, in
   view) get them, in maps a quarter as wide as the others; 48 such maps at most, six to a point light.
 - Light that bounced (probes) fills a box set when it is turned on: a scene that grows needs it set again. A wall

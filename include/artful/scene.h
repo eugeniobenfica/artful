@@ -22,8 +22,8 @@ typedef uint32_t ArtfLight;
 
 /* How many point lights can be on at once. */
 /* Lights a scene holds. The first 16 that are on (by handle) are drawn as they always were, and may cast shadows;
- * those past them light what they reach, by the 64 x 64 squares of the frame each falls in, up to 64 a square,
- * with no shadow, and tracing leaves them out. */
+ * those past them light what they reach, listed by the 64 x 64 squares of the frame each falls in (on the GPU, and
+ * their slices of depth), and tracing leaves them out. */
 #define ARTF_MAX_LIGHTS 1024
 
 typedef struct ArtfScene ArtfScene;

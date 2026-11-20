@@ -1239,10 +1239,80 @@ uint32_t artfSceneExtraLights(const ArtfScene* s, const ArtfFrameData* frame, Ar
     return count;
 }
 
-void artfSceneLightTiles(const ArtfFrameData* f, int width, int height, const ArtfLightData* lights, uint32_t count, uint32_t* lists) {
-    const int tilesX = (width + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE, tilesY = (height + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE;
+/* Where a light's ball is along the view, from the camera (as the GPU's z of a point: along eye[2]). */
+static float alongView(const ArtfFrameData* f, const ArtfLightData* L) {
+    return (L->position[0] - f->cameraPos[0]) * f->eye[2][0] + (L->position[1] - f->cameraPos[1]) * f->eye[2][1] + (L->position[2] - f->cameraPos[2]) * f->eye[2][2];
+}
+
+void artfSceneLightSlices(ArtfFrameData* f, const ArtfLightData* lights, uint32_t count) {
+    float lo = 0, hi = 0;
+    bool any = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        const float z = alongView(f, &lights[i]), r = lights[i].radius;
+        if (z + r <= 0) continue; /* (behind the eye: it reaches nothing seen) */
+        lo = any ? artfMinf(lo, z - r) : z - r;
+        hi = any ? artfMaxf(hi, z + r) : z + r;
+        any = true;
+    }
+    f->slices[0] = f->slices[1] = 0;
+    if (!any) return;
+    /* (nothing is seen nearer than the near plane; and nearer than a ten-thousandth of the farthest, one slice: so
+     * deep a view has nothing to tell apart there) */
+    if (!artfOrtho(f)) lo = artfMaxf(lo, f->nearW);
+    lo = artfMaxf(lo, hi * 1e-4f);
+    if (!(hi > lo * 1.0001f)) return;
+    const float scale = (float)ARTF_LIGHT_SLICES / log2f(hi / lo);
+    f->slices[0] = scale;
+    f->slices[1] = -log2f(lo) * scale;
+}
+
+/* What a light reaches of the frame's squares: which columns and which rows (a square is reached when both its column
+ * and its row are: the planes of its sides are of one or the other), into cols and rows; and the slices of depth,
+ * into k0 and k1. False: none. */
+typedef struct TileView {
+    float right[3], up[3];
+    const float* xs; /* of each column's edges, their slopes; and of each row's, and the lengths of the planes' normals */
+    const float* ys;
+    int tilesX, tilesY;
+} TileView;
+static bool lightReach(const ArtfFrameData* f, const TileView* t, const ArtfLightData* L, uint8_t* cols, uint8_t* rows, int* k0, int* k1) {
+    const float c[3] = {L->position[0] - f->cameraPos[0], L->position[1] - f->cameraPos[1], L->position[2] - f->cameraPos[2]};
+    const float z = c[0] * f->eye[2][0] + c[1] * f->eye[2][1] + c[2] * f->eye[2][2];
+    const float x = c[0] * t->right[0] + c[1] * t->right[1] + c[2] * t->right[2], y = c[0] * t->up[0] + c[1] * t->up[1] + c[2] * t->up[2];
+    const float r = L->radius;
+    const bool ortho = artfOrtho(f);
+    if (ortho ? z < f->ortho[1] - f->ortho[0] - r : z < -r) return false;
+    bool anyCol = false, anyRow = false;
+    for (int tx = 0; tx < t->tilesX; ++tx) {
+        const float* e = t->xs + tx * 4; /* x0, x1, and their normals' lengths */
+        /* (outside a plane through the eye by more than the radius, or orthographic, beside the box: it cannot reach) */
+        cols[tx] = ortho ? !(x - e[0] < -r || e[1] - x < -r) : !(x - e[0] * z < -r * e[2] || e[1] * z - x < -r * e[3]);
+        anyCol |= cols[tx];
+    }
+    for (int ty = 0; ty < t->tilesY; ++ty) {
+        const float* e = t->ys + ty * 4; /* y0, y1, theirs */
+        rows[ty] = ortho ? !(y - e[0] < -r || e[1] - y < -r) : !(y - e[0] * z < -r * e[2] || e[1] * z - y < -r * e[3]);
+        anyRow |= rows[ty];
+    }
+    if (!anyCol || !anyRow) return false;
+    /* the slices its ball spans along the view; a sixty-fourth of a slice more each way, for how the GPU's log2
+     * rounds */
+    const float first = artfLightSliceAt(f, z - r) - 1.f / 64, last = artfLightSliceAt(f, z + r) + 1.f / 64;
+    *k0 = artfClampi((int)floorf(artfMaxf(first, -1.f)), 0, ARTF_LIGHT_SLICES - 1);
+    *k1 = artfClampi((int)floorf(artfMinf(last, (float)ARTF_LIGHT_SLICES)), 0, ARTF_LIGHT_SLICES - 1);
+    return true;
+}
+
+static size_t sizeMin(size_t a, size_t b) { return a < b ? a : b; }
+
+size_t artfSceneLightTiles(const ArtfFrameData* f, int width, int height, const ArtfLightData* lights, uint32_t count, uint32_t* tiles, uint32_t** clusters, size_t* room, uint32_t* omitted) {
+    TileView t;
+    t.tilesX = (width + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE;
+    t.tilesY = (height + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE;
+    const size_t squares = (size_t)t.tilesX * t.tilesY, cells = squares * ARTF_LIGHT_SLICES;
+    if (omitted) *omitted = 0;
     /* the view's frame: right and up, each as long as the tangent of half the view that way */
-    float right[3], up[3], tanX = 0, tanY = 0;
+    float tanX = 0, tanY = 0;
     for (int k = 0; k < 3; ++k) {
         tanX += f->eye[0][k] * f->eye[0][k];
         tanY += f->eye[1][k] * f->eye[1][k];
@@ -1250,34 +1320,96 @@ void artfSceneLightTiles(const ArtfFrameData* f, int width, int height, const Ar
     tanX = sqrtf(tanX);
     tanY = sqrtf(tanY);
     for (int k = 0; k < 3; ++k) {
-        right[k] = f->eye[0][k] / tanX;
-        up[k] = f->eye[1][k] / tanY;
+        t.right[k] = f->eye[0][k] / tanX;
+        t.up[k] = f->eye[1][k] / tanY;
     }
-    for (int ty = 0; ty < tilesY; ++ty)
-        for (int tx = 0; tx < tilesX; ++tx) {
-            uint32_t* list = lists + (size_t)(ty * tilesX + tx) * (1 + ARTF_TILE_LIGHTS);
-            list[0] = 0;
-            /* the square's edges, as slopes of the view */
-            const float x0 = ((float)(tx * ARTF_LIGHT_TILE) / (float)width * 2.f - 1.f) * tanX, x1 = ((float)artfMini((tx + 1) * ARTF_LIGHT_TILE, width) / (float)width * 2.f - 1.f) * tanX;
-            const float y1 = (1.f - (float)(ty * ARTF_LIGHT_TILE) / (float)height * 2.f) * tanY, y0 = (1.f - (float)artfMini((ty + 1) * ARTF_LIGHT_TILE, height) / (float)height * 2.f) * tanY;
-            const float l0 = sqrtf(1.f + x0 * x0), l1 = sqrtf(1.f + x1 * x1), m0 = sqrtf(1.f + y0 * y0), m1 = sqrtf(1.f + y1 * y1);
-            for (uint32_t i = 0; i < count && list[0] < ARTF_TILE_LIGHTS; ++i) {
-                const ArtfLightData* L = &lights[i];
-                const float c[3] = {L->position[0] - f->cameraPos[0], L->position[1] - f->cameraPos[1], L->position[2] - f->cameraPos[2]};
-                const float z = c[0] * f->eye[2][0] + c[1] * f->eye[2][1] + c[2] * f->eye[2][2];
-                const float x = c[0] * right[0] + c[1] * right[1] + c[2] * right[2], y = c[0] * up[0] + c[1] * up[1] + c[2] * up[2];
-                const float r = L->radius;
-                if (artfOrtho(f)) {
-                    /* (orthographic: the square's slice of the view is a box, its sides x0 to x1 and y0 to y1 across) */
-                    if (z < f->ortho[1] - f->ortho[0] - r || x - x0 < -r || x1 - x < -r || y - y0 < -r || y1 - y < -r) continue;
+    /* the squares' edges, as slopes of the view (orthographic: as places across it), and the lengths of the planes'
+     * normals through them */
+    float* edges = artfMalloc(((size_t)t.tilesX + t.tilesY) * 4 * sizeof(float) + ((size_t)t.tilesX + t.tilesY) + (clusters ? cells * sizeof(uint32_t) : 0));
+    float* xs = edges;
+    float* ys = edges + (size_t)t.tilesX * 4;
+    for (int tx = 0; tx < t.tilesX; ++tx) {
+        const float x0 = ((float)(tx * ARTF_LIGHT_TILE) / (float)width * 2.f - 1.f) * tanX, x1 = ((float)artfMini((tx + 1) * ARTF_LIGHT_TILE, width) / (float)width * 2.f - 1.f) * tanX;
+        xs[tx * 4] = x0;
+        xs[tx * 4 + 1] = x1;
+        xs[tx * 4 + 2] = sqrtf(1.f + x0 * x0);
+        xs[tx * 4 + 3] = sqrtf(1.f + x1 * x1);
+    }
+    for (int ty = 0; ty < t.tilesY; ++ty) {
+        const float y1 = (1.f - (float)(ty * ARTF_LIGHT_TILE) / (float)height * 2.f) * tanY, y0 = (1.f - (float)artfMini((ty + 1) * ARTF_LIGHT_TILE, height) / (float)height * 2.f) * tanY;
+        ys[ty * 4] = y0;
+        ys[ty * 4 + 1] = y1;
+        ys[ty * 4 + 2] = sqrtf(1.f + y0 * y0);
+        ys[ty * 4 + 3] = sqrtf(1.f + y1 * y1);
+    }
+    t.xs = xs;
+    t.ys = ys;
+    uint8_t* cols = (uint8_t*)(ys + (size_t)t.tilesY * 4);
+    uint8_t* rows = cols + t.tilesX;
+    uint32_t* filled = clusters ? (uint32_t*)(void*)((char*)edges + ((size_t)t.tilesX + t.tilesY) * 4 * sizeof(float) + ((size_t)t.tilesX + t.tilesY)) : NULL;
+    if (tiles)
+        for (size_t q = 0; q < squares; ++q) tiles[q * (1 + count)] = 0;
+    /* first, how long each cluster's list is (into filled); the squares' lists, made as they go: a light at a time,
+     * so each in the lights' order */
+    if (filled) memset(filled, 0, cells * sizeof(uint32_t));
+    int k0 = 0, k1 = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!lightReach(f, &t, &lights[i], cols, rows, &k0, &k1)) continue;
+        for (int ty = 0; ty < t.tilesY; ++ty) {
+            if (!rows[ty]) continue;
+            for (int tx = 0; tx < t.tilesX; ++tx) {
+                if (!cols[tx]) continue;
+                const size_t q = (size_t)ty * t.tilesX + tx;
+                if (tiles) {
+                    uint32_t* list = tiles + q * (1 + count);
                     list[1 + list[0]++] = i;
-                    continue;
                 }
-                /* (outside a plane through the eye by more than the radius: it cannot reach the square) */
-                if (z < -r || x - x0 * z < -r * l0 || x1 * z - x < -r * l1 || y - y0 * z < -r * m0 || y1 * z - y < -r * m1) continue;
-                list[1 + list[0]++] = i;
+                if (filled)
+                    for (int k = k0; k <= k1; ++k) ++filled[q * ARTF_LIGHT_SLICES + (size_t)k];
             }
         }
+    }
+    if (!clusters) {
+        artfFree(edges);
+        return 0;
+    }
+    /* where each list starts, after the counts; as many as there is room for */
+    size_t at = cells * 2, left = ARTF_CLUSTER_ENTRIES, total = 0;
+    for (size_t c = 0; c < cells; ++c) total += sizeMin(filled[c], left), left -= sizeMin(filled[c], left);
+    const size_t need = cells * 2 + total;
+    if (*room < need) {
+        artfFree(*clusters);
+        *room = need + need / 4;
+        *clusters = artfMalloc(*room * sizeof(uint32_t));
+    }
+    uint32_t* out = *clusters;
+    left = ARTF_CLUSTER_ENTRIES;
+    for (size_t c = 0; c < cells; ++c) {
+        const uint32_t given = (uint32_t)sizeMin(filled[c], left);
+        if (omitted) *omitted += filled[c] - given;
+        left -= given;
+        out[c * 2] = (uint32_t)at;
+        out[c * 2 + 1] = given;
+        at += given;
+        filled[c] = 0;
+    }
+    /* then the lists, a light at a time again */
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!lightReach(f, &t, &lights[i], cols, rows, &k0, &k1)) continue;
+        for (int ty = 0; ty < t.tilesY; ++ty) {
+            if (!rows[ty]) continue;
+            for (int tx = 0; tx < t.tilesX; ++tx) {
+                if (!cols[tx]) continue;
+                const size_t q = (size_t)ty * t.tilesX + tx;
+                for (int k = k0; k <= k1; ++k) {
+                    const size_t c = q * ARTF_LIGHT_SLICES + (size_t)k;
+                    if (filled[c] < out[c * 2 + 1]) out[out[c * 2] + filled[c]++] = i;
+                }
+            }
+        }
+    }
+    artfFree(edges);
+    return need;
 }
 
 static float halton(uint32_t i, uint32_t base) {

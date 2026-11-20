@@ -421,7 +421,8 @@ typedef struct Vulkan {
     bool probeClear;
     ArtfLightData* lightScratch;    /* lights past the frame's own, and their lists, before they go up */
     uint32_t* listScratch;
-    VkDeviceSize listScratchSize;
+    uint32_t lightsOmitted; /* ArtfFrameStats.lightsOmitted, of the last frame */
+    size_t listScratchSize; /* (in numbers) */
     uint64_t backgroundDataStamp, backgroundDataScene, backgroundModuleStamp, backgroundModuleScene;
 
     /* the overlay */
@@ -3996,25 +3997,22 @@ bool artfVulkanProbesRead(ArtfRenderer* r, float* out, size_t floats) {
     return ok;
 }
 
-/* Into this slot's buffers: the lights, and each square's list (its fence was waited for). */
-static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, const ArtfFrameData* frame) {
+/* Into this slot's buffers: the lights, and each cluster's list (its fence was waited for); into the frame, its
+ * slices of depth. */
+static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, ArtfFrameData* frame) {
+    v->lightsOmitted = 0;
     if (frame->eye[2][3] <= 0) return true;
-    const uint32_t tilesX = ((uint32_t)v->sceneWidth + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE, tilesY = ((uint32_t)v->sceneHeight + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE;
-    const VkDeviceSize need = (VkDeviceSize)tilesX * tilesY * (1 + ARTF_TILE_LIGHTS) * 4;
-    if (s->tileLights.size < need) {
-        bufferFree(v, &s->tileLights);
-        if (!bufferNew(v, &s->tileLights, need, BUFFER_STORAGE, true)) return false;
-        lightDescriptors(v, s);
-    }
     /* (made in main memory, then copied: what the GPU reads is slow to read back, as the lists' counts are) */
     if (!v->lightScratch) v->lightScratch = artfMalloc(ARTF_MAX_LIGHTS * sizeof(ArtfLightData));
-    if (v->listScratchSize < need) {
-        artfFree(v->listScratch);
-        v->listScratch = artfMalloc((size_t)need);
-        v->listScratchSize = need;
-    }
     const uint32_t count = artfSceneExtraLights(scene, frame, v->lightScratch);
-    artfSceneLightTiles(frame, v->sceneWidth, v->sceneHeight, v->lightScratch, count, v->listScratch);
+    artfSceneLightSlices(frame, v->lightScratch, count);
+    const VkDeviceSize need = (VkDeviceSize)artfSceneLightTiles(frame, v->sceneWidth, v->sceneHeight, v->lightScratch, count, NULL, &v->listScratch, &v->listScratchSize, &v->lightsOmitted) * 4;
+    if (s->tileLights.size < need) {
+        /* (a quarter more, so a list that grows a little does not make it again) */
+        bufferFree(v, &s->tileLights);
+        if (!bufferNew(v, &s->tileLights, need + need / 4, BUFFER_STORAGE, true)) return false;
+        lightDescriptors(v, s);
+    }
     memcpy(s->extraLights.mapped, v->lightScratch, (size_t)count * sizeof(ArtfLightData));
     memcpy(s->tileLights.mapped, v->listScratch, (size_t)need);
     return true;
@@ -4458,13 +4456,14 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     memcpy(frame.hiz, v->hizTable, sizeof frame.hiz);
     /* the decals that may show, straight into this slot's buffer (its fence was waited for) */
     frame.indirect[1][3] = (float)artfSceneDecals(scene, &frame, v->sceneHeight, s->decals.mapped);
+    bool probeStep = false;
+    if (!syncLights(v, s, scene, &frame)) return false;
     memcpy(s->frame.mapped, &frame, sizeof frame);
     /* the frame's lights' profiles, past those past them in their buffer (shaders.c's profileAt) */
     for (uint32_t k = 0; k < frame.lightCount; ++k)
         if (frame.lightShapes[k][2][3] > 0)
             memcpy((char*)s->extraLights.mapped + ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + (size_t)k * ARTF_PROFILE_FLOATS * sizeof(float), scene->lightProfile[(int)frame.lightShapes[k][2][3] - 1], ARTF_PROFILE_FLOATS * sizeof(float));
-    bool probeStep = false;
-    if (!syncLights(v, s, scene, &frame) || !syncIndirect(v, s, scene, &frame, &probeStep)) return false;
+    if (!syncIndirect(v, s, scene, &frame, &probeStep)) return false;
     syncSlot(v, s, scene);
     if (!syncSwarms(v, s, scene)) return false;
     uint32_t layerCount = 0, traceAdding = 0;
@@ -4900,6 +4899,7 @@ static void vkStats(const ArtfRenderer* r, ArtfFrameStats* out) {
     out->traceSamples = v->traceDone;
     out->gpuMs = v->gpuMs;
     out->gpuBytes = v->deviceBytes;
+    out->lightsOmitted = v->lightsOmitted;
     out->shadowMapsDrawn = v->shadowMapsDrawn;
     out->passCount = v->passTimeCount;
     memcpy(out->passes, v->passTimes, v->passTimeCount * sizeof *out->passes);

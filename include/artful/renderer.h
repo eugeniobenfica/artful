@@ -177,6 +177,10 @@ typedef struct ArtfFrameStats {
     uint32_t passCount;
     ArtfPassTime passes[ARTF_PASS_TIMES];
     uint64_t gpuBytes;        /* Vulkan: bytes of the GPU's memory the renderer holds now (all it was given) */
+    /* Vulkan: of the lights past the frame's 16, how many times one reached a cluster of the frame (64 x 64 pixels, a
+     * slice of depth) and was left out of its list, the lists of all being as long as they may be (4M places); 0 on
+     * the CPU, which lists them all */
+    uint32_t lightsOmitted;
 } ArtfFrameStats;
 
 void artfRendererStats(const ArtfRenderer* r, ArtfFrameStats* out);

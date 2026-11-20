@@ -140,6 +140,7 @@ void testFloats(void) {
         const ArtfPostDesc each[6] = {{.lens.bloom = .5f, .lens.bloomThreshold = .1f}, {.screen.occlusion = 1, .screen.occlusionRadius = .8f}, {.screen.reflections = 1}, {.lens.focus = 3, .lens.aperture = 10},
                                       {.screen.volumetric = 1, .screen.scattering = .5f}, {.screen.temporal = true}};
         for (int e = 0; e < 6; ++e) {
+            if (getenv("ARTFUL_TEST_TRACE")) printf("(effect %d)\n", e); /* (which one, if the driver falls over) */
             artfSceneSetPost(s, &each[e]);
             if (e == 4) artfSceneSetFog(s, artfVec3(.5f, .5f, .55f), .05f);
             drawInto(floats, s, c);
@@ -207,6 +208,119 @@ void testFloats(void) {
     artfFree(a);
     artfFree(b);
     artfFree(c);
+}
+
+/* Lights in clusters: a corridor of three floors, 360 lights down it, seen from the middle one. Far down it, a square
+ * of the frame is reached by more lights than one list holds; by slices of depth, none is full, the GPU leaves none
+ * out (ArtfFrameStats.lightsOmitted), and its picture is the CPU's, which lists them all. And the lists are quick to
+ * make, at 1920 x 1080. */
+static ArtfScene* corridorScene(void) {
+    ArtfScene* s = plainScene();
+    artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
+    const ArtfMaterialDesc grey = {artfVec3(.8f, .8f, .8f), 0, .6f, .04f, artfVec3(0, 0, 0)};
+    const ArtfMaterial m = artfSceneAddMaterial(s, &grey);
+    const ArtfMesh floor = artfSceneAddPlane(s, 30, 1);
+    for (int level = 0; level < 3; ++level) {
+        const ArtfTransform t = artfTransformAt(0, (float)level * 3.f, -40, 3);
+        artfSceneAddInstance(s, floor, m, &t);
+    }
+    for (int level = 0; level < 3; ++level)
+        for (int k = 0; k < 60; ++k)
+            for (int side = 0; side < 2; ++side) {
+                const float hue = (float)((k + level) % 3);
+                CHECK(artfSceneAddLight(s, artfVec3(side ? 1.2f : -1.2f, (float)level * 3.f + 1.f, -1.f - (float)k * 1.25f), artfVec3(hue == 0, hue == 1, hue == 2), 2.5f) != 0);
+            }
+    setCamera(s, 0, 4.6f, 1, 0, 4.f, -60);
+    return s;
+}
+
+void testLightClusters(void) {
+    ArtfScene* s = corridorScene();
+    /* the lists, as the backends make them */
+    ArtfFrameData f;
+    artfSceneFrame(s, 1920, 1080, &f);
+    ArtfLightData* lights = artfMalloc(ARTF_MAX_LIGHTS * sizeof *lights);
+    const uint32_t count = artfSceneExtraLights(s, &f, lights);
+    CHECK(count == 360 - ARTF_FRAME_LIGHTS);
+    const int tiles = ((1920 + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE) * ((1080 + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE);
+    uint32_t* all = artfMalloc((size_t)tiles * (1 + count) * 4);
+    uint32_t* clusters = NULL;
+    size_t room = 0;
+    uint32_t omitted = 1;
+    artfSceneLightSlices(&f, lights, count);
+    const size_t length = artfSceneLightTiles(&f, 1920, 1080, lights, count, all, &clusters, &room, &omitted);
+    /* a square is reached by more than the 64 a list once held; a cluster, by far fewer */
+    uint32_t most = 0, fullest = 0;
+    for (int t = 0; t < tiles; ++t) {
+        const uint32_t n = all[(size_t)t * (1 + count)];
+        if (n > most) most = n;
+    }
+    for (int c = 0; c < tiles * ARTF_LIGHT_SLICES; ++c) {
+        const uint32_t n = clusters[(size_t)c * 2 + 1];
+        if (n > fullest) fullest = n;
+    }
+    printf("a corridor of 3 floors, 344 lights past the frame's: a square reached by %u at most, a cluster by %u; %zu numbers, %u left out\n", most, fullest, length, omitted);
+    CHECK(most > 64 && fullest < most / 2);
+    CHECK(omitted == 0);
+    /* every light a square lists is in the cluster of each point of it that it reaches, and in their order: none is
+     * lost by slicing. At each depth its ball spans. */
+    int lost = 0, unordered = 0;
+    for (int t = 0; t < tiles; ++t) {
+        const uint32_t* list = all + (size_t)t * (1 + count);
+        for (uint32_t k = 0; k < list[0]; ++k) {
+            const ArtfLightData* L = &lights[list[1 + k]];
+            const float z = (L->position[0] - f.cameraPos[0]) * f.eye[2][0] + (L->position[1] - f.cameraPos[1]) * f.eye[2][1] + (L->position[2] - f.cameraPos[2]) * f.eye[2][2];
+            for (int step = 0; step <= 32; ++step) {
+                const float at = z - L->radius + L->radius * 2.f * (float)step / 32.f;
+                const int slice = artfClampi((int)floorf(artfLightSliceAt(&f, at)), 0, ARTF_LIGHT_SLICES - 1);
+                const uint32_t* head = clusters + ((size_t)t * ARTF_LIGHT_SLICES + (size_t)slice) * 2;
+                bool there = false;
+                for (uint32_t j = 0; j < head[1] && !there; ++j) there = clusters[head[0] + j] == list[1 + k];
+                lost += !there;
+            }
+        }
+        for (int k = 0; k < ARTF_LIGHT_SLICES; ++k) {
+            const uint32_t* head = clusters + ((size_t)t * ARTF_LIGHT_SLICES + (size_t)k) * 2;
+            for (uint32_t j = 1; j < head[1]; ++j) unordered += clusters[head[0] + j] <= clusters[head[0] + j - 1];
+        }
+    }
+    CHECK(lost == 0 && unordered == 0);
+    /* how long they take to make */
+    const int rounds = 50;
+    const double t0 = artfNowMs();
+    for (int k = 0; k < rounds; ++k) {
+        artfSceneLightSlices(&f, lights, count);
+        artfSceneLightTiles(&f, 1920, 1080, lights, count, NULL, &clusters, &room, &omitted);
+    }
+    const double ms = (artfNowMs() - t0) / rounds;
+    printf("the clusters of 344 lights at 1920 x 1080: %.3f ms to make\n", ms);
+    CHECK(ms < 2.0); /* (0.2 is the aim, in a build that is optimized: this is for any) */
+    artfFree(all);
+    artfFree(clusters);
+    artfFree(lights);
+    /* on the GPU, none left out, and the picture is the CPU's */
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        o.backend = ARTF_BACKEND_SOFTWARE;
+        ArtfRenderer* cpu = artfRendererNew(&o);
+        uint32_t* a = artfMalloc((size_t)W * H * 4);
+        uint32_t* b = artfMalloc((size_t)W * H * 4);
+        drawInto(cpu, s, a);
+        drawInto(gpu, s, b);
+        ArtfFrameStats stats;
+        artfRendererStats(gpu, &stats);
+        const double apart = differentShare(a, b, 16);
+        printf("the corridor, the GPU against the CPU: %.2f%% of pixels apart; lights left out on the GPU: %u; lit: %.1f\n", apart * 100, stats.lightsOmitted, meanOf(a, W / 2, H * 3 / 5, 8));
+        CHECK(stats.lightsOmitted == 0);
+        CHECK(apart < .02);
+        CHECK(meanOf(a, W / 2, H * 3 / 5, 8) > 10);
+        artfFree(a);
+        artfFree(b);
+        artfRendererFree(cpu);
+        artfRendererFree(gpu);
+    }
+    artfSceneFree(s);
 }
 
 /* The look: log2 and 2^x as the metering has them; each setting changes the picture the same way every time, on both

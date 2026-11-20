@@ -122,6 +122,7 @@ void testShadersAhead(void);
 void testPipelinesAhead(void);
 /* layers.c: colors, layers, alpha, samples and decals */
 void testColorData(void);
+void testLightClusters(void);
 void testLayers(ArtfBackend backend);
 void testMaterials(ArtfBackend backend, bool antialias);
 void testSamePixelsOfLayers(void);

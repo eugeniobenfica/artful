@@ -623,9 +623,19 @@ only for fog that light goes through.
 
 The frame holds 16 lights, as it always did: the first that are on, which may cast shadows. Those past them, up to 1024,
 go into lists: for each 64 x 64 square of the frame, those whose sphere reaches the square's slice of the view (four
-planes through the eye). `artfSceneLightTiles` makes them on the CPU for both backends, so both light the same pixels
-with the same lights; the CPU's tiles are those squares, and the GPU's pixel shader finds its square from its place.
-Tracing leaves them out. Of those that ask for shadows (`artfLightSetShadow`), the 32 that matter most each frame, by
+planes through the eye). `artfSceneLightTiles` makes them on the CPU for both backends; the CPU's tiles are those
+squares, and it lists all that reach one. The GPU's lists are by clusters: each square in 16 slices of depth, each
+slice as many times deeper as the one before, from the near plane (or the nearest a light reaches) to the farthest a
+light reaches (`artfSceneLightSlices`, into the frame's `slices`); a light is listed in the slices its ball spans,
+with a sixty-fourth of a slice more each way for how the GPU's `log2` rounds. The pixel shader finds its square from
+its place, and its slice from how far along the view it is. The lists are compact: of each cluster, where its list
+starts and how long it is, then all the lists, as long as they need, in a buffer that grows (to 4M places in all, past
+which what is left out is counted, `ArtfFrameStats.lightsOmitted`). A light adds nothing where it does not reach, and
+the lists keep the lights' order, so the CPU, listing more, makes the GPU's picture. The test of a square is the test
+of its column and of its row (each of the four planes is of one or the other), so a light is tested against the
+columns and the rows, not each square: a corridor of three floors with 344 lights past the frame's, at 1920 x 1080,
+takes 0.09 ms to list. There, a square far down it is reached by 324; a cluster, by 132 at most; where the lists held
+64 a square, 1,846 places were left out, and now none is. Tracing leaves them out. Of those that ask for shadows (`artfLightSetShadow`), the 32 that matter most each frame, by
 how wide they are against how far from the eye, and in view, get maps in the atlas a quarter as wide as the others,
 in rows below them: 48 such maps, one a spot and six a point light. They go first in the list, in that order, and the
 shadow frame keeps, for each of those first places, where its maps are: both backends look them up as they do the

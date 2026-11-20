@@ -1824,7 +1824,7 @@ static void shadePlane(ArtfSoftFrame* f, ArtfWorker* w, const ArtfRasterTri* con
     LitBatch batch;
     batch.count = 0;
     batch.lights = 0;
-    batch.extra = f->extraCount ? f->tileLights + (size_t)((oy / ARTF_TILE) * f->tilesX + ox / ARTF_TILE) * (1 + ARTF_TILE_LIGHTS) : NULL;
+    batch.extra = f->extraCount ? f->tileLights + (size_t)((oy / ARTF_TILE) * f->tilesX + ox / ARTF_TILE) * (1 + f->extraCount) : NULL;
     batch.material = NULL;
     batch.texture = NULL;
     batch.level = 0;

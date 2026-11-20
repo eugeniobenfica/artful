@@ -166,7 +166,8 @@ for (int i = 0; i < 500; ++i) artfSceneAddLight(scene, places[i], colors[i], 2.f
 
 Probes follow a few rays each frame and keep what reaches them, and how far they see each way; surfaces take light
 from all around from the probes near them that can see them, so it does not come through walls (`.throughWalls`
-leaves that out, for less work). Lights past the first 16 are listed by the 64 x 64 squares of the frame they reach.
+leaves that out, for less work). Lights past the first 16 are listed by the 64 x 64 squares of the frame they reach, and on the GPU by slices of depth
+in each (clusters), with no cap a list.
 </details>
 
 <details>

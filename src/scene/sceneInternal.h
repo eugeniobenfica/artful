@@ -282,7 +282,8 @@ void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float
 /* The lights a frame holds itself: those past them are listed by the squares of the frame they reach. */
 #define ARTF_FRAME_LIGHTS 16
 #define ARTF_LIGHT_TILE 64       /* a square's side, in pixels: the CPU's tiles */
-#define ARTF_TILE_LIGHTS 64      /* the most one square lists */
+#define ARTF_LIGHT_SLICES 16     /* each square of the frame, in slices of depth: its clusters */
+#define ARTF_CLUSTER_ENTRIES (1u << 22) /* the most the clusters list, all together (16 MB) */
 
 /* What a frame needs to know, as the GPU's uniform block. Everything lit is in linear light. */
 typedef struct ArtfFrameData {
@@ -334,8 +335,10 @@ typedef struct ArtfFrameData {
     /* An orthographic camera: how deep its depth goes (far - near), and where it ends, along the view; 0: perspective.
      * Its depth is (far - t) / (far - near) of t along the view, where a perspective's is near / t: 1 at near, 0 at far,
      * even across a triangle as w is 1. The eye's rows (eye) then hold the view's half width and half height, in the
-     * world, and all rays go along eye[2], each from cameraPos + x eye[0] + y eye[1]. */
-    float orthoPad[2], ortho[2];
+     * world, and all rays go along eye[2], each from cameraPos + x eye[0] + y eye[1]. Before them, the slices of depth
+     * the lights past the frame's own are listed in (artfSceneLightSlices): a point t along the view is in slice
+     * floor(log2(t) slices[0] + slices[1]), held to 0 and ARTF_LIGHT_SLICES - 1. */
+    float slices[2], ortho[2];
     /* Rays while drawing: ARTF_TRACED_SHADOWS and REFLECTIONS; which lights cast (ARTF_TRACED_SUN and bits 0 to 15);
      * how far the pattern of a pixel's rays turns this frame; rays to a light with a size. */
     uint32_t traced, tracedCasts, tracedFrame, tracedRays;
@@ -642,9 +645,21 @@ void artfSceneIndirectStep(ArtfScene* s, const ArtfFrameData* frame, ArtfPool* p
 
 /* Lights past the frame's own, in handle order: how many, into out (ARTF_MAX_LIGHTS of room). */
 uint32_t artfSceneExtraLights(const ArtfScene* s, const ArtfFrameData* frame, ArtfLightData* out);
-/* Of each square of the frame (ARTF_LIGHT_TILE a side, by rows), which of those lights reach it: a count, then up to
- * ARTF_TILE_LIGHTS of their places in what artfSceneExtraLights gave. lists: squares x (1 + ARTF_TILE_LIGHTS). */
-void artfSceneLightTiles(const ArtfFrameData* frame, int width, int height, const ArtfLightData* lights, uint32_t count, uint32_t* lists);
+/* How depth along the view is cut into ARTF_LIGHT_SLICES for those lights: from the nearest any reaches to the farthest,
+ * each slice as many times deeper as the one before; into frame->slices. */
+void artfSceneLightSlices(ArtfFrameData* frame, const ArtfLightData* lights, uint32_t count);
+/* The slice a point t along the view is in (as the GPU finds it, but for how log2 rounds there). */
+ARTF_INLINE float artfLightSliceAt(const ArtfFrameData* f, float t) { return log2f(t > 1e-30f ? t : 1e-30f) * f->slices[0] + f->slices[1]; }
+/* Of each square of the frame (ARTF_LIGHT_TILE a side, by rows), which of those lights reach it, in their order (their
+ * places in what artfSceneExtraLights gave):
+ * - tiles (the CPU's; NULL: not made): of each square, a count, then the places; squares x (1 + count).
+ * - clusters (the GPU's; NULL: not made): of each square, of each of its slices (artfSceneLightSlices), where its list
+ *   starts and how long it is, two numbers; after them all, the lists. Into *clusters, made larger when it must be
+ *   (*room: how many numbers it holds); how many it took, returned.
+ * A light past the frame adds nothing where it does not reach, so the two give the same picture, unless the clusters
+ * would list more than ARTF_CLUSTER_ENTRIES: how many places were left out, into omitted
+ * (ArtfFrameStats.lightsOmitted). */
+size_t artfSceneLightTiles(const ArtfFrameData* frame, int width, int height, const ArtfLightData* lights, uint32_t count, uint32_t* tiles, uint32_t** clusters, size_t* room, uint32_t* omitted);
 
 /* Moves the frame within a pixel, by the n-th of Halton's points, for temporal antialiasing: viewProj and post[2]. */
 void artfFrameJitter(ArtfFrameData* frame, uint32_t n, int width, int height);

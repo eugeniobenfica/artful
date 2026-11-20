@@ -1501,7 +1501,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         frontFacing = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->boolType), SPV_STORAGE_Input);
         spvDecorate(s, frontFacing, SPV_DECORATE_BuiltIn, SPV_BUILTIN_FrontFacing);
     }
-    /* lights past the frame's own: their list for each square of the frame (artfSceneLightTiles) */
+    /* lights past the frame's own: their list for each cluster of the frame (artfSceneLightTiles) */
     SpvId extraLights = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 60);
     SpvId probes = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 62);
     SpvId tileLights = spvResource(s, blockOf(s, r.uintArray, false), SPV_STORAGE_StorageBuffer, 61);
@@ -2031,8 +2031,14 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId tx = spvOp2(s, SPV_OP_UDiv, s->uintType, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(coord)), UINT(ARTF_LIGHT_TILE));
         SpvId ty = spvOp2(s, SPV_OP_UDiv, s->uintType, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(coord)), UINT(ARTF_LIGHT_TILE));
         SpvId tilesX = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_FOG))), UINT(ARTF_LIGHT_TILE - 1)), UINT(ARTF_LIGHT_TILE));
-        SpvId base = MUL_U(ADD_U(MUL_U(ty, tilesX), tx), UINT(1 + ARTF_TILE_LIGHTS));
-        SpvId listed = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, base));
+        /* (and the slice of depth: as artfLightSliceAt) */
+        SpvId slicing = frameVec(s, &r, F_ORTHO);
+        SpvId along = DOT3(SUB_V3(world, spvShuffle3(s, frameVec(s, &r, F_CAMERA))), spvShuffle3(s, frameVec(s, &r, F_EYE + 2)));
+        SpvId deep = ADD_F(MUL_F(spvGlsl1(s, SPV_GLSL_Log2, s->floatType, MAX_F(along, FLOAT(1e-30f))), X(slicing)), Y(slicing));
+        SpvId slice = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, MIN_F(MAX_F(spvGlsl1(s, SPV_GLSL_Floor, s->floatType, deep), FLOAT(0.f)), FLOAT((float)(ARTF_LIGHT_SLICES - 1))));
+        SpvId head = MUL_U(ADD_U(MUL_U(ADD_U(MUL_U(ty, tilesX), tx), UINT(ARTF_LIGHT_SLICES)), slice), UINT(2));
+        SpvId base = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, head));
+        SpvId listed = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(head, UINT(1))));
         spvStore(s, counter, UINT(0));
         SpvId eHeader = spvNewId(s), eTest = spvNewId(s), eBody = spvNewId(s), eNext = spvNewId(s), eDone = spvNewId(s);
         spvBranch(s, eHeader);
@@ -2044,7 +2050,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         spvBranchIf(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, k, listed), eBody, eDone);
         spvLabel(s, eBody);
         {
-            SpvId li = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(ADD_U(base, UINT(1)), k)));
+            SpvId li = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(base, k)));
             SpvId at = MUL_U(li, UINT(3));
             SpvId lightA = bufferVec(s, &r, extraLights, at), lightB = bufferVec(s, &r, extraLights, ADD_U(at, UINT(1))), lightC = bufferVec(s, &r, extraLights, ADD_U(at, UINT(2)));
             SpvId d = SUB_V3(spvShuffle3(s, lightA), world);

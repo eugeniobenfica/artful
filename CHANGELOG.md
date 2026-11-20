@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Phase 5.2: lights in clusters.** On the GPU, the lights past the frame's 16 are listed by each 64 x 64 square and
+  16 slices of depth (`artfSceneLightSlices`, the frame's `slices`), in compact lists with no cap a list (4M places in
+  all); the CPU lists all that reach a square, so both make the same picture where a list once was full. A light is
+  tested against the squares' columns and rows, not each square. `ArtfFrameStats.lightsOmitted` (new) counts what is
+  left out. A corridor of three floors and 344 lights at 1080p: 1,846 places were left out, now none; 0.09 ms to list;
+  the GPU against the CPU, 0.01% of pixels apart (`post/lightClusters`). Pictures change only where a square was reached
+  by more than 64 such lights.
+
 - **Phase 4.3 done; 4.2's second and third steps.** A glTF model is cooked too: `artfPreparedModelSave` and
   `artfPrepareModelCooked` keep its decoded images with their mipmaps and its built meshes, tied to the glTF's hash;
   `artful-cook model.glb` writes the file and checks the scenes are the same, to the byte; a model of 980,000 triangles

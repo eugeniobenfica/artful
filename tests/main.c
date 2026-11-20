@@ -194,6 +194,7 @@ int main(int argc, char** argv) {
     RUN("files/gltfMeshopt", testGltfMeshopt());
     RUN("sky/environment", testEnvironment());
     RUN("post/floats", testFloats());
+    RUN("post/lightClusters", testLightClusters());
     RUN("post/grading", testGrading());
     RUN("materials/coat", testCoat());
     RUN("materials/lightShapes", testLightShapes());

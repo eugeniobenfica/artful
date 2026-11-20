@@ -233,6 +233,14 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 | 5.11 | **Céu**: LUT de perspectiva aérea aplicada à cena; nuvens marchadas a um quarto da resolução e compostas contra a profundidade. | Montanhas distantes ganham a cor do ar; uma torre atravessa as nuvens. | M |
 | 5.12 | **Materiais**: texturas das extensões glTF hoje ignoradas; iridescência de Belcour e Barla; camadas no estilo OpenPBR no grafo em C; SSS separável (verificar antes a patente associada à difusão de Burley). | Os modelos de extensão do glTF-Sample-Assets coincidem com o visualizador de referência dentro do limiar. | M a G |
 
+**Estado da 5.2: feito.**
+- **GPU:** cada quadrado de 64 x 64 é cortado em 16 fatias de profundidade, em progressão geométrica do plano near (ou da luz mais próxima) até a luz mais distante (`artfSceneLightSlices`, nos campos `slices` do quadro). Uma luz entra nas fatias que sua esfera cobre, com 1/64 de fatia de folga para o arredondamento do `log2` da GPU.
+- **Listas compactas:** cada cluster guarda início e comprimento, sem teto por lista, num buffer que cresce. O teto é de 4M posições no total; o que passar dele é contado em `ArtfFrameStats.lightsOmitted` (novo).
+- **CPU:** lista todas as luzes que alcançam o quadrado. Como uma luz soma zero onde não alcança e a ordem das luzes se mantém, CPU e GPU dão a mesma imagem.
+- **Construção:** o teste de um quadrado é o da sua coluna e o da sua linha, então cada luz é testada contra colunas e linhas, não contra cada quadrado.
+- **Critério (`post/lightClusters`):** num corredor de 3 andares com 344 luzes além das 16, a 1080p, um quadrado é alcançado por até 324 luzes e um cluster por no máximo 132. Com o teto antigo de 64 por quadrado, 1.846 pares ficavam de fora; agora **nenhum**. A construção leva **0,09 ms** (meta 0,2) e a diferença GPU contra CPU é de 0,01% dos pixels.
+- **Efeito nas imagens:** só mudam onde um quadrado recebia mais de 64 dessas luzes.
+
 **Ordem sugerida dentro da fase:** 5.1, 5.2 e 5.4 primeiro (baratos, atacam limites documentados); depois 5.5 e 5.6 (dependem de 4.3); depois 5.7 (depende de 2.2 e se beneficia de 5.6). 5.8 a 5.12 são independentes e entram por demanda de consumidor.
 
 ---

@@ -129,7 +129,8 @@ typedef struct ArtfSoftFrame {
     const float* motion;    /* with motion followed: of each instance, from where it is to where it was (ArtfMotion) */
     const float* const* motionBack; /* and of each that a pose bent, where its vertices were (ArtfMotion.back); else NULL */
     bool sizedLights;       /* of the frame's lights, one has a size, a shape or a profile (artfLightSetSize, artfLightSetShape) */
-    /* lights past the frame's own, and of each tile, which of them reach it (artfSceneLightTiles) */
+    /* lights past the frame's own, and of each tile, which of them reach it: all of them, in their order
+     * (artfSceneLightTiles; the GPU's lists are by slices of depth too, and hold fewer) */
     ArtfLightData* extra;
     uint32_t extraCount;
     uint32_t* tileLights;

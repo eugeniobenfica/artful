@@ -35,7 +35,7 @@ enum { SPV_DECORATE_Block = 2, SPV_DECORATE_ArrayStride = 6, SPV_DECORATE_BuiltI
        SPV_DECORATE_Binding = 33, SPV_DECORATE_DescriptorSet = 34, SPV_DECORATE_Offset = 35, SPV_DECORATE_NonUniform = 5300 };
 enum { SPV_BUILTIN_Position = 0, SPV_BUILTIN_FragCoord = 15, SPV_BUILTIN_FrontFacing = 17, SPV_BUILTIN_GlobalInvocationId = 28, SPV_BUILTIN_VertexIndex = 42, SPV_BUILTIN_InstanceIndex = 43 };
 enum { SPV_MODEL_Vertex = 0, SPV_MODEL_Fragment = 4, SPV_MODEL_GLCompute = 5 };
-enum { SPV_GLSL_UnpackUnorm4x8 = 64, SPV_GLSL_FAbs = 4, SPV_GLSL_Floor = 8, SPV_GLSL_Sin = 13, SPV_GLSL_Cos = 14, SPV_GLSL_Atan2 = 25, SPV_GLSL_Sqrt = 31, SPV_GLSL_FMin = 37, SPV_GLSL_UMin = 38, SPV_GLSL_FMax = 40, SPV_GLSL_UMax = 41, SPV_GLSL_Length = 66, SPV_GLSL_Cross = 68, SPV_GLSL_Normalize = 69, SPV_GLSL_FindUMsb = 75 };
+enum { SPV_GLSL_UnpackUnorm4x8 = 64, SPV_GLSL_FAbs = 4, SPV_GLSL_Floor = 8, SPV_GLSL_Log2 = 30, SPV_GLSL_Sin = 13, SPV_GLSL_Cos = 14, SPV_GLSL_Atan2 = 25, SPV_GLSL_Sqrt = 31, SPV_GLSL_FMin = 37, SPV_GLSL_UMin = 38, SPV_GLSL_FMax = 40, SPV_GLSL_UMax = 41, SPV_GLSL_Length = 66, SPV_GLSL_Cross = 68, SPV_GLSL_Normalize = 69, SPV_GLSL_FindUMsb = 75 };
 
 void spvInit(Spv* s);
 void spvFini(Spv* s);
