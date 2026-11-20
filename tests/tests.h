@@ -87,6 +87,7 @@ ArtfRenderer* gpuWithoutRayQueries(const ArtfRendererOptions* o); /* as on a dev
 /* metrics.c: what pictures are measured with */
 void testFlip(void);
 void testSrgb(void);
+void testSobol(void);
 /* core.c: the mesh's data, the CPU's promises, levels of detail, occlusion, handles and lifetimes */
 void testPacking(void);
 void testMeshlets(void);

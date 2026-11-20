@@ -235,9 +235,20 @@ has one side, as triangles do; a shadow's rays meet backs as well, or a wall wou
 behind.
 
 **Samples add up.** A frame adds samples to float sums per pixel. A hash of the frame's data and the scene's
-versions says when these no longer hold, and they start over. Each pixel draws its random numbers from its
-position and sample index, so threads change nothing. There is no sine or cosine: a direction comes from
-rejection in a ball, as C libraries do not agree on those.
+versions says when these no longer hold, and they start over. Each pixel draws its numbers from its position and
+sample index, so threads change nothing.
+
+**Where samples fall.** Where in the pixel a path starts, and at each surface the point of a ball it turns by and which
+lobe it takes, are Sobol's points, four dimensions at a time, scrambled by Owen's way with a hash (Burley, 2020): the
+camera's from one seed of the pixel, each bounce's from another (`scene/sampling.h`). So a pixel's first 2^m samples
+fall one in each 2^-m of each dimension, and in the camera's two, one in each box of every shape, where a hash's
+numbers clump; and each pixel has its own scrambling, so that pixels do not repeat each other. All of it is integers:
+the GPU's tracing shader (`sobol4Of`, with `OpBitReverse`) makes the same numbers. The point of the ball is a direction
+(its height even, an angle by `artfCosFast`) times the cube root of a third number, with no rejection and no sine of a
+C library. What goes through a surface that is partly there, the end of a path past three bounces and the points of
+shaped lights still take a hash's numbers. Against the hash and rejection there were before, on `spheres` and
+`surfaces` at 480 x 270, FLIP from 1,024 samples is .045 against .060 at four samples, .022 against .037 at sixteen
+(the same on both scenes); a sample takes 11% longer on the CPU (38.5 to 43 ms at 1280 x 720) and the same on the GPU.
 
 **What was covered.** A path that meets nothing leaves the frame's background: sums hold light for covered
 samples, and how many there were. So alpha comes out as how often something was there, edges are smooth for

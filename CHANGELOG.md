@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Paths' samples are Sobol's, scrambled by Owen's way** (the plan's phase 2.2): where in the pixel a path starts, the
+  point of a ball it turns by at each surface and the lobe it takes, four dimensions a bounce, each pixel its own
+  scrambling, by a hash (Burley, 2020; `scene/sampling.h`), the same integers in the tracing shader (`sobol4Of`). The
+  ball's point is a direction and the cube root of a third number, with no rejection. Four samples are 1.43 from 512
+  where they were 2.21 (`tracing/denoise`), and by FLIP from 1,024 samples .045 against .060 at four and .022 against
+  .037 at sixteen, on `spheres` and `surfaces`; a sample costs 11% more on the CPU, nothing more on the GPU. A test
+  (`metrics/sobol`) holds the scrambling to what makes the points good: one in each 2^-m of each dimension, one in
+  each box of the first two, pixels apart from each other. The denoising test now asks the filter for what 512 samples
+  are from the truth, as four samples alone come closer than they did. The traced orthographic picture's hash made
+  again; Metal's shaders made again. **Not yet**: blue noise across pixels (Heitz 2019, FAST); probes keep their hash
+  and rejection, as the GPU gathers them in the CPU's order.
+
 - **Frames are sRGB** (the plan's phase 2.1): bytes, in and out, are what pictures and screens are, in place of the
   square root of light. Two polynomials stand for the curve (`core/color.h`: degree six in what shows, degree five in
   the fourth root of light), within 8e-6 of it, every byte back to itself (`metrics/srgb`), the same in C, in the

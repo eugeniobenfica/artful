@@ -1,5 +1,6 @@
 /* artful-tests: what the tests measure pictures with (tools/flip.c). */
 #include "tests.h"
+#include "scene/sampling.h"
 
 static void fill(float* p, int n, float r, float g, float b) {
     for (int i = 0; i < n; ++i) {
@@ -98,4 +99,49 @@ void testSrgb(void) {
     printf("sRGB: within %.2g of the curve decoding, %.2g encoding\n", worstDecode, worstEncode);
     CHECK(back && rising && worstDecode < 1e-5 && worstEncode < 1e-5);
     CHECK(artfSrgbEncode(-1.f) == 0 && artfSrgbDecode(0) == 0);
+}
+
+/* Where a path's samples fall (scene/sampling.h): Sobol's points, scrambled by Owen's way for each pixel. Scrambling
+ * keeps what makes them good: the first 2^m of each pixel put one in each 2^-m of each dimension, and the first two
+ * dimensions one in each of the 2^m boxes of every shape; two pixels' sequences are not the same; and the numbers are
+ * Sobol's own where nothing scrambles them. */
+void testSobol(void) {
+    bool spread = true;
+    for (uint32_t pixel = 0; pixel < 16; ++pixel)
+        for (int m = 1; m <= 10; ++m) {
+            const uint32_t n = 1u << m, seed = artfPathSeed(pixel * 7919u, 3);
+            static uint8_t seen[4][1024], boxes[11][1024];
+            memset(seen, 0, sizeof seen);
+            memset(boxes, 0, sizeof boxes);
+            for (uint32_t i = 0; i < n; ++i) {
+                float u[4];
+                artfSobol4(i, seed, u);
+                for (int d = 0; d < 4; ++d) {
+                    CHECK(u[d] >= 0 && u[d] < 1);
+                    const uint32_t cell = (uint32_t)(u[d] * (float)n);
+                    spread = spread && !seen[d][cell];
+                    seen[d][cell] = 1;
+                }
+                for (int k = 0; k <= m; ++k) {
+                    const uint32_t bx = (uint32_t)(u[0] * (float)(1u << k)), by = (uint32_t)(u[1] * (float)(1u << (m - k)));
+                    const uint32_t box = bx * (1u << (m - k)) + by;
+                    spread = spread && !boxes[k][box];
+                    boxes[k][box] = 1;
+                }
+            }
+        }
+    CHECK(spread);
+    float a[4], b[4];
+    artfSobol4(5, artfPathSeed(1, 0), a);
+    artfSobol4(5, artfPathSeed(2, 0), b);
+    CHECK(a[0] != b[0] && a[1] != b[1]);
+    /* unscrambled (Owen's way with nothing to undo it is not the identity, so by the matrices): Joe and Kuo's third
+     * dimension at 1..4 is 1/2, 3/4, 1/4, 3/8 */
+    const float third[4] = {.5f, .75f, .25f, .375f};
+    for (uint32_t i = 1; i <= 4; ++i) {
+        uint32_t x = 0;
+        for (int k = 0; k < ARTF_SOBOL_BITS; ++k)
+            if (i >> k & 1u) x ^= artfSobolMatrix[2][k];
+        CHECK((float)x / 4294967296.f == third[i - 1]);
+    }
 }

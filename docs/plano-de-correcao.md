@@ -128,7 +128,10 @@ Um arquivo novo, `src/shading/sampling.inc`, incluído nos mesmos contextos que 
 | 2.1 Curvas de tom | **Já existia.** | Khronos PBR Neutral (`ARTF_TONE_NEUTRAL`) já estava implementada. Uma LUT ACES 2.0/Tony fica para quem quiser carregar via `.cube`. |
 | 2.1 Gradação em ACEScct | **Pendente.** | Muda o significado de lift/gamma/gain e do domínio das LUTs; precisa de decisão sobre compatibilidade das LUTs existentes. |
 | Revisão das referências | **Feito.** | Os hashes de `core/pictures`, `views/orthographic` e `post/temporalBytes` foram regenerados. FLIP antes×depois: de 0,042 (`spheres`) a 0,13 (`outdoors`), igual nos dois backends. A concordância CPU×GPU ficou como estava (`spheres` 0,0225 → 0,0222). |
-| 2.2, 2.3, 2.4 | **Não iniciados.** | |
+| 2.2 Sobol com Owen | **Feito.** | Câmera, ponto da bola e escolha do lóbulo vêm de um Sobol 4D por evento, com embaralhamento de Owen por pixel (`scene/sampling.h`), e a mesma conta inteira no shader de traçado. A direção é gerada sem rejeição. Com 4 amostras, o erro contra 512 caiu de 2,21 para 1,43 (−35%; meta −30%). FLIP contra 1.024 amostras: −24% com 4 amostras e −40% com 16. Custo: +11% por amostra na CPU, nada na GPU. O teste do denoiser passou a exigir um limite absoluto, porque o ruído de partida ficou menor. |
+| 2.2 Ruído azul entre pixels | **Pendente.** | Heitz 2019 ou FAST: uma tabela pequena embutida que decide o embaralhamento por pixel. |
+| 2.2 Probes | **Mantidas no hash.** | A GPU coleta as probes na mesma ordem da CPU; trocar exige mudar os dois lados e o teste `tracing/probesGpu`. |
+| 2.3, 2.4 | **Não iniciados.** | |
 
 ---
 

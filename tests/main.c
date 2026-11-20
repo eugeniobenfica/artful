@@ -92,6 +92,7 @@ int main(int argc, char** argv) {
 #endif
     RUN("metrics/flip", testFlip());
     RUN("metrics/srgb", testSrgb());
+    RUN("metrics/sobol", testSobol());
     RUN("core/packing", testPacking());
     RUN("core/meshlets", testMeshlets());
     RUN("core/instances", testInstances());

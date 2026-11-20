@@ -1,6 +1,7 @@
 /* artful — what rays need: a tree of boxes for each mesh, one over the instances, and the paths
  * themselves, as plain C. The CPU draws with these; the GPU reads the same trees, and its shader
  * (shaders.c, artfShaderTrace) is this same arithmetic. */
+#include "scene/sampling.h"
 #include "scene/sceneInternal.h"
 #include "core/threads.h"
 
@@ -778,7 +779,18 @@ static inline float randomOf(uint32_t* state) {
     return (float)(hashOf(*state) >> 8) * (1.f / 16777216.f);
 }
 
-/* A direction, even in a ball: with no sine or cosine, which differ from one C library to the next. */
+/* A point even in a ball, from three of a path's numbers (scene/sampling.h): a direction (its height even from -1 to 1,
+ * and an angle round), and how far out (the cube root, so that the ball's volume is even). No sine or cosine of a C
+ * library, which differ from one to the next: artfCosFast, as the tracing shader's ballOfSpv. */
+static void ballOf(const float* u, float* out) {
+    const float z = 1.f - 2.f * u[0], across = sqrtf(artfMaxf(1.f - z * z, 0.f)), turn = 6.28318531f * u[1];
+    const float r = artfExp2Fast(artfLog2Fast(u[2]) * (1.f / 3.f));
+    out[0] = across * artfCosFast(turn) * r;
+    out[1] = across * artfCosFast(turn - 1.57079633f) * r;
+    out[2] = z * r;
+}
+
+/* A direction, even in a ball, by rejection: for the probes, whose rays the GPU draws in the same order. */
 static void randomInBall(uint32_t* state, float* out) {
     for (int i = 0; i < 16; ++i) {
         for (int k = 0; k < 3; ++k) out[k] = randomOf(state) * 2.f - 1.f;
@@ -932,8 +944,13 @@ static void shiftOf(const ArtfScene* s, const Hit* h, float* out) {
 }
 
 void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTraceFrame* c, uint32_t x, uint32_t y, uint32_t sample, float* out, ArtfTraceGuide* guide) {
-    uint32_t state = hashOf(hashOf(x + y * c->width) + sample);
-    const float px = ((float)x + randomOf(&state)) / (float)c->width * 2.f - 1.f, py = 1.f - ((float)y + randomOf(&state)) / (float)c->height * 2.f;
+    /* where in the pixel, which way a bounce goes and which lobe: Sobol's points, this pixel's own scrambling of them
+     * (artfSobol4); what goes through, what ends and points on shaped lights: a hash */
+    const uint32_t pixel = x + y * c->width;
+    uint32_t state = hashOf(hashOf(pixel) + sample);
+    float jitter[4];
+    artfSobol4(sample, artfPathSeed(pixel, 0), jitter);
+    const float px = ((float)x + jitter[0]) / (float)c->width * 2.f - 1.f, py = 1.f - ((float)y + jitter[1]) / (float)c->height * 2.f;
     float o[3], d[3], path[3] = {1, 1, 1}, light[3] = {0, 0, 0}, travelled = 0, keep = 1.f;
     if (c->eye[3] > 0)
         for (int k = 0; k < 3; ++k) {
@@ -1005,8 +1022,9 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             lifted[k] = p[k] + m.normal[k] * reach;
             light[k] += path[k] * m.emissive[k];
         }
-        float ball[3];
-        randomInBall(&state, ball);
+        float ball[3], u[4];
+        artfSobol4(sample, artfPathSeed(pixel, bounces + 1), u);
+        ballOf(u, ball);
         if (f->sunColor[0] > 0 || f->sunColor[1] > 0 || f->sunColor[2] > 0) {
             /* (a sun with a size: each path sees another point of it, and shadows go soft with distance) */
             float toSun[3];
@@ -1058,7 +1076,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             if (bounces >= c->bounces) break;
             const float most = artfMaxf(m.mirror[0], artfMaxf(m.mirror[1], m.mirror[2]));
             const float chance = m.shiny ? artfClampf(most, .05f, .95f) : 0.f;
-            if (randomOf(&state) < chance) {
+            if (u[3] < chance) {
                 for (int k = 0; k < 3; ++k) {
                     d[k] = mirror[k] + ball[k] * stray;
                     path[k] *= m.mirror[k] / chance;

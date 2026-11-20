@@ -37,7 +37,9 @@ void testDenoise(ArtfBackend backend) {
     CHECK(artfRendererReadPixels(r, b));
     const double before = errorOf(a, c), after = errorOf(b, c);
     printf("from 512 samples: four samples are %.2f away, four filtered %.2f\n", before, after);
-    CHECK(after < before * .6);
+    /* (four samples were 2.2 away by a hash's numbers, and are 1.4 by Sobol's: the filter takes them to about what 512
+     * samples are from the truth themselves) */
+    CHECK(after < before * .8 && after < 1.2);
 
     /* the eye moves, and the picture does not start over: a frame later it is still closer than noise is */
     for (int i = 0; i < 12; ++i) CHECK(artfRendererDraw(r, s));
@@ -49,7 +51,7 @@ void testDenoise(ArtfBackend backend) {
     CHECK(artfRendererReadPixels(r, c));
     const double moved = errorOf(b, c);
     printf("a frame after moving: %.2f away\n", moved);
-    CHECK(moved < before * .6);
+    CHECK(moved < before * .8 && moved < 1.2);
     artfSceneFree(s);
     artfFree(a);
     artfFree(b);

@@ -16,6 +16,7 @@
  *
  * Lighting here is the same arithmetic as the CPU's (kernels.inc), so that both draw the same scene. */
 #include "vulkan/shaders.h"
+#include "scene/sampling.h"
 #include "artful/renderer.h"
 #include "scene/sceneInternal.h"
 #include "vulkan/spirv.h"
@@ -2706,7 +2707,7 @@ typedef struct Tracer {
     /* variables: all at the top of main, as SPIR-V wants */
     SpvId stack, depth, at, pop, stack2, depth2, at2, pop2, leaf, leaf2;
     SpvId bestT, bestU, bestV, bestInstance, bestTriangle;
-    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex;
+    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice;
     SpvId shadowOrigin, through, limit, shadowStep, lightIndex, ballStep, ball, travelled, keep;
     GraphVars own;
     const ArtfGraphData* graphs;
@@ -3085,6 +3086,32 @@ static SpvId traceHash(Spv* s, SpvId x) {
     return XOR_U(x, SHR_U(x, 16));
 }
 
+/* artfSobol4 and artfPathSeed (scene/sampling.h): a path's numbers, Sobol's points scrambled by Owen's way, in the
+ * same order. */
+static SpvId owenOf(Spv* s, SpvId x, SpvId seed) {
+    x = ADD_U(spvOp1(s, 204 /* OpBitReverse */, s->uintType, x), seed);
+    const uint32_t m[4] = {0x6C50B47Cu, 0xB82F1E52u, 0xC7AFE638u, 0x8D22F6E6u};
+    for (int k = 0; k < 4; ++k) x = XOR_U(x, MUL_U(x, UINT(m[k])));
+    return spvOp1(s, 204, s->uintType, x);
+}
+static void sobol4Of(Spv* s, SpvId index, SpvId seed, SpvId* out) {
+    for (uint32_t d = 0; d < 4; ++d) {
+        SpvId x = UINT(0);
+        for (int k = 0; k < ARTF_SOBOL_BITS; ++k) x = XOR_U(x, MUL_U(AND_U(SHR_U(index, k), UINT(1)), UINT(artfSobolMatrix[d][k])));
+        SpvId seedHere = traceHash(s, ADD_U(seed, UINT(d * 0x9E3779B9u)));
+        out[d] = MUL_F(TO_F(SHR_U(owenOf(s, x, seedHere), 8)), FLOAT(1.f / 16777216.f));
+    }
+}
+static SpvId pathSeedOf(Spv* s, SpvId pixel, SpvId group) { return traceHash(s, XOR_U(traceHash(s, pixel), MUL_U(ADD_U(group, UINT(1)), UINT(0x85EBCA6Bu)))); }
+/* trace.c's ballOf */
+static SpvId ballOfSpv(Spv* s, const SpvId* u) {
+    SpvId z = SUB_F(FLOAT(1.f), MUL_F(FLOAT(2.f), u[0]));
+    SpvId across = spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, MAX_F(SUB_F(FLOAT(1.f), MUL_F(z, z)), FLOAT(0.f)));
+    SpvId turn = MUL_F(FLOAT(6.28318531f), u[1]);
+    SpvId r = exp2Of(s, MUL_F(log2Of(s, u[2]), FLOAT(1.f / 3.f)));
+    return vec3Of(s, MUL_F(MUL_F(across, cosOf(s, turn)), r), MUL_F(MUL_F(across, cosOf(s, SUB_F(turn, FLOAT(1.57079633f)))), r), MUL_F(z, r));
+}
+
 static SpvId traceRandom(const Tracer* t) {
     Spv* s = t->s;
     SpvId next = ADD_U(MUL_U(LOAD_U(t->state), UINT(747796405u)), UINT(2891336453u));
@@ -3304,7 +3331,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->bestInstance = VAR(ptrUint); t->bestTriangle = VAR(ptrUint);
     t->state = VAR(ptrUint); t->covered = VAR(ptrUint); t->bounces = VAR(ptrUint); t->step = VAR(ptrUint); t->sampleIndex = VAR(ptrUint);
     t->origin = VAR(ptrVec3); t->direction = VAR(ptrVec3); t->path = VAR(ptrVec3); t->light = VAR(ptrVec3);
-    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3);
+    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat);
     t->through = VAR(ptrFloat); t->limit = VAR(ptrFloat); t->travelled = VAR(ptrFloat); t->keep = VAR(ptrFloat);
     t->shadowStep = VAR(ptrUint); t->lightIndex = VAR(ptrUint); t->ballStep = VAR(ptrUint);
     t->graphs = graphs;
@@ -3340,7 +3367,9 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     loopWhile(s, &sampleLoop, LESS_U(LOAD_U(t->sampleIndex), samples));
     {
         spvStore(s, t->state, traceHash(s, ADD_U(traceHash(s, pixel), ADD_U(done, LOAD_U(t->sampleIndex)))));
-        SpvId jx = traceRandom(t), jy = traceRandom(t);
+        SpvId jitter[4];
+        sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, UINT(0)), jitter);
+        SpvId jx = jitter[0], jy = jitter[1];
         SpvId px = SUB_F(MUL_F(DIV_F(ADD_F(TO_F(x), jx), TO_F(width)), FLOAT(2.f)), FLOAT(1.f));
         SpvId py = SUB_F(FLOAT(1.f), MUL_F(DIV_F(ADD_F(TO_F(y), jy), TO_F(height)), FLOAT(2.f)));
         /* (orthographic, eye's w 1: each ray from its place on the view's plane, all forward. By a 0 or a 1, so that a
@@ -3454,19 +3483,11 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             SpvId lifted = ADD_V3(p, SCALE_V3(m.normal, reach));
             spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), MUL_V3(LOAD_V3(t->path), m.emissive)));
 
-            /* a random direction in a ball */
-            spvStore(s, t->ballStep, UINT(0));
-            Loop ball;
-            loopOpen(s, &ball);
-            loopWhile(s, &ball, LESS_U(LOAD_U(t->ballStep), UINT(16)));
-            {
-                SpvId bx = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f)), by = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f)), bz = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f));
-                SpvId v = vec3Of(s, bx, by, bz);
-                spvStore(s, t->ball, v);
-                breakIf(s, &ball, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(v, v), FLOAT(1.f)));
-                spvStore(s, t->ballStep, ADD_U(LOAD_U(t->ballStep), UINT(1)));
-            }
-            loopClose(s, &ball);
+            /* a point even in a ball, and which lobe: this bounce's numbers (trace.c's ballOf) */
+            SpvId u[4];
+            sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, ADD_U(LOAD_U(t->bounces), UINT(1))), u);
+            spvStore(s, t->ball, ballOfSpv(s, u));
+            spvStore(s, t->choice, u[3]);
             SpvId ballDir = LOAD_V3(t->ball);
             SpvId toSun = NORMALIZE(ADD_V3(spvShuffle3(s, frameVec(s, &t->r, F_TOSUN)), SCALE_V3(ballDir, Z(look))));
 
@@ -3603,7 +3624,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             breakIf(s, &steps, EITHER(last, BOTH(NOT(paths), NOT(m.shiny))));
             SpvId most = maxOf3(s, m.mirror);
             SpvId chance = PICK_F(m.shiny, MIN_F(MAX_F(most, FLOAT(.05f)), FLOAT(.95f)), FLOAT(0.f));
-            SpvId isMirror = EITHER(NOT(paths), LESS_F(traceRandom(t), chance));
+            SpvId isMirror = EITHER(NOT(paths), LESS_F(LOAD_F(t->choice), chance));
             SpvId diffuse = ADD_V3(SCALE_V3(m.normal, FLOAT(1.0001f)), ballDir);
             SpvId next = NORMALIZE(pick3(s, isMirror, glossy, diffuse));
             SpvId keep = DIV_F(MUL_F(m.open, SUB_F(FLOAT(1.f), most)), SUB_F(FLOAT(1.f), chance));
