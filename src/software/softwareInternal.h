@@ -160,7 +160,11 @@ typedef struct ArtfSoftPost {
     float ratioX, ratioY; /* the scene's size over the frame's */
     float viewBack[16];   /* where a pixel of the frame was, by the view alone (post.c's viewBackOf) */
     float* scratch[4];
-    float* box[6];       /* upscaling: of each of the scene's pixels, the least and most of each color around it */
+    float* box[6];       /* upscaling: of each of the scene's pixels, the least and most of each color the history may
+                          * be (post.c's boxRow), and 1 where it is a thin ridge, 0 where not (ridge) */
+    float* ridge;
+    float* lock[2];      /* of each of the frame's pixels, how locked it is (0 to 1): the frame before's and this one's */
+    int lockAt;          /* which of them this frame writes */
     float* history[3];
     float* spare[3];     /* during a frame, what the history was before it took the light's place */
     bool historyValid;

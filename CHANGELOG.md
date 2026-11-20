@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Phase 5.4: the upscaler holds thin lines and lets go of what went.** What a pixel had is held to its nearest
+  sample's neighbours' mean and three quarters of their deviation, within their least and most; a pixel whose nearest
+  sample is a ridge locks, and keeps what it had for 24 frames unless a ridge is seen again (the lock follows the pixel;
+  on the GPU, binding 71); what is new and what was are weighted by 1 / (1 + luma). At half the size
+  (`post/upscaleQuality`): a still grille changes 2.0 of 255 a frame where it changed 4.9 (GPU 5.0); smoke stays 2
+  frames after it went, where it stayed 10; something moving is nearer drawn without history. Upscaled pictures
+  change; the CPU's lanes and its pixel at a time make the same bytes.
+
 - **Phase 5.3: rectangles and tubes by linearly transformed cosines.** A light's shape is lit from all of it, as the
   tracer has it (the mean of point lights over it): diffuse by Gauss's 3 x 3 points, the highlight by the lobe's
   integral over the polygon (`AreaLight` in `shading.inc`, one formula for the CPU and the GPU), with a table fitted to

@@ -210,6 +210,7 @@ int main(int argc, char** argv) {
     RUN("materials/sizedLights", testSizedLights());
     RUN("motion/motion", testMotion());
     RUN("post/upscale", testUpscale());
+    RUN("post/upscaleQuality", testUpscaleQuality());
     RUN("motion/skinnedMotion", testSkinnedMotion());
     RUN("motion/skinScenes", testSkinScenes());
     RUN("motion/blurEdges", testBlurEdges());

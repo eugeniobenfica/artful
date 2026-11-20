@@ -256,6 +256,22 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
   A GPU fica abaixo de 0,5% dos pixels contra a CPU.
 - **O que fica:** coat, sheen e subsuperfície ainda usam o ponto mais próximo; lobos anisotrópicos são tratados como redondos; o erro restante vem do ajuste em ângulos rasantes. No Metal, formas e perfis viram pontos, porque o buffer que eles leem nunca é enviado.
 
+**Estado da 5.4: critério atingido; parte da lista feita de outro jeito.**
+- **Travas:** um pixel cuja amostra mais próxima é uma crista (mais clara ou mais escura que os dois lados, por 1/4 da mais clara) trava e guarda o histórico sem recorte. A trava segue o pixel como o histórico e se desgasta em 24 quadros, a menos que a crista reapareça. Na GPU fica no binding 71 (dois floats por pixel do quadro, metades alternadas); na CPU, em dois planos.
+- **Caixa do histórico:** além do mínimo e máximo, ela fica presa à média ± 0,75 desvio dos 3×3 vizinhos. Isso faz a fumaça sumir sem precisar de máscara reativa.
+- **Mistura adaptativa:** pesos 1 / (1 + luma) (Karis) no lugar do 9:1 fixo.
+- **Critério (`post/upscaleQuality`, 50% de escala):**
+
+  | Medida | Antes (CPU / GPU) | Agora (CPU / GPU) |
+  |---|---|---|
+  | Grade fina parada, variação por quadro | 4,90 / 5,01 | 2,02 / 1,99 (−59% / −60%; meta: metade) |
+  | Fumaça sobre xadrez | 10 quadros | 2 quadros (meta: ≤ 4) |
+  | Objeto em movimento, contra o quadro sem histórico | 1,48 / 1,22 | 1,06 / 0,78 |
+
+  A GPU fica a 0,07% dos pixels da CPU, e as variantes vetoriais da CPU dão os mesmos bytes.
+- **Não feito:** máscaras reativa e de composição por material (a caixa por desvio cobre o caso medido), reprojeção Lanczos (o histórico continua bilinear) e um detector de cintilação separado (as travas fazem esse papel).
+- **Custo:** as travas ocupam 8 bytes por pixel do quadro (16,6 MB a 1080p).
+
 **Ordem sugerida dentro da fase:** 5.1, 5.2 e 5.4 primeiro (baratos, atacam limites documentados); depois 5.5 e 5.6 (dependem de 4.3); depois 5.7 (depende de 2.2 e se beneficia de 5.6). 5.8 a 5.12 são independentes e entram por demanda de consumidor.
 
 ---

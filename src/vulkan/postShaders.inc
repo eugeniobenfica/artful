@@ -847,9 +847,12 @@ POST_MAIN(artfShaderPostTemporal)
     spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, P_MIX3(was, spvShuffle3(s, now), share), W(now)));
 POST_FINISH()
 
-/* ---- upscaling: as upscaleRow, from the scene's light into the second light at the frame's size. The push constant
- * is 1 when there is a frame before to follow ---- */
+/* ---- upscaling: as upscaleRow, from the scene's light into the second light at the frame's size. The push constant's
+ * bit 0 is 1 when there is a frame before to follow; bit 1 says which half of the locks (71: two floats a pixel of the
+ * frame, this frame's half and the one before's) this frame writes ---- */
+static SpvId postLuma(Spv* s, SpvId c) { return DOT3(c, vec3Of(s, FLOAT(.2126f), FLOAT(.7152f), FLOAT(.0722f))); }
 POST_MAIN(artfShaderPostUpscale)
+    SpvId locks = postBuffer(s, p, p->r.floatArray, 71);
     SpvId main = spvBeginMain(s);
     postFrameSizes(s, p);
     SpvId i, x, y, merge;
@@ -866,7 +869,9 @@ POST_MAIN(artfShaderPostUpscale)
     SpvId spatial = ADD_V4(ADD_V4(SCALE_V4(c00, MUL_F(gx, gy)), SCALE_V4(c10, MUL_F(fx, gy))), ADD_V4(SCALE_V4(c01, MUL_F(gx, fy)), SCALE_V4(c11, MUL_F(fx, fy))));
     SpvId sx, sy, ok;
     postWasAt(s, p, xf, yf, &sx, &sy, &ok);
-    SpvId follows = P_AND(P_AND(ok, spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0))), P_MORE(W(frameVec(s, &p->r, F_POST + 1)), FLOAT(0.f)));
+    SpvId push = postPush(s, p), half = AND_U(spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, push, UINT(1)), UINT(1));
+    SpvId framePixels = MUL_U(p->width, p->height);
+    SpvId follows = P_AND(P_AND(ok, spvOp2(s, SPV_OP_INotEqual, s->boolType, AND_U(push, UINT(1)), UINT(0))), P_MORE(W(frameVec(s, &p->r, F_POST + 1)), FLOAT(0.f)));
     follows = P_AND(follows, P_AND(P_AND(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, sx, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, sy, FLOAT(0.f))),
                                    P_AND(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, sx, SUB_F(p->widthF, FLOAT(1.f))), spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, sy, SUB_F(p->heightF, FLOAT(1.f))))));
     /* (only what follows reads the frame before) */
@@ -886,23 +891,46 @@ POST_MAIN(artfShaderPostUpscale)
     }
     SpvId gain = DIV_F(FLOAT(.1f), MUL_F(p->ratioX, p->ratioY));
     SpvId share = MIN_F(MUL_F(near, gain), FLOAT(1.f)), each = PICK_F(P_MORE(near, FLOAT(0.f)), DIV_F(FLOAT(1.f), MAX_F(near, FLOAT(1e-30f))), FLOAT(0.f));
-    /* the box, of the nearest sample's neighbours */
+    /* the box, of the nearest sample's neighbours: their least and most, held to their mean and three quarters of their
+     * deviation (boxLanes); and whether the nearest is a ridge */
     SpvId nearX = PICK_F(P_LESS(fx, FLOAT(.5f)), bx, ADD_F(bx, FLOAT(1.f))), nearY = PICK_F(P_LESS(fy, FLOAT(.5f)), by, ADD_F(by, FLOAT(1.f)));
-    SpvId lo = same3(s, 3e38f), hi = same3(s, -3e38f);
+    SpvId lo = same3(s, 3e38f), hi = same3(s, -3e38f), sum = same3(s, 0.f), squares = same3(s, 0.f);
+    SpvId lumas[3][3];
     for (int dy = -1; dy <= 1; ++dy)
         for (int dx = -1; dx <= 1; ++dx) {
             SpvId qx = P_TOU(P_CLAMP(ADD_F(nearX, FLOAT((float)dx)), FLOAT(0.f), lastX)), qy = P_TOU(P_CLAMP(ADD_F(nearY, FLOAT((float)dy)), FLOAT(0.f), lastY));
             SpvId q = spvShuffle3(s, postVec4(s, p, p->light, ADD_U(MUL_U(qy, p->sceneW), qx)));
             lo = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, lo, q);
             hi = spvGlsl2(s, SPV_GLSL_FMax, s->vec3, hi, q);
+            sum = ADD_V3(sum, q);
+            squares = ADD_V3(squares, MUL_V3(q, q));
+            lumas[dy + 1][dx + 1] = postLuma(s, q);
         }
-    SpvId was = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, postTap(s, p, p->history, UINT(0), p->width, p->height, sx, sy)), lo), hi);
+    SpvId mean = SCALE_V3(sum, FLOAT(1.f / 9.f));
+    SpvId deviation = spvGlsl1(s, SPV_GLSL_Sqrt, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, SUB_V3(SCALE_V3(squares, FLOAT(1.f / 9.f)), MUL_V3(mean, mean)), same3(s, 0.f)));
+    lo = spvGlsl2(s, SPV_GLSL_FMax, s->vec3, lo, SUB_V3(mean, SCALE_V3(deviation, FLOAT(.75f))));
+    hi = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, hi, ADD_V3(mean, SCALE_V3(deviation, FLOAT(.75f))));
+    SpvId l = lumas[1][1], a1 = SUB_F(l, lumas[1][0]), a2 = SUB_F(l, lumas[1][2]), b1 = SUB_F(l, lumas[0][1]), b2 = SUB_F(l, lumas[2][1]);
+    SpvId across = MUL_F(MAX_F(MAX_F(l, lumas[1][0]), lumas[1][2]), FLOAT(.25f)), along = MUL_F(MAX_F(MAX_F(l, lumas[0][1]), lumas[2][1]), FLOAT(.25f));
+    SpvId ridge = P_OR(P_AND(P_MORE(MUL_F(a1, a2), FLOAT(0.f)), P_AND(P_MORE(G_ABS(a1), across), P_MORE(G_ABS(a2), across))),
+                       P_AND(P_MORE(MUL_F(b1, b2), FLOAT(0.f)), P_AND(P_MORE(G_ABS(b1), along), P_MORE(G_ABS(b2), along))));
+    /* the lock: a ridge here, or what it was where the pixel was, worn (upscaleRow) */
+    SpvId lockAt = ADD_U(MUL_U(P_TOU(FLOOR_F(ADD_F(sy, FLOAT(.5f)))), p->width), P_TOU(FLOOR_F(ADD_F(sx, FLOAT(.5f)))));
+    SpvId lockWas = postFloat(s, p, locks, ADD_U(MUL_U(SUB_U(UINT(1), half), framePixels), spvGlsl2(s, 38 /* UMin */, s->uintType, lockAt, SUB_U(framePixels, UINT(1)))));
+    SpvId lock = PICK_F(ridge, FLOAT(1.f), MAX_F(SUB_F(lockWas, FLOAT(1.f / 24.f)), FLOAT(0.f)));
+    SpvId had = spvShuffle3(s, postTap(s, p, p->history, UINT(0), p->width, p->height, sx, sy));
+    SpvId kept = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, had, lo), hi);
+    SpvId was = ADD_V3(kept, SCALE_V3(SUB_V3(had, kept), lock));
     SpvId fresher = SCALE_V3(fresh, each);
-    SpvId gathered = P_MIX3(was, fresher, share);
+    /* (each by 1 / (1 + its luma)) */
+    SpvId byNow = DIV_F(share, ADD_F(FLOAT(1.f), postLuma(s, fresher))), byWas = DIV_F(SUB_F(FLOAT(1.f), share), ADD_F(FLOAT(1.f), postLuma(s, was)));
+    SpvId gathered = P_MIX3(was, fresher, DIV_F(byNow, ADD_F(byNow, byWas)));
     SpvId gatheredFrom = s->block;
     spvIfEnd(s, followMerge);
     SpvId got = spvPhi(s, s->vec3, gathered, gatheredFrom, spatialRgb, before);
+    SpvId locked = spvPhi(s, s->floatType, lock, gatheredFrom, FLOAT(0.f), before);
     spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, got, W(spatial)));
+    spvStore(s, postPtr(s, p, locks, s->floatType, ADD_U(MUL_U(half, framePixels), i)), locked);
 POST_FINISH()
 
 /* ---- sharpening: as sharpenRow, into the second light ---- */

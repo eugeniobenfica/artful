@@ -124,6 +124,7 @@ void testPipelinesAhead(void);
 void testColorData(void);
 void testLightClusters(void);
 void testAreaLights(void);
+void testUpscaleQuality(void);
 void testLayers(ArtfBackend backend);
 void testMaterials(ArtfBackend backend, bool antialias);
 void testSamePixelsOfLayers(void);

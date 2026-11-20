@@ -714,6 +714,117 @@ void testUpscale(void) {
     artfFree(corner);
 }
 
+/* What upscaling makes of what is hard for it, at half the size:
+ * - a grille of lines a fifth of the scene's pixel wide, the eye still: how much a pixel changes from one frame to the
+ *   next, once it has settled (it should not: nothing moves);
+ * - a veil of smoke over a black and white board, gone at once: for how many frames what it was stays. */
+static ArtfScene* grilleScene(void) {
+    ArtfScene* s = plainScene();
+    artfSceneSetAmbient(s, artfVec3(.8f, .8f, .8f), artfVec3(.8f, .8f, .8f));
+    enum { LINES = 31 };
+    static ArtfVertex v[LINES * 2 * 4];
+    static uint32_t idx[LINES * 2 * 6];
+    int nv = 0, ni = 0;
+    for (int k = 0; k < LINES; ++k)
+        for (int across = 0; across < 2; ++across) {
+            const float at = -1.5f + (float)k * .1f, half = .006f;
+            const float x0 = across ? -1.5f : at - half, x1 = across ? 1.5f : at + half;
+            const float y0 = across ? at - half : -1.5f, y1 = across ? at + half : 1.5f;
+            const float px[4] = {x0, x1, x1, x0}, py[4] = {y0, y0, y1, y1};
+            for (int c = 0; c < 4; ++c) v[nv + c] = (ArtfVertex){px[c], py[c], 0, 0, 0, 1, 0, 0, 0};
+            const uint32_t q[6] = {0, 1, 2, 0, 2, 3};
+            for (int c = 0; c < 6; ++c) idx[ni + c] = (uint32_t)nv + q[c];
+            nv += 4;
+            ni += 6;
+        }
+    addAt(s, artfSceneAddMesh(s, v, (uint32_t)nv, idx, (uint32_t)ni), whiteMaterial(s), 0, 0, 0, 1);
+    return s;
+}
+
+static ArtfScene* smokeScene(ArtfInstance* veil) {
+    ArtfScene* s = plainScene();
+    static uint32_t board[8 * 8];
+    for (int i = 0; i < 64; ++i) board[i] = ((i % 8) + (i / 8)) & 1 ? 0xFFFFFFFFu : 0xFF000000u;
+    ArtfMaterialDesc d = {artfVec3(1, 1, 1), artfSceneAddTexture(s, board, 8, 8, 0), 1, 0, artfVec3(0, 0, 0)};
+    addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &d), 0, 0, -.5f, 2.5f);
+    const ArtfMaterialDesc grey = {artfVec3(.6f, .6f, .6f), 0, 1, 0, artfVec3(0, 0, 0)};
+    *veil = addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &grey), 0, 0, .5f, .8f);
+    artfInstanceSetOpacity(s, *veil, .6f);
+    return s;
+}
+
+void testUpscaleQuality(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* still = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        o.renderScale = .5f;
+        ArtfRenderer* r = artfRendererNew(&o);
+        ArtfRenderer* plain = artfRendererNew(&o);
+        if (!r || !plain) {
+            artfRendererFree(r);
+            artfRendererFree(plain);
+            continue;
+        }
+        const char* name = backend ? "GPU" : "CPU";
+        const ArtfPostDesc temporal = {.screen.temporal = true};
+        /* the grille: the mean change of a pixel, frame to frame, over 16 frames after 32 */
+        ArtfScene* s = grilleScene();
+        artfSceneSetPost(s, &temporal);
+        drawFrames(r, s, 32, a);
+        double change = 0;
+        for (int k = 0; k < 16; ++k) {
+            drawFrames(r, s, 1, b);
+            change += meanApart(a, b);
+            memcpy(a, b, W * H * 4);
+        }
+        change /= 16;
+        artfSceneFree(s);
+        /* the smoke: the board alone, then with the veil for 24 frames, then gone; how many frames until what it
+         * covered is the board's again, within 4 of 255 on the mean */
+        ArtfInstance veil;
+        s = smokeScene(&veil);
+        artfSceneSetPost(s, &temporal);
+        const ArtfTransform away = artfTransformAt(40, 0, .5f, .8f);
+        artfInstanceSetTransform(s, veil, &away);
+        drawInto(plain, s, still);
+        const ArtfTransform here = artfTransformAt(0, 0, .5f, .8f);
+        artfInstanceSetTransform(s, veil, &here);
+        drawFrames(r, s, 24, a);
+        artfInstanceSetTransform(s, veil, &away);
+        int trail = 0;
+        for (int k = 1; k <= 16; ++k) {
+            drawFrames(r, s, 1, b);
+            double sum = 0;
+            int n = 0;
+            for (int y = H / 2 - 30; y < H / 2 + 30; ++y)
+                for (int x = W / 2 - 30; x < W / 2 + 30; ++x, ++n) sum += abs(CHANNEL(b[y * W + x], 8) - CHANNEL(still[y * W + x], 8));
+            if (sum / n > 4) trail = k;
+        }
+        /* something solid going across the board: how far from it drawn without history, once it has gone some way */
+        artfInstanceSetOpacity(s, veil, 1);
+        for (int k = 0; k < 24; ++k) {
+            const ArtfTransform at = artfTransformAt(-1.f + .06f * (float)k, 0, .5f, .8f);
+            artfInstanceSetTransform(s, veil, &at);
+            drawFrames(r, s, 1, a);
+        }
+        drawInto(plain, s, b);
+        const double moving = meanApart(a, b);
+        artfSceneFree(s);
+        printf("%s, upscaled from half: a still grille changes %.2f of 255 a frame; smoke stays %d frames after it went; something moving is %.2f from drawn without history\n", name, change, trail,
+               moving);
+        /* (before locks, a box held to the deviation and the blend by luma: 4.90 and 5.01, 10 frames, 1.48 and 1.22) */
+        CHECK(change < 2.45 && trail <= 4 && moving < 1.5);
+        artfRendererFree(r);
+        artfRendererFree(plain);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(still);
+}
+
 /* What is off is as it was, to the byte: a frame in floats with soft shadows and no temporal antialiasing, and one
  * with temporal antialiasing following a moving instance, on the CPU, hash as they did before upscaling, vertices'
  * motion and turned shadows came. */

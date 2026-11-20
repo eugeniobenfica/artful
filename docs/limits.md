@@ -11,7 +11,10 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   (a fine normal map's floor: .0144 where its truth is .0213), and tracing is not widened. Highlights get back the light
   their lobe loses to a second facet as a white metal's would; the rasterizer's reflection of all around is as it was,
   which for a white metal gave all of it back already. Upscaling (`renderScale`) needs a frame in floats, and temporal antialiasing to
-  be more than reading between pixels; it gathers 16 places within a pixel, so what is very thin flickers below .5.
+  be more than reading between pixels; it gathers 16 places within a pixel. What is thinner than the scene's pixels is
+  held by locks (ridges seen in the last 24 frames), and changes 2 of 255 a frame at half the size; transparent things
+  have no mask of their own: what they leave goes by the history's box, in two or three frames. Its history is read
+  bilinearly, not by Lanczos.
 - When tracing, a light is a point unless it has a size or a shape (`artfLightSetSize`, `artfLightSetShape`), and those
   past the sixteen are points; glass has no Fresnel of its own, and its color (`attenuation`) is taken from paths, not
   from shadow rays: the shadow of green glass is grey. It reads textures in their largest mipmap. Black holes stay behind

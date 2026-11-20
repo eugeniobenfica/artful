@@ -579,7 +579,7 @@ shader gathers both, with depth taken between the solid pass and the layers', in
 | Ambient occlusion | every pixel | Eight points in a hemisphere around the normal, turned by a 4 x 4 pattern and tested against depth; blurred over 4 x 4 by depth; taken only from the share of light that came from all around. |
 | Reflections | half the pixels | The mirror ray projected once and walked as a line across the frame, 1 / w even along it, in 24 steps closer near the start; a hit is a step from in front to behind, near enough. What it shows takes the place of what the surface was lit with from all around in that direction (the picture, or the sky's two colors), by Fresnel, smoothness and the frame's edges: where it finds nothing, that light stays. Then taken up to every pixel. |
 | Temporal antialiasing | every pixel | The eye moves within a pixel by Halton's (2, 3) points; each pixel goes back to where it was by its depth and the frame before's view, and what it finds there is kept within what this frame shows around it, nine to one. |
-| Upscaling | the frame's pixels | With `renderScale`, in place of the above: of the four samples around a pixel's center, those within a pixel of the frame give as much as their nearness, over what it had (followed, and kept within the nearest sample's neighbours); from here on all is the frame's size, and depth and surface are read at the nearest sample. |
+| Upscaling | the frame's pixels | With `renderScale`, in place of the above: of the four samples around a pixel's center, those within a pixel of the frame give as much as their nearness, over what it had (followed, and kept within the nearest sample's neighbours unless the pixel is locked; each weighted by 1 / (1 + luma)); from here on all is the frame's size, and depth and surface are read at the nearest sample. |
 | Motion blur | every pixel | McGuire et al.'s: velocities, the largest of each tile of 16 and of its neighbours, then 12 points along that, each weighed by whether it is in front and moves over the pixel, or is behind while the pixel moves, or both. |
 | Depth of field | every pixel | 24 points of a disc as wide as the circle of confusion; what is sharper and behind does not spread over what is in front. |
 | Bloom | a pyramid | What is past the threshold, after exposure, down six halves with a tent and back up. |
@@ -592,6 +592,21 @@ the frame out of each frame with temporal antialiasing: 1.60 to 1.13 ms on a Rad
 CPU temporal antialiasing and upscaling go through the kernels eight pixels at a time where they can (`temporalLanes`,
 `upscaleLanes`, `boxLanes`: in perspective, away from the frame's sides, and where no pixel went by its vertices), and a
 pixel at a time where they cannot, with the same arithmetic: 5.8 to 2.6 ms and 6.6 to 4.2 ms.
+
+What upscaling keeps of what a pixel had is held within its nearest sample's neighbours, three by three: their least
+and most, and no further from their mean than three quarters of how much they differ, so that what is gone (smoke, a
+veil) goes in two or three frames where it stayed ten. That alone makes what is thinner than the scene's pixels worse:
+a line between the samples in most frames is held away in those, and comes and goes. So a pixel whose nearest sample is
+a ridge (brighter or darker than both sides, across or along, by a quarter of the brightest) locks: a locked pixel keeps
+what it had as it was. A lock follows the pixel as the history does (read where the pixel was, at the nearest pixel of
+the frame before's), and wears off in 24 frames unless a ridge is seen there again; where nothing is followed, it is 0.
+On the GPU the locks are a buffer of their own (binding 71: two floats a pixel of the frame, this frame's half and the
+one before's, which the push constant's second bit picks), on the CPU two planes. Last, what is new and what was are
+each weighted by 1 / (1 + their luma) (Karis, 2014), so a bright sample that comes and goes moves the pixel less than
+by the fixed share. At half the size, `post/upscaleQuality`: a still grille of lines a fifth of the scene's pixel wide
+changes 2.0 of 255 a frame where it changed 4.9 (the GPU: 2.0 where 5.0); smoke over a black and white board stays 2
+frames after it went, where it stayed 10; something solid going across the board is 1.06 from drawn without history
+where it was 1.48 (the GPU 0.78 where 1.22). The locks take 8 bytes a pixel of the frame, 16.6 MB at 1920 x 1080.
 
 Exposure and tone mapping come last, then the overlay, which on the GPU is drawn in a pass of its own over the frame.
 With four samples a pixel the light is their mean, and what comes after reads the first sample's depth and surface,

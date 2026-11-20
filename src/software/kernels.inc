@@ -2764,6 +2764,23 @@ V8_INLINE V8I floorLanes(V8F v) {
     return v8iAdd(i, v8fLt(v, v8iToF(i)));
 }
 
+/* Luma, and a ridge: brighter or darker than both sides, one way or the other, by a quarter of the brightest (boxLanes,
+ * upscaleLanes). */
+V8_INLINE V8F lumaLanes(V8F r, V8F g, V8F b) { return v8fAdd(v8fAdd(v8fMul(v8fSet(.2126f), r), v8fMul(v8fSet(.7152f), g)), v8fMul(v8fSet(.0722f), b)); }
+static float lumaAt(float* const* light, size_t at) { return .2126f * light[0][at] + .7152f * light[1][at] + .0722f * light[2][at]; }
+V8_INLINE V8I ridgeLanes(V8F l, V8F left, V8F right, V8F up, V8F down) {
+    const V8F zero = v8fSet(0.f), quarter = v8fSet(.25f);
+    const V8F a1 = v8fSub(l, left), a2 = v8fSub(l, right), b1 = v8fSub(l, up), b2 = v8fSub(l, down);
+    const V8F across = v8fMul(v8fMax(v8fMax(l, left), right), quarter), along = v8fMul(v8fMax(v8fMax(l, up), down), quarter);
+    const V8I h = v8iAnd(v8fGt(v8fMul(a1, a2), zero), v8iAnd(v8fGt(v8fAbs(a1), across), v8fGt(v8fAbs(a2), across)));
+    const V8I v = v8iAnd(v8fGt(v8fMul(b1, b2), zero), v8iAnd(v8fGt(v8fAbs(b1), along), v8fGt(v8fAbs(b2), along)));
+    return v8iOr(h, v);
+}
+static bool ridgeAt(float l, float left, float right, float up, float down) {
+    const float a1 = l - left, a2 = l - right, b1 = l - up, b2 = l - down;
+    const float across = artfMaxf(artfMaxf(l, left), right) * .25f, along = artfMaxf(artfMaxf(l, up), down) * .25f;
+    return (a1 * a2 > 0.f && fabsf(a1) > across && fabsf(a2) > across) || (b1 * b2 > 0.f && fabsf(b1) > along && fabsf(b2) > along);
+}
 /* post.c's upscaleRow with temporal antialiasing, for the pixels from from to to of row y, eight at a time: wasAt at
  * the frame's size (by the view alone where no instance shows, by the instance's motion where one does), the four
  * samples, the least and most around the nearest, the history: the same arithmetic in the same order. done[g] as for
@@ -2871,62 +2888,90 @@ static void upscaleLanes(ArtfSoftPost* p, int y, int from, int to, uint8_t* done
         const V8I r0 = v8iMul(hy0, v8iSet(w)), r1 = v8iMul(hy1, v8iSet(w));
         const V8I i00 = v8iAdd(r0, hx0), i01 = v8iAdd(r0, hx1), i10 = v8iAdd(r1, hx0), i11 = v8iAdd(r1, hx1);
         const size_t i = (size_t)y * w + x;
+        /* the lock (post.c's: a ridge here, or what it was where the pixel was, worn) */
+        const V8I lx = v8fToI(v8fAdd(tx, half)), ly = v8fToI(v8fAdd(ty, half));
+        const V8F lockWas = gatherF(p->lock[p->lockAt ^ 1], v8iAdd(v8iMul(ly, v8iSet(w)), lx));
+        const V8F worn = v8fMax(v8fSub(lockWas, v8fSet(1.f / 24.f)), zero);
+        const V8F lock = v8fSelect(v8fGt(gatherF(p->ridge, nearest), zero), worn, one);
+        v8iStoreU(p->lock[p->lockAt] + i, v8fAsI(v8fSelect(fresh, lock, zero)));
+        V8F was[3], now[3], between[4];
         for (int c = 0; c < 4; ++c) {
             const float* light = sf->postLight[c];
             const V8F l0 = gatherF(light, q[0]), l1 = gatherF(light, q[1]), l2 = gatherF(light, q[2]), l3 = gatherF(light, q[3]);
-            const V8F between = v8fAdd(v8fAdd(v8fAdd(v8fMul(l0, weights[0]), v8fMul(l1, weights[1])), v8fMul(l2, weights[2])), v8fMul(l3, weights[3]));
-            if (c == 3) {
-                v8iStoreU(p->scratch[3] + i, v8fAsI(between));
-                continue;
-            }
+            between[c] = v8fAdd(v8fAdd(v8fAdd(v8fMul(l0, weights[0]), v8fMul(l1, weights[1])), v8fMul(l2, weights[2])), v8fMul(l3, weights[3]));
+            if (c == 3) break;
             const V8F lo = gatherF(p->box[c], nearest), hi = gatherF(p->box[3 + c], nearest);
             const float* plane = p->history[c];
             const V8F a = gatherF(plane, i00), b = gatherF(plane, i01), cc = gatherF(plane, i10), e = gatherF(plane, i11);
             const V8F top = v8fAdd(a, v8fMul(v8fSub(b, a), hfx)), bottom = v8fAdd(cc, v8fMul(v8fSub(e, cc), hfx));
-            const V8F was = gradeClamp(v8fAdd(top, v8fMul(v8fSub(bottom, top), hfy)), lo, hi);
-            const V8F now = v8fMul(v8fAdd(v8fAdd(v8fAdd(v8fMul(l0, near[0]), v8fMul(l1, near[1])), v8fMul(l2, near[2])), v8fMul(l3, near[3])), each);
-            const V8F gathered = v8fAdd(was, v8fMul(v8fSub(now, was), share));
-            v8iStoreU(p->scratch[c] + i, v8fAsI(v8fSelect(fresh, gathered, between)));
+            const V8F had = v8fAdd(top, v8fMul(v8fSub(bottom, top), hfy)), kept = gradeClamp(had, lo, hi);
+            was[c] = v8fAdd(kept, v8fMul(v8fSub(had, kept), lock));
+            now[c] = v8fMul(v8fAdd(v8fAdd(v8fAdd(v8fMul(l0, near[0]), v8fMul(l1, near[1])), v8fMul(l2, near[2])), v8fMul(l3, near[3])), each);
+        }
+        v8iStoreU(p->scratch[3] + i, v8fAsI(between[3]));
+        /* (each by 1 / (1 + its luma)) */
+        const V8F byNow = v8fDiv(share, v8fAdd(one, lumaLanes(now[0], now[1], now[2]))), byWas = v8fDiv(v8fSub(one, share), v8fAdd(one, lumaLanes(was[0], was[1], was[2])));
+        const V8F taken = v8fDiv(byNow, v8fAdd(byNow, byWas));
+        for (int c = 0; c < 3; ++c) {
+            const V8F gathered = v8fAdd(was[c], v8fMul(v8fSub(now[c], was[c]), taken));
+            v8iStoreU(p->scratch[c] + i, v8fAsI(v8fSelect(fresh, gathered, between[c])));
         }
         done[g] = 1;
     }
 }
 
-/* post.c's boxRow: of each of the scene's pixels in row y, the least and most of each color around it, three by three,
- * in the same order; eight at a time away from the sides. */
+/* post.c's boxRow: of each of the scene's pixels in row y, what the history may be around it, three by three (the least
+ * and most of each color, held to their mean and three quarters of their deviation), and whether it is a ridge; in the
+ * same order; eight at a time away from the sides. */
 static void boxLanes(ArtfSoftPost* p, int y) {
     const int sw = p->sceneW, sh = p->sceneH;
     float* const* light = p->f->postLight;
     const size_t rows[3] = {(size_t)artfMaxi(y - 1, 0) * sw, (size_t)y * sw, (size_t)artfMini(y + 1, sh - 1) * sw};
     const size_t at = (size_t)y * sw;
+    const float ninth = 1.f / 9.f;
     for (int x = 0; x < sw;) {
         if (x >= 1 && x + 8 <= sw - 1) {
+            const V8F ninthL = v8fSet(ninth), most = v8fSet(.75f), zero = v8fSet(0.f);
             for (int c = 0; c < 3; ++c) {
-                V8F lo = v8fSet(3e38f), hi = v8fSet(-3e38f);
+                V8F lo = v8fSet(3e38f), hi = v8fSet(-3e38f), sum = zero, squares = zero;
                 for (int r = 0; r < 3; ++r)
                     for (int k = -1; k <= 1; ++k) {
                         const V8F there = loadU(light[c] + rows[r] + x + k);
                         lo = v8fSelect(v8fLt(there, lo), lo, there);
                         hi = v8fSelect(v8fLt(hi, there), hi, there);
+                        sum = v8fAdd(sum, there);
+                        squares = v8fAdd(squares, v8fMul(there, there));
                     }
+                const V8F mean = v8fMul(sum, ninthL), deviation = v8fSqrt(v8fMax(v8fSub(v8fMul(squares, ninthL), v8fMul(mean, mean)), zero));
+                const V8F low = v8fSub(mean, v8fMul(most, deviation)), high = v8fAdd(mean, v8fMul(most, deviation));
+                lo = v8fSelect(v8fLt(lo, low), lo, low);
+                hi = v8fSelect(v8fLt(high, hi), hi, high);
                 v8iStoreU(p->box[c] + at + x, v8fAsI(lo));
                 v8iStoreU(p->box[3 + c] + at + x, v8fAsI(hi));
             }
+#define LUMA_AT(row, dx) lumaLanes(loadU(light[0] + (row) + x + (dx)), loadU(light[1] + (row) + x + (dx)), loadU(light[2] + (row) + x + (dx)))
+            const V8I ridge = ridgeLanes(LUMA_AT(rows[1], 0), LUMA_AT(rows[1], -1), LUMA_AT(rows[1], 1), LUMA_AT(rows[0], 0), LUMA_AT(rows[2], 0));
+#undef LUMA_AT
+            v8iStoreU(p->ridge + at + x, v8fAsI(v8fSelect(ridge, zero, v8fSet(1.f))));
             x += 8;
             continue;
         }
         const int xs[3] = {artfMaxi(x - 1, 0), x, artfMini(x + 1, sw - 1)};
         for (int c = 0; c < 3; ++c) {
-            float lo = 3e38f, hi = -3e38f;
+            float lo = 3e38f, hi = -3e38f, sum = 0.f, squares = 0.f;
             for (int r = 0; r < 3; ++r)
                 for (int k = 0; k < 3; ++k) {
                     const float there = light[c][rows[r] + xs[k]];
                     lo = artfMinf(lo, there);
                     hi = artfMaxf(hi, there);
+                    sum = sum + there;
+                    squares = squares + there * there;
                 }
-            p->box[c][at + x] = lo;
-            p->box[3 + c][at + x] = hi;
+            const float mean = sum * ninth, deviation = sqrtf(artfMaxf(squares * ninth - mean * mean, 0.f));
+            p->box[c][at + x] = artfMaxf(lo, mean - .75f * deviation);
+            p->box[3 + c][at + x] = artfMinf(hi, mean + .75f * deviation);
         }
+        p->ridge[at + x] = ridgeAt(lumaAt(light, rows[1] + xs[1]), lumaAt(light, rows[1] + xs[0]), lumaAt(light, rows[1] + xs[2]), lumaAt(light, rows[0] + xs[1]), lumaAt(light, rows[2] + xs[1])) ? 1.f : 0.f;
         ++x;
     }
 }

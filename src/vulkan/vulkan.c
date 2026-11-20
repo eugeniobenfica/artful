@@ -400,6 +400,8 @@ typedef struct Vulkan {
     bool surfaceWide;               /* the surface target has its second word: motion is followed */
     GpuBuffer pastVertices;         /* what the vertex buffer held a frame ago, where a pose moves vertices (binding 68) */
     GpuBuffer postBlur;             /* motion blur's velocities (binding 69): unused since they share postOcclusion */
+    GpuBuffer postLocks;            /* upscaling's locks (binding 71): two floats a pixel of the frame, the halves in turn */
+    uint32_t lockHalf;              /* which half this frame's upscaling writes */
     uint32_t postNeeds;             /* what effects that are on need of the post buffers (postNeedsOf) */
     /* What each post pipeline reads and writes (its IR, from its words: postAccessOf), as bits: the three parts of set 1
      * (0 to 2), then set 0's post buffers; and, while postRecord records, what the dispatches since the last barrier read
@@ -571,8 +573,8 @@ static void targetsFree(Vulkan* v) {
     }
     imageFree(v, &v->floatColor);
     imageFree(v, &v->floatSurface);
-    GpuBuffer* const post[10] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom, &v->postBlur, &v->postNone};
-    for (int i = 0; i < 10; ++i) bufferFree(v, post[i]);
+    GpuBuffer* const post[11] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom, &v->postBlur, &v->postLocks, &v->postNone};
+    for (int i = 0; i < 11; ++i) bufferFree(v, post[i]);
     v->historyValid = false;
     v->hasPrevious = false;
     imageFree(v, &v->depth);
@@ -634,7 +636,8 @@ static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b
 
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
 /* What a post shader reads and writes, from its words (irFromSpirv, irUses): set 1's parts as bits 0 to 2, set 0's
- * bindings 50 to 59 as bits 3 to 12, 69 as 55's (they are one buffer); what else it binds is only read, and left out. */
+ * bindings 50 to 59 as bits 3 to 12, 69 as 55's (they are one buffer), 71 as bit 13; what else it binds is only read, and
+ * left out. */
 static void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* writes) {
     *reads = *writes = ~0u; /* (not known: as all) */
     IrModule m;
@@ -648,6 +651,7 @@ static void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uin
             if (uses[k].set == 1 && uses[k].binding < 3) bit = 1u << uses[k].binding;
             else if (uses[k].set == 0 && uses[k].binding >= 50 && uses[k].binding <= 59) bit = 1u << (3 + uses[k].binding - 50);
             else if (uses[k].set == 0 && uses[k].binding == 69) bit = 1u << (3 + 55 - 50);
+            else if (uses[k].set == 0 && uses[k].binding == 71) bit = 1u << 13;
             if (uses[k].read) *reads |= bit;
             if (uses[k].write) *writes |= bit;
         }
@@ -690,6 +694,11 @@ static bool postBuffersMake(Vulkan* v) {
     GpuBuffer* const buffers[8] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom};
     for (int i = 0; i < 8; ++i) bufferFree(v, buffers[i]);
     bufferFree(v, &v->postBlur);
+    bufferFree(v, &v->postLocks);
+    /* (upscaling's locks, with a history and the scene drawn smaller) */
+    if (v->postNeeds & NEED_HISTORY && (v->sceneWidth != v->width || v->sceneHeight != v->height) &&
+        !bufferNew(v, &v->postLocks, framePixels * 8, BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false))
+        return false;
     /* (motion blur's: each pixel's velocity, then of each tile of 16 the largest, and of its neighbours) */
     const VkDeviceSize blurTiles = (VkDeviceSize)((v->width + 15) / 16) * ((v->height + 15) / 16);
     const VkDeviceSize occlusion = v->postNeeds & NEED_OCCLUSION ? pixels * 4 : 0, blur = v->postNeeds & NEED_BLUR ? (framePixels + blurTiles * 2) * 8 : 0;
@@ -717,6 +726,7 @@ static bool postBuffersMake(Vulkan* v) {
         writes[9] = images[1];
         v->vkUpdateDescriptorSets(v->device, 10, writes, 0, NULL);
         bindStorage(v, &v->slots[k], 69, blur ? &v->postOcclusion : &v->postNone);
+        bindStorage(v, &v->slots[k], 71, v->postLocks.buffer ? &v->postLocks : &v->postNone);
     }
     const GpuBuffer* const three[3] = {&v->postLight, OR_NONE(&v->postScratch), OR_NONE(&v->postHistory)};
 #undef OR_NONE
@@ -1712,14 +1722,16 @@ static bool pipelinesMake(Vulkan* v) {
     /* (and with the ray tracing hardware, the top level) */
     /* (64 bindings, 54 without floats; then what moves (68, 69) with them, the top level (64), the meshlets view's table
      * (65) and emitters of many (66, 67)) */
-    DescriptorSetLayoutBinding all[71];
+    DescriptorSetLayoutBinding all[72];
     uint32_t bindingCount = v->floats ? 64 : 54;
     memcpy(all, bindings, bindingCount * sizeof *all);
     if (v->floats) {
         /* (what the vertices were a frame ago; motion blur's velocities) */
         const DescriptorSetLayoutBinding past = {68, DESCRIPTOR_STORAGE, 1, SHADER_VERTEX, NULL}, blur = {69, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL};
+        const DescriptorSetLayoutBinding locks = {71, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}; /* (upscaling's locks) */
         all[bindingCount++] = past;
         all[bindingCount++] = blur;
+        all[bindingCount++] = locks;
     }
     if (v->rayQuery) {
         const DescriptorSetLayoutBinding top = {64, DESCRIPTOR_AS, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL};
@@ -1747,7 +1759,7 @@ static bool pipelinesMake(Vulkan* v) {
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
     /* (54 storage bindings of the 64, then 65 to 70) */
-    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 60}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
+    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 64}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, v->rayQuery ? 4u : 3u, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -4157,7 +4169,8 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     const bool temporal = frame->post[1][3] > 0;
     if (scaled) {
         /* (from here on, the frame's size) */
-        postStep(v, c, POST_UPSCALE, temporal && v->historyValid ? 1u : 0u, framePixels);
+        postStep(v, c, POST_UPSCALE, (temporal && v->historyValid ? 1u : 0u) | v->lockHalf << 1, framePixels);
+        v->lockHalf ^= 1; /* (what this frame's locks are, the next reads) */
         postSwap(v, c, temporal);
         passMark(v, c, s, "upscaling");
     } else if (temporal) {
@@ -5500,6 +5513,7 @@ void artfVulkanTargetBytes(const ArtfRenderer* r, uint64_t* bytes) {
     bytes[FG_OCCLUSION] = v->postOcclusion.held;
     bytes[FG_BLOOM] = v->postBloom.held;
     bytes[FG_BLUR] = 0; /* (they share ambient occlusion's buffer) */
+    bytes[FG_LOCKS] = v->postLocks.held;
     bytes[FG_FRAME] = v->offscreen.held;
 }
 
