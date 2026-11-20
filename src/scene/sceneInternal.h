@@ -283,6 +283,9 @@ typedef struct ArtfIndirect {
     ArtfIndirectDesc desc;
     int dims[3];
     float origin[3], spacing[3];
+    /* With follow: the cell the volume starts at, in cells of the world, and where that cell's probe is kept (each
+     * axis, base modulo dims): a cell (x, y, z) of the volume is kept at artfIndirectSlot. Without: none, and all 0. */
+    int base[3], wrap[3];
     float* probes;      /* dims product x ARTF_PROBE_FLOATS */
     float* next;        /* what this step makes */
     uint32_t frames;
@@ -290,6 +293,29 @@ typedef struct ArtfIndirect {
     uint32_t serial;    /* artfSceneSetIndirect's calls: a GPU that gathers the probes itself starts over when it changes */
 } ArtfIndirect;
 ARTF_INLINE uint32_t artfIndirectCount(const ArtfIndirect* g) { return (uint32_t)(g->dims[0] * g->dims[1] * g->dims[2]); }
+/* Where the probe of the volume's cell (x, y, z) is kept: each axis turned by wrap (follow), as the GPU's. */
+ARTF_INLINE uint32_t artfIndirectSlot(const ArtfIndirect* g, int x, int y, int z) {
+    const int c[3] = {x + g->wrap[0], y + g->wrap[1], z + g->wrap[2]};
+    int s[3];
+    for (int k = 0; k < 3; ++k) s[k] = c[k] >= g->dims[k] ? c[k] - g->dims[k] : c[k];
+    return (uint32_t)((s[2] * g->dims[1] + s[1]) * g->dims[0] + s[0]);
+}
+/* What a probe kept at a slot is of: the volume's cell (x, y, z) there now, and the world's cell, as its stamp (1 + its
+ * cell's coordinates, each modulo 256, in a float: exact). A probe whose stamp is not its cell's is new there: it starts
+ * over. The world's cell is the volume's origin over its spacing, rounded, plus the volume's cell, on both backends. */
+ARTF_INLINE float artfIndirectStampAt(const ArtfIndirect* g, uint32_t slot, int* cell) {
+    const int sx = (int)(slot % (uint32_t)g->dims[0]), sy = (int)(slot / (uint32_t)g->dims[0] % (uint32_t)g->dims[1]), sz = (int)(slot / (uint32_t)(g->dims[0] * g->dims[1]));
+    const int s[3] = {sx, sy, sz};
+    uint32_t code = 0;
+    for (int k = 0; k < 3; ++k) {
+        cell[k] = s[k] >= g->wrap[k] ? s[k] - g->wrap[k] : s[k] - g->wrap[k] + g->dims[k];
+        const int world = (int)floorf(g->origin[k] / g->spacing[k] + .5f) + cell[k];
+        code |= (uint32_t)(world & 255) << (8 * k);
+    }
+    return (float)(code + 1u);
+}
+/* With follow: the volume around where the camera is now (artfRendererDraw, before each frame). */
+void artfIndirectFollow(ArtfScene* s);
 
 /* Light from all around a surface at p facing n, from the probes near it, over pi. */
 void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float* out);

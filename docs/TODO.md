@@ -65,7 +65,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [x] 4.3 Cozimento — HLOD (`artfSceneSaveHlod`), glTF (`artfPrepareModelCooked`), `artful-cook`, alvo de fuzzing
 
 ## Fase 5 — Alcance de conteúdo
-- [~] 5.1 Probes escaláveis — estados e histerese adaptativa (critério atingido); faltam cascatas seguindo a câmera; realocação descartada
+- [~] 5.1 Probes escaláveis — estados e histerese adaptativa (critério atingido); volume que segue a câmera (`follow`, toroidal, sem cópia); faltam as cascatas; realocação descartada
 - [x] 5.2 Luzes em clusters — 0 omitidas no corredor (antes 1.846), 0,09 ms a 1080p
 - [x] 5.3 LTC para retângulos e tubos — retângulo 54–58% → 4–9% do traçado, tubo 22% → 0,5%
 - [~] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); faltam máscaras reativa/composição e Lanczos

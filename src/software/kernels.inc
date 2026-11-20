@@ -867,7 +867,12 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lan
     for (int c = 0; c < 8; ++c) {
         const V8I x = v8iAdd(i0[0], v8iSet(c & 1)), y = v8iAdd(i0[1], v8iSet(c >> 1 & 1)), z = v8iAdd(i0[2], v8iSet(c >> 2));
         V8F weight = v8fMul(v8fMul(c & 1 ? w[0] : v8fSub(one, w[0]), c & 2 ? w[1] : v8fSub(one, w[1])), c & 4 ? w[2] : v8fSub(one, w[2]));
-        const V8I index = v8iAdd(v8iMul(v8iAdd(v8iMul(z, v8iSet(g->dims[1])), y), v8iSet(g->dims[0])), x);
+        /* (where each is kept: turned by wrap, artfIndirectSlot) */
+        V8I sx = v8iAdd(x, v8iSet(g->wrap[0])), sy = v8iAdd(y, v8iSet(g->wrap[1])), sz = v8iAdd(z, v8iSet(g->wrap[2]));
+        sx = v8iSelect(v8iGt(sx, v8iSet(g->dims[0] - 1)), sx, v8iSub(sx, v8iSet(g->dims[0])));
+        sy = v8iSelect(v8iGt(sy, v8iSet(g->dims[1] - 1)), sy, v8iSub(sy, v8iSet(g->dims[1])));
+        sz = v8iSelect(v8iGt(sz, v8iSet(g->dims[2] - 1)), sz, v8iSub(sz, v8iSet(g->dims[2])));
+        const V8I index = v8iAdd(v8iMul(v8iAdd(v8iMul(sz, v8iSet(g->dims[1])), sy), v8iSet(g->dims[0])), sx);
         const V8I base = v8iMul(index, v8iSet(16));
 #define PROBE(j) v8iAsF(v8iGather(bits, v8iAdd(base, v8iSet(j))))
         weight = v8fMul(weight, PROBE(3)); /* (none from one inside something) */

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Probes that follow the camera** (`ArtfIndirectDesc.follow`, phase 5.1): the volume of probes is around the camera
+  and moves a cell at a time, in place of a box that stays. Nothing is copied: probes are kept by their cell modulo
+  the volume's size, and each carries the cell of the world it stands for, so one that came into a new cell starts
+  over and the rest keep their light. Both backends, the same probes to 2e-6. Cascades are not done yet.
+
 - **Phase 4.2 done.** The scene's passes take their barriers from what each says it does (`trackUse`): one where
   three were before the scene, the same where they were needed, and synchronization validation clean, also with
   occlusion. Both backends' passes are one graph of what must come before what (`render/framePasses.c`); each frame's

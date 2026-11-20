@@ -112,6 +112,7 @@ static void pace(ArtfRenderer* r) {
 
 bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene) {
     artfSceneTextureRoles(scene);
+    artfIndirectFollow(scene);
     scene->drawingThread = artfThreadId();
     const bool drawn = r->vt->draw(r, scene);
     scene->drawingThread = 0;

@@ -1474,7 +1474,15 @@ void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc) {
     static const int start[3] = {8, 4, 8};
     for (int k = 0; k < 3; ++k) g->dims[k] = artfClampi(desc->probes[k] > 0 ? desc->probes[k] : start[k], 2, 64);
     float low[3], high[3];
-    if (desc->low.x != desc->high.x || desc->low.y != desc->high.y || desc->low.z != desc->high.z) {
+    if (desc->follow) {
+        /* (a volume of that size, where the camera is: artfIndirectFollow places it) */
+        const bool sized = desc->low.x != desc->high.x || desc->low.y != desc->high.y || desc->low.z != desc->high.z;
+        const float size[3] = {sized ? fabsf(desc->high.x - desc->low.x) : 32.f, sized ? fabsf(desc->high.y - desc->low.y) : 12.f, sized ? fabsf(desc->high.z - desc->low.z) : 32.f};
+        for (int k = 0; k < 3; ++k) {
+            low[k] = 0;
+            high[k] = artfMaxf(size[k], 1e-3f);
+        }
+    } else if (desc->low.x != desc->high.x || desc->low.y != desc->high.y || desc->low.z != desc->high.z) {
         for (int k = 0; k < 3; ++k) {
             low[k] = artfMinf((&desc->low.x)[k], (&desc->high.x)[k]);
             high[k] = artfMaxf((&desc->low.x)[k], (&desc->high.x)[k]);
@@ -1495,6 +1503,24 @@ void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc) {
     g->probes = artfCalloc((size_t)artfIndirectCount(g) * ARTF_PROBE_FLOATS, 4);
     g->next = artfCalloc((size_t)artfIndirectCount(g) * ARTF_PROBE_FLOATS, 4);
     g->on = true;
+    if (desc->follow) {
+        g->base[0] = g->base[1] = g->base[2] = 1 << 30; /* (placed at the first frame) */
+        artfIndirectFollow(s);
+    }
+}
+
+void artfIndirectFollow(ArtfScene* s) {
+    ArtfIndirect* g = &s->indirect;
+    if (!g->on || !g->desc.follow) return;
+    const float eye[3] = {s->camera.position.x, s->camera.position.y, s->camera.position.z};
+    for (int k = 0; k < 3; ++k) {
+        /* (the cell of the camera, at the middle of the volume) */
+        const int base = (int)floorf(eye[k] / g->spacing[k]) - (g->dims[k] - 1) / 2;
+        if (base == g->base[k]) continue;
+        g->base[k] = base;
+        g->origin[k] = (float)base * g->spacing[k];
+        g->wrap[k] = ((base % g->dims[k]) + g->dims[k]) % g->dims[k];
+    }
 }
 
 void artfSceneSetPost(ArtfScene* s, const ArtfPostDesc* desc) {
@@ -1852,7 +1878,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
         const ArtfIndirect* g = &s->indirect;
         const float rows[3][4] = {{g->origin[0], g->origin[1], g->origin[2], g->desc.strength > 0 ? g->desc.strength : 1.f},
                                   {g->spacing[0], g->spacing[1], g->spacing[2], 0},
-                                  {(float)g->dims[0], (float)g->dims[1], (float)g->dims[2], 0}};
+                                  {(float)g->dims[0], (float)g->dims[1], (float)g->dims[2], (float)(g->wrap[0] + g->wrap[1] * 64 + g->wrap[2] * 4096)}};
         memcpy(out->indirect, rows, sizeof rows);
     }
     memcpy(out->previous, vp.m, sizeof vp.m);

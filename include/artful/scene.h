@@ -732,6 +732,10 @@ typedef struct ArtfIndirectDesc {
     ArtfVec3 low, high; /* the box the probes fill; both zero: the scene's bounds */
     bool throughWalls;  /* leave out what each probe sees: lighter (about 5 ms less at 1920 x 1080 on a Vega 8, the
                          * pixel shader reading a third as much), and light leaks through walls thinner than a cell */
+    /* The probes go with the camera, in place of a box that stays: high - low is how large their volume is (both zero:
+     * 32 x 12 x 32), centred on the camera and moved a cell at a time as it moves. What a step left keeps its light;
+     * the cells that come in start over, the probes of those that went taking their place (no copy). */
+    bool follow;
 } ArtfIndirectDesc;
 
 /* NULL: none. */

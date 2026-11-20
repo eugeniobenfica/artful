@@ -1472,3 +1472,88 @@ void testLightMis(void) {
     artfFree(truth);
     artfFree(few);
 }
+
+/* Probes that follow the camera (ArtfIndirectDesc.follow): the volume is around the camera, light bounces from the red
+ * wall onto the floor as with a box; a step of the camera across a cell starts one slab of probes over and keeps the
+ * rest, as their stamps say; and the GPU's probes, after steps away and back, are the CPU's. */
+void testProbesFollow(void) {
+    const ArtfIndirectDesc d = {{8, 4, 8}, 64, .5f, 1, {0, 0, 0}, {16, 6, 16}, false, true};
+    /* (the CPU's: the slab a step starts over) */
+    {
+        ArtfScene* s = bleedScene();
+        artfSceneSetIndirect(s, &d);
+        ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        for (int k = 0; k < 4; ++k) CHECK(artfRendererDraw(r, s));
+        const ArtfIndirect* g = &s->indirect;
+        const int was = g->base[0];
+        setCamera(s, g->spacing[0], 3, 7, g->spacing[0], 0, 0);
+        artfIndirectFollow(s);
+        int fresh = 0;
+        for (uint32_t i = 0; i < artfIndirectCount(g); ++i) {
+            int cell[3];
+            fresh += g->probes[(size_t)i * 16 + 7] != artfIndirectStampAt(g, i, cell);
+        }
+        printf("probes that follow: a step of a cell moves the volume %d cell, and starts %d probes over, a slab of %d\n", g->base[0] - was, fresh, g->dims[1] * g->dims[2]);
+        CHECK(g->base[0] == was + 1 && fresh == g->dims[1] * g->dims[2]);
+        artfRendererFree(r);
+        artfSceneFree(s);
+    }
+    uint32_t* frames[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    float* probes[2] = {NULL, NULL};
+    double bled[2] = {0, 0};
+    bool drawn[2] = {false, false};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) {
+            missing("vulkan");
+            continue;
+        }
+        ArtfScene* s = bleedScene();
+        artfSceneSetIndirect(s, &d);
+        /* (along x and back, a cell and a half each way, with steps at each place) */
+        const float stops[5] = {0, 1.5f, 3.f, 1.5f, 0};
+        for (int k = 0; k < 5; ++k) {
+            const float x = stops[k] * s->indirect.spacing[0];
+            setCamera(s, x, 3, 7, x, 0, 0);
+            for (int f = 0; f < 4; ++f) CHECK(artfRendererDraw(r, s));
+        }
+        CHECK(artfRendererReadPixels(r, frames[backend]));
+        const int fx = W / 2 + 28, fy = H / 2 + 34;
+        bled[backend] = meanOf(frames[backend], fx, fy, 16) - meanOf(frames[backend], fx, fy, 8);
+        const size_t floats = (size_t)artfIndirectCount(&s->indirect) * ARTF_PROBE_FLOATS;
+        probes[backend] = artfMalloc(floats * 4);
+#ifdef ARTFUL_VULKAN
+        if (backend) CHECK(artfVulkanProbesRead(r, probes[backend], floats));
+        else
+#endif
+            memcpy(probes[backend], s->indirect.probes, floats * 4);
+        drawn[backend] = true;
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    printf("probes that follow, after steps away and back: red over green by the wall %.1f (CPU)", bled[0]);
+    if (drawn[1]) {
+        double most = 0, light = 0;
+        const uint32_t count = 8 * 4 * 8;
+        for (uint32_t i = 0; i < count; ++i)
+            for (int k = 0; k < 3; ++k) {
+                most = fmax(most, fabs(probes[0][i * 16 + k]));
+                light = fmax(light, fabs(probes[0][i * 16 + k] - probes[1][i * 16 + k]));
+            }
+        int stamps = 0;
+        for (uint32_t i = 0; i < count; ++i) stamps += probes[0][i * 16 + 7] == probes[1][i * 16 + 7];
+        const double apart = differentShare(frames[0], frames[1], 16);
+        printf(", %.1f (GPU); the GPU's probes against the CPU's, %.2g of the brightest at most, %d of %u stamps the same; %.2f%% of pixels apart\n", bled[1], light / fmax(most, 1e-9), stamps,
+               count, apart * 100);
+        CHECK(light <= most * 1e-4 && stamps == (int)count && apart < .01 && bled[1] > 3);
+    } else {
+        printf("\n");
+    }
+    CHECK(bled[0] > 3);
+    for (int k = 0; k < 2; ++k) {
+        artfFree(frames[k]);
+        artfFree(probes[k]);
+    }
+}
