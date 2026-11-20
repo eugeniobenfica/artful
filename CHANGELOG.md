@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Paths aim at light from all around** (the plan's phase 2.3, first part): with a picture of all around, each surface
+  of a path also sends a ray toward it, chosen by its texels' light times the share of all around each covers
+  (`artfEnvAim`; tables kept past the maps, which the GPU reads from the same buffer), for what the surface gives back
+  diffusely, weighed against the path's own diffuse bounce by the power heuristic; the diffuse bounce is a point on a
+  sphere, the cosine exactly. Under a sun of 40 at sixteen samples: .020 from 4,096 where it was .041, 1 pixel far off
+  where there were 169; converged, the same light as before but for half a percent that the old diffuse bounce, a point
+  in a ball, gave too much. A sun so bright that a path passed 64 was cut and lost; aimed at, it is not, and such
+  scenes are brighter. New test `tracing/environmentAimed`: aims go to a small sun (248 of 256), how likely a direction
+  is agrees both ways and is 1 / (4 pi) within 1% under even light, and a diffuse ball under even light shows its
+  albedo times it (169.9 and 169.7 for 170), on both backends. Metal's shaders made again. **Not yet**: highlights by
+  sampling visible normals, with MIS against lights; ray cones for textures.
+
 - **Paths' samples are Sobol's, scrambled by Owen's way** (the plan's phase 2.2): where in the pixel a path starts, the
   point of a ball it turns by at each surface and the lobe it takes, four dimensions a bounce, each pixel its own
   scrambling, by a hash (Burley, 2020; `scene/sampling.h`), the same integers in the tracing shader (`sobol4Of`). The

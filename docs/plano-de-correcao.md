@@ -131,7 +131,10 @@ Um arquivo novo, `src/shading/sampling.inc`, incluído nos mesmos contextos que 
 | 2.2 Sobol com Owen | **Feito.** | Câmera, ponto da bola e escolha do lóbulo vêm de um Sobol 4D por evento, com embaralhamento de Owen por pixel (`scene/sampling.h`), e a mesma conta inteira no shader de traçado. A direção é gerada sem rejeição. Com 4 amostras, o erro contra 512 caiu de 2,21 para 1,43 (−35%; meta −30%). FLIP contra 1.024 amostras: −24% com 4 amostras e −40% com 16. Custo: +11% por amostra na CPU, nada na GPU. O teste do denoiser passou a exigir um limite absoluto, porque o ruído de partida ficou menor. |
 | 2.2 Ruído azul entre pixels | **Pendente.** | Heitz 2019 ou FAST: uma tabela pequena embutida que decide o embaralhamento por pixel. |
 | 2.2 Probes | **Mantidas no hash.** | A GPU coleta as probes na mesma ordem da CPU; trocar exige mudar os dois lados e o teste `tracing/probesGpu`. |
-| 2.3, 2.4 | **Não iniciados.** | |
+| 2.3 Ambiente por importância + MIS | **Feito para o lóbulo difuso.** | As tabelas (CDF marginal e condicional sobre o mapa octaédrico, pesadas por luminância × ângulo sólido) ficam no fim do buffer do ambiente, e a GPU as lê sem binding novo. O NEE cobre o difuso, com MIS por heurística da potência contra o salto difuso, que agora é cosseno exato. Os saltos especulares continuam pegando o ambiente sem peso, o que mantém o estimador sem viés. Com sol 40 e 16 amostras: RMSE de 0,041 para 0,020 e pixels quentes de 169 para 1. Convergido: a mesma luz, menos 0,5% de viés do salto difuso antigo. Fornalha exata nos dois backends. Diferença em relação ao plano: o critério de "energia não muda além de 0,5%" não vale para sóis acima do corte de 64 por caminho, porque o estimador antigo perdia essa energia; esses casos ficam mais claros, corretamente. |
+| 2.3 VNDF + MIS especular | **Pendente.** | O lóbulo especular é "espelho + bola × rugosidade²", sem pdf analítico. Trocar por VNDF (Dupuy-Benyoub) permite MIS também para luzes com tamanho e para o ambiente nos realces. |
+| 2.3 Cones de raio | **Pendente.** | |
+| 2.4 | **Não iniciado.** | |
 
 ---
 

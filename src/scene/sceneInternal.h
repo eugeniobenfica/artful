@@ -906,7 +906,11 @@ void artfSwarmMove(float* particle, const float* step, uint32_t place);
  * floats a texel. The GPU reads the same floats, and its shaders do the same arithmetic. */
 #define ARTF_ENV_LEVELS 6
 #define ARTF_ENV_DIFFUSE 5
-#define ARTF_ENV_FLOATS (3 * (514 * 514 + 66 * 66 + 34 * 34 + 3 * 18 * 18))
+/* Past the maps, what aims at the first of them by the light each of its texels gives, times the share of all around
+ * it covers (environment.c): for each of its 512 rows, 513 sums of its texels from 0 to 1; then 513 of the rows. All
+ * 0 when the picture gives no light. */
+#define ARTF_ENV_AIM_START (3 * (514 * 514 + 66 * 66 + 34 * 34 + 3 * 18 * 18))
+#define ARTF_ENV_FLOATS (ARTF_ENV_AIM_START + 513 * 513)
 ARTF_INLINE uint32_t artfEnvSize(int level) { return level == 0 ? 512u : level == 1 ? 64u : level == 2 ? 32u : 16u; }
 ARTF_INLINE uint32_t artfEnvStart(int level) {
     uint32_t at = 0;
@@ -944,6 +948,66 @@ ARTF_INLINE void artfEnvSample(const float* env, int level, float x, float y, fl
         const float top = p00[k] + (p10[k] - p00[k]) * fx, bottom = p01[k] + (p11[k] - p01[k]) * fx;
         out[k] = top + (bottom - top) * fy;
     }
+}
+
+/* The direction at a place on a map (0 to 1): artfEnvPlace's way back, unfolded below. */
+ARTF_INLINE void artfEnvDirection(float u, float v, float* d) {
+    float a = u * 2.f - 1.f, b = v * 2.f - 1.f;
+    const float sum = fabsf(a) + fabsf(b);
+    float y = 1.f - sum;
+    if (sum > 1.f) {
+        const float unfolded = (1.f - fabsf(b)) * (a >= 0 ? 1.f : -1.f);
+        b = (1.f - fabsf(a)) * (b >= 0 ? 1.f : -1.f);
+        a = unfolded;
+        y = 1.f - sum;
+    }
+    const float inverse = 1.f / sqrtf(a * a + y * y + b * b);
+    d[0] = a * inverse;
+    d[1] = y * inverse;
+    d[2] = b * inverse;
+}
+
+/* Of sums from 0 to 1 (513 of them), the one of 512 a number falls in: in nine halvings, as the shader's. */
+ARTF_INLINE uint32_t artfEnvFind(const float* sums, float u) {
+    uint32_t at = 0;
+    for (uint32_t step = 256; step; step >>= 1)
+        if (sums[at + step] <= u) at += step;
+    return at;
+}
+
+/* How likely a direction is to be aimed at (artfEnvAim), over directions: a texel's share, over the share of all
+ * around it covers. On a map of an octahedron that is (512^2 / 4) / (|x| + |y| + |z|)^3 of a unit direction. */
+ARTF_INLINE float artfEnvAimShare(float rowShare, float columnShare, const float* d) {
+    const float l1 = fabsf(d[0]) + fabsf(d[1]) + fabsf(d[2]);
+    return rowShare * columnShare * 65536.f / (l1 * l1 * l1);
+}
+
+/* A direction toward the picture of all around, chosen as much as it gives light, from two numbers in [0, 1); how
+ * likely it was (artfEnvAimDensity's). 0: the picture gives none. */
+ARTF_INLINE float artfEnvAim(const float* env, float u0, float u1, float* d) {
+    const float* aim = env + ARTF_ENV_AIM_START;
+    const float* rows = aim + 512 * 513;
+    if (!(rows[512] > 0)) return 0.f;
+    const uint32_t row = artfEnvFind(rows, u0);
+    const float* columns = aim + row * 513;
+    const uint32_t column = artfEnvFind(columns, u1);
+    const float rowShare = rows[row + 1] - rows[row], columnShare = columns[column + 1] - columns[column];
+    /* (where in its texel: what is left of each number, as a share of its texel's) */
+    const float across = (u1 - columns[column]) / columnShare, down = (u0 - rows[row]) / rowShare;
+    artfEnvDirection(((float)column + across) * (1.f / 512.f), ((float)row + down) * (1.f / 512.f), d);
+    return artfEnvAimShare(rowShare, columnShare, d);
+}
+
+/* How likely artfEnvAim is to choose this direction (unit), over directions. */
+ARTF_INLINE float artfEnvAimDensity(const float* env, const float* d) {
+    const float* aim = env + ARTF_ENV_AIM_START;
+    const float* rows = aim + 512 * 513;
+    if (!(rows[512] > 0)) return 0.f;
+    float u, v;
+    artfEnvPlace(d[0], d[1], d[2], &u, &v);
+    const uint32_t column = (uint32_t)artfMinf(u * 512.f, 511.f), row = (uint32_t)artfMinf(v * 512.f, 511.f);
+    const float* columns = aim + row * 513;
+    return artfEnvAimShare(rows[row + 1] - rows[row], columns[column + 1] - columns[column], d);
 }
 
 /* Light reflected toward a direction by a surface this rough: between the two nearest maps. */

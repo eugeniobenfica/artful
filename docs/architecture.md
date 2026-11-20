@@ -227,6 +227,20 @@ as `addLight` (`shading.inc`'s) with a shadow ray added; then one bounce. For `A
 diffuse bounce, chosen at random, and what comes from all around is what a path finds when it leaves: so a
 corner gets dark by itself. Past three bounces paths end at random, in proportion to what they still carry.
 
+**Aiming at all around.** With a picture of all around, a path at each surface also sends a ray toward it, chosen
+as much as each of the picture's texels gives light times the share of all around it covers (on a map of an
+octahedron, `(|x| + |y| + |z|)^3` of its direction): two searches of nine halvings in sums kept past the maps
+(`artfEnvAim`, `environment.c`'s `aimTables`), which the GPU reads from the same buffer. That ray brings what the
+surface gives back diffusely, and the path's own diffuse bounce, when it leaves the scene, brings its share too: each
+weighed by how likely the other way was to find the same light (MIS, the power heuristic), so that neither is counted
+twice. A diffuse bounce is a point on a sphere over the surface, which is the cosine exactly, so that how likely it is
+is known (before, a point in the ball, which is not, and drew rough surfaces half a percent bright). What a surface
+reflects is found by bouncing alone, unweighed. Under a picture with a small sun of 40, at sixteen samples, the error
+from 4,096 is .020 where it was .041, and pixels far off the truth went from 169 to 1; a ball that gives light back
+diffusely under light the same from everywhere shows its albedo times that light to within half a step of a byte, on
+both backends (`tracing/environmentAimed`). A sun so bright that one path's light passes 64 (`LIGHT_LIMIT`) was cut
+there and lost before; aimed at, it no longer is, and such a scene is brighter now, as it should be.
+
 Holes need no special case. A surface that is only partly there lets a path through that share of the
 time, and a shadow ray through that share of its light. So glass and fences work with the same code, and
 layers that cut through each other are right, which drawing cannot do. With `ior` a path bends as it goes

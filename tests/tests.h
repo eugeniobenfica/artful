@@ -189,6 +189,7 @@ void testProbesGpu(void);
 void testTrace(ArtfBackend backend);
 void testTraceData(void);
 void testTraceBothBackends(void);
+void testEnvironmentAimed(ArtfBackend backend);
 /* sky.c: the sky, and light from all around from a picture */
 void testEnvironment(void);
 void testSky(void);

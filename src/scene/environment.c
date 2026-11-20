@@ -167,6 +167,43 @@ static void sourceFree(Source* s) {
     artfFree(s->weight);
 }
 
+/* What aims at the first map (artfEnvAim): each texel as much as its light (luminance) times the share of all around it
+ * covers, (|x| + |y| + |z|)^3 of its middle's direction; each row's sums from 0 to 1, then the rows'. In doubles, in one
+ * order: the same floats everywhere. A row with no light is even (it is never chosen); a picture with none is all 0. */
+static void aimTables(float* env) {
+    const uint32_t n = artfEnvSize(0), w = n + 2;
+    float* aim = env + ARTF_ENV_AIM_START;
+    float* rows = aim + 512 * 513;
+    double rowTotals[512];
+    double all = 0;
+    for (uint32_t y = 0; y < n; ++y) {
+        float* columns = aim + y * 513;
+        double sum = 0;
+        double sums[513];
+        sums[0] = 0;
+        for (uint32_t x = 0; x < n; ++x) {
+            const float* t = env + 3 * ((y + 1) * w + x + 1);
+            float d[3];
+            artfEnvDirection(((float)x + .5f) / (float)n, ((float)y + .5f) / (float)n, d);
+            const double l1 = fabs((double)d[0]) + fabs((double)d[1]) + fabs((double)d[2]);
+            const double lum = artfMaxf(.2126f * t[0] + .7152f * t[1] + .0722f * t[2], 0.f);
+            sum += lum * l1 * l1 * l1;
+            sums[x + 1] = sum;
+        }
+        for (uint32_t x = 0; x <= n; ++x) columns[x] = sum > 0 ? (float)(sums[x] / sum) : (float)x / (float)n;
+        columns[n] = 1.f;
+        rowTotals[y] = sum;
+        all += sum;
+    }
+    double sum = 0;
+    rows[0] = 0;
+    for (uint32_t y = 0; y < n; ++y) {
+        sum += rowTotals[y];
+        rows[y + 1] = all > 0 ? (float)(sum / all) : 0.f;
+    }
+    if (all > 0) rows[n] = 1.f;
+}
+
 bool artfSceneSetEnvironment(ArtfScene* s, const float* rgb, int width, int height, float light, bool shown) {
     if (!rgb) {
         artfFree(s->environment);
@@ -193,6 +230,7 @@ bool artfSceneSetEnvironment(ArtfScene* s, const float* rgb, int width, int heig
     sourceFree(&fine);
     sourceFree(&coarse);
     artfPoolFree(pool);
+    aimTables(env);
     s->environment = env;
     s->environmentLight = light;
     s->environmentShown = shown;

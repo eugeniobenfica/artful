@@ -124,6 +124,8 @@ int main(int argc, char** argv) {
     RUN("tracing/trace/software", testTrace(ARTF_BACKEND_SOFTWARE));
     RUN("tracing/trace/vulkan", testTrace(ARTF_BACKEND_VULKAN));
     RUN("tracing/traceBothBackends", testTraceBothBackends());
+    RUN("tracing/environmentAimed/software", testEnvironmentAimed(ARTF_BACKEND_SOFTWARE));
+    RUN("tracing/environmentAimed/vulkan", testEnvironmentAimed(ARTF_BACKEND_VULKAN));
     RUN("core/handles", testHandles());
     RUN("post/look/software", testLook(ARTF_BACKEND_SOFTWARE));
     RUN("post/look/vulkan", testLook(ARTF_BACKEND_VULKAN));

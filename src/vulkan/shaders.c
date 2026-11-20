@@ -2707,7 +2707,7 @@ typedef struct Tracer {
     /* variables: all at the top of main, as SPIR-V wants */
     SpvId stack, depth, at, pop, stack2, depth2, at2, pop2, leaf, leaf2;
     SpvId bestT, bestU, bestV, bestInstance, bestTriangle;
-    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice;
+    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice, diffuseLikely;
     SpvId shadowOrigin, through, limit, shadowStep, lightIndex, ballStep, ball, travelled, keep;
     GraphVars own;
     const ArtfGraphData* graphs;
@@ -3086,6 +3086,80 @@ static SpvId traceHash(Spv* s, SpvId x) {
     return XOR_U(x, SHR_U(x, 16));
 }
 
+/* ---- aiming at light from all around: as artfEnvAim and artfEnvAimDensity, on the same floats ---- */
+
+/* artfEnvFind: of 513 sums from start, the one of 512 that u falls in, in nine halvings */
+static SpvId envFindSpv(Spv* s, const Resources* r, SpvId start, SpvId u) {
+    SpvId at = spvConstUint(s, 0);
+    for (uint32_t step = 256; step; step >>= 1) {
+        SpvId next = spvOp2(s, SPV_OP_IAdd, s->uintType, at, spvConstUint(s, step));
+        SpvId sum = envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, start, next));
+        at = spvSelect(s, s->uintType, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, sum, u), next, at);
+    }
+    return at;
+}
+
+/* artfEnvAimShare */
+static SpvId envAimShareSpv(Spv* s, SpvId rowShare, SpvId columnShare, SpvId d) {
+    SpvId l1 = ADD_F(ADD_F(G_ABS(X(d)), G_ABS(Y(d))), G_ABS(Z(d)));
+    return DIV_F(MUL_F(MUL_F(rowShare, columnShare), FLOAT(65536.f)), MUL_F(MUL_F(l1, l1), l1));
+}
+
+/* artfEnvDirection */
+static SpvId envDirectionSpv(Spv* s, SpvId u, SpvId v) {
+    SpvId a = SUB_F(MUL_F(u, FLOAT(2.f)), FLOAT(1.f)), b = SUB_F(MUL_F(v, FLOAT(2.f)), FLOAT(1.f));
+    SpvId sum = ADD_F(G_ABS(a), G_ABS(b));
+    SpvId y = SUB_F(FLOAT(1.f), sum);
+    SpvId folded = G_GT(sum, FLOAT(1.f));
+    SpvId signA = G_PICK(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, a, FLOAT(0.f)), FLOAT(1.f), FLOAT(-1.f));
+    SpvId signB = G_PICK(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, b, FLOAT(0.f)), FLOAT(1.f), FLOAT(-1.f));
+    SpvId unfoldedA = MUL_F(SUB_F(FLOAT(1.f), G_ABS(b)), signA), unfoldedB = MUL_F(SUB_F(FLOAT(1.f), G_ABS(a)), signB);
+    a = G_PICK(folded, unfoldedA, a);
+    b = G_PICK(folded, unfoldedB, b);
+    SpvId inverse = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, ADD_F(ADD_F(MUL_F(a, a), MUL_F(y, y)), MUL_F(b, b))));
+    return vec3Of(s, MUL_F(a, inverse), MUL_F(y, inverse), MUL_F(b, inverse));
+}
+
+/* artfEnvAim: a direction (into *d) and how likely it was; read only where there is a picture of all around */
+static SpvId envAimSpv(Spv* s, const Resources* r, SpvId u0, SpvId u1, SpvId* d) {
+    SpvId rows = spvConstUint(s, ARTF_ENV_AIM_START + 512 * 513);
+    SpvId row = envFindSpv(s, r, rows, u0);
+    SpvId columns = spvOp2(s, SPV_OP_IAdd, s->uintType, spvConstUint(s, ARTF_ENV_AIM_START), spvOp2(s, SPV_OP_IMul, s->uintType, row, spvConstUint(s, 513)));
+    SpvId column = envFindSpv(s, r, columns, u1);
+    SpvId rowLow = envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, rows, row)), rowHigh = envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, rows, spvOp2(s, SPV_OP_IAdd, s->uintType, row, spvConstUint(s, 1))));
+    SpvId columnLow = envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, columns, column)), columnHigh = envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, columns, spvOp2(s, SPV_OP_IAdd, s->uintType, column, spvConstUint(s, 1))));
+    SpvId rowShare = SUB_F(rowHigh, rowLow), columnShare = SUB_F(columnHigh, columnLow);
+    SpvId across = DIV_F(SUB_F(u1, columnLow), columnShare), down = DIV_F(SUB_F(u0, rowLow), rowShare);
+    SpvId cu = MUL_F(ADD_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, column), across), FLOAT(1.f / 512.f));
+    SpvId cv = MUL_F(ADD_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, row), down), FLOAT(1.f / 512.f));
+    *d = envDirectionSpv(s, cu, cv);
+    SpvId total = envFloat(s, r, spvConstUint(s, ARTF_ENV_AIM_START + 512 * 513 + 512));
+    return G_PICK(G_GT(total, FLOAT(0.f)), envAimShareSpv(s, rowShare, columnShare, *d), FLOAT(0.f));
+}
+
+/* artfEnvAimDensity */
+static SpvId envAimDensitySpv(Spv* s, const Resources* r, SpvId d) {
+    SpvId x = X(d), y = Y(d), z = Z(d);
+    SpvId sum = MAX_F(ADD_F(ADD_F(G_ABS(x), G_ABS(y)), G_ABS(z)), FLOAT(1e-20f));
+    SpvId a = DIV_F(x, sum), b = DIV_F(z, sum);
+    SpvId below = G_LT(y, FLOAT(0.f));
+    SpvId signA = G_PICK(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, a, FLOAT(0.f)), FLOAT(1.f), FLOAT(-1.f));
+    SpvId signB = G_PICK(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, b, FLOAT(0.f)), FLOAT(1.f), FLOAT(-1.f));
+    SpvId foldedA = MUL_F(SUB_F(FLOAT(1.f), G_ABS(b)), signA), foldedB = MUL_F(SUB_F(FLOAT(1.f), G_ABS(a)), signB);
+    a = G_PICK(below, foldedA, a);
+    b = G_PICK(below, foldedB, b);
+    SpvId u = ADD_F(MUL_F(a, FLOAT(.5f)), FLOAT(.5f)), v = ADD_F(MUL_F(b, FLOAT(.5f)), FLOAT(.5f));
+    SpvId column = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, MIN_F(MUL_F(u, FLOAT(512.f)), FLOAT(511.f)));
+    SpvId row = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, MIN_F(MUL_F(v, FLOAT(512.f)), FLOAT(511.f)));
+    SpvId rows = spvConstUint(s, ARTF_ENV_AIM_START + 512 * 513);
+    SpvId columns = spvOp2(s, SPV_OP_IAdd, s->uintType, spvConstUint(s, ARTF_ENV_AIM_START), spvOp2(s, SPV_OP_IMul, s->uintType, row, spvConstUint(s, 513)));
+    SpvId one = spvConstUint(s, 1);
+    SpvId rowShare = SUB_F(envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, rows, spvOp2(s, SPV_OP_IAdd, s->uintType, row, one))), envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, rows, row)));
+    SpvId columnShare = SUB_F(envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, columns, spvOp2(s, SPV_OP_IAdd, s->uintType, column, one))), envFloat(s, r, spvOp2(s, SPV_OP_IAdd, s->uintType, columns, column)));
+    SpvId total = envFloat(s, r, spvConstUint(s, ARTF_ENV_AIM_START + 512 * 513 + 512));
+    return G_PICK(G_GT(total, FLOAT(0.f)), envAimShareSpv(s, rowShare, columnShare, d), FLOAT(0.f));
+}
+
 /* artfSobol4 and artfPathSeed (scene/sampling.h): a path's numbers, Sobol's points scrambled by Owen's way, in the
  * same order. */
 static SpvId owenOf(Spv* s, SpvId x, SpvId seed) {
@@ -3104,12 +3178,15 @@ static void sobol4Of(Spv* s, SpvId index, SpvId seed, SpvId* out) {
 }
 static SpvId pathSeedOf(Spv* s, SpvId pixel, SpvId group) { return traceHash(s, XOR_U(traceHash(s, pixel), MUL_U(ADD_U(group, UINT(1)), UINT(0x85EBCA6Bu)))); }
 /* trace.c's ballOf */
-static SpvId ballOfSpv(Spv* s, const SpvId* u) {
+static SpvId directionOfSpv(Spv* s, const SpvId* u) {
     SpvId z = SUB_F(FLOAT(1.f), MUL_F(FLOAT(2.f), u[0]));
     SpvId across = spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, MAX_F(SUB_F(FLOAT(1.f), MUL_F(z, z)), FLOAT(0.f)));
     SpvId turn = MUL_F(FLOAT(6.28318531f), u[1]);
+    return vec3Of(s, MUL_F(across, cosOf(s, turn)), MUL_F(across, cosOf(s, SUB_F(turn, FLOAT(1.57079633f)))), z);
+}
+static SpvId ballOfSpv(Spv* s, const SpvId* u) {
     SpvId r = exp2Of(s, MUL_F(log2Of(s, u[2]), FLOAT(1.f / 3.f)));
-    return vec3Of(s, MUL_F(MUL_F(across, cosOf(s, turn)), r), MUL_F(MUL_F(across, cosOf(s, SUB_F(turn, FLOAT(1.57079633f)))), r), MUL_F(z, r));
+    return SCALE_V3(directionOfSpv(s, u), r);
 }
 
 static SpvId traceRandom(const Tracer* t) {
@@ -3331,7 +3408,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->bestInstance = VAR(ptrUint); t->bestTriangle = VAR(ptrUint);
     t->state = VAR(ptrUint); t->covered = VAR(ptrUint); t->bounces = VAR(ptrUint); t->step = VAR(ptrUint); t->sampleIndex = VAR(ptrUint);
     t->origin = VAR(ptrVec3); t->direction = VAR(ptrVec3); t->path = VAR(ptrVec3); t->light = VAR(ptrVec3);
-    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat);
+    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat); t->diffuseLikely = VAR(ptrFloat);
     t->through = VAR(ptrFloat); t->limit = VAR(ptrFloat); t->travelled = VAR(ptrFloat); t->keep = VAR(ptrFloat);
     t->shadowStep = VAR(ptrUint); t->lightIndex = VAR(ptrUint); t->ballStep = VAR(ptrUint);
     t->graphs = graphs;
@@ -3367,6 +3444,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     loopWhile(s, &sampleLoop, LESS_U(LOAD_U(t->sampleIndex), samples));
     {
         spvStore(s, t->state, traceHash(s, ADD_U(traceHash(s, pixel), ADD_U(done, LOAD_U(t->sampleIndex)))));
+        spvStore(s, t->diffuseLikely, FLOAT(0.f));
         SpvId jitter[4];
         sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, UINT(0)), jitter);
         SpvId jx = jitter[0], jy = jitter[1];
@@ -3402,7 +3480,10 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         spvIfEnd(s, merge);
         spvIfBegin(s, BOTH(BOTH(missed, NOT_EQ(LOAD_U(t->covered), UINT(0))), aroundOn), &aroundMerge);
         {
-            SpvId env = SCALE_V3(envSample(s, &t->r, UINT(0), d), environmentLight);
+            /* (weighed against aiming at it, after a diffuse bounce: as trace.c's) */
+            SpvId before = LOAD_F(t->diffuseLikely), other = envAimDensitySpv(s, &t->r, d);
+            SpvId weight = PICK_F(BOTH(paths, MORE_F(before, FLOAT(0.f))), DIV_F(MUL_F(before, before), ADD_F(MUL_F(before, before), MUL_F(other, other))), FLOAT(1.f));
+            SpvId env = SCALE_V3(envSample(s, &t->r, UINT(0), d), MUL_F(environmentLight, weight));
             spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), MUL_V3(LOAD_V3(t->path), env)));
         }
         spvIfEnd(s, aroundMerge);
@@ -3624,9 +3705,33 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             breakIf(s, &steps, EITHER(last, BOTH(NOT(paths), NOT(m.shiny))));
             SpvId most = maxOf3(s, m.mirror);
             SpvId chance = PICK_F(m.shiny, MIN_F(MAX_F(most, FLOAT(.05f)), FLOAT(.95f)), FLOAT(0.f));
+            /* aimed at the picture of all around, for what the surface gives back diffusely (trace.c's) */
+            SpvId aimMerge;
+            spvIfBegin(s, BOTH(paths, aroundOn), &aimMerge);
+            {
+                SpvId e[4], toward;
+                sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, ADD_U(LOAD_U(t->bounces), UINT(65))), e);
+                SpvId likely = envAimSpv(s, &t->r, e[0], e[1], &toward), cosine = DOT3(m.normal, toward);
+                SpvId goMerge;
+                spvIfBegin(s, BOTH(MORE_F(likely, FLOAT(0.f)), MORE_F(cosine, FLOAT(0.f))), &goMerge);
+                {
+                    SpvId other = MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), cosine), FLOAT(1.f / 3.14159265f));
+                    lightThrough(t, lifted, toward, FLOAT(3e37f));
+                    SpvId through = LOAD_F(t->through);
+                    SpvId around = envSample(s, &t->r, UINT(0), toward);
+                    SpvId weight = DIV_F(MUL_F(likely, likely), ADD_F(MUL_F(likely, likely), MUL_F(other, other)));
+                    SpvId share = MUL_F(MUL_F(MUL_F(MUL_F(MUL_F(MUL_F(m.open, SUB_F(FLOAT(1.f), most)), FLOAT(1.f / 3.14159265f)), cosine), through), DIV_F(weight, likely)), environmentLight);
+                    SpvId gained = SCALE_V3(MUL_V3(m.albedo, around), share);
+                    spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), MUL_V3(LOAD_V3(t->path), gained)));
+                }
+                spvIfEnd(s, goMerge);
+            }
+            spvIfEnd(s, aimMerge);
             SpvId isMirror = EITHER(NOT(paths), LESS_F(LOAD_F(t->choice), chance));
-            SpvId diffuse = ADD_V3(SCALE_V3(m.normal, FLOAT(1.0001f)), ballDir);
+            /* (a point on a sphere over the surface: as many rays as the cosine says, exactly) */
+            SpvId diffuse = ADD_V3(SCALE_V3(m.normal, FLOAT(1.0001f)), directionOfSpv(s, u));
             SpvId next = NORMALIZE(pick3(s, isMirror, glossy, diffuse));
+            spvStore(s, t->diffuseLikely, PICK_F(isMirror, FLOAT(0.f), MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), MAX_F(DOT3(next, m.normal), FLOAT(0.f))), FLOAT(1.f / 3.14159265f))));
             SpvId keep = DIV_F(MUL_F(m.open, SUB_F(FLOAT(1.f), most)), SUB_F(FLOAT(1.f), chance));
             SpvId tint = pick3(s, isMirror, pick3(s, paths, SCALE_V3(m.mirror, DIV_F(FLOAT(1.f), MAX_F(chance, FLOAT(1e-6f)))), m.mirror), SCALE_V3(m.albedo, keep));
             spvStore(s, t->path, MUL_V3(LOAD_V3(t->path), tint));

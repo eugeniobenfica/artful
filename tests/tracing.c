@@ -1,5 +1,6 @@
 /* artful-tests: rays: tracing, the ray tracing hardware, rays while drawing, denoising, probes. */
 #include "tests.h"
+#include "scene/sampling.h"
 
 /* ---- noise ---- */
 
@@ -963,4 +964,73 @@ void testTraceBothBackends(void) {
     artfFree(b);
     artfRendererFree(gpu);
     artfRendererFree(cpu);
+}
+
+/* Light from all around, aimed at (artfEnvAim) as well as bounced into, each weighed by the other (MIS): nothing is
+ * counted twice or left out. A ball that only gives light back diffusely, under light the same from everywhere, shows
+ * its albedo times that light wherever it is seen, as nothing of it hides another part (the furnace). The tables aim
+ * where the light is: under a small bright sun, nearly every aim goes to it. */
+void testEnvironmentAimed(ArtfBackend backend) {
+    enum { PW = 64, PH = 32 };
+    static float even[PW * PH * 3], sunny[PW * PH * 3];
+    for (int i = 0; i < PW * PH * 3; ++i) even[i] = .8f;
+    for (int i = 0; i < PW * PH * 3; ++i) sunny[i] = .05f;
+    for (int c = 0; c < 3; ++c) sunny[(8 * PW + 20) * 3 + c] = 4000.f;
+    ArtfScene* s = plainScene(); /* (no sun) */
+    CHECK(artfSceneSetEnvironment(s, sunny, PW, PH, 1.f, false));
+    /* (the tables: aimed, the sun's texels; and how likely each aim was, as aiming says) */
+    int atSun = 0;
+    bool agrees = true;
+    for (int i = 0; i < 256; ++i) {
+        float u[4], d[3];
+        artfSobol4((uint32_t)i, 12345u, u);
+        const float likely = artfEnvAim(s->environment, u[0], u[1], d);
+        float around[3];
+        artfEnvSample(s->environment, 0, d[0], d[1], d[2], around);
+        atSun += around[0] > 100.f;
+        const float again = artfEnvAimDensity(s->environment, d);
+        agrees = agrees && likely > 0 && fabsf(again - likely) <= likely * 1e-3f;
+    }
+    printf("aimed at a small sun: %d of 256 aims there\n", atSun);
+    CHECK(atSun > 230 && agrees);
+    /* light the same from everywhere: every direction as likely as any other, 1 / (4 pi), which is what makes sure the
+     * share of all around each texel covers is right */
+    CHECK(artfSceneSetEnvironment(s, even, PW, PH, 1.f, false));
+    double least = 1e9, most = 0;
+    for (int i = 0; i < 4096; ++i) {
+        float u[4], d[3];
+        artfSobol4((uint32_t)i, 777u, u);
+        const float z = 1.f - 2.f * u[0], across = sqrtf(1.f - z * z), turn = 6.28318531f * u[1];
+        d[0] = across * cosf(turn);
+        d[1] = z;
+        d[2] = across * sinf(turn);
+        const double times = artfEnvAimDensity(s->environment, d) * 4.0 * 3.14159265;
+        least = fmin(least, times);
+        most = fmax(most, times);
+    }
+    printf("aiming under even light: from %.3f to %.3f of 1 / (4 pi)\n", least, most);
+    CHECK(least > .9 && most < 1.1);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.5f, .5f, .5f);
+    d.specular = 0;
+    d.roughness = 1;
+    addAt(s, artfSceneAddSphere(s, 1, 48, 64), artfSceneAddMaterial(s, &d), 0, 0, 0, 1);
+    setCamera(s, 0, 0, 4, 0, 0, 0);
+    const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 4, 256, 0, false};
+    artfSceneSetTrace(s, &paths);
+    ArtfRendererOptions o = options(backend, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    if (!r) {
+        artfSceneFree(s);
+        return;
+    }
+    uint32_t* frame = artfMalloc((size_t)W * H * 4);
+    drawSamples(r, s, 64, frame);
+    const int want = shownByte(.5 * .8);
+    const double middle = meanOf(frame, W / 2, H / 2, 8), side = meanOf(frame, W / 2 + 30, H / 2, 8);
+    printf("%s, the furnace: %.1f and %.1f where %d is the truth\n", backend == ARTF_BACKEND_VULKAN ? "GPU" : "CPU", middle, side, want);
+    CHECK(fabs(middle - want) < 2.5 && fabs(side - want) < 2.5);
+    artfFree(frame);
+    artfRendererFree(r);
+    artfSceneFree(s);
 }

@@ -140,8 +140,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual
   approximation): at grazing angles a rough surface's reflection is less stretched than it should be. Its maps are
   512 texels a side at most, so the picture shown behind the scene is soft at a wide view's center. Metal leaves it
-  out. Paths read the sharp map where they leave the scene: a small, very bright sun in the picture makes fireflies,
-  as it would in any path tracer that does not aim at it.
+  out. Paths aim at the picture for what surfaces give back diffusely; what they reflect of it (a highlight, a
+  mirror) is still found only by bouncing into it, so a small, very bright sun seen in a rough highlight is noisy.
+  Light from the picture over 64 in one path is cut there, as all light of a path is.
 - A background pass is light behind the scene, and only that: what the scene holds is drawn in front of it, and is
   not bent, lit or reflected by it; it fills the frame (alpha 1), its bloom and tone curve are its own, and Metal
   draws none. The black hole (extensions/blackhole) is one: it bends only its own disc and stars.

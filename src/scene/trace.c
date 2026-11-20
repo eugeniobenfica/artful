@@ -782,12 +782,16 @@ static inline float randomOf(uint32_t* state) {
 /* A point even in a ball, from three of a path's numbers (scene/sampling.h): a direction (its height even from -1 to 1,
  * and an angle round), and how far out (the cube root, so that the ball's volume is even). No sine or cosine of a C
  * library, which differ from one to the next: artfCosFast, as the tracing shader's ballOfSpv. */
-static void ballOf(const float* u, float* out) {
+static void directionOf(const float* u, float* out) {
     const float z = 1.f - 2.f * u[0], across = sqrtf(artfMaxf(1.f - z * z, 0.f)), turn = 6.28318531f * u[1];
+    out[0] = across * artfCosFast(turn);
+    out[1] = across * artfCosFast(turn - 1.57079633f);
+    out[2] = z;
+}
+static void ballOf(const float* u, float* out) {
+    directionOf(u, out);
     const float r = artfExp2Fast(artfLog2Fast(u[2]) * (1.f / 3.f));
-    out[0] = across * artfCosFast(turn) * r;
-    out[1] = across * artfCosFast(turn - 1.57079633f) * r;
-    out[2] = z * r;
+    for (int k = 0; k < 3; ++k) out[k] *= r;
 }
 
 /* A direction, even in a ball, by rejection: for the probes, whose rays the GPU draws in the same order. */
@@ -965,6 +969,12 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
     normalize3(d);
     bool covered = false;
     uint32_t bounces = 0;
+    /* Paths aim at the picture of all around as well as bouncing into it (artfEnvAim): each way's light is weighed by
+     * how likely each way was to find it (MIS, the power heuristic), for what a surface gives back diffusely, which is
+     * what the aiming adds. diffuseLikely: how likely the last bounce's direction was, diffusely; 0 when it was not a
+     * diffuse bounce, and what it then finds is not weighed. */
+    const float* aimed = c->paths && f->sky[3] > 0 && s->environment ? s->environment : NULL;
+    float diffuseLikely = 0;
     for (int step = 0; step < MAX_STEPS; ++step) {
         Hit h;
         if (!closest(&s->trace, o, d, 3e37f, false, &h)) {
@@ -972,7 +982,12 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             if (covered && f->sky[3] > 0 && s->environment) {
                 float around[3];
                 artfEnvSample(s->environment, 0, d[0], d[1], d[2], around);
-                for (int k = 0; k < 3; ++k) light[k] += path[k] * around[k] * f->sky[3];
+                float weight = 1.f;
+                if (aimed && diffuseLikely > 0) {
+                    const float other = artfEnvAimDensity(aimed, d);
+                    weight = diffuseLikely * diffuseLikely / (diffuseLikely * diffuseLikely + other * other);
+                }
+                for (int k = 0; k < 3; ++k) light[k] += path[k] * around[k] * f->sky[3] * weight;
             } else if (covered) {
                 const float up = d[1] * .5f + .5f;
                 for (int k = 0; k < 3; ++k) light[k] += path[k] * artfShadeSkyGround(f->ground[k], f->sky[k] - f->ground[k], up);
@@ -1076,18 +1091,40 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             if (bounces >= c->bounces) break;
             const float most = artfMaxf(m.mirror[0], artfMaxf(m.mirror[1], m.mirror[2]));
             const float chance = m.shiny ? artfClampf(most, .05f, .95f) : 0.f;
+            if (aimed) {
+                /* aimed at the picture of all around, for what the surface gives back diffusely: albedo, what of it is
+                 * open and what is not reflected, over pi, times the cosine */
+                float e[4], toward[3], around[3];
+                artfSobol4(sample, artfPathSeed(pixel, 64u + bounces + 1u), e);
+                const float likely = artfEnvAim(aimed, e[0], e[1], toward), cosine = dot3(m.normal, toward);
+                if (likely > 0 && cosine > 0) {
+                    const float other = (1.f - chance) * cosine * (1.f / 3.14159265f);
+                    const float through = lightThrough(s, lifted, toward, 3e37f);
+                    if (through > 0) {
+                        artfEnvSample(aimed, 0, toward[0], toward[1], toward[2], around);
+                        const float weight = likely * likely / (likely * likely + other * other);
+                        const float share = m.open * (1.f - most) * (1.f / 3.14159265f) * cosine * through * (weight / likely) * f->sky[3];
+                        for (int k = 0; k < 3; ++k) light[k] += path[k] * m.albedo[k] * around[k] * share;
+                    }
+                }
+            }
             if (u[3] < chance) {
                 for (int k = 0; k < 3; ++k) {
                     d[k] = mirror[k] + ball[k] * stray;
                     path[k] *= m.mirror[k] / chance;
                 }
+                diffuseLikely = 0;
             } else {
-                /* a point on a ball over the surface: as many rays as the cosine says */
+                /* a point on a sphere over the surface: as many rays as the cosine says, exactly */
                 const float keep = m.open * (1.f - most) / (1.f - chance);
+                float unit[3];
+                directionOf(u, unit);
                 for (int k = 0; k < 3; ++k) {
-                    d[k] = m.normal[k] * 1.0001f + ball[k];
+                    d[k] = m.normal[k] * 1.0001f + unit[k];
                     path[k] *= m.albedo[k] * keep;
                 }
+                normalize3(d);
+                diffuseLikely = (1.f - chance) * artfMaxf(dot3(d, m.normal), 0.f) * (1.f / 3.14159265f);
             }
         }
         normalize3(d);
