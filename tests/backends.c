@@ -679,3 +679,58 @@ void testSpirvRoundTrip(void) {
     }
 #endif
 }
+
+/* Both backends' frames keep to one graph of passes (render/framePasses.h): every pass they mark is in it, and none reads
+ * what a pass after it in the frame writes; with every effect, with occlusion, with layers, shadows and fog, and traced. */
+#include "render/framePasses.h"
+void testFramePasses(void) {
+    /* (orders the graph does not allow are found: the scene before the shadows it reads, the gather before the scene) */
+    static const char* const good[] = {"cull", "shadows", "fog grid", "scene", "gather", "bloom", "tone map and out"};
+    static const char* const early[] = {"cull", "scene", "shadows", "gather", "tone map and out"};
+    static const char* const late[] = {"cull", "gather", "scene", "tone map and out"};
+    static const char* const unknown[] = {"cull", "something else"};
+    char said[256];
+    CHECK(artfFramePassesOrder(good, 7, ARTF_BACKEND_VULKAN, said, sizeof said) == 0);
+    CHECK(artfFramePassesOrder(early, 5, ARTF_BACKEND_VULKAN, said, sizeof said) > 0 && strstr(said, "shadows"));
+    CHECK(artfFramePassesOrder(late, 4, ARTF_BACKEND_VULKAN, said, sizeof said) > 0 && strstr(said, "gather"));
+    CHECK(artfFramePassesOrder(unknown, 2, ARTF_BACKEND_SOFTWARE, said, sizeof said) == 1);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) {
+            missing("vulkan");
+            continue;
+        }
+        ArtfScene* s = shadowScene();
+        ArtfMaterialDesc glass = artfMaterialDefaults();
+        glass.alphaMode = ARTF_ALPHA_BLEND;
+        glass.transparency = .5f;
+        addAt(s, artfSceneAddSphere(s, .4f, 12, 16), artfSceneAddMaterial(s, &glass), 0, .5f, 1, 1);
+        const ArtfPostDesc all = {.lens.bloom = .2f, .lens.focus = 6, .lens.aperture = 4, .lens.motionBlur = .5f, .screen.occlusion = 1, .screen.reflections = 1,
+                                  .screen.temporal = true, .screen.sharpen = .5f, .exposure.automatic = true, .screen.volumetric = 1};
+        artfSceneSetPost(s, &all);
+        artfSceneSetFog(s, artfVec3(.5f, .5f, .55f), .05f);
+        int wrong = 0, frames = 0;
+        char why[256] = "";
+        for (int k = 0; k < 3; ++k) {
+            artfSceneSetFeature(s, ARTF_FEATURE_OCCLUSION, k == 1);
+            if (k == 2) {
+                const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 0, 2, false, false};
+                artfSceneSetTrace(s, &paths);
+            }
+            for (int f = 0; f < 3; ++f) {
+                CHECK(artfRendererDraw(r, s));
+                char said[256];
+                const int n = artfFramePassesCheck(r, said, sizeof said);
+                if (n && !wrong) memcpy(why, said, sizeof why);
+                wrong += n;
+                ++frames;
+            }
+        }
+        printf("%s, %d frames against the graph of passes: %d out of it%s%s\n", backend ? "GPU" : "CPU", frames, wrong, wrong ? ", the first: " : "", why);
+        CHECK(wrong == 0);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+}

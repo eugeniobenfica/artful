@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Phase 4.2 done.** The scene's passes take their barriers from what each says it does (`trackUse`): one where
+  three were before the scene, the same where they were needed, and synchronization validation clean, also with
+  occlusion. Both backends' passes are one graph of what must come before what (`render/framePasses.c`); each frame's
+  order is checked against it (`backends/framePasses`).
+
 - **Phase 4, in part: less memory after the frame, and shaders that say where they come from.**
   - *Light in halves* (the owner's choice): the three buffers of light after the frame hold four 16-bit floats a pixel,
     not 32-bit; and occlusion with motion blur's velocities lives in the memory of the scene's light, which is dead by

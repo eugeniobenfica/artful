@@ -57,11 +57,11 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
   - [x] passo 3: DebugInfo (`ARTFUL_SHADER_DEBUG`, `artful-shaders --debug`; por função, não por linha)
   - [~] passo 4: emissor MSL feito (94 de 103); o compilador da Apple na CI achou dois defeitos, corrigidos; falta compilar em execução no `metal.c`
   - [ ] passo 5: WGSL (Fase 6)
-- [~] 4.2 Grafo de quadro
+- [x] 4.2 Grafo de quadro
   - [x] passo 1: descrição a partir do IR, `--graph`, medição
-  - [~] passo 2: barreiras do pós a partir dos acessos dos shaders; faltam os passes da cena
+  - [x] passo 2: barreiras do pós pelos acessos dos shaders, e as da cena por um rastreador de acessos (`trackUse`)
   - [x] passo 3: luz em 16 bits e aliasing imagem↔buffer — −31% com tudo ligado a 1080p (meta 30%)
-  - [~] passo 4: `vulkan.c` dividido (tipos em `vulkanInternal.h`, traçado em `vulkanTrace.c`, pós em `vulkanPost.c`), sem perda de desempenho; falta o backend de CPU percorrer o grafo
+  - [x] passo 4: `vulkan.c` dividido sem perda de desempenho; os dois backends conferidos contra um grafo de passes comum (`render/framePasses.c`)
 - [x] 4.3 Cozimento — HLOD (`artfSceneSaveHlod`), glTF (`artfPrepareModelCooked`), `artful-cook`, alvo de fuzzing
 
 ## Fase 5 — Alcance de conteúdo

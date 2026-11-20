@@ -278,6 +278,7 @@ int main(int argc, char** argv) {
     RUN("backends/shaderIr", testShaderIr());
     RUN("backends/spirvRoundTrip", testSpirvRoundTrip());
     RUN("backends/frameGraph", testFrameGraph());
+    RUN("backends/framePasses", testFramePasses());
     RUN("backends/textureMemory", testTextureMemory());
     RUN("backends/gpuMemory", testGpuMemory());
     RUN("backends/refusedSwapchain", testRefusedSwapchain());

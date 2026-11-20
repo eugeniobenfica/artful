@@ -145,6 +145,67 @@ void memoryBarrier(Vulkan* v, VkCommandBuffer c, VkFlags srcStage, VkFlags dstSt
     v->vkCmdPipelineBarrier(c, srcStage, dstStage, 0, 1, &b, 0, NULL, 0, NULL);
 }
 
+/* ---- barriers from what passes do (the frame graph's step 2, for the scene's passes) ---- */
+
+/* As the frame before left them: each resource written and read by the stages that do so in a frame. */
+void trackFrameStart(Vulkan* v) {
+    static const VkFlags writes[TRACK_COUNT][2] = {
+        [TRACK_FOG] = {STAGE_COMPUTE, ACCESS_SHADER_WRITE},
+        [TRACK_HIZ] = {STAGE_COMPUTE, ACCESS_SHADER_WRITE},
+        [TRACK_TRACE] = {STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE},
+        [TRACK_LAYERS] = {STAGE_FRAGMENT | STAGE_TRANSFER, ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE},
+        [TRACK_DEPTH] = {STAGE_EARLY_TESTS | STAGE_LATE_TESTS, ACCESS_DEPTH_WRITE},
+        [TRACK_POST] = {STAGE_COMPUTE, ACCESS_SHADER_WRITE}};
+    static const VkFlags reads[TRACK_COUNT] = {
+        [TRACK_FOG] = STAGE_FRAGMENT, [TRACK_HIZ] = STAGE_COMPUTE, [TRACK_TRACE] = STAGE_COMPUTE | STAGE_FRAGMENT,
+        [TRACK_LAYERS] = STAGE_FRAGMENT, [TRACK_DEPTH] = STAGE_FRAGMENT | STAGE_COMPUTE, [TRACK_POST] = STAGE_COMPUTE | STAGE_FRAGMENT};
+    for (int t = 0; t < TRACK_COUNT; ++t) {
+        v->trackWriteStage[t] = writes[t][0];
+        v->trackWriteAccess[t] = writes[t][1];
+        v->trackReadStage[t] = reads[t];
+        v->trackVisible[t] = 0;
+    }
+    v->trackBarriers = 0;
+}
+
+/* A pass is about to read (readMask) and write (writeMask) these, at stage: one barrier for all it needs, after what
+ * wrote what it reads or writes (its writes made visible), and after what read what it writes (an execution
+ * dependency). covered: a render pass's own dependency already orders it; what it does is noted, and no barrier made. */
+static void trackDo(Vulkan* v, VkCommandBuffer c, uint32_t readMask, uint32_t writeMask, VkFlags stage, VkFlags readAccess, VkFlags writeAccess, bool covered) {
+    VkFlags srcStage = 0, srcAccess = 0;
+    for (int t = 0; t < TRACK_COUNT; ++t) {
+        const bool reads = readMask >> t & 1, writes = writeMask >> t & 1;
+        if (!reads && !writes) continue;
+        /* (after what wrote it: unless that write is visible to this stage already and this only reads) */
+        if (v->trackWriteStage[t] && (writes || (stage & ~v->trackVisible[t]))) {
+            srcStage |= v->trackWriteStage[t];
+            srcAccess |= v->trackWriteAccess[t];
+        }
+        if (writes) srcStage |= v->trackReadStage[t];
+    }
+    if (srcStage && !covered) {
+        memoryBarrier(v, c, srcStage, stage, srcAccess, readAccess | writeAccess);
+        ++v->trackBarriers;
+    }
+    for (int t = 0; t < TRACK_COUNT; ++t) {
+        if (writeMask >> t & 1) {
+            v->trackWriteStage[t] = stage;
+            v->trackWriteAccess[t] = writeAccess;
+            v->trackReadStage[t] = 0;
+            v->trackVisible[t] = 0;
+        } else if (readMask >> t & 1) {
+            v->trackReadStage[t] |= stage;
+            v->trackVisible[t] |= stage;
+        }
+    }
+}
+void trackUse(Vulkan* v, VkCommandBuffer c, uint32_t readMask, uint32_t writeMask, VkFlags stage, VkFlags readAccess, VkFlags writeAccess) {
+    trackDo(v, c, readMask, writeMask, stage, readAccess, writeAccess, false);
+}
+void trackCovered(Vulkan* v, uint32_t readMask, uint32_t writeMask, VkFlags stage, VkFlags readAccess, VkFlags writeAccess) {
+    trackDo(v, NULL, readMask, writeMask, stage, readAccess, writeAccess, true);
+}
+
 /* Commands to run now, for what happens rarely: loading a mesh, say. */
 VkCommandBuffer oneShotBegin(Vulkan* v) {
     CommandBufferAllocateInfo alloc = {ST_COMMAND_BUFFER_ALLOCATE, NULL, v->commandPool, 0, 1};
@@ -3550,6 +3611,7 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const CommandBufferBeginInfo begin = {ST_COMMAND_BUFFER_BEGIN, NULL, 1, NULL};
     v->vkResetCommandBuffer(c, 0);
     v->vkBeginCommandBuffer(c, &begin);
+    trackFrameStart(v);
     s->timed = v->timestamps != 0;
     s->passCount = 0;
     if (s->timed) {
@@ -3613,28 +3675,24 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const bool froxels = v->floats && frame.post[1][1] > 0 && frame.look[1] > 0;
     if (froxels) {
         /* fog that light goes through: its grid, from the sun's maps, for what is drawn to read (after the frame before read it) */
-        memoryBarrier(v, c, STAGE_FRAGMENT, STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
+        trackUse(v, c, 0, TRACK(TRACK_FOG), STAGE_COMPUTE, 0, ACCESS_SHADER_WRITE);
         v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
         const uint32_t cells = (uint32_t)((v->sceneWidth + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * (uint32_t)((v->sceneHeight + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE);
         postStep(v, c, POST_FROXELS, 0, cells);
-        memoryBarrier(v, c, STAGE_COMPUTE, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ);
         passMark(v, c, s, "fog grid");
     }
     if (tracing) {
         /* (the frame before read and wrote what this one is about to) */
-        const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
         if (traceClear) {
-            memoryBarrier(v, c, STAGE_COMPUTE | STAGE_FRAGMENT, STAGE_TRANSFER, readWrite, ACCESS_TRANSFER_WRITE);
+            trackUse(v, c, 0, TRACK(TRACK_TRACE), STAGE_TRANSFER, 0, ACCESS_TRANSFER_WRITE);
             v->vkCmdFillBuffer(c, v->traceSum.buffer, 0, ~(VkDeviceSize)0, 0);
-            memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, readWrite);
         }
         if (traceAdding) {
-            memoryBarrier(v, c, STAGE_COMPUTE | STAGE_FRAGMENT, STAGE_COMPUTE, readWrite, readWrite);
+            trackUse(v, c, TRACK(TRACK_TRACE), TRACK(TRACK_TRACE), STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
             v->vkCmdBindPipeline(c, 1, v->tracePipeline);
             v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
             v->vkCmdDispatch(c, ((uint32_t)v->sceneWidth + 7) / 8, ((uint32_t)v->sceneHeight + 7) / 8, 1);
             if (scene->trace.desc.denoise) denoise(v, c, s);
-            memoryBarrier(v, c, STAGE_COMPUTE, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ);
             passMark(v, c, s, "trace");
         }
     }
@@ -3653,9 +3711,15 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const Viewport viewport = {0, (float)v->sceneHeight, (float)v->sceneWidth, -(float)v->sceneHeight, 0, 1};
     if (sorted) {
         /* (the frame before read them) */
-        memoryBarrier(v, c, STAGE_FRAGMENT, STAGE_TRANSFER, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE, ACCESS_TRANSFER_WRITE);
+        trackUse(v, c, 0, TRACK(TRACK_LAYERS), STAGE_TRANSFER, 0, ACCESS_TRANSFER_WRITE);
         v->vkCmdFillBuffer(c, v->layerCounts.buffer, 0, ~(VkDeviceSize)0, 0);
-        memoryBarrier(v, c, STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
+    }
+    /* what the scene's passes' pixel shaders read (fog's grid, what was traced) and the layers' lists they write: one
+     * barrier for all, from what wrote each (trackUse); depth, by the passes' own dependencies */
+    {
+        const uint32_t reads = (froxels ? TRACK(TRACK_FOG) : 0u) | (tracing ? TRACK(TRACK_TRACE) : 0u) | (sorted ? TRACK(TRACK_LAYERS) : 0u);
+        if (reads) trackUse(v, c, reads, sorted ? TRACK(TRACK_LAYERS) : 0u, STAGE_FRAGMENT, ACCESS_SHADER_READ, sorted ? ACCESS_SHADER_WRITE : 0u);
+        trackCovered(v, 0, TRACK(TRACK_DEPTH), STAGE_EARLY_TESTS | STAGE_LATE_TESTS, 0, ACCESS_DEPTH_WRITE);
     }
     RenderPassBeginInfo pass = {ST_RENDER_PASS_BEGIN, NULL, occlusion || sorted || v->floats ? v->earlyPass : v->renderPass, v->framebuffers[image], area, v->floats ? (v->samples > 1 ? 4u : 3u) : 2u, clears};
     v->vkCmdBeginRenderPass(c, &pass, 0);
@@ -3680,12 +3744,18 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         /* the pyramid, from what was just drawn */
         v->vkCmdBindPipeline(c, 1, v->hizFirstPipeline);
         v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+        /* (what read it this frame, the early culling, is before the scene's pass, which orders it before this) */
+        trackCovered(v, TRACK(TRACK_HIZ), 0, STAGE_COMPUTE, ACCESS_SHADER_READ, 0);
+        v->trackWriteStage[TRACK_HIZ] = 0;
+        v->trackReadStage[TRACK_HIZ] = 0;
         for (uint32_t level = 0; level < v->hizLevels; ++level) {
             if (level == 1) v->vkCmdBindPipeline(c, 1, v->hizNextPipeline);
             v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &level);
+            if (level) trackUse(v, c, TRACK(TRACK_HIZ), TRACK(TRACK_HIZ), STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
+            else trackCovered(v, 0, TRACK(TRACK_HIZ), STAGE_COMPUTE, 0, ACCESS_SHADER_WRITE);
             v->vkCmdDispatch(c, (v->hizTable[level][1] * v->hizTable[level][2] + 63) / 64, 1, 1);
-            memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
         }
+        trackUse(v, c, TRACK(TRACK_HIZ), 0, STAGE_COMPUTE, ACCESS_SHADER_READ, 0);
         v->vkCmdBindPipeline(c, 1, v->cullPipelines[ARTF_CULL_LATE]);
         v->vkCmdDispatch(c, (instanceCount + 63) / 64, 1, 1);
         if (meshlets) {
@@ -3712,7 +3782,7 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         /* (the gather's shader names set 1 too, the post buffers' parts: bound, though depth alone is written; and the
          * frame before's last pass read what the post passes write, in another submission: after it) */
         rolesBind(v, c, 1);
-        memoryBarrier(v, c, STAGE_FRAGMENT, STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
+        trackUse(v, c, 0, TRACK(TRACK_POST), STAGE_COMPUTE, 0, ACCESS_SHADER_WRITE);
         postStep(v, c, POST_GATHER, 1, (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight);
         passMark(v, c, s, "depth for what follows");
         pass.renderPass = v->latePass;

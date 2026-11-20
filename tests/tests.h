@@ -121,6 +121,7 @@ void testLostDevice(void);
 void testShaderIr(void);
 void testSpirvRoundTrip(void);
 void testFrameGraph(void);
+void testFramePasses(void);
 void testTextureMemory(void);
 void testGpuMemory(void);
 void testRefusedSwapchain(void);

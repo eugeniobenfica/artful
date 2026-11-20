@@ -35,6 +35,12 @@ enum {
 };
 
 #define SLOTS 2            /* frames in flight */
+
+/* What the scene's passes share, whose barriers come from what each pass says it does to them (trackUse): fog's grid,
+ * the depth pyramid, tracing's sums, the layers' lists, the depth the scene draws, and what the gather writes for the
+ * post passes (the depth and surfaces copied, the parts of light). */
+enum { TRACK_FOG, TRACK_HIZ, TRACK_TRACE, TRACK_LAYERS, TRACK_DEPTH, TRACK_POST, TRACK_COUNT };
+#define TRACK(x) (1u << (x))
 #define QUERIES (ARTF_PASS_TIMES + 1) /* timestamps of a slot: where its frame starts, and where each pass ends */
 #define MAX_TEXTURES 1024  /* in the one descriptor array, where the device allows; what is beyond draws white */
 #define MAX_SWAPCHAIN_IMAGES 8
@@ -411,6 +417,12 @@ typedef struct Vulkan {
     uint32_t pendingReads, pendingWrites;
     bool postTracking;
     uint32_t postBarriers, postDispatches; /* (of the last frame: how many barriers its post dispatches took) */
+    /* What the frame's passes before the post ones last did to each resource they share (trackUse): the stages that
+     * wrote it and how, and those that read it since; from these, and what a pass is about to do, the barrier it
+     * needs. A frame starts as if each was used as the frame before uses it (trackFrameStart). */
+    VkFlags trackWriteStage[TRACK_COUNT], trackWriteAccess[TRACK_COUNT], trackReadStage[TRACK_COUNT];
+    VkFlags trackVisible[TRACK_COUNT]; /* the stages the last write has been made visible to */
+    uint32_t trackBarriers; /* (of the last frame: how many barriers the scene's passes took from it) */
     GpuBuffer postNone;             /* what binds where an effect is off: a buffer of nothing */
     ArtfPool* pool;                 /* workers for what the CPU does for the GPU: the probes, for tests */
     /* Light that bounced, gathered here (artfShaderProbes): what the probes hold and what a step makes of them, which
@@ -520,6 +532,10 @@ enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_F
        POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN };
 
 /* ---- what each part calls of the others ---- */
+
+void trackFrameStart(Vulkan* v);
+void trackUse(Vulkan* v, VkCommandBuffer c, uint32_t readMask, uint32_t writeMask, VkFlags stage, VkFlags readAccess, VkFlags writeAccess);
+void trackCovered(Vulkan* v, uint32_t readMask, uint32_t writeMask, VkFlags stage, VkFlags readAccess, VkFlags writeAccess);
 
 int memoryType(const Vulkan* v, uint32_t bits, VkFlags wanted);
 bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, BufferUse use);

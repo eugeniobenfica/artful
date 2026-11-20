@@ -70,7 +70,7 @@ add_library(artful STATIC
   src/scene/scene.c src/scene/blocks.c src/scene/meshBuild.c src/scene/simplify.c src/scene/trace.c src/scene/background.c
   src/scene/gltf.c src/scene/imageDecode.c src/scene/graph.c src/scene/texture.c src/scene/environment.c src/scene/sky.c src/scene/motion.c src/scene/extras.c src/scene/meshopt.c src/scene/scale.c src/scene/particles.c src/scene/cook.c
   src/scene/lights.c
-  src/render/renderer.c src/scene/views.c
+  src/render/renderer.c src/render/framePasses.c src/scene/views.c
   src/software/software.c src/software/post.c src/software/shadows.c src/software/denoise.c src/software/kernelsPortable.c)
 add_library(artful::artful ALIAS artful)
 target_include_directories(artful PRIVATE src)
