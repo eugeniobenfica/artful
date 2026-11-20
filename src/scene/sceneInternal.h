@@ -286,33 +286,68 @@ typedef struct ArtfIndirect {
     /* With follow: the cell the volume starts at, in cells of the world, and where that cell's probe is kept (each
      * axis, base modulo dims): a cell (x, y, z) of the volume is kept at artfIndirectSlot. Without: none, and all 0. */
     int base[3], wrap[3];
-    float* probes;      /* dims product x ARTF_PROBE_FLOATS */
+    int cascades;       /* volumes (follow): each after the one before in probes, its cells twice as far apart */
+    float* probes;      /* dims product x cascades x ARTF_PROBE_FLOATS: all the volumes' first 16 floats, then their maps */
     float* next;        /* what this step makes */
     uint32_t frames;
     uint64_t version;   /* a step changed them */
     uint32_t serial;    /* artfSceneSetIndirect's calls: a GPU that gathers the probes itself starts over when it changes */
 } ArtfIndirect;
-ARTF_INLINE uint32_t artfIndirectCount(const ArtfIndirect* g) { return (uint32_t)(g->dims[0] * g->dims[1] * g->dims[2]); }
-/* Where the probe of the volume's cell (x, y, z) is kept: each axis turned by wrap (follow), as the GPU's. */
-ARTF_INLINE uint32_t artfIndirectSlot(const ArtfIndirect* g, int x, int y, int z) {
-    const int c[3] = {x + g->wrap[0], y + g->wrap[1], z + g->wrap[2]};
+/* All the probes, of all the volumes; and of one. */
+ARTF_INLINE uint32_t artfIndirectPer(const ArtfIndirect* g) { return (uint32_t)(g->dims[0] * g->dims[1] * g->dims[2]); }
+ARTF_INLINE uint32_t artfIndirectCount(const ArtfIndirect* g) { return artfIndirectPer(g) * (uint32_t)(g->cascades > 0 ? g->cascades : 1); }
+/* (a / 2^k, rounded down, for any a) */
+ARTF_INLINE int artfFloorShift(int a, int k) { return a >= 0 ? a >> k : -((-a + (1 << k) - 1) >> k); }
+/* Volume k's corner, spacing and wrap: the first's as the grid has them; each after, with follow, from the first's
+ * cell of the camera in whole cells (the same integers on the GPU), its cells 2^k as far apart. */
+ARTF_INLINE void artfIndirectCascade(const ArtfIndirect* g, int k, float* origin, float* spacing, int* wrap) {
+    for (int a = 0; a < 3; ++a) {
+        if (!k) {
+            origin[a] = g->origin[a];
+            spacing[a] = g->spacing[a];
+            wrap[a] = g->wrap[a];
+            continue;
+        }
+        const int half = (g->dims[a] - 1) / 2, base = artfFloorShift(g->base[a] + half, k) - half;
+        spacing[a] = g->spacing[a] * (float)(1 << k);
+        origin[a] = (float)base * spacing[a];
+        wrap[a] = ((base % g->dims[a]) + g->dims[a]) % g->dims[a];
+    }
+}
+/* Where the probe of a volume's cell (x, y, z) is kept: each axis turned by its wrap (follow), as the GPU's. */
+ARTF_INLINE uint32_t artfIndirectSlotOf(const ArtfIndirect* g, const int* wrap, int x, int y, int z) {
+    const int c[3] = {x + wrap[0], y + wrap[1], z + wrap[2]};
     int s[3];
     for (int k = 0; k < 3; ++k) s[k] = c[k] >= g->dims[k] ? c[k] - g->dims[k] : c[k];
     return (uint32_t)((s[2] * g->dims[1] + s[1]) * g->dims[0] + s[0]);
 }
-/* What a probe kept at a slot is of: the volume's cell (x, y, z) there now, and the world's cell, as its stamp (1 + its
- * cell's coordinates, each modulo 256, in a float: exact). A probe whose stamp is not its cell's is new there: it starts
- * over. The world's cell is the volume's origin over its spacing, rounded, plus the volume's cell, on both backends. */
-ARTF_INLINE float artfIndirectStampAt(const ArtfIndirect* g, uint32_t slot, int* cell) {
+ARTF_INLINE uint32_t artfIndirectSlot(const ArtfIndirect* g, int x, int y, int z) { return artfIndirectSlotOf(g, g->wrap, x, y, z); }
+/* What the probe kept at index (of all the volumes') is of: its volume, the volume's cell there now (cell), the
+ * volume's corner and spacing (where), and the world's cell as its stamp (1 + its cell's coordinates, each modulo 256,
+ * in a float: exact). A probe whose stamp is not its cell's is new there: it starts over. The world's cell is the
+ * volume's corner over its spacing, rounded, plus the volume's cell, on both backends. */
+ARTF_INLINE float artfIndirectStampAt(const ArtfIndirect* g, uint32_t index, int* cell, float* origin, float* spacing) {
+    const uint32_t per = artfIndirectPer(g), slot = index % per;
+    int wrap[3];
+    artfIndirectCascade(g, (int)(index / per), origin, spacing, wrap);
     const int sx = (int)(slot % (uint32_t)g->dims[0]), sy = (int)(slot / (uint32_t)g->dims[0] % (uint32_t)g->dims[1]), sz = (int)(slot / (uint32_t)(g->dims[0] * g->dims[1]));
     const int s[3] = {sx, sy, sz};
     uint32_t code = 0;
     for (int k = 0; k < 3; ++k) {
-        cell[k] = s[k] >= g->wrap[k] ? s[k] - g->wrap[k] : s[k] - g->wrap[k] + g->dims[k];
-        const int world = (int)floorf(g->origin[k] / g->spacing[k] + .5f) + cell[k];
+        cell[k] = s[k] >= wrap[k] ? s[k] - wrap[k] : s[k] - wrap[k] + g->dims[k];
+        const int world = (int)floorf(origin[k] / spacing[k] + .5f) + cell[k];
         code |= (uint32_t)(world & 255) << (8 * k);
     }
     return (float)(code + 1u);
+}
+/* How far inside volume k a point is, as a share to take from it: 1 from a cell and a half in, 0 at half a cell. */
+ARTF_INLINE float artfIndirectInside(const ArtfIndirect* g, const float* origin, const float* spacing, const float* q) {
+    float least = 1e30f;
+    for (int a = 0; a < 3; ++a) {
+        const float at = (q[a] - origin[a]) / spacing[a];
+        least = fminf(least, fminf(at, (float)(g->dims[a] - 1) - at));
+    }
+    return fminf(fmaxf(least - .5f, 0.f), 1.f);
 }
 /* With follow: the volume around where the camera is now (artfRendererDraw, before each frame). */
 void artfIndirectFollow(ArtfScene* s);

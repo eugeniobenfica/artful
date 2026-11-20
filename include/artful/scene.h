@@ -736,6 +736,10 @@ typedef struct ArtfIndirectDesc {
      * 32 x 12 x 32), centred on the camera and moved a cell at a time as it moves. What a step left keeps its light;
      * the cells that come in start over, the probes of those that went taking their place (no copy). */
     bool follow;
+    /* With follow: more volumes around the first, each with its cells twice as far apart, as many as this (1 to 4;
+     * 0: 1). A point takes from the finest that holds it, and from the next across its last cell, so light far from
+     * the camera still bounces, coarser, at a cost of probes that grows by the volumes, not by how far they reach. */
+    int cascades;
 } ArtfIndirectDesc;
 
 /* NULL: none. */

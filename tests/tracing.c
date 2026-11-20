@@ -1492,7 +1492,8 @@ void testProbesFollow(void) {
         int fresh = 0;
         for (uint32_t i = 0; i < artfIndirectCount(g); ++i) {
             int cell[3];
-            fresh += g->probes[(size_t)i * 16 + 7] != artfIndirectStampAt(g, i, cell);
+            float origin[3], spacing[3];
+            fresh += g->probes[(size_t)i * 16 + 7] != artfIndirectStampAt(g, i, cell, origin, spacing);
         }
         printf("probes that follow: a step of a cell moves the volume %d cell, and starts %d probes over, a slab of %d\n", g->base[0] - was, fresh, g->dims[1] * g->dims[2]);
         CHECK(g->base[0] == was + 1 && fresh == g->dims[1] * g->dims[2]);
@@ -1552,6 +1553,103 @@ void testProbesFollow(void) {
         printf("\n");
     }
     CHECK(bled[0] > 3);
+    for (int k = 0; k < 2; ++k) {
+        artfFree(frames[k]);
+        artfFree(probes[k]);
+    }
+}
+
+/* Cascades (ArtfIndirectDesc.cascades): three volumes around the camera, each twice as coarse; a point near the red
+ * wall, far from the camera and past the finest volume, takes red from the coarser ones, where one volume gives it
+ * only what its edge holds; and the GPU's probes of all three, after the camera's steps, are the CPU's. */
+void testProbeCascades(void) {
+    ArtfIndirectDesc d = {{8, 4, 8}, 64, .5f, 1, {0, 0, 0}, {6, 4, 6}, false, true, 3};
+    const float at[3] = {1.9f, -.98f, .3f}, up[3] = {0, 1, 0};
+    double red[2] = {0, 0};
+    for (int many = 0; many < 2; ++many) {
+        d.cascades = many ? 3 : 1;
+        ArtfScene* s = bleedScene();
+        setCamera(s, -9, 3, 7, -9, 0, 0);
+        artfSceneSetIndirect(s, &d);
+        ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        for (int k = 0; k < 8; ++k) CHECK(artfRendererDraw(r, s));
+        float got[3];
+        artfIndirectAt(&s->indirect, at, up, got);
+        red[many] = got[0] - got[1];
+        artfRendererFree(r);
+        artfSceneFree(s);
+    }
+    printf("cascades: by the red wall, 9 m from the camera, red over green %.4f with one volume, %.4f with three\n", red[0], red[1]);
+    CHECK(red[1] > red[0] * 2 && red[1] > .01);
+    uint32_t* frames[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    float* probes[2] = {NULL, NULL};
+    uint32_t count = 0;
+    bool drawn[2] = {false, false};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) {
+            missing("vulkan");
+            continue;
+        }
+        ArtfScene* s = bleedScene();
+        artfSceneSetIndirect(s, &d);
+        const float stops[4] = {-2.5f, -1.f, .5f, 0};
+        for (int k = 0; k < 4; ++k) {
+            setCamera(s, stops[k], 3, 7, stops[k], 0, 0);
+            for (int f = 0; f < 3; ++f) CHECK(artfRendererDraw(r, s));
+        }
+        CHECK(artfRendererReadPixels(r, frames[backend]));
+        count = artfIndirectCount(&s->indirect);
+        const size_t floats = (size_t)count * ARTF_PROBE_FLOATS;
+        probes[backend] = artfMalloc(floats * 4);
+#ifdef ARTFUL_VULKAN
+        if (backend) CHECK(artfVulkanProbesRead(r, probes[backend], floats));
+        else
+#endif
+            memcpy(probes[backend], s->indirect.probes, floats * 4);
+        drawn[backend] = true;
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    CHECK(count == 3 * 8 * 4 * 8);
+    /* (the CPU's lanes, of each instruction set, and a pixel at a time: the same bytes) */
+    {
+        static const ArtfSimd sets[3] = {ARTF_SIMD_AUTO, ARTF_SIMD_128, ARTF_SIMD_PORTABLE};
+        uint64_t hashes[3];
+        uint32_t* each = artfMalloc(W * H * 4);
+        for (int k = 0; k < 3; ++k) {
+            ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, k == 2 ? 1 : 0, false);
+            o.simd = sets[k];
+            ArtfRenderer* r = artfRendererNew(&o);
+            ArtfScene* s = bleedScene();
+            artfSceneSetIndirect(s, &d);
+            setCamera(s, -2.5f, 3, 7, -2.5f, 0, 0);
+            for (int f = 0; f < 3; ++f) CHECK(artfRendererDraw(r, s));
+            CHECK(artfRendererReadPixels(r, each));
+            hashes[k] = hashOf(each, (size_t)W * H);
+            artfSceneFree(s);
+            artfRendererFree(r);
+        }
+        CHECK(hashes[0] == hashes[1] && hashes[1] == hashes[2]);
+        artfFree(each);
+    }
+    if (drawn[1]) {
+        double most = 0, apartLight = 0;
+        int stamps = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            for (int k = 0; k < 3; ++k) {
+                most = fmax(most, fabs(probes[0][i * 16 + k]));
+                apartLight = fmax(apartLight, fabs(probes[0][i * 16 + k] - probes[1][i * 16 + k]));
+            }
+            stamps += probes[0][i * 16 + 7] == probes[1][i * 16 + 7];
+        }
+        const double apart = differentShare(frames[0], frames[1], 16);
+        printf("cascades, the GPU against the CPU after the camera's steps: probes %.2g of the brightest at most, %d of %u stamps the same; %.2f%% of pixels apart\n",
+               apartLight / fmax(most, 1e-9), stamps, count, apart * 100);
+        CHECK(apartLight <= most * 1e-4 && stamps == (int)count && apart < .01);
+    }
     for (int k = 0; k < 2; ++k) {
         artfFree(frames[k]);
         artfFree(probes[k]);

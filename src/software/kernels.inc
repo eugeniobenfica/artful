@@ -848,14 +848,15 @@ static V8F tracedLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
 
 /* Light that bounced, at eight places: artfIndirectAt's arithmetic, in the same order, eight at a time. */
 /* mirror: also, into reflected, what the same probes give toward that direction, for what a surface reflects. */
-static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lanes3* mirror, Lanes3* reflected) {
+/* Of volume `cascade` (corner, spacing, wrap: artfIndirectCascade), as cascadeAt. */
+static Lanes3 cascadeLanes(const ArtfIndirect* g, int cascade, const float* origin, const float* spacing, const int* wrap, Lanes3 p, Lanes3 n, const Lanes3* mirror, Lanes3* reflected) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
     V8F q[3], w[3];
     V8I i0[3];
     const V8F pk[3] = {p.x, p.y, p.z}, nk[3] = {n.x, n.y, n.z};
     for (int k = 0; k < 3; ++k) {
-        q[k] = v8fAdd(pk[k], v8fMul(v8fMul(nk[k], v8fSet(g->spacing[k])), v8fSet(.25f)));
-        const V8F at = v8fMin(v8fMax(v8fDiv(v8fSub(q[k], v8fSet(g->origin[k])), v8fSet(g->spacing[k])), zero), v8fSet((float)(g->dims[k] - 1)));
+        q[k] = v8fAdd(pk[k], v8fMul(v8fMul(nk[k], v8fSet(spacing[k])), v8fSet(.25f)));
+        const V8F at = v8fMin(v8fMax(v8fDiv(v8fSub(q[k], v8fSet(origin[k])), v8fSet(spacing[k])), zero), v8fSet((float)(g->dims[k] - 1)));
         V8I i = v8fToI(at);
         i = v8iSelect(v8iGt(i, v8iSet(g->dims[k] - 2)), i, v8iSet(g->dims[k] - 2));
         i0[k] = i;
@@ -867,18 +868,18 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lan
     for (int c = 0; c < 8; ++c) {
         const V8I x = v8iAdd(i0[0], v8iSet(c & 1)), y = v8iAdd(i0[1], v8iSet(c >> 1 & 1)), z = v8iAdd(i0[2], v8iSet(c >> 2));
         V8F weight = v8fMul(v8fMul(c & 1 ? w[0] : v8fSub(one, w[0]), c & 2 ? w[1] : v8fSub(one, w[1])), c & 4 ? w[2] : v8fSub(one, w[2]));
-        /* (where each is kept: turned by wrap, artfIndirectSlot) */
-        V8I sx = v8iAdd(x, v8iSet(g->wrap[0])), sy = v8iAdd(y, v8iSet(g->wrap[1])), sz = v8iAdd(z, v8iSet(g->wrap[2]));
+        /* (where each is kept: turned by wrap, after the volumes before: artfIndirectSlotOf) */
+        V8I sx = v8iAdd(x, v8iSet(wrap[0])), sy = v8iAdd(y, v8iSet(wrap[1])), sz = v8iAdd(z, v8iSet(wrap[2]));
         sx = v8iSelect(v8iGt(sx, v8iSet(g->dims[0] - 1)), sx, v8iSub(sx, v8iSet(g->dims[0])));
         sy = v8iSelect(v8iGt(sy, v8iSet(g->dims[1] - 1)), sy, v8iSub(sy, v8iSet(g->dims[1])));
         sz = v8iSelect(v8iGt(sz, v8iSet(g->dims[2] - 1)), sz, v8iSub(sz, v8iSet(g->dims[2])));
-        const V8I index = v8iAdd(v8iMul(v8iAdd(v8iMul(sz, v8iSet(g->dims[1])), sy), v8iSet(g->dims[0])), sx);
+        const V8I index = v8iAdd(v8iAdd(v8iMul(v8iAdd(v8iMul(sz, v8iSet(g->dims[1])), sy), v8iSet(g->dims[0])), sx), v8iSet((int32_t)((uint32_t)cascade * artfIndirectPer(g))));
         const V8I base = v8iMul(index, v8iSet(16));
 #define PROBE(j) v8iAsF(v8iGather(bits, v8iAdd(base, v8iSet(j))))
         weight = v8fMul(weight, PROBE(3)); /* (none from one inside something) */
         if (!g->desc.throughWalls) {
-            const V8F there[3] = {v8fAdd(v8fSet(g->origin[0]), v8fMul(v8iToF(x), v8fSet(g->spacing[0]))), v8fAdd(v8fSet(g->origin[1]), v8fMul(v8iToF(y), v8fSet(g->spacing[1]))),
-                                  v8fAdd(v8fSet(g->origin[2]), v8fMul(v8iToF(z), v8fSet(g->spacing[2])))};
+            const V8F there[3] = {v8fAdd(v8fSet(origin[0]), v8fMul(v8iToF(x), v8fSet(spacing[0]))), v8fAdd(v8fSet(origin[1]), v8fMul(v8iToF(y), v8fSet(spacing[1]))),
+                                  v8fAdd(v8fSet(origin[2]), v8fMul(v8iToF(z), v8fSet(spacing[2])))};
             const V8F d0 = v8fSub(q[0], there[0]), d1 = v8fSub(q[1], there[1]), d2 = v8fSub(q[2], there[2]);
             const V8F distance = v8fSqrt(v8fAdd(v8fAdd(v8fMul(d0, d0), v8fMul(d1, d1)), v8fMul(d2, d2)));
             const V8F inv = v8fSelect(v8fGt(distance, v8fSet(1e-6f)), zero, v8fDiv(one, distance));
@@ -921,6 +922,50 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lan
         reflected->y = v8fMul(mirrored[1], scale);
         reflected->z = v8fMul(mirrored[2], scale);
     }
+    return out;
+}
+
+/* Light that bounced, at eight places: artfIndirectAt's arithmetic, in the same order, eight at a time, the volumes in
+ * turn (cascades), each lane taking from those that hold it. */
+/* mirror: also, into reflected, what the same probes give toward that direction, for what a surface reflects. */
+static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lanes3* mirror, Lanes3* reflected) {
+    float origin[3], spacing[3];
+    int wrap[3];
+    if (g->cascades <= 1) {
+        artfIndirectCascade(g, 0, origin, spacing, wrap);
+        return cascadeLanes(g, 0, origin, spacing, wrap, p, n, mirror, reflected);
+    }
+    const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
+    Lanes3 out = {zero, zero, zero}, mirrored = {zero, zero, zero};
+    V8F left = one;
+    const V8F pk[3] = {p.x, p.y, p.z}, nk[3] = {n.x, n.y, n.z};
+    for (int k = 0; k < g->cascades; ++k) {
+        artfIndirectCascade(g, k, origin, spacing, wrap);
+        V8F take = left;
+        if (k < g->cascades - 1) {
+            /* (artfIndirectInside) */
+            V8F least = v8fSet(1e30f);
+            for (int a = 0; a < 3; ++a) {
+                const V8F q = v8fAdd(pk[a], v8fMul(v8fMul(nk[a], v8fSet(spacing[a])), v8fSet(.25f)));
+                const V8F at = v8fDiv(v8fSub(q, v8fSet(origin[a])), v8fSet(spacing[a]));
+                least = v8fMin(least, v8fMin(at, v8fSub(v8fSet((float)(g->dims[a] - 1)), at)));
+            }
+            take = v8fMul(left, v8fMin(v8fMax(v8fSub(least, v8fSet(.5f)), zero), one));
+        }
+        if (!v8iSigns(v8fGt(take, zero))) continue;
+        Lanes3 r = {zero, zero, zero};
+        const Lanes3 got = cascadeLanes(g, k, origin, spacing, wrap, p, n, mirror, &r);
+        out.x = v8fAdd(out.x, v8fMul(take, got.x));
+        out.y = v8fAdd(out.y, v8fMul(take, got.y));
+        out.z = v8fAdd(out.z, v8fMul(take, got.z));
+        if (mirror) {
+            mirrored.x = v8fAdd(mirrored.x, v8fMul(take, r.x));
+            mirrored.y = v8fAdd(mirrored.y, v8fMul(take, r.y));
+            mirrored.z = v8fAdd(mirrored.z, v8fMul(take, r.z));
+        }
+        left = v8fSub(left, take);
+    }
+    if (mirror) *reflected = mirrored;
     return out;
 }
 

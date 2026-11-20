@@ -5,7 +5,12 @@
 - **Probes that follow the camera** (`ArtfIndirectDesc.follow`, phase 5.1): the volume of probes is around the camera
   and moves a cell at a time, in place of a box that stays. Nothing is copied: probes are kept by their cell modulo
   the volume's size, and each carries the cell of the world it stands for, so one that came into a new cell starts
-  over and the rest keep their light. Both backends, the same probes to 2e-6. Cascades are not done yet.
+  over and the rest keep their light. Both backends, the same probes to 2e-6.
+- **Cascades of probes** (`ArtfIndirectDesc.cascades`, up to 4, with `follow`): volumes around the camera, each with
+  cells twice as far apart as the one before; a point takes from the finest that holds it, and across its last cell
+  from the next, so light bounces far from the camera too. A point 9 m away by a red wall takes 0.023 of red where one
+  volume gave it 0.004; both backends place and fill the volumes alike (2.7e-6). With probes, the GPU's pixel shader
+  takes up to 3% longer for the loop over volumes.
 
 - **Phase 4.2 done.** The scene's passes take their barriers from what each says it does (`trackUse`): one where
   three were before the scene, the same where they were needed, and synchronization validation clean, also with

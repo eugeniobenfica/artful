@@ -3080,7 +3080,7 @@ void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene)
     v->vkCmdBindPipeline(c, 1, v->probePipeline);
     v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
     v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &v->probeFrames);
-    v->vkCmdDispatch(c, (uint32_t)(g->dims[0] * g->dims[1]), (uint32_t)g->dims[2], 1);
+    v->vkCmdDispatch(c, (uint32_t)(g->dims[0] * g->dims[1]), (uint32_t)(g->dims[2] * (g->cascades > 0 ? g->cascades : 1)), 1); /* (each volume's cells: cascades) */
     memoryBarrier(v, c, STAGE_COMPUTE | STAGE_FRAGMENT, STAGE_TRANSFER, ACCESS_SHADER_WRITE, ACCESS_TRANSFER_READ | ACCESS_TRANSFER_WRITE);
     const BufferCopy all = {0, 0, (VkDeviceSize)artfIndirectCount(g) * ARTF_PROBE_FLOATS * 4};
     v->vkCmdCopyBuffer(c, v->probesNext.buffer, v->probesNow.buffer, 1, &all);

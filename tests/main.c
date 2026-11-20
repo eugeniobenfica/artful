@@ -271,6 +271,7 @@ int main(int argc, char** argv) {
     RUN("tracing/probesGpu", testProbesGpu());
     RUN("tracing/probesKept", testProbesKept());
     RUN("tracing/probesFollow", testProbesFollow());
+    RUN("tracing/probeCascades", testProbeCascades());
     RUN("shadows/extraShadows", testExtraShadows());
     RUN("post/floatsSamples", testFloatsSamples());
     RUN("layers/decals", testDecals());

@@ -1495,30 +1495,30 @@ static inline void probeReach(const float* map, const float* dir, float* mean, f
     *square = texel[1];
 }
 
-void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float* out) {
-    float at[3], w[3], q[3];
+/* Of volume k (corner, spacing, wrap): what its eight probes nearest q give a surface facing n, over pi. */
+static void cascadeAt(const ArtfIndirect* g, int k, const float* origin, const float* spacing, const int* wrap, const float* q, const float* n, float* out) {
+    float at[3], w[3];
     int i0[3];
-    for (int k = 0; k < 3; ++k) {
-        /* (a little out along the normal: a probe on the surface's own side counts more) */
-        q[k] = p[k] + n[k] * g->spacing[k] * .25f;
-        at[k] = artfClampf((q[k] - g->origin[k]) / g->spacing[k], 0, (float)(g->dims[k] - 1));
-        i0[k] = artfMini((int)at[k], g->dims[k] - 2);
-        w[k] = at[k] - (float)i0[k];
+    for (int a = 0; a < 3; ++a) {
+        at[a] = artfClampf((q[a] - origin[a]) / spacing[a], 0, (float)(g->dims[a] - 1));
+        i0[a] = artfMini((int)at[a], g->dims[a] - 2);
+        w[a] = at[a] - (float)i0[a];
     }
+    const size_t first = (size_t)k * artfIndirectPer(g);
     float sum[3] = {0, 0, 0}, weights = 0;
     for (int c = 0; c < 8; ++c) {
         const int x = i0[0] + (c & 1), y = i0[1] + (c >> 1 & 1), z = i0[2] + (c >> 2);
         float weight = (c & 1 ? w[0] : 1.f - w[0]) * (c & 2 ? w[1] : 1.f - w[1]) * (c & 4 ? w[2] : 1.f - w[2]);
-        const size_t index = artfIndirectSlot(g, x, y, z);
+        const size_t index = first + artfIndirectSlotOf(g, wrap, x, y, z);
         const float* probe = g->probes + index * 16;
         weight *= probe[3]; /* (none from one inside something) */
         if (g->desc.throughWalls) {
             weights += weight;
-            for (int k = 0; k < 3; ++k) sum[k] += weight * artfMaxf(probe[k] + probe[4 + 4 * k] * n[0] + probe[5 + 4 * k] * n[1] + probe[6 + 4 * k] * n[2], 0);
+            for (int a = 0; a < 3; ++a) sum[a] += weight * artfMaxf(probe[a] + probe[4 + 4 * a] * n[0] + probe[5 + 4 * a] * n[1] + probe[6 + 4 * a] * n[2], 0);
             continue;
         }
         /* from the probe to the point: one behind the surface counts less, and one that cannot see it hardly at all */
-        const float there[3] = {g->origin[0] + (float)x * g->spacing[0], g->origin[1] + (float)y * g->spacing[1], g->origin[2] + (float)z * g->spacing[2]};
+        const float there[3] = {origin[0] + (float)x * spacing[0], origin[1] + (float)y * spacing[1], origin[2] + (float)z * spacing[2]};
         const float dir[3] = {q[0] - there[0], q[1] - there[1], q[2] - there[2]};
         const float distance = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
         const float inv = distance > 1e-6f ? 1.f / distance : 0.f;
@@ -1532,10 +1532,28 @@ void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float
             weight *= artfMaxf(seen * seen * seen, .002f);
         }
         weights += weight;
-        for (int k = 0; k < 3; ++k) sum[k] += weight * artfMaxf(probe[k] + probe[4 + 4 * k] * n[0] + probe[5 + 4 * k] * n[1] + probe[6 + 4 * k] * n[2], 0);
+        for (int a = 0; a < 3; ++a) sum[a] += weight * artfMaxf(probe[a] + probe[4 + 4 * a] * n[0] + probe[5 + 4 * a] * n[1] + probe[6 + 4 * a] * n[2], 0);
     }
     const float scale = weights > 1e-6f ? 1.f / weights : 0.f;
-    for (int k = 0; k < 3; ++k) out[k] = sum[k] * scale;
+    for (int a = 0; a < 3; ++a) out[a] = sum[a] * scale;
+}
+
+void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float* out) {
+    /* from the finest volume that holds the point, and across its last cell from the next (cascades); one: all of it */
+    out[0] = out[1] = out[2] = 0;
+    float left = 1.f;
+    for (int k = 0; k < g->cascades && left > 0; ++k) {
+        float origin[3], spacing[3], q[3], got[3];
+        int wrap[3];
+        artfIndirectCascade(g, k, origin, spacing, wrap);
+        /* (a little out along the normal: a probe on the surface's own side counts more) */
+        for (int a = 0; a < 3; ++a) q[a] = p[a] + n[a] * spacing[a] * .25f;
+        const float take = k == g->cascades - 1 ? left : left * artfIndirectInside(g, origin, spacing, q);
+        if (!(take > 0)) continue;
+        cascadeAt(g, k, origin, spacing, wrap, q, n, got);
+        for (int a = 0; a < 3; ++a) out[a] += take * got[a];
+        left -= take;
+    }
 }
 
 typedef struct ProbeJob { ArtfScene* s; const ArtfFrameData* f; } ProbeJob;
@@ -1548,8 +1566,9 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
     ArtfIndirect* g = &s->indirect;
     /* (index: where it is kept; the cell of the volume it is of now, and whether it was of that cell before: follow) */
     int cell[3];
-    const float stamp = artfIndirectStampAt(g, index, cell);
-    const float o[3] = {g->origin[0] + (float)cell[0] * g->spacing[0], g->origin[1] + (float)cell[1] * g->spacing[1], g->origin[2] + (float)cell[2] * g->spacing[2]};
+    float origin[3], spacing[3];
+    const float stamp = artfIndirectStampAt(g, index, cell, origin, spacing);
+    const float o[3] = {origin[0] + (float)cell[0] * spacing[0], origin[1] + (float)cell[1] * spacing[1], origin[2] + (float)cell[2] * spacing[2]};
     const float* wasProbe = g->probes + (size_t)index * 16;
     const bool fresh = wasProbe[7] != stamp;
     /* (one inside something, on the steps it is not followed: none, and what it had, as it was) */
@@ -1576,7 +1595,7 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
         toward[k][2] = z / length;
         reach[k] = reach2[k] = reachWeight[k] = 0;
     }
-    const float most = sqrtf(g->spacing[0] * g->spacing[0] + g->spacing[1] * g->spacing[1] + g->spacing[2] * g->spacing[2]) * 1.5f;
+    const float most = sqrtf(spacing[0] * spacing[0] + spacing[1] * spacing[1] + spacing[2] * spacing[2]) * 1.5f;
     const float one[3] = {1, 1, 1};
     for (int r = 0; r < rays; ++r) {
         /* (its way: Sobol's, scrambled by the probe's own seed, each step the next of them; as the GPU's) */

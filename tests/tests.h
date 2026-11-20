@@ -212,6 +212,7 @@ void testProbesWalls(void);
 void testProbesGpu(void);
 void testProbesKept(void);
 void testProbesFollow(void);
+void testProbeCascades(void);
 void testTrace(ArtfBackend backend);
 void testTraceData(void);
 void testTraceBothBackends(void);

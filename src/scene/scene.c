@@ -1473,6 +1473,7 @@ void artfSceneSetIndirect(ArtfScene* s, const ArtfIndirectDesc* desc) {
     g->desc = *desc;
     static const int start[3] = {8, 4, 8};
     for (int k = 0; k < 3; ++k) g->dims[k] = artfClampi(desc->probes[k] > 0 ? desc->probes[k] : start[k], 2, 64);
+    g->cascades = desc->follow ? artfClampi(desc->cascades > 0 ? desc->cascades : 1, 1, 4) : 1;
     float low[3], high[3];
     if (desc->follow) {
         /* (a volume of that size, where the camera is: artfIndirectFollow places it) */
@@ -1878,7 +1879,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
         const ArtfIndirect* g = &s->indirect;
         const float rows[3][4] = {{g->origin[0], g->origin[1], g->origin[2], g->desc.strength > 0 ? g->desc.strength : 1.f},
                                   {g->spacing[0], g->spacing[1], g->spacing[2], 0},
-                                  {(float)g->dims[0], (float)g->dims[1], (float)g->dims[2], (float)(g->wrap[0] + g->wrap[1] * 64 + g->wrap[2] * 4096)}};
+                                  {(float)g->dims[0], (float)g->dims[1], (float)g->dims[2], (float)(g->wrap[0] + g->wrap[1] * 64 + g->wrap[2] * 4096 + (g->cascades - 1) * 262144)}};
         memcpy(out->indirect, rows, sizeof rows);
     }
     memcpy(out->previous, vp.m, sizeof vp.m);

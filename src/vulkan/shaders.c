@@ -93,6 +93,50 @@ static SpvId probeSlotSpv(Spv* s, const Resources* r, SpvId x, SpvId y, SpvId z,
     return spvOp2(s, SPV_OP_IAdd, s->uintType, spvOp2(s, SPV_OP_IMul, s->uintType, spvOp2(s, SPV_OP_IAdd, s->uintType, spvOp2(s, SPV_OP_IMul, s->uintType, slot[2], dy), slot[1]), dx), slot[0]);
 }
 
+/* The same with the wraps given (wrap[3], one volume's), and after the volumes before it (first: their probes). */
+static SpvId probeSlotWith(Spv* s, SpvId x, SpvId y, SpvId z, SpvId dx, SpvId dy, SpvId dz, const SpvId* wrap, SpvId first) {
+    const SpvId c[3] = {x, y, z}, d[3] = {dx, dy, dz};
+    SpvId slot[3];
+    for (int k = 0; k < 3; ++k) {
+        SpvId sum = spvOp2(s, SPV_OP_IAdd, s->uintType, c[k], wrap[k]);
+        slot[k] = spvSelect(s, s->uintType, spvOp2(s, SPV_OP_ULessThan, s->boolType, sum, d[k]), sum, spvOp2(s, SPV_OP_ISub, s->uintType, sum, d[k]));
+    }
+    SpvId within = spvOp2(s, SPV_OP_IAdd, s->uintType, spvOp2(s, SPV_OP_IMul, s->uintType, spvOp2(s, SPV_OP_IAdd, s->uintType, spvOp2(s, SPV_OP_IMul, s->uintType, slot[2], dy), slot[1]), dx), slot[0]);
+    return spvOp2(s, SPV_OP_IAdd, s->uintType, within, first);
+}
+
+/* artfIndirectCascade: volume k's corner, spacing and wraps, from the frame's (the first volume's) and, past it, from
+ * the first's cell of the camera in whole cells, as the CPU's integers. */
+static void cascadeSpv(Spv* s, const Resources* r, SpvId k, SpvId* origin, SpvId* spacing, SpvId* wrap) {
+    SpvId row0 = frameVec(s, r, F_INDIRECT), row1 = frameVec(s, r, F_INDIRECT + 1), row2 = frameVec(s, r, F_INDIRECT + 2);
+    SpvId word = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, spvExtract(s, s->floatType, row2, 3));
+    SpvId first = spvOp2(s, 170 /* OpIEqual */, s->boolType, k, spvConstUint(s, 0));
+    SpvId scale = spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_ShiftLeftLogical, s->uintType, spvConstUint(s, 1), k));
+    SpvId o[3], sp[3];
+    for (int a = 0; a < 3; ++a) {
+        SpvId o0 = spvExtract(s, s->floatType, row0, (uint32_t)a), s0 = spvExtract(s, s->floatType, row1, (uint32_t)a);
+        SpvId d = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, spvExtract(s, s->floatType, row2, (uint32_t)a));
+        SpvId half = spvOp2(s, SPV_OP_UDiv, s->uintType, spvOp2(s, SPV_OP_ISub, s->uintType, d, spvConstUint(s, 1)), spvConstUint(s, 2));
+        SpvId base0 = spvOp1(s, 110 /* ConvertFToS */, s->intType, spvGlsl1(s, SPV_GLSL_Floor, s->floatType, spvOp2(s, SPV_OP_FAdd, s->floatType, spvOp2(s, SPV_OP_FDiv, s->floatType, o0, s0), spvConstFloat(s, .5f))));
+        SpvId c = spvOp2(s, SPV_OP_IAdd, s->intType, base0, spvOp1(s, SPV_OP_Bitcast, s->intType, half));
+        SpvId base = spvOp2(s, SPV_OP_ISub, s->intType, spvOp2(s, 195 /* OpShiftRightArithmetic */, s->intType, c, k), spvOp1(s, SPV_OP_Bitcast, s->intType, half));
+        sp[a] = spvOp2(s, SPV_OP_FMul, s->floatType, s0, scale);
+        o[a] = spvSelect(s, s->floatType, first, o0, spvOp2(s, SPV_OP_FMul, s->floatType, spvOp1(s, 111 /* ConvertSToF */, s->floatType, base), sp[a]));
+        SpvId di = spvOp1(s, SPV_OP_Bitcast, s->intType, d);
+        SpvId wrapped = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvOp2(s, 139 /* OpSMod */, s->intType, base, di));
+        SpvId frameWrap = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, word, spvConstUint(s, 6u * (uint32_t)a)), spvConstUint(s, 63));
+        wrap[a] = spvSelect(s, s->uintType, first, frameWrap, wrapped);
+    }
+    const SpvId oc[3] = {o[0], o[1], o[2]}, sc[3] = {sp[0], sp[1], sp[2]};
+    *origin = spvCompose(s, s->vec3, oc, 3);
+    *spacing = spvCompose(s, s->vec3, sc, 3);
+}
+/* How many volumes the frame's probes are in (follow's cascades). */
+static SpvId cascadeCountSpv(Spv* s, const Resources* r) {
+    SpvId word = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, spvExtract(s, s->floatType, frameVec(s, r, F_INDIRECT + 2), 3));
+    return spvOp2(s, SPV_OP_IAdd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, word, spvConstUint(s, 18)), spvConstUint(s, 1));
+}
+
 static SpvId bufferVec(Spv* s, const Resources* r, SpvId buffer, SpvId i) {
     const SpvId idx[2] = {r->zero, i};
     return spvLoad(s, s->vec4, spvAccess(s, r->ptrStorageVec4, buffer, idx, 2));
@@ -1582,6 +1626,9 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId decalAlbedo = spvVariable(s, ptrFn3, SPV_STORAGE_Function), decalRough = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
     SpvId probeSum = spvVariable(s, ptrFn3, SPV_STORAGE_Function), probeWeights = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
     SpvId probeMirror = spvVariable(s, ptrFn3, SPV_STORAGE_Function);
+    /* (the volumes in turn: what is left to take, the one at, and what they gave) */
+    SpvId probeLeft = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), probeVolume = spvVariable(s, ptrFnUint, SPV_STORAGE_Function);
+    SpvId probeTaken = spvVariable(s, ptrFn3, SPV_STORAGE_Function), probeTakenMirror = spvVariable(s, ptrFn3, SPV_STORAGE_Function);
     Coating coating;
     memset(&coating, 0, sizeof coating);
     SpvId through = 0;
@@ -1815,21 +1862,50 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId indirectRow = frameVec(s, &r, F_INDIRECT), indirectMerge;
     spvIfBegin(s, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, W(indirectRow), FLOAT(0.f)), &indirectMerge);
     if (withProbes) {
-        SpvId origin = spvShuffle3(s, indirectRow), spacing = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 1)), dims = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 2));
+        /* (the volumes in turn, as artfIndirectAt: from the finest that holds the point, and across its last cell from
+         * the next; one volume, all of it from it) */
+        SpvId dims = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 2));
+        SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims)), dz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims));
+        SpvId volumes = cascadeCountSpv(s, &r);
+        SpvId per = MUL_U(MUL_U(dx, dy), dz), probeCount = MUL_U(per, volumes);
+        SpvId mirrorDir = SUB_V3(SCALE_V3(n, twice), view);
+        spvStore(s, probeLeft, FLOAT(1.f));
+        spvStore(s, probeVolume, UINT(0));
+        spvStore(s, probeTaken, same3(s, 0.f));
+        spvStore(s, probeTakenMirror, same3(s, 0.f));
+        SpvId vHeader = spvNewId(s), vTest = spvNewId(s), vBody = spvNewId(s), vNext = spvNewId(s), vDone = spvNewId(s);
+        spvBranch(s, vHeader);
+        spvLabel(s, vHeader);
+        spvLoopMerge(s, vDone, vNext);
+        spvBranch(s, vTest);
+        spvLabel(s, vTest);
+        SpvId volume = spvLoad(s, s->uintType, probeVolume);
+        spvBranchIf(s, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_ULessThan, s->boolType, volume, volumes),
+                              spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, spvLoad(s, s->floatType, probeLeft), FLOAT(0.f))),
+                    vBody, vDone);
+        spvLabel(s, vBody);
+        SpvId origin, spacing, wraps[3];
+        cascadeSpv(s, &r, volume, &origin, &spacing, wraps);
         SpvId q = ADD_V3(world, MUL_V3(n, SCALE_V3(spacing, FLOAT(.25f))));
-        SpvId place = spvOp2(s, SPV_OP_FDiv, s->vec3, SUB_V3(q, origin), spacing);
         SpvId last = SUB_V3(dims, same3(s, 1.f));
-        place = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, place, same3(s, 0.f)), last);
+        SpvId rawPlace = spvOp2(s, SPV_OP_FDiv, s->vec3, SUB_V3(q, origin), spacing);
+        /* (artfIndirectInside: how far in, a share to take) */
+        SpvId edge = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, rawPlace, SUB_V3(last, rawPlace));
+        SpvId least = MIN_F(X(edge), MIN_F(Y(edge), Z(edge)));
+        SpvId inside = MIN_F(MAX_F(SUB_F(least, FLOAT(.5f)), FLOAT(0.f)), FLOAT(1.f));
+        SpvId left = spvLoad(s, s->floatType, probeLeft);
+        SpvId take = spvSelect(s, s->floatType, spvOp2(s, 170 /* OpIEqual */, s->boolType, ADD_U(volume, UINT(1)), volumes), left, MUL_F(left, inside));
+        SpvId takeMerge;
+        spvIfBegin(s, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, take, FLOAT(0.f)), &takeMerge);
+        SpvId place = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, rawPlace, same3(s, 0.f)), last);
         SpvId base = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl1(s, SPV_GLSL_Floor, s->vec3, place), SUB_V3(dims, same3(s, 2.f)));
         SpvId w = SUB_V3(place, base);
-        SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims));
         SpvId bx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(base)), by = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(base)), bz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(base));
-        SpvId probeCount = MUL_U(MUL_U(dx, dy), spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims)));
+        SpvId first = MUL_U(volume, per);
         /* (the eight probes in a loop, not eight copies: what is drawn without probes pays for the registers of one) */
         spvStore(s, probeSum, same3(s, 0.f));
         spvStore(s, probeMirror, same3(s, 0.f));
         spvStore(s, probeWeights, FLOAT(0.f));
-        SpvId mirrorDir = SUB_V3(SCALE_V3(n, twice), view);
         spvStore(s, counter, UINT(0));
         SpvId pHeader = spvNewId(s), pTest = spvNewId(s), pBody = spvNewId(s), pNext = spvNewId(s), pDone = spvNewId(s);
         spvBranch(s, pHeader);
@@ -1848,7 +1924,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
 #define SIDE_OF(bit, t) spvSelect(s, s->floatType, spvOp2(s, SPV_OP_INotEqual, s->boolType, bit, UINT(0)), t, SUB_F(FLOAT(1.f), t))
             SpvId weight = MUL_F(MUL_F(SIDE_OF(cx, X(w)), SIDE_OF(cy, Y(w))), SIDE_OF(cz, Z(w)));
 #undef SIDE_OF
-            SpvId index = probeSlotSpv(s, &r, x, y, z, dx, dy, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims))), at = MUL_U(index, UINT(4));
+            SpvId index = probeSlotWith(s, x, y, z, dx, dy, dz, wraps, first), at = MUL_U(index, UINT(4));
             weight = MUL_F(weight, W(bufferVec(s, &r, probes, at))); /* (none from one inside something) */
             /* as artfIndirectAt: from the probe to the point, what is behind counts less and what it cannot see hardly at all */
             SpvId cell = vec3Of(s, spvOp1(s, SPV_OP_ConvertUToF, s->floatType, x), spvOp1(s, SPV_OP_ConvertUToF, s->floatType, y), spvOp1(s, SPV_OP_ConvertUToF, s->floatType, z));
@@ -1886,8 +1962,17 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         spvLabel(s, pDone);
         SpvId sum = spvLoad(s, s->vec3, probeSum), weights = spvLoad(s, s->floatType, probeWeights);
         SpvId scale = spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, weights, FLOAT(1e-6f)), DIV_F(FLOAT(1.f), MAX_F(weights, FLOAT(1e-6f))), FLOAT(0.f));
-        spvStore(s, acc.diffuse, SCALE_V3(sum, MUL_F(MUL_F(W(indirectRow), open), scale)));
-        SpvId bounced = SCALE_V3(spvLoad(s, s->vec3, probeMirror), MUL_F(scale, W(indirectRow)));
+        spvStore(s, probeTaken, ADD_V3(spvLoad(s, s->vec3, probeTaken), SCALE_V3(SCALE_V3(sum, scale), take)));
+        spvStore(s, probeTakenMirror, ADD_V3(spvLoad(s, s->vec3, probeTakenMirror), SCALE_V3(SCALE_V3(spvLoad(s, s->vec3, probeMirror), scale), take)));
+        spvStore(s, probeLeft, SUB_F(left, take));
+        spvIfEnd(s, takeMerge);
+        spvBranch(s, vNext);
+        spvLabel(s, vNext);
+        spvStore(s, probeVolume, ADD_U(volume, UINT(1)));
+        spvBranch(s, vHeader);
+        spvLabel(s, vDone);
+        spvStore(s, acc.diffuse, SCALE_V3(spvLoad(s, s->vec3, probeTaken), MUL_F(W(indirectRow), open)));
+        SpvId bounced = SCALE_V3(spvLoad(s, s->vec3, probeTakenMirror), W(indirectRow));
         spvStore(s, acc.highlight, pick3(s, shiny, MUL_V3(bounced, mirror), same3(s, 0.f)));
     }
     spvIfEnd(s, indirectMerge);
@@ -4119,18 +4204,37 @@ _Static_assert(ARTF_PROBE_SIDE == 8, "a probe's map is 8 x 8: an invocation's te
 static void groupBarrier(Spv* s) { spvEmit(&s->code, 224 /* OpControlBarrier */, SPV_WORDS(UINT(2), UINT(2), UINT(0x108))); /* the group's, acquire and release, its memory */ }
 
 /* As artfIndirectAt, from the probes in `probes` (62): light from all around a surface at p facing n, over pi. */
-static SpvId indirectAtSpv(const Tracer* t, SpvId probes, SpvId p, SpvId n, bool walls, SpvId sumVar, SpvId weightsVar, SpvId counter) {
+/* (the volumes in turn, as artfIndirectAt: leftVar, volumeVar and takenVar, the caller's) */
+static SpvId indirectAtSpv(const Tracer* t, SpvId probes, SpvId p, SpvId n, bool walls, SpvId sumVar, SpvId weightsVar, SpvId counter, SpvId leftVar, SpvId volumeVar, SpvId takenVar) {
     Spv* s = t->s;
     const Resources* r = &t->r;
-    SpvId origin = spvShuffle3(s, frameVec(s, r, F_INDIRECT)), spacing = spvShuffle3(s, frameVec(s, r, F_INDIRECT + 1)), dims = spvShuffle3(s, frameVec(s, r, F_INDIRECT + 2));
+    SpvId dims = spvShuffle3(s, frameVec(s, r, F_INDIRECT + 2));
+    SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims)), dz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims));
+    SpvId volumes = cascadeCountSpv(s, r);
+    SpvId per = MUL_U(MUL_U(dx, dy), dz), count = MUL_U(per, volumes);
+    spvStore(s, leftVar, FLOAT(1.f));
+    spvStore(s, volumeVar, UINT(0));
+    spvStore(s, takenVar, same3(s, 0.f));
+    Loop volumeLoop;
+    loopOpen(s, &volumeLoop);
+    loopWhile(s, &volumeLoop, BOTH(LESS_U(LOAD_U(volumeVar), volumes), MORE_F(LOAD_F(leftVar), FLOAT(0.f))));
+    SpvId volume = LOAD_U(volumeVar);
+    SpvId origin, spacing, wraps[3];
+    cascadeSpv(s, r, volume, &origin, &spacing, wraps);
     /* (a little out along the normal: a probe on the surface's own side counts more) */
     SpvId q = ADD_V3(p, SCALE_V3(MUL_V3(n, spacing), FLOAT(.25f)));
-    SpvId at = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvOp2(s, SPV_OP_FDiv, s->vec3, SUB_V3(q, origin), spacing), same3(s, 0.f)), SUB_V3(dims, same3(s, 1.f)));
+    SpvId rawAt = spvOp2(s, SPV_OP_FDiv, s->vec3, SUB_V3(q, origin), spacing), last = SUB_V3(dims, same3(s, 1.f));
+    SpvId edge = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, rawAt, SUB_V3(last, rawAt));
+    SpvId inside = MIN_F(MAX_F(SUB_F(MIN_F(X(edge), MIN_F(Y(edge), Z(edge))), FLOAT(.5f)), FLOAT(0.f)), FLOAT(1.f));
+    SpvId left = LOAD_F(leftVar);
+    SpvId take = PICK_F(IS_EQ(ADD_U(volume, UINT(1)), volumes), left, MUL_F(left, inside));
+    SpvId takeMerge;
+    spvIfBegin(s, MORE_F(take, FLOAT(0.f)), &takeMerge);
+    SpvId at = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, rawAt, same3(s, 0.f)), last);
     SpvId base = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl1(s, SPV_GLSL_Floor, s->vec3, at), SUB_V3(dims, same3(s, 2.f)));
     SpvId w = SUB_V3(at, base);
-    SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims)), dz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims));
     SpvId bx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(base)), by = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(base)), bz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(base));
-    SpvId count = MUL_U(MUL_U(dx, dy), dz);
+    SpvId first = MUL_U(volume, per);
     spvStore(s, sumVar, same3(s, 0.f));
     spvStore(s, weightsVar, FLOAT(0.f));
     spvStore(s, counter, UINT(0));
@@ -4144,7 +4248,7 @@ static SpvId indirectAtSpv(const Tracer* t, SpvId probes, SpvId p, SpvId n, bool
 #define SIDE_OF(bit, f) PICK_F(NOT_EQ(bit, UINT(0)), f, SUB_F(FLOAT(1.f), f))
         SpvId weight = MUL_F(MUL_F(SIDE_OF(cx, X(w)), SIDE_OF(cy, Y(w))), SIDE_OF(cz, Z(w)));
 #undef SIDE_OF
-        SpvId index = probeSlotSpv(s, r, x, y, z, dx, dy, dz), row = MUL_U(index, UINT(4));
+        SpvId index = probeSlotWith(s, x, y, z, dx, dy, dz, wraps, first), row = MUL_U(index, UINT(4));
         weight = MUL_F(weight, W(bufferVec(s, r, probes, row))); /* (none from one inside something) */
         if (walls) {
             /* from the probe to the point: one behind the surface counts less, and one that cannot see it hardly at all */
@@ -4169,7 +4273,13 @@ static SpvId indirectAtSpv(const Tracer* t, SpvId probes, SpvId p, SpvId n, bool
     }
     loopClose(s, &corners);
     SpvId weights = LOAD_F(weightsVar);
-    return SCALE_V3(LOAD_V3(sumVar), PICK_F(MORE_F(weights, FLOAT(1e-6f)), DIV_F(FLOAT(1.f), MAX_F(weights, FLOAT(1e-6f))), FLOAT(0.f)));
+    SpvId got = SCALE_V3(LOAD_V3(sumVar), PICK_F(MORE_F(weights, FLOAT(1e-6f)), DIV_F(FLOAT(1.f), MAX_F(weights, FLOAT(1e-6f))), FLOAT(0.f)));
+    spvStore(s, takenVar, ADD_V3(LOAD_V3(takenVar), SCALE_V3(got, take)));
+    spvStore(s, leftVar, SUB_F(left, take));
+    spvIfEnd(s, takeMerge);
+    spvStore(s, volumeVar, ADD_U(volume, UINT(1)));
+    loopClose(s, &volumeLoop);
+    return LOAD_V3(takenVar);
 }
 
 /* As lightFrom with a path of 1: a light toward `to` (of length 1), as far as limit, adds to `light` (a variable) what
@@ -4228,16 +4338,22 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     SpvId lightVar = VAR(ptr3), sumVar = VAR(ptr3), meanVar = VAR(ptr3), leanVar[3];
     for (int k = 0; k < 3; ++k) leanVar[k] = VAR(ptr3);
     SpvId weightsVar = VAR(ptrF), reachVar = VAR(ptrF), reach2Var = VAR(ptrF), reachWeightVar = VAR(ptrF), backsVar = VAR(ptrF), backVar = VAR(ptrF);
+    SpvId leftVar = VAR(ptrF), volumeVar = VAR(ptrU), takenVar = VAR(ptr3); /* (indirectAtSpv's volumes) */
 
     SpvId group = spvLoad(s, uvec3, groupVar), lid = spvExtract(s, s->uintType, spvLoad(s, uvec3, localVar), 0);
     SpvId gx = spvExtract(s, s->uintType, group, 0), gy = spvExtract(s, s->uintType, group, 1);
     SpvId frames = spvLoad(s, s->uintType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_PushConstant, s->uintType), push, &r.zero, 1));
-    SpvId origin = spvShuffle3(s, frameVec(s, &r, F_INDIRECT)), spacing = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 1)), dims = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 2));
+    SpvId dims = spvShuffle3(s, frameVec(s, &r, F_INDIRECT + 2));
     SpvId dx = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(dims)), dy = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(dims)), dz = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Z(dims));
-    /* (the groups: dims[0] x dims[1] across, dims[2] down: each a cell of the volume; where its probe is kept, turned
-     * by follow's wrap, artfIndirectSlot: index, as the CPU's probeJob has it, for its rays' seed too) */
-    SpvId cellX = spvOp2(s, SPV_OP_UMod, s->uintType, gx, dx), cellY = spvOp2(s, SPV_OP_UDiv, s->uintType, gx, dx), cellZ = gy;
-    SpvId count = MUL_U(MUL_U(dx, dy), dz), index = probeSlotSpv(s, &r, cellX, cellY, cellZ, dx, dy, dz);
+    /* (the groups: dims[0] x dims[1] across, dims[2] x the volumes down: each a cell of a volume (cascades); where its
+     * probe is kept, after the volumes before and turned by its wrap: index, as the CPU's probeJob has it, for its rays'
+     * seed too) */
+    SpvId volume = spvOp2(s, SPV_OP_UDiv, s->uintType, gy, dz);
+    SpvId origin, spacing, wraps[3];
+    cascadeSpv(s, &r, volume, &origin, &spacing, wraps);
+    SpvId cellX = spvOp2(s, SPV_OP_UMod, s->uintType, gx, dx), cellY = spvOp2(s, SPV_OP_UDiv, s->uintType, gx, dx), cellZ = spvOp2(s, SPV_OP_UMod, s->uintType, gy, dz);
+    SpvId per = MUL_U(MUL_U(dx, dy), dz), count = MUL_U(per, cascadeCountSpv(s, &r));
+    SpvId index = probeSlotWith(s, cellX, cellY, cellZ, dx, dy, dz, wraps, MUL_U(volume, per));
     SpvId o = ADD_V3(origin, MUL_V3(vec3Of(s, TO_F(cellX), TO_F(cellY), TO_F(cellZ)), spacing));
     /* (its stamp, artfIndirectStampAt: 1 + the world's cell, each modulo 256; one not its cell's is new there) */
     SpvId stamp;
@@ -4347,7 +4463,7 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
                     }
                     loopClose(s, &lights);
                     /* what bounced to it before: the probes, as the last step left them */
-                    SpvId around = indirectAtSpv(t, probes, p, m.normal, walls, sumVar, weightsVar, counter);
+                    SpvId around = indirectAtSpv(t, probes, p, m.normal, walls, sumVar, weightsVar, counter, leftVar, volumeVar, takenVar);
                     spvStore(s, lightVar, ADD_V3(LOAD_V3(lightVar), MUL_V3(m.albedo, around)));
                 }
                 spvIfEnd(s, front);
