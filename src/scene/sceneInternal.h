@@ -1082,6 +1082,16 @@ float artfCookGetFloat(ArtfCookReader* r);
  * into the arrays stays in them; on failure, nothing is held. */
 void artfCookPutMesh(ArtfCookBytes* b, const ArtfMeshData* m);
 bool artfCookGetMesh(ArtfCookReader* r, ArtfMeshData* m);
+/* What is inside a prepared mesh or texture, and one made of such parts (the parts are its own then). */
+void artfPreparedMeshParts(const ArtfPreparedMesh* p, const ArtfMeshData** mesh, const ArtfMeshData** levels, const float** errors, uint32_t* levelCount);
+ArtfPreparedMesh* artfPreparedMeshOf(const ArtfMeshData* mesh, const ArtfMeshData* levels, const float* errors, uint32_t levelCount);
+const ArtfTextureData* artfPreparedTextureData(const ArtfPreparedTexture* p);
+ArtfPreparedTexture* artfPreparedTextureOf(const ArtfTextureData* t);
+/* A texture as prepared (plain pixels and their mipmaps), and back; reading checks its sizes. */
+void artfCookPutTexture(ArtfCookBytes* b, const ArtfTextureData* t);
+bool artfCookGetTexture(ArtfCookReader* r, ArtfTextureData* t);
+/* A hash of bytes (FNV-1a, 64 bits): what a cooked file says it was made from. */
+uint64_t artfCookHash(const void* data, size_t size);
 /* What the first count instances are, and where: what a file was made against. */
 uint64_t artfCookInstancesPrint(const ArtfScene* s, uint32_t count);
 /* A mesh as built, and its levels, into the scene: what artfSceneAddPreparedMesh does with a prepared one. */

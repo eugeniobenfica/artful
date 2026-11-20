@@ -175,6 +175,24 @@ void irPrint(const IrModule* m, FILE* out) {
     }
 }
 
+bool irFromSpirv(IrModule* m, const uint32_t* words, size_t count) {
+    if (count < 5 || words[0] != 0x07230203) return false;
+    bool code = false;
+    for (size_t at = 5; at < count;) {
+        const uint32_t length = words[at] >> 16, op = words[at] & 0xFFFF;
+        if (!length || at + length > count) return false;
+        int section;
+        if (op == 54) code = true; /* (OpFunction: code from here on) */
+        if (op == 17 || op == 10 || op == 11 || op == 14 || op == 15 || op == 16) section = IR_HEAD;
+        else if (op == 71 || op == 72 || (op >= 5 && op <= 7)) section = IR_ANNOTATIONS; /* (decorations, and names) */
+        else section = code ? IR_CODE : IR_TYPES;
+        irAppend(m, section, op, words + at + 1, length - 1);
+        at += length;
+    }
+    if (words[3] > m->bound + 1) m->bound = words[3] - 1;
+    return true;
+}
+
 int irUses(const IrModule* m, IrUse* out, int max) {
     const size_t ids = (size_t)m->bound + 1;
     uint32_t* root = artfCalloc(ids, 4);   /* of a pointer: the variable it is into, + 1 */

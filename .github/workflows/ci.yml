@@ -29,6 +29,9 @@ jobs:
           VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
           VK_LAYER_VALIDATE_SYNC: 1
           VK_LAYER_SYNCVAL_SHADER_ACCESSES_HEURISTIC: 1
+          VK_KHRONOS_VALIDATION_VALIDATE_SYNC: true
+          VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC: true
+          ARTFUL_TEST_TRACE: 1
         run: |
           build/artful-tests
           ARTFUL_SINGLE_DRAW=1 build/artful-tests

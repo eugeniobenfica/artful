@@ -15,6 +15,9 @@ typedef enum ArtfFgTarget {
     FG_OCCLUSION, FG_BLOOM, FG_BLUR, FG_FRAME, FG_TARGETS
 } ArtfFgTarget;
 
+/* Of a Vulkan renderer's last frame: how many of its post passes' dispatches there were, and how many barriers they
+ * took (one only where a dispatch reads or writes what one before it wrote, or writes what one read). */
+void artfVulkanPostBarriers(const ArtfRenderer* r, uint32_t* barriers, uint32_t* dispatches);
 /* Of a Vulkan renderer: each target's bytes, as allocated now (vulkan.c). */
 void artfVulkanTargetBytes(const ArtfRenderer* r, uint64_t* bytes);
 

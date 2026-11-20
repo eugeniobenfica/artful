@@ -55,6 +55,8 @@ static int failuresBefore;
 
 static void begin(const char* name) {
     testName = name;
+    /* (ARTFUL_TEST_TRACE: each test's name before it runs, so that what dies is known: CI) */
+    if (getenv("ARTFUL_TEST_TRACE")) printf("[%s]\n", name);
     missedCount = 0;
     failuresBefore = failures;
 }
@@ -82,6 +84,7 @@ static void end(void) {
 #define RUN(name, call) do { if (chosen(name)) { begin(name); call; end(); } } while (0)
 
 int main(int argc, char** argv) {
+    setvbuf(stdout, NULL, _IONBF, 0); /* (all of what was said reaches a pipe, also when the program dies) */
     listing = argc > 1 && !strcmp(argv[1], "--list");
     exact = argc > 2 && !strcmp(argv[1], "--exact");
     if (exact) {
@@ -244,6 +247,7 @@ int main(int argc, char** argv) {
     RUN("scale/extras", testExtras());
     RUN("backends/lostDevice", testLostDevice());
     RUN("backends/shaderIr", testShaderIr());
+    RUN("backends/spirvRoundTrip", testSpirvRoundTrip());
     RUN("backends/frameGraph", testFrameGraph());
     RUN("backends/textureMemory", testTextureMemory());
     RUN("backends/refusedSwapchain", testRefusedSwapchain());

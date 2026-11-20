@@ -412,6 +412,31 @@ plan's 30% comes from both: targets made only for what is on, and aliasing what 
 (`backends/frameGraph`) draws every effect and some, with occlusion's two halves and without, and every pass the frame
 takes is described, in its order.
 
+What the graph said is done where it is safe to. **Targets only for what is on:** the post buffers are made as the
+frame's effects need them (`postNeedsOf`): ambient occlusion's only with it, motion blur's velocities only with it, the
+fog grid only with fog that light goes through, the second light only where a pass swaps the parts, the history only
+with temporal antialiasing or upscaling; what an effect that is off would bind names a buffer of nothing. When an effect
+comes or goes, they are made again with the device idle (rare: a setting changed). **Two that never meet share one
+buffer:** ambient occlusion's and the velocities live in passes apart, so they are one buffer as large as the larger,
+bound at both places. At 1920 x 1080: with every effect on, the targets are 196.7 MB where they were 212.6 (7.5% less);
+with temporal antialiasing and bloom, 180.7 where 212.6 (15%); with bloom alone, 110.0 where 205.1 (46%). The light,
+the second and the history are three buffers whose parts rotate from pass to pass: whichever a pass touches, each lives
+the whole post chain, so they cannot share with what lives within it (the graph now counts them so; it had counted the
+parts, and said more could be saved than can). What aliasing could still save with every effect on is 15.9 MB (8%): the
+shared buffer, in the scene's float images' memory, which they no longer need past the gather; that is an image's and
+a buffer's memory as one, not yet done. The rest of the plan's 30% with every effect on is in the post buffers' format:
+the three hold light as four 32-bit floats a pixel; as 16-bit, they would take 47 MB less, which changes the frames'
+bytes, a choice of its own.
+
+**Barriers from what passes do.** Each post pipeline knows what it reads and writes, from its words read back into the
+IR (`irFromSpirv`, then `irUses`): set 1's three parts, and set 0's post buffers (55 and 69 as one, being one buffer).
+While `postRecord` records, a dispatch takes a barrier only where it reads or writes what one since the last barrier
+wrote, or writes what one read, the parts mapped to the buffers they are at that moment; one whose accesses are not known
+(traced reflections') takes one on each side; the passes outside `postRecord` keep a barrier after each. The post chain
+is mostly a line, each pass reading what the one before wrote: with every effect on, 24 dispatches take 22 barriers
+where they took 24 (`--graph` says so). Synchronization validation, in every mode CI runs, with ray queries and without,
+finds nothing. Not yet from the graph: the scene's passes, and the CPU's.
+
 ## Merged meshes in a file
 
 What takes long to make can be kept in a file and read back as a copy (`src/scene/cook.c`). `artfSceneSaveHlod` writes
@@ -425,6 +450,19 @@ nothing. A file is "ARTFCOOK", its version and its kind, then records each led b
 what a newer writer put after what it knows: a newer version's file is read, as far as its records are laid out as
 before. What reading does is what merging did after its simplifying: the same meshes in the same places, the same
 instances in the same order, so the same handles.
+
+A glTF model is cooked the same way: what preparing it made (`artfPrepareModelMemory`: its images decoded with their
+mipmaps, its meshes built with their meshlets and levels) goes to a file (`artfPreparedModelSave`), tied to the glTF by
+its hash and size; `artfPrepareModelCooked` takes them from the file in place of making them, and reads the rest of the
+glTF (nodes, materials, what bends) as it always does. A file of another glTF, or one that does not hold what it says,
+is said and left, and the model made. `artful-cook model.glb` writes it and checks that the two scenes hold the same, to
+the byte; `artful-render --model model.glb --cooked file` reads it. A glTF of 980,000 triangles and three images of
+2048 x 2048: 2,395 ms to load, 65 with its file (2.7%), the same picture.
+
+The readers of cooked files have their libFuzzer target (`cook`), against a scene of balls and a small glTF, with seeds
+it writes itself (`ARTF_FUZZ_SEEDS`); in its first minutes it found that the merged meshes' reader made memory for as
+many records as a file said before asking whether the file could hold them, and that an array's length was trusted
+before it was checked against what was left: both now are, and half an hour more found nothing.
 
 `artful-render --scene forest --hlod --cook file` writes forest's 392 merged meshes (87 MB); `--cooked file` reads them:
 the scene is made in 45 ms where merging made it in 1,166 (3.9%), and the picture is the same bytes, on the CPU and on

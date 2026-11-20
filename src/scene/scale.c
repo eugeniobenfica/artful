@@ -298,6 +298,11 @@ uint32_t artfSceneLoadHlod(ArtfScene* s, const void* data, size_t size) {
         artfLog("artful: merged meshes made for other instances, or the same moved: not read");
         return 0;
     }
+    /* (each record takes at least its length's 4 bytes: no more of them than the file can hold) */
+    if (count > (r.size - r.at) / 4) {
+        artfLog("artful: a file of merged meshes that does not hold what it says");
+        return 0;
+    }
     /* all of it read first: a file that breaks off leaves the scene as it was */
     Cooked* cooked = artfCalloc((size_t)count + 1, sizeof *cooked);
     uint32_t read = 0;

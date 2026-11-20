@@ -19,6 +19,7 @@
 #include "render/rendererInternal.h"
 #include "scene/sceneInternal.h"
 #include "core/threads.h"
+#include "shaderir/ir.h"
 #include "vulkan/frameGraph.h"
 #include "vulkan/shaders.h"
 #include "vulkan/vulkanApi.h"
@@ -398,7 +399,16 @@ typedef struct Vulkan {
     float renderScale;
     bool surfaceWide;               /* the surface target has its second word: motion is followed */
     GpuBuffer pastVertices;         /* what the vertex buffer held a frame ago, where a pose moves vertices (binding 68) */
-    GpuBuffer postBlur;             /* motion blur's velocities (binding 69) */
+    GpuBuffer postBlur;             /* motion blur's velocities (binding 69): unused since they share postOcclusion */
+    uint32_t postNeeds;             /* what effects that are on need of the post buffers (postNeedsOf) */
+    /* What each post pipeline reads and writes (its IR, from its words: postAccessOf), as bits: the three parts of set 1
+     * (0 to 2), then set 0's post buffers; and, while postRecord records, what the dispatches since the last barrier read
+     * and wrote, by the buffers the parts are then: a barrier goes only where a dispatch would race one before it. */
+    uint32_t postReads[16], postWrites[16];
+    uint32_t pendingReads, pendingWrites;
+    bool postTracking;
+    uint32_t postBarriers, postDispatches; /* (of the last frame: how many barriers its post dispatches took) */
+    GpuBuffer postNone;             /* what binds where an effect is off: a buffer of nothing */
     ArtfPool* pool;                 /* workers for what the CPU does for the GPU: the probes, for tests */
     /* Light that bounced, gathered here (artfShaderProbes): what the probes hold and what a step makes of them, which
      * all frames share, as each step reads what the one before made (62, 70); its pipeline and what it was made for;
@@ -560,8 +570,8 @@ static void targetsFree(Vulkan* v) {
     }
     imageFree(v, &v->floatColor);
     imageFree(v, &v->floatSurface);
-    GpuBuffer* const post[9] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom, &v->postBlur};
-    for (int i = 0; i < 9; ++i) bufferFree(v, post[i]);
+    GpuBuffer* const post[10] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom, &v->postBlur, &v->postNone};
+    for (int i = 0; i < 10; ++i) bufferFree(v, post[i]);
     v->historyValid = false;
     v->hasPrevious = false;
     imageFree(v, &v->depth);
@@ -622,10 +632,48 @@ static void lightDescriptors(Vulkan* v, Slot* s);
 static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b);
 
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
-static bool postTargetsMake(Vulkan* v) {
-    if (!imageNew(v, &v->floatColor, v->sceneFormat, v->sceneWidth, v->sceneHeight, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
-    /* (the surface word, and where motion is followed, the instance that shows + 1 or where it was) */
-    if (!imageNew(v, &v->floatSurface, v->surfaceWide ? FORMAT_R32G32_UINT : FORMAT_R32_UINT, v->sceneWidth, v->sceneHeight, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+/* What a post shader reads and writes, from its words (irFromSpirv, irUses): set 1's parts as bits 0 to 2, set 0's
+ * bindings 50 to 59 as bits 3 to 12, 69 as 55's (they are one buffer); what else it binds is only read, and left out. */
+static void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* writes) {
+    *reads = *writes = ~0u; /* (not known: as all) */
+    IrModule m;
+    irInit(&m);
+    if (code && irFromSpirv(&m, code, size / 4)) {
+        IrUse uses[64];
+        const int n = irUses(&m, uses, 64);
+        *reads = *writes = 0;
+        for (int k = 0; k < n && k < 64; ++k) {
+            uint32_t bit = 0;
+            if (uses[k].set == 1 && uses[k].binding < 3) bit = 1u << uses[k].binding;
+            else if (uses[k].set == 0 && uses[k].binding >= 50 && uses[k].binding <= 59) bit = 1u << (3 + uses[k].binding - 50);
+            else if (uses[k].set == 0 && uses[k].binding == 69) bit = 1u << (3 + 55 - 50);
+            if (uses[k].read) *reads |= bit;
+            if (uses[k].write) *writes |= bit;
+        }
+    }
+    irFree(&m);
+}
+
+enum { NEED_OCCLUSION = 1, NEED_BLUR = 2, NEED_FOG = 4, NEED_SECOND = 8, NEED_HISTORY = 16 };
+
+/* What the frame's effects need past the light, its depth and surfaces, and bloom (the frame graph's targets that
+ * effects that are off leave unused: frameGraph.c). */
+static uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f) {
+    const bool scaled = v->sceneWidth != v->width || v->sceneHeight != v->height, temporal = f->post[1][3] > 0;
+    uint32_t n = 0;
+    if (f->post[0][2] > 0) n |= NEED_OCCLUSION;
+    if (f->motionBlur > 0) n |= NEED_BLUR | NEED_SECOND;
+    if (f->post[1][1] > 0 && f->look[1] > 0) n |= NEED_FOG;
+    if (scaled || temporal) n |= NEED_SECOND | NEED_HISTORY;
+    if (f->post[2][1] > 0 && f->post[2][0] > 0) n |= NEED_SECOND;
+    return n;
+}
+
+/* The post passes' buffers, as postNeeds says: what an effect that is off would use is not made, and its binding names
+ * a buffer of nothing (postNone); ambient occlusion's and motion blur's velocities are one buffer, as large as the larger,
+ * as no pass uses both (the frame graph: one lives in its pass, the other in its own). Made again when an effect comes
+ * or goes (postNeedsOf): the device is idle then. */
+static bool postBuffersMake(Vulkan* v) {
     const VkDeviceSize pixels = (VkDeviceSize)v->sceneWidth * v->sceneHeight, framePixels = (VkDeviceSize)v->width * v->height;
     const VkDeviceSize fog = (VkDeviceSize)((v->sceneWidth + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ((v->sceneHeight + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ARTF_FROXEL_SLICES;
     VkDeviceSize bloom = 0;
@@ -639,20 +687,24 @@ static bool postTargetsMake(Vulkan* v) {
         bloom += (VkDeviceSize)w * h;
     }
     GpuBuffer* const buffers[8] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom};
-    /* (bloom's levels, and past them auto exposure's state) */
-    /* (the surface's words, then the instance that shows at each pixel) */
-    /* (light, the second and the history end at the frame's size) */
-    const VkDeviceSize sizes[8] = {framePixels * 16, pixels * 4, pixels * 8, framePixels * 16, framePixels * 16, pixels * 4, fog * 16, (bloom + 1 + v->lutRoom) * 16};
-    for (int i = 0; i < 8; ++i)
-        if (!bufferNew(v, buffers[i], sizes[i], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
+    for (int i = 0; i < 8; ++i) bufferFree(v, buffers[i]);
+    bufferFree(v, &v->postBlur);
     /* (motion blur's: each pixel's velocity, then of each tile of 16 the largest, and of its neighbours) */
     const VkDeviceSize blurTiles = (VkDeviceSize)((v->width + 15) / 16) * ((v->height + 15) / 16);
-    if (!bufferNew(v, &v->postBlur, (framePixels + blurTiles * 2) * 8, BUFFER_STORAGE, false)) return false;
+    const VkDeviceSize occlusion = v->postNeeds & NEED_OCCLUSION ? pixels * 4 : 0, blur = v->postNeeds & NEED_BLUR ? (framePixels + blurTiles * 2) * 8 : 0;
+    /* (bloom's levels, and past them auto exposure's state; the surface's words, then the instance that shows at each
+     * pixel; light, the second and the history end at the frame's size) */
+    const VkDeviceSize sizes[8] = {framePixels * 16, pixels * 4, pixels * 8, v->postNeeds & NEED_SECOND ? framePixels * 16 : 0, v->postNeeds & NEED_HISTORY ? framePixels * 16 : 0,
+                                   occlusion > blur ? occlusion : blur, v->postNeeds & NEED_FOG ? fog * 16 : 0, (bloom + 1 + v->lutRoom) * 16};
+    for (int i = 0; i < 8; ++i)
+        if (sizes[i] && !bufferNew(v, buffers[i], sizes[i], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
+    if (!v->postNone.buffer && !bufferNew(v, &v->postNone, 64, BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
+#define OR_NONE(b) ((b)->buffer ? (b) : &v->postNone)
     for (int k = 0; k < SLOTS; ++k) {
         WriteDescriptorSet writes[10];
         DescriptorBufferInfo infos[8];
         for (int i = 0; i < 8; ++i) {
-            const DescriptorBufferInfo info = {buffers[i]->buffer, 0, ~(VkDeviceSize)0};
+            const DescriptorBufferInfo info = {OR_NONE(buffers[i])->buffer, 0, ~(VkDeviceSize)0};
             infos[i] = info;
             const WriteDescriptorSet write = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 50 + (uint32_t)i, 0, 1, DESCRIPTOR_STORAGE, NULL, &infos[i], NULL};
             writes[i] = write;
@@ -663,9 +715,10 @@ static bool postTargetsMake(Vulkan* v) {
         writes[8] = images[0];
         writes[9] = images[1];
         v->vkUpdateDescriptorSets(v->device, 10, writes, 0, NULL);
-        bindStorage(v, &v->slots[k], 69, &v->postBlur);
+        bindStorage(v, &v->slots[k], 69, blur ? &v->postOcclusion : &v->postNone);
     }
-    const GpuBuffer* const three[3] = {&v->postLight, &v->postScratch, &v->postHistory};
+    const GpuBuffer* const three[3] = {&v->postLight, OR_NONE(&v->postScratch), OR_NONE(&v->postHistory)};
+#undef OR_NONE
     for (int k = 0; k < 27; ++k) {
         DescriptorBufferInfo infos[3];
         WriteDescriptorSet writes[3];
@@ -686,6 +739,14 @@ static bool postTargetsMake(Vulkan* v) {
     v->hasPrevious = false;
     v->lutVersion = 0; /* (copied again) */
     return true;
+}
+
+/* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
+static bool postTargetsMake(Vulkan* v) {
+    if (!imageNew(v, &v->floatColor, v->sceneFormat, v->sceneWidth, v->sceneHeight, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    /* (the surface word, and where motion is followed, the instance that shows + 1 or where it was) */
+    if (!imageNew(v, &v->floatSurface, v->surfaceWide ? FORMAT_R32G32_UINT : FORMAT_R32_UINT, v->sceneWidth, v->sceneHeight, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    return postBuffersMake(v);
 }
 
 /* The scene's look-up table, into the staging buffer, and bloom's buffer made larger when it has no room for it: the
@@ -1826,6 +1887,7 @@ static bool pipelinesMake(Vulkan* v) {
                                                   artfShaderPostSharpen};
         for (int i = 0; i < 16 && ok; ++i) {
             uint32_t* postCode = i == 0 ? artfShaderPostGather(&size, v->samples) : makers[i](&size);
+            postAccessOf(postCode, size, &v->postReads[i], &v->postWrites[i]);
             VkShaderModule module = shaderModule(v, postCode, size);
             const ComputePipelineCreateInfo c = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
             ok = module && v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &c, NULL, &v->postPipelines[i]) == VK_OK;
@@ -3998,14 +4060,45 @@ static void passMark(Vulkan* v, VkCommandBuffer c, Slot* s, const char* name) {
     s->passNames[s->passCount++] = name;
 }
 
-static void postStepWith(Vulkan* v, VkCommandBuffer c, VkPipeline pipeline, uint32_t push, uint32_t count) {
+static uint32_t postPhysical(const Vulkan* v, uint32_t mask);
+
+static void postBarrier(Vulkan* v, VkCommandBuffer c) {
+    memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
+    v->pendingReads = v->pendingWrites = 0;
+    ++v->postBarriers;
+}
+
+/* A post pass's dispatch. index: its pipeline's place in postPipelines, whose reads and writes are known; -1 one that is
+ * not (traced reflections'): a barrier on each side of it. Outside postRecord, a barrier after each, as before. */
+static void postStepWith(Vulkan* v, VkCommandBuffer c, VkPipeline pipeline, int index, uint32_t push, uint32_t count) {
+    uint32_t reads = ~0u, writes = ~0u;
+    if (index >= 0) {
+        reads = postPhysical(v, v->postReads[index]);
+        writes = postPhysical(v, v->postWrites[index]);
+    }
+    const bool tracked = v->postTracking && index >= 0;
+    if (v->postTracking && (((reads | writes) & v->pendingWrites) || (writes & v->pendingReads))) postBarrier(v, c);
     v->vkCmdBindPipeline(c, 1, pipeline);
     v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &push);
     v->vkCmdDispatch(c, (count + 63) / 64, 1, 1);
-    memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
+    ++v->postDispatches;
+    if (tracked) {
+        v->pendingReads |= reads;
+        v->pendingWrites |= writes;
+    } else {
+        postBarrier(v, c);
+    }
 }
 
-static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) { postStepWith(v, c, v->postPipelines[pipeline], push, count); }
+static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) { postStepWith(v, c, v->postPipelines[pipeline], pipeline, push, count); }
+
+/* (a post pipeline's reads and writes as bits, by role: what writes to the parts' buffers rotates with them) */
+static uint32_t postPhysical(const Vulkan* v, uint32_t mask) {
+    uint32_t out = mask & ~7u;
+    for (int r = 0; r < 3; ++r)
+        if (mask >> r & 1) out |= 1u << v->role[r];
+    return out;
+}
 
 /* Set 1 as the parts are given now, for compute (1) or drawing (0). */
 static void rolesBind(Vulkan* v, VkCommandBuffer c, int point) {
@@ -4042,6 +4135,9 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
         v->lutPending = false;
     }
     v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+    v->postTracking = true;
+    v->pendingReads = v->pendingWrites = 0;
+    v->postBarriers = v->postDispatches = 0;
     /* (the light and the second are the two buffers that do not hold the history) */
     v->role[0] = v->role[2] ? 0 : 1;
     v->role[1] = (uint8_t)(3 - v->role[0] - v->role[2]);
@@ -4056,7 +4152,7 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     if (frame->post[1][0] > 0) {
         /* (from rays, or marched across the frame) */
         const bool traced = frame->traced & ARTF_TRACED_REFLECTIONS && v->reflectionTraced;
-        postStepWith(v, c, traced ? v->reflectionTraced : v->postPipelines[POST_REFLECTION], 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
+        postStepWith(v, c, traced ? v->reflectionTraced : v->postPipelines[POST_REFLECTION], traced ? -1 : POST_REFLECTION, 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
         postStep(v, c, POST_REFLECTION_APPLY, 0, pixels);
         passMark(v, c, s, "reflections");
     }
@@ -4103,6 +4199,7 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
         for (int l = 4; l >= 0; --l) postStep(v, c, POST_BLOOM_UP, (uint32_t)l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
         passMark(v, c, s, "bloom");
     }
+    v->postTracking = false;
     memoryBarrier(v, c, STAGE_COMPUTE | STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
     RenderPassBeginInfo present = {ST_RENDER_PASS_BEGIN, NULL, v->presentPass, v->presentFramebuffers[image], area, 0, NULL};
     v->vkCmdBeginRenderPass(c, &present, 0);
@@ -4316,6 +4413,15 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     frame.output[0] = (float)v->width;
     frame.output[1] = (float)v->height;
     frame.output[3] = (float)v->postFrames;
+    if (v->floats) {
+        /* (an effect came or went: the post buffers as they now need to be, with the device idle) */
+        const uint32_t needs = postNeedsOf(v, &frame);
+        if (needs != v->postNeeds) {
+            v->vkDeviceWaitIdle(v->device);
+            v->postNeeds = needs;
+            if (!postBuffersMake(v)) return false;
+        }
+    }
     if (v->floats || view == ARTF_VIEW_MOTION) {
         /* the frame before, and with temporal antialiasing, a place within the pixel: as softDraw */
         float now[16];
@@ -5389,6 +5495,12 @@ void artfVulkanTargetBytes(const ArtfRenderer* r, uint64_t* bytes) {
     bytes[FG_SURFACE] = v->postSurface.held;
     bytes[FG_OCCLUSION] = v->postOcclusion.held;
     bytes[FG_BLOOM] = v->postBloom.held;
-    bytes[FG_BLUR] = v->postBlur.held;
+    bytes[FG_BLUR] = 0; /* (they share ambient occlusion's buffer) */
     bytes[FG_FRAME] = v->offscreen.held;
+}
+
+void artfVulkanPostBarriers(const ArtfRenderer* r, uint32_t* barriers, uint32_t* dispatches) {
+    const Vulkan* v = (const Vulkan*)r;
+    *barriers = r && r->backend == ARTF_BACKEND_VULKAN ? v->postBarriers : 0;
+    *dispatches = r && r->backend == ARTF_BACKEND_VULKAN ? v->postDispatches : 0;
 }

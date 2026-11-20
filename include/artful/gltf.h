@@ -35,6 +35,12 @@ typedef struct ArtfPreparedModel ArtfPreparedModel;
 ArtfPreparedModel* artfPrepareModel(const char* path);
 ArtfPreparedModel* artfPrepareModelMemory(const void* data, size_t size, const char* folder);
 void artfPreparedModelFree(ArtfPreparedModel* prepared);
+/* What preparing made (images with their mipmaps, meshes with their lighter levels), as a file (cooked: artfFree's),
+ * tied to the glTF it was made from by its hash; and a model prepared from it in place of making them: a file of
+ * another glTF, or one that does not hold what it says, is said and left, and the model made as artfPrepareModelMemory
+ * makes it. A file of an older version is read by a newer Artful. */
+void* artfPreparedModelSave(const ArtfPreparedModel* prepared, size_t* size);
+ArtfPreparedModel* artfPrepareModelCooked(const void* data, size_t size, const char* folder, const void* cooked, size_t cookedSize);
 ArtfModel artfSceneAddPreparedModel(ArtfScene* s, ArtfPreparedModel* prepared, const ArtfTransform* transform);
 
 void artfModelSetTransform(ArtfScene* s, ArtfModel m, const ArtfTransform* transform);

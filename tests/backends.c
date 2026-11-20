@@ -406,6 +406,7 @@ void testPipelinesAhead(void) { missing("vulkan"); }
 #ifdef ARTFUL_VULKAN
 #include "shaderir/ir.h"
 #include "shaderir/msl.h"
+#include "vulkan/shaders.h"
 #include "vulkan/spirv.h"
 
 /* Every shader the tests build, written as Metal too (shaderir/msl.h): all but ray queries must be. */
@@ -516,5 +517,40 @@ void testFrameGraph(void) {
     CHECK(sum > 0 && sum < stats.gpuBytes); /* (what the graph counts is part of what the GPU holds) */
     artfRendererFree(r);
     artfSceneFree(s);
+#endif
+}
+
+/* SPIR-V read back into the IR (irFromSpirv): every shader's words, read and written again, the same words; and what
+ * a post pass reads and writes, from its words alone. */
+void testSpirvRoundTrip(void) {
+#ifdef ARTFUL_VULKAN
+    uint32_t* (*const shaders[6])(size_t*) = {artfShaderPostTemporal, artfShaderPostBloomDown, artfShaderPostFinal, artfShaderPostMotionBlur, artfShaderShadowVertex, artfShaderSkin};
+    for (int k = 0; k < 6; ++k) {
+        size_t size;
+        uint32_t* words = shaders[k](&size);
+        IrModule m;
+        irInit(&m);
+        CHECK(irFromSpirv(&m, words, size / 4));
+        char why[256];
+        CHECK(irCheck(&m, why, sizeof why));
+        size_t again;
+        uint32_t* back = irSpirv(&m, &again);
+        CHECK(again == size / 4 && !memcmp(back, words, size));
+        if (k == 0) {
+            /* temporal antialiasing: reads the light (set 1, 0) and the history (1, 2), writes the second (1, 1) */
+            IrUse uses[32];
+            const int n = irUses(&m, uses, 32);
+            bool light = false, history = false, second = false;
+            for (int i = 0; i < n && i < 32; ++i) {
+                if (uses[i].set == 1 && uses[i].binding == 0) light = uses[i].read && !uses[i].write;
+                if (uses[i].set == 1 && uses[i].binding == 2) history = uses[i].read && !uses[i].write;
+                if (uses[i].set == 1 && uses[i].binding == 1) second = uses[i].write;
+            }
+            CHECK(light && history && second);
+        }
+        artfFree(back);
+        artfFree(words);
+        irFree(&m);
+    }
 #endif
 }

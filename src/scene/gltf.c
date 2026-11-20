@@ -1532,6 +1532,7 @@ ArtfModel artfSceneLoadModelMemory(ArtfScene* s, const void* data, size_t size, 
 struct ArtfPreparedModel {
     Loader loader;
     uint8_t* data;
+    size_t size;
     char folder[1024];
 };
 
@@ -1648,16 +1649,151 @@ static void prepareAll(Loader* l) {
 }
 
 ArtfPreparedModel* artfPrepareModelMemory(const void* data, size_t size, const char* folder) {
+    return artfPrepareModelCooked(data, size, folder, NULL, 0);
+}
+
+/* ---- what preparing made, in a file (cook.c's): "ARTFCOOK", its version, kind 2; the hash of the glTF it was made from
+ * and its size; how many images and primitives; then each image and each primitive that does not bend, as a flag and,
+ * where it was made, a record of its length: the texture with its mipmaps, or the mesh as built and its levels ---- */
+
+enum { MODEL_FILE_VERSION = 1, MODEL_FILE_KIND = 2 };
+
+void* artfPreparedModelSave(const ArtfPreparedModel* p, size_t* size) {
+    *size = 0;
+    if (!p) return NULL;
+    const Loader* l = &p->loader;
+    ArtfCookBytes b = {0}, r = {0};
+    artfCookPut(&b, "ARTFCOOK", 8);
+    artfCookPut32(&b, MODEL_FILE_VERSION);
+    artfCookPut32(&b, MODEL_FILE_KIND);
+    const uint64_t hash = artfCookHash(p->data, p->size);
+    artfCookPut32(&b, (uint32_t)hash);
+    artfCookPut32(&b, (uint32_t)(hash >> 32));
+    artfCookPut32(&b, (uint32_t)p->size);
+    artfCookPut32(&b, l->imageCount);
+    artfCookPut32(&b, l->primitiveTotal);
+    for (uint32_t i = 0; i < l->imageCount; ++i) {
+        const ArtfPreparedTexture* t = l->preparedImages ? l->preparedImages[i] : NULL;
+        artfCookPut32(&b, t ? 1u : 0u);
+        if (!t) continue;
+        r.len = 0;
+        artfCookPutTexture(&r, artfPreparedTextureData(t));
+        artfCookPut32(&b, (uint32_t)r.len);
+        artfCookPut(&b, r.items, r.len);
+    }
+    for (uint32_t i = 0; i < l->primitiveTotal; ++i) {
+        const ArtfPreparedMesh* m = l->preparedMeshes ? l->preparedMeshes[i] : NULL;
+        artfCookPut32(&b, m ? 1u : 0u);
+        if (!m) continue;
+        const ArtfMeshData *mesh, *levels;
+        const float* errors;
+        uint32_t levelCount;
+        artfPreparedMeshParts(m, &mesh, &levels, &errors, &levelCount);
+        r.len = 0;
+        artfCookPutMesh(&r, mesh);
+        artfCookPut32(&r, levelCount);
+        for (uint32_t k = 0; k < levelCount; ++k) {
+            artfCookPutFloat(&r, errors[k]);
+            artfCookPutMesh(&r, &levels[k]);
+        }
+        artfCookPut32(&b, (uint32_t)r.len);
+        artfCookPut(&b, r.items, r.len);
+    }
+    artfFree(r.items);
+    *size = b.len;
+    return b.items;
+}
+
+/* What a cooked file holds, into the loader's prepared images and meshes: false (and nothing kept) when it is not of
+ * this glTF, or does not hold what it says. */
+static bool readCooked(Loader* l, const uint8_t* data, size_t size, const void* cooked, size_t cookedSize) {
+    ArtfCookReader r = {cooked, cookedSize, 0, false};
+    char magic[8];
+    artfCookGet(&r, magic, 8);
+    const uint32_t version = artfCookGet32(&r), kind = artfCookGet32(&r);
+    const uint32_t low = artfCookGet32(&r), high = artfCookGet32(&r), bytes = artfCookGet32(&r);
+    const uint32_t images = artfCookGet32(&r), primitives = artfCookGet32(&r);
+    if (r.failed || memcmp(magic, "ARTFCOOK", 8) || kind != MODEL_FILE_KIND || version < 1) {
+        artfLog("artful: not a cooked model");
+        return false;
+    }
+    if (bytes != (uint32_t)size || ((uint64_t)high << 32 | low) != artfCookHash(data, size) || images != l->imageCount || primitives != l->primitiveTotal) {
+        artfLog("artful: a cooked model of another glTF: it is made again");
+        return false;
+    }
+    for (uint32_t i = 0; i < images && !r.failed; ++i) {
+        if (!artfCookGet32(&r)) continue;
+        const uint32_t length = artfCookGet32(&r);
+        if (r.failed || length > r.size - r.at) { r.failed = true; break; }
+        ArtfCookReader record = {r.data + r.at, length, 0, false};
+        r.at += length;
+        ArtfTextureData t;
+        if (!artfCookGetTexture(&record, &t)) { r.failed = true; break; }
+        l->preparedImages[i] = artfPreparedTextureOf(&t);
+    }
+    for (uint32_t i = 0; i < primitives && !r.failed; ++i) {
+        if (!artfCookGet32(&r)) continue;
+        const uint32_t length = artfCookGet32(&r);
+        if (r.failed || length > r.size - r.at) { r.failed = true; break; }
+        ArtfCookReader record = {r.data + r.at, length, 0, false};
+        r.at += length;
+        ArtfMeshData mesh, levels[ARTF_MAX_LODS];
+        float errors[ARTF_MAX_LODS];
+        if (!artfCookGetMesh(&record, &mesh)) { r.failed = true; break; }
+        uint32_t levelCount = artfCookGet32(&record);
+        if (levelCount > ARTF_MAX_LODS) { artfMeshFini(&mesh); r.failed = true; break; }
+        uint32_t got = 0;
+        for (; got < levelCount; ++got) {
+            errors[got] = artfCookGetFloat(&record);
+            if (!artfCookGetMesh(&record, &levels[got])) break;
+        }
+        if (got < levelCount) {
+            artfMeshFini(&mesh);
+            for (uint32_t k = 0; k < got; ++k) artfMeshFini(&levels[k]);
+            r.failed = true;
+            break;
+        }
+        l->preparedMeshes[i] = artfPreparedMeshOf(&mesh, levels, errors, levelCount);
+    }
+    if (r.failed) {
+        for (uint32_t i = 0; i < l->imageCount; ++i) {
+            artfPreparedTextureFree(l->preparedImages[i]);
+            l->preparedImages[i] = NULL;
+        }
+        for (uint32_t i = 0; i < l->primitiveTotal; ++i) {
+            artfPreparedMeshFree(l->preparedMeshes[i]);
+            l->preparedMeshes[i] = NULL;
+        }
+        artfLog("artful: a cooked model that does not hold what it says: it is made again");
+        return false;
+    }
+    if (version > MODEL_FILE_VERSION) artfLog("artful: a cooked model of a newer version (%u): what this one knows of it is read", version);
+    return true;
+}
+
+ArtfPreparedModel* artfPrepareModelCooked(const void* data, size_t size, const char* folder, const void* cooked, size_t cookedSize) {
     ArtfPreparedModel* p = ARTF_NEW(ArtfPreparedModel);
     p->data = artfMalloc(size + 1);
     memcpy(p->data, data, size);
+    p->size = size;
     snprintf(p->folder, sizeof p->folder, "%s", folder ? folder : "");
     p->loader.folder = folder ? p->folder : NULL;
     if (!loaderOpen(&p->loader, p->data, size)) {
         artfPreparedModelFree(p);
         return NULL;
     }
-    prepareAll(&p->loader);
+    Loader* l = &p->loader;
+    if (cooked) {
+        /* (what the file holds is taken as made; what it does not hold, a skinned mesh say, is made when it is added) */
+        l->preparedImages = artfCalloc(l->imageCount + 1, sizeof *l->preparedImages);
+        l->preparedMeshes = artfCalloc((size_t)l->primitiveTotal + 1, sizeof *l->preparedMeshes);
+        if (readCooked(l, p->data, size, cooked, cookedSize)) return p;
+        artfFree(l->preparedImages);
+        artfFree(l->preparedMeshes);
+        l->preparedImages = NULL;
+        l->preparedMeshes = NULL;
+    }
+    prepareAll(l);
     return p;
 }
 

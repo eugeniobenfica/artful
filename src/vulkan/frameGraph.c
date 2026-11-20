@@ -135,6 +135,21 @@ uint64_t artfFrameGraphReport(ArtfRenderer* r, FILE* report, FILE* dot) {
                 if (first[t] < 0) first[t] = k;
                 last[t] = k;
             }
+    /* (the light, the second and the history are three buffers whose parts rotate from pass to pass, not three targets:
+     * whichever of them a pass touches, each buffer lives from the first to the last pass that touches any) */
+    {
+        int lo = -1, hi = -1;
+        for (int t = FG_LIGHT; t <= FG_HISTORY; ++t)
+            if (first[t] >= 0) {
+                if (lo < 0 || first[t] < lo) lo = first[t];
+                if (last[t] > hi) hi = last[t];
+            }
+        for (int t = FG_LIGHT; t <= FG_HISTORY; ++t)
+            if (first[t] >= 0 || bytes[t]) {
+                first[t] = lo;
+                last[t] = hi;
+            }
+    }
     /* (what no pass writes and nothing keeps holds nothing this frame: a shader made for more than the frame does, as
      * the scene's that reads fog with no fog) */
     for (int t = 0; t < FG_TARGETS; ++t) {
@@ -196,6 +211,9 @@ uint64_t artfFrameGraphReport(ArtfRenderer* r, FILE* report, FILE* dot) {
         }
         fprintf(report, "\nframe-sized targets: %.1f MB, %.1f MB of them living only within the frame; aliased, those take %.1f MB in %d heaps: %.1f MB saved, %.0f%% of the targets\n",
                 (double)all / 1048576.0, (double)sum / 1048576.0, (double)heapSum / 1048576.0, heaps, (double)saved / 1048576.0, all ? 100.0 * (double)saved / (double)all : 0.0);
+        uint32_t barriers = 0, dispatches = 0;
+        artfVulkanPostBarriers(r, &barriers, &dispatches);
+        fprintf(report, "post passes: %u dispatches, %u barriers between them\n", dispatches, barriers);
         uint64_t idle = 0;
         for (int t = 0; t < FG_TARGETS; ++t)
             if (first[t] < 0 && !persists[t]) idle += bytes[t];

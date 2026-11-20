@@ -58,7 +58,8 @@ static void putArray(ArtfCookBytes* b, const void* data, size_t bytes) {
 }
 static void* getArray(ArtfCookReader* r, size_t want, bool aligned) {
     const uint32_t bytes = artfCookGet32(r);
-    if (r->failed || bytes != want) {
+    /* (nothing made of what the file does not hold: a count it says is not memory it takes) */
+    if (r->failed || bytes != want || bytes > r->size - r->at) {
         r->failed = true;
         return NULL;
     }
@@ -135,6 +136,64 @@ bool artfCookGetMesh(ArtfCookReader* r, ArtfMeshData* m) {
         return false;
     }
     return true;
+}
+
+uint64_t artfCookHash(const void* data, size_t size) {
+    const uint8_t* p = data;
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < size; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+/* (all a texture's mipmaps hold, in pixels) */
+static size_t texturePixels(const ArtfTextureData* t) {
+    size_t total = 0;
+    int w = t->width, h = t->height;
+    for (int level = 0; level < t->mipCount; ++level) {
+        total += (size_t)w * (size_t)h;
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+    }
+    return total;
+}
+
+void artfCookPutTexture(ArtfCookBytes* b, const ArtfTextureData* t) {
+    artfCookPut32(b, (uint32_t)t->width);
+    artfCookPut32(b, (uint32_t)t->height);
+    artfCookPut32(b, (uint32_t)t->mipCount);
+    artfCookPut32(b, t->light ? 1u : 0u);
+    for (int k = 0; k < 16; ++k) artfCookPut32(b, t->offsets[k]);
+    putArray(b, t->pixels, texturePixels(t) * 4);
+}
+
+bool artfCookGetTexture(ArtfCookReader* r, ArtfTextureData* t) {
+    memset(t, 0, sizeof *t);
+    t->width = (int)artfCookGet32(r);
+    t->height = (int)artfCookGet32(r);
+    t->mipCount = (int)artfCookGet32(r);
+    t->light = (artfCookGet32(r) & 1) != 0;
+    for (int k = 0; k < 16; ++k) t->offsets[k] = artfCookGet32(r);
+    if (r->failed || t->width <= 0 || t->height <= 0 || t->width > 65536 || t->height > 65536 || t->mipCount < 1 || t->mipCount > 16) {
+        r->failed = true;
+        return false;
+    }
+    /* (the mipmaps where they are, one after another: as artfPrepareTexture lays them) */
+    size_t at = 0;
+    int w = t->width, h = t->height;
+    for (int level = 0; level < t->mipCount; ++level) {
+        if (t->offsets[level] != at) {
+            r->failed = true;
+            return false;
+        }
+        at += (size_t)w * (size_t)h;
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+    }
+    t->pixels = getArray(r, at * 4, false);
+    return t->pixels != NULL;
 }
 
 /* (of the instances there are, the first count: what they are, and where; what a cooked file was made against) */

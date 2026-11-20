@@ -11,6 +11,9 @@
  *   ies      artfIesDecode: a light's profile
  *   cube     artfLutDecodeCube: a grading table
  *   meshopt  EXT_meshopt_compression's buffers: the first bytes say which, how many and how wide
+ *   cook     what artful-cook and artfSceneSaveHlod write: the first byte says which; the rest is read against a
+ *            scene of nine balls (merged meshes) or a small glTF (a cooked model), as each was made for. With
+ *            ARTF_FUZZ_SEEDS=dir, it writes a valid one of each there first.
  *
  * Seeds: tools/fuzz/seeds.py writes a few of each from what the tests make; tools/fuzz/gltf.dict is a dictionary of
  * glTF's names. Run as: artful-fuzz-gltf -dict=tools/fuzz/gltf.dict corpus/gltf seeds/gltf */
@@ -19,7 +22,59 @@
 #include "scene/sceneInternal.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* (what a cooked file is read against: nine balls, merged; and a small glTF) */
+static ArtfScene* balls(void) {
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, true);
+    const ArtfMesh ball = artfSceneAddSphere(s, .4f, 12, 16);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    const ArtfMaterial m = artfSceneAddMaterial(s, &d);
+    for (int i = 0; i < 9; ++i) {
+        const ArtfTransform t = artfTransformAt((float)(i % 3), 0, (float)(i / 3), 1);
+        artfSceneAddInstance(s, ball, m, &t);
+    }
+    return s;
+}
+static const char model[] =
+    "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"byteLength\":44,\"uri\":\"data:application/octet-stream;base64,AAABAAIAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAA=\"}],"
+    "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":8,\"byteLength\":36}],\"accessors\":[{\"bufferView\":0,"
+    "\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"max\":[1,1,0],\"min\":[0,0,0]}],"
+    "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":1},\"indices\":0}]}],\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}],\"scene\":0}";
+
+static void writeSeeds(const char* dir) {
+    char path[1024];
+    ArtfScene* s = balls();
+    ArtfHlodDesc d;
+    memset(&d, 0, sizeof d);
+    d.cell = 2;
+    artfSceneBuildHlod(s, &d);
+    size_t size = 0;
+    uint8_t* hlod = artfSceneSaveHlod(s, &size);
+    snprintf(path, sizeof path, "%s/hlod", dir);
+    FILE* f = fopen(path, "wb");
+    if (f && hlod) {
+        fputc(0, f);
+        fwrite(hlod, 1, size, f);
+    }
+    if (f) fclose(f);
+    artfFree(hlod);
+    artfSceneFree(s);
+    ArtfPreparedModel* p = artfPrepareModelMemory(model, sizeof model - 1, NULL);
+    uint8_t* made = artfPreparedModelSave(p, &size);
+    snprintf(path, sizeof path, "%s/model", dir);
+    f = fopen(path, "wb");
+    if (f && made) {
+        fputc(1, f);
+        fwrite(made, 1, size, f);
+    }
+    if (f) fclose(f);
+    artfFree(made);
+    artfPreparedModelFree(p);
+}
 
 static void quiet(void* user, const char* message) {
     (void)user;
@@ -30,6 +85,7 @@ int LLVMFuzzerInitialize(int* argc, char*** argv) {
     (void)argc;
     (void)argv;
     artfSetLog(quiet, NULL);
+    if (getenv("ARTF_FUZZ_SEEDS")) writeSeeds(getenv("ARTF_FUZZ_SEEDS"));
     return 0;
 }
 
@@ -66,6 +122,18 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     } else if (FUZZ_IS("cube")) {
         int n = 0;
         artfFree(artfLutDecodeCube(data, size, &n));
+    } else if (FUZZ_IS("cook")) {
+        if (size < 1) return 0;
+        if (data[0] & 1) {
+            ArtfPreparedModel* p = artfPrepareModelCooked(model, sizeof model - 1, NULL, data + 1, size - 1);
+            ArtfScene* s = artfSceneNew();
+            artfSceneAddPreparedModel(s, p, NULL);
+            artfSceneFree(s);
+        } else {
+            ArtfScene* s = balls();
+            artfSceneLoadHlod(s, data + 1, size - 1);
+            artfSceneFree(s);
+        }
     } else if (FUZZ_IS("meshopt")) {
         if (size < 4) return 0;
         const size_t count = ((size_t)data[1] | (size_t)data[2] << 8) % 4096, mode = data[0] % 3;

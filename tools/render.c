@@ -7,7 +7,8 @@
  *                 [--shadows side]: the sun casts shadows, in maps of that side; [--soft-shadows]: as wide as the
  *                 sun is, [--sun-size radians]; [--traced-shadows]: shadows from rays, through the trees or the GPU's ray
  *                 tracing hardware, for the sun and the sixteen lights (with --shadows, the rest keep maps)
- *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room
+ *                 [--model file.glb]: a glTF file, framed by the camera, on a plain floor if there is room; with
+ *                 [--cooked file]: what artful-cook made of it, in place of decoding its images and making its meshes
  *                 [--trace rays|paths] [--trace-samples n]: light followed along rays, for n samples a
  *                 pixel, gathered over frames (1 to start with); [--bounces n]; [--denoise]; [--hardware]: through the
  *                 GPU's ray tracing hardware
@@ -526,9 +527,42 @@ static void printLog(void* user, const char* message) {
 }
 
 /* The eye goes back until all of what a file holds is in view. */
-static void sceneModel(ArtfScene* s, const char* path) {
-    const uint32_t count = artfSceneLoadGltf(s, path, NULL);
-    printf("%u instances from %s\n", count, path);
+static void* readAll(const char* path, size_t* size) {
+    *size = 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    const long length = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    void* data = malloc(length > 0 ? (size_t)length : 1);
+    *size = fread(data, 1, length > 0 ? (size_t)length : 0, f);
+    fclose(f);
+    return data;
+}
+
+/* a model, made, or with what artful-cook made of it (--cooked) */
+static void sceneModel(ArtfScene* s, const char* path, const char* cooked) {
+    const double start = artfNowMs();
+    uint32_t count = 0;
+    if (cooked) {
+        size_t size = 0, cookedSize = 0;
+        void* data = readAll(path, &size);
+        void* made = readAll(cooked, &cookedSize);
+        char folder[1024];
+        snprintf(folder, sizeof folder, "%s", path);
+        char* slash = strrchr(folder, '/');
+        char* back = strrchr(folder, '\\');
+        if (back && (!slash || back > slash)) slash = back;
+        if (slash) *slash = 0;
+        else strcpy(folder, ".");
+        const ArtfModel m = data ? artfSceneAddPreparedModel(s, artfPrepareModelCooked(data, size, folder, made, cookedSize), NULL) : 0;
+        count = m ? artfModelInstanceCount(s, m) : 0;
+        free(data);
+        free(made);
+    } else {
+        count = artfSceneLoadGltf(s, path, NULL);
+    }
+    printf("%u instances from %s%s in %.1f ms\n", count, path, cooked ? ", cooked" : "", artfNowMs() - start);
     float radius = 1.f;
     ArtfVec3 middle = artfVec3(0, 0, 0);
     artfSceneBounds(s, &middle, &radius);
@@ -754,7 +788,7 @@ int main(int argc, char** argv) {
     const bool isHole = !strcmp(sceneName, "blackhole");
     ArtfScene* s = artfSceneNew();
     if (model && strcmp(sceneName, "spheres")) sceneName = "spheres";
-    if (model) sceneModel(s, model);
+    if (model) sceneModel(s, model, cooked);
     else if (!strcmp(sceneName, "field")) sceneField(s, fieldSide);
     else if (!strcmp(sceneName, "heavy")) sceneHeavy(s);
     else if (!strcmp(sceneName, "city")) sceneCity(s);
@@ -829,7 +863,7 @@ int main(int argc, char** argv) {
         trace.maxSamples = traceSamples;
         artfSceneSetTrace(s, &trace);
     }
-    if (cooked) {
+    if (cooked && !model) {
         /* the merged meshes as a file made them (--cook): read, not made */
         const double h0 = artfNowMs();
         FILE* file = fopen(cooked, "rb");

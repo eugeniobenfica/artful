@@ -65,6 +65,11 @@ void irPrint(const IrModule* m, FILE* out);
 typedef struct IrUse { uint32_t set, binding; bool read, write; } IrUse;
 int irUses(const IrModule* m, IrUse* out, int max);
 
+/* SPIR-V's words read into a module (m initialized): each instruction into its section, as the order of a module
+ * puts them (what is needed and said of the module, the names and decorations, the types, constants and globals before
+ * the first function, then the code). false: the words are not SPIR-V (m holds what was read). */
+bool irFromSpirv(IrModule* m, const uint32_t* words, size_t count);
+
 /* SPIR-V 1.3's words (artfFree), the sections in their order. */
 uint32_t* irSpirv(const IrModule* m, size_t* wordCount);
 

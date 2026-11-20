@@ -114,6 +114,7 @@ void testCullSize(void);
 void testVulkan(void);
 void testLostDevice(void);
 void testShaderIr(void);
+void testSpirvRoundTrip(void);
 void testFrameGraph(void);
 void testTextureMemory(void);
 void testRefusedSwapchain(void);

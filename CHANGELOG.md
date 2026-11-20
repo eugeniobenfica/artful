@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Phase 4.3 done; 4.2's second and third steps.** A glTF model is cooked too: `artfPreparedModelSave` and
+  `artfPrepareModelCooked` keep its decoded images with their mipmaps and its built meshes, tied to the glTF's hash;
+  `artful-cook model.glb` writes the file and checks the scenes are the same, to the byte; a model of 980,000 triangles
+  and three images of 2048 loads in 65 ms where it took 2,395 (2.7%), the same picture. A libFuzzer target for the
+  cooked readers found two faults (memory made for what a file said before checking it), fixed. The post buffers are
+  made only for the effects that are on, and ambient occlusion's and motion blur's share one buffer: at 1080p, 7.5% less
+  target memory with every effect on, 15% with temporal antialiasing and bloom, 46% with bloom alone. The post passes'
+  barriers come from what their shaders read and write (`irFromSpirv`, new: SPIR-V read back into the IR, and written
+  again to the same words), only where one would race another; clean under synchronization validation in every mode.
+
 - **The frame as a graph** (phase 4.2, its first step). `src/vulkan/frameGraph.c` describes the GPU's frame, each pass
   with what it reads and writes, its shaders' part read from their IR (`irUses`, new); `artfFrameGraphReport` and
   `artful-render --graph prefix` write it as a table and Graphviz with what aliasing would save: at 1080p, 19% of the

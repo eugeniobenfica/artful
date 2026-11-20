@@ -185,6 +185,24 @@ ArtfPreparedMesh* artfPrepareMesh(const ArtfVertex* vertices, uint32_t vertexCou
     return p;
 }
 
+void artfPreparedMeshParts(const ArtfPreparedMesh* p, const ArtfMeshData** mesh, const ArtfMeshData** levels, const float** errors, uint32_t* levelCount) {
+    *mesh = &p->mesh;
+    *levels = p->levels;
+    *errors = p->errors;
+    *levelCount = p->levelCount;
+}
+
+ArtfPreparedMesh* artfPreparedMeshOf(const ArtfMeshData* mesh, const ArtfMeshData* levels, const float* errors, uint32_t levelCount) {
+    ArtfPreparedMesh* p = ARTF_NEW(ArtfPreparedMesh);
+    p->mesh = *mesh;
+    p->levelCount = levelCount < ARTF_MAX_LODS ? levelCount : ARTF_MAX_LODS;
+    for (uint32_t i = 0; i < p->levelCount; ++i) {
+        p->levels[i] = levels[i];
+        p->errors[i] = errors[i];
+    }
+    return p;
+}
+
 void artfPreparedMeshFree(ArtfPreparedMesh* p) {
     if (!p) return;
     artfMeshFini(&p->mesh);
@@ -424,6 +442,13 @@ static void buildMips(ArtfTextureData* t, bool light) {
 }
 
 struct ArtfPreparedTexture { ArtfTextureData texture; };
+
+const ArtfTextureData* artfPreparedTextureData(const ArtfPreparedTexture* p) { return &p->texture; }
+ArtfPreparedTexture* artfPreparedTextureOf(const ArtfTextureData* t) {
+    ArtfPreparedTexture* p = ARTF_NEW(ArtfPreparedTexture);
+    p->texture = *t;
+    return p;
+}
 
 void artfPreparedTextureFree(ArtfPreparedTexture* p) {
     if (!p) return;

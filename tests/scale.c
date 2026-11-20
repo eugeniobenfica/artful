@@ -720,6 +720,10 @@ void testHlodCooked(void) {
     const size_t vertexBytes = (size_t)vertices * sizeof(ArtfPackedVertex), indicesAt = meshAt + 16 + 40 + 4 + 4 + vertexBytes + 4;
     broken[indicesAt + 3] = 0x7F;
     CHECK(artfSceneLoadHlod(other, broken, size) == 0 && other->meshes.len == plainMeshes);
+    /* a count of merged meshes the file cannot hold (fuzzing found it made memory for them first) */
+    memcpy(broken, file, size);
+    broken[28] = broken[29] = broken[30] = broken[31] = 0xFF;
+    CHECK(artfSceneLoadHlod(other, broken, size) == 0 && other->meshes.len == plainMeshes);
     /* of a newer version: read, as what it holds is laid out as before */
     memcpy(broken, file, size);
     broken[8] = 2;
