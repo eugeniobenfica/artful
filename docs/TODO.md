@@ -54,13 +54,13 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 ## Fase 4 — Arquitetura
 - [~] 4.1 IR de shaders
   - [x] passos 1–2: IR, emissor SPIR-V, todos os 103 shaders com as mesmas palavras; `irFromSpirv`, `irUses`
-  - [ ] passo 3: DebugInfo (`NonSemantic.Shader.DebugInfo.100`)
-  - [~] passo 4: emissor MSL feito (94 de 103; os 17 do Metal ligam como os do SPIRV-Cross); falta passar no compilador da Apple (CI) e compilar em execução no `metal.c`
+  - [x] passo 3: DebugInfo (`ARTFUL_SHADER_DEBUG`, `artful-shaders --debug`; por função, não por linha)
+  - [~] passo 4: emissor MSL feito (94 de 103); o compilador da Apple na CI achou dois defeitos, corrigidos; falta compilar em execução no `metal.c`
   - [ ] passo 5: WGSL (Fase 6)
 - [~] 4.2 Grafo de quadro
   - [x] passo 1: descrição a partir do IR, `--graph`, medição
   - [~] passo 2: barreiras do pós a partir dos acessos dos shaders; faltam os passes da cena
-  - [~] passo 3: alvos só dos efeitos ligados e oclusão/velocidades num buffer; faltam aliasing imagem↔buffer (+8%) e luz em 16 bits 🔒 (~22%) para os 30% com tudo ligado
+  - [x] passo 3: luz em 16 bits e aliasing imagem↔buffer — −31% com tudo ligado a 1080p (meta 30%)
   - [ ] passo 4: backend de CPU percorrendo o grafo; dividir o `vulkan.c` por passe
 - [x] 4.3 Cozimento — HLOD (`artfSceneSaveHlod`), glTF (`artfPrepareModelCooked`), `artful-cook`, alvo de fuzzing
 

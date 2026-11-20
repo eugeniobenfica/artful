@@ -677,5 +677,13 @@ void testFuzzFindings(void) {
     const double start = artfNowMs();
     artfSceneLoadModelMemory(s, cycle, sizeof cycle - 1, NULL, NULL);
     CHECK(artfNowMs() - start < 1000);
+    /* (CI's fuzzing, image and glTF: a PNG whose palette is empty appended nothing to nothing, memcpy with a null
+     * pointer) */
+    static const uint8_t emptyPalette[45] = {
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,                                                       /* signature */
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x03, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,                                                                   /* IHDR, palette */
+        0x00, 0x00, 0x00, 0x00, 0x50, 0x4C, 0x54, 0x45, 0x00, 0x00, 0x00, 0x00};                                /* PLTE, empty */
+    artfFree(artfImageDecode(emptyPalette, sizeof emptyPalette, &w, &h));
     artfSceneFree(s);
 }

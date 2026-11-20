@@ -623,8 +623,12 @@ void testFrameGraph(void) {
         const uint64_t saved = artfFrameGraphReport(r, NULL, NULL);
         CHECK(artfFrameGraphUndescribed == 0);
         if (k == 0) {
-            printf("the frame as a graph, every effect on: %.1f MB of its targets could share memory\n", (double)saved / 1048576.0);
-            CHECK(saved > 0);
+            /* (occlusion and velocities already live in the scene's light: what is left to share is the rest) */
+            uint64_t now[FG_TARGETS];
+            artfVulkanTargetBytes(r, now);
+            printf("the frame as a graph, every effect on: occlusion and velocities in the scene's light (%.1f MB of their own), "
+                   "%.1f MB more could share memory\n", (double)now[FG_OCCLUSION] / 1048576.0, (double)saved / 1048576.0);
+            CHECK(now[FG_OCCLUSION] == 0 && now[FG_FLOAT_COLOR] > 0);
         }
     }
     uint64_t bytes[FG_TARGETS], sum = 0;

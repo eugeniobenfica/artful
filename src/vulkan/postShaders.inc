@@ -28,9 +28,10 @@ typedef struct Post {
 static SpvId postExp2(Spv* s, SpvId x); /* (below) */
 static SpvId postBuffer(Spv* s, Post* p, SpvId array, uint32_t binding) { return spvResource(s, blockOf(s, array, true), SPV_STORAGE_StorageBuffer, binding); }
 /* Light, the second light and the history: in set 1, by the part each plays (the renderer gives the parts to its three
- * buffers in turn, in place of copying) */
+ * buffers in turn, in place of copying). Each pixel's four as halves, in two words (postLight, postLightStore): half
+ * the memory of floats, and 11 bits of each, finer than what a screen shows of it. */
 static SpvId postRole(Spv* s, Post* p, uint32_t part) {
-    const SpvId id = spvVariable(s, spvTypePointer(s, SPV_STORAGE_StorageBuffer, blockOf(s, p->r.vec4Array, true)), SPV_STORAGE_StorageBuffer);
+    const SpvId id = spvVariable(s, spvTypePointer(s, SPV_STORAGE_StorageBuffer, blockOf(s, p->r.uintArray, true)), SPV_STORAGE_StorageBuffer);
     spvDecorate(s, id, SPV_DECORATE_DescriptorSet, 1);
     spvDecorate(s, id, SPV_DECORATE_Binding, (int)part);
     return id;
@@ -97,7 +98,23 @@ static SpvId postPtr(Spv* s, Post* p, SpvId buffer, SpvId type, SpvId i) {
     const SpvId idx[2] = {p->r.zero, i};
     return spvAccess(s, spvTypePointer(s, SPV_STORAGE_StorageBuffer, type), buffer, idx, 2);
 }
-static SpvId postVec4(Spv* s, Post* p, SpvId buffer, SpvId i) { return spvLoad(s, s->vec4, postPtr(s, p, buffer, s->vec4, i)); }
+static SpvId postIsRole(const Post* p, SpvId buffer) { return buffer == p->light || buffer == p->scratch || buffer == p->history; }
+/* A pixel of a part (light, the second light, the history): its two words, as halves. */
+static SpvId postLight(Spv* s, Post* p, SpvId buffer, SpvId i) {
+    SpvId at = spvOp2(s, SPV_OP_IMul, s->uintType, i, spvConstUint(s, 2));
+    SpvId lo = spvLoad(s, s->uintType, postPtr(s, p, buffer, s->uintType, at));
+    SpvId hi = spvLoad(s, s->uintType, postPtr(s, p, buffer, s->uintType, spvOp2(s, SPV_OP_IAdd, s->uintType, at, spvConstUint(s, 1))));
+    SpvId a = spvGlsl1(s, 62 /* UnpackHalf2x16 */, s->vec2, lo), b = spvGlsl1(s, 62, s->vec2, hi);
+    const SpvId parts[4] = {spvExtract(s, s->floatType, a, 0), spvExtract(s, s->floatType, a, 1), spvExtract(s, s->floatType, b, 0), spvExtract(s, s->floatType, b, 1)};
+    return spvCompose(s, s->vec4, parts, 4);
+}
+static void postLightStore(Spv* s, Post* p, SpvId buffer, SpvId i, SpvId v) {
+    SpvId at = spvOp2(s, SPV_OP_IMul, s->uintType, i, spvConstUint(s, 2));
+    const SpvId xy[2] = {spvExtract(s, s->floatType, v, 0), spvExtract(s, s->floatType, v, 1)}, zw[2] = {spvExtract(s, s->floatType, v, 2), spvExtract(s, s->floatType, v, 3)};
+    spvStore(s, postPtr(s, p, buffer, s->uintType, at), spvGlsl1(s, 58 /* PackHalf2x16 */, s->uintType, spvCompose(s, s->vec2, xy, 2)));
+    spvStore(s, postPtr(s, p, buffer, s->uintType, spvOp2(s, SPV_OP_IAdd, s->uintType, at, spvConstUint(s, 1))), spvGlsl1(s, 58, s->uintType, spvCompose(s, s->vec2, zw, 2)));
+}
+static SpvId postVec4(Spv* s, Post* p, SpvId buffer, SpvId i) { return postIsRole(p, buffer) ? postLight(s, p, buffer, i) : spvLoad(s, s->vec4, postPtr(s, p, buffer, s->vec4, i)); }
 static SpvId postFloat(Spv* s, Post* p, SpvId buffer, SpvId i) { return spvLoad(s, s->floatType, postPtr(s, p, buffer, s->floatType, i)); }
 static SpvId postUint(Spv* s, Post* p, SpvId buffer, SpvId i) { return spvLoad(s, s->uintType, postPtr(s, p, buffer, s->uintType, i)); }
 
@@ -251,7 +268,7 @@ uint32_t* artfShaderPostGather(size_t* size, int samples) {
     /* (the push constant: 1 for depth alone, after what is solid and before layers write theirs; 0 for the rest) */
     SpvId depthAlone = spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0)), rest, depthOnly;
     spvIfBegin(s, P_NOT(depthAlone), &rest);
-    spvStore(s, postPtr(s, p, p->light, s->vec4, i), spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, color), at));
+    postLightStore(s, p, p->light, i, spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, color), at));
     SpvId word = many ? spvImageFetchSampleAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at, spvConstInt(s, 0)) : spvImageFetchAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at);
     spvStore(s, postPtr(s, p, p->surface, s->uintType, i), spvExtract(s, s->uintType, word, 0));
     /* (the instance that shows, after all the words: when something moved, for what follows it) */
@@ -329,8 +346,8 @@ POST_MAIN(artfShaderPostOcclusionBlur)
     SpvId around = postField(s, postUint(s, p, p->surface, i), 27, 31, 31.f);
     SpvId keep = SUB_F(FLOAT(1.f), MUL_F(MUL_F(around, SUB_F(FLOAT(1.f), open)), Z(frameVec(s, &p->r, F_POST))));
     keep = PICK_F(P_MORE(d, FLOAT(0.f)), keep, FLOAT(1.f));
-    SpvId here = postPtr(s, p, p->light, s->vec4, i), light = spvLoad(s, s->vec4, here);
-    spvStore(s, here, vec4Of(s, SCALE_V3(spvShuffle3(s, light), keep), W(light)));
+    SpvId light = postLight(s, p, p->light, i);
+    postLightStore(s, p, p->light, i, vec4Of(s, SCALE_V3(spvShuffle3(s, light), keep), W(light)));
 POST_FINISH()
 
 /* ---- reflections: as reflectionRow, into the second light ---- */
@@ -542,8 +559,8 @@ POST_MAIN(artfShaderPostReflectionApply)
     postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
     SpvId hw = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->width, UINT(1)), UINT(2)), hh = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(1)), UINT(2));
     SpvId got = postTap(s, p, p->bloom, UINT(0), hw, hh, SUB_F(MUL_F(ADD_F(TO_F(x), FLOAT(.5f)), FLOAT(.5f)), FLOAT(.5f)), SUB_F(MUL_F(ADD_F(TO_F(y), FLOAT(.5f)), FLOAT(.5f)), FLOAT(.5f)));
-    SpvId here = postPtr(s, p, p->light, s->vec4, i), light = spvLoad(s, s->vec4, here);
-    spvStore(s, here, vec4Of(s, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, ADD_V3(spvShuffle3(s, light), spvShuffle3(s, got)), same3(s, 0.f)), W(light)));
+    SpvId light = postLight(s, p, p->light, i);
+    postLightStore(s, p, p->light, i, vec4Of(s, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, ADD_V3(spvShuffle3(s, light), spvShuffle3(s, got)), same3(s, 0.f)), W(light)));
 POST_FINISH()
 
 /* ---- fog that light goes through: the grid of froxels, as froxelRow, before the frame is drawn ---- */
@@ -818,7 +835,7 @@ POST_MAIN(artfShaderPostMotionBlur)
     SpvId blurredFrom = s->block;
     spvIfEnd(s, blurMerge);
     SpvId got = spvPhi(s, s->vec3, blurred, blurredFrom, nowRgb, before);
-    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, got, W(now)));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, got, W(now)));
 POST_FINISH()
 
 /* ---- temporal antialiasing: as temporalRow, into the second light ---- */
@@ -844,7 +861,7 @@ POST_MAIN(artfShaderPostTemporal)
     SpvId now = postVec4(s, p, p->light, i);
     SpvId was = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, postTap(s, p, p->history, UINT(0), p->width, p->height, sx, sy)), lo), hi);
     SpvId share = PICK_F(valid, FLOAT(.1f), FLOAT(1.f));
-    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, P_MIX3(was, spvShuffle3(s, now), share), W(now)));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, P_MIX3(was, spvShuffle3(s, now), share), W(now)));
 POST_FINISH()
 
 /* ---- upscaling: as upscaleRow, from the scene's light into the second light at the frame's size. The push constant's
@@ -929,7 +946,7 @@ POST_MAIN(artfShaderPostUpscale)
     spvIfEnd(s, followMerge);
     SpvId got = spvPhi(s, s->vec3, gathered, gatheredFrom, spatialRgb, before);
     SpvId locked = spvPhi(s, s->floatType, lock, gatheredFrom, FLOAT(0.f), before);
-    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, got, W(spatial)));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, got, W(spatial)));
     spvStore(s, postPtr(s, p, locks, s->floatType, ADD_U(MUL_U(half, framePixels), i)), locked);
 POST_FINISH()
 
@@ -1023,7 +1040,7 @@ POST_MAIN(artfShaderPostSharpen)
     }
     SpvId sharper = ADD_V3(h, SCALE_V3(SUB_V3(h, SCALE_V3(sum, FLOAT(.25f))), amount));
     sharper = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, sharper, lo), hi);
-    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, sharper, W(here)));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, sharper, W(here)));
 POST_FINISH()
 
 /* ---- depth of field: as focusRow, into the second light ---- */
@@ -1055,7 +1072,7 @@ POST_MAIN(artfShaderPostFocus)
         weight = ADD_F(weight, w);
     }
     SpvId blurred = SCALE_V3(sum, DIV_F(FLOAT(1.f), weight));
-    spvStore(s, postPtr(s, p, p->scratch, s->vec4, i), vec4Of(s, pick3(s, P_LESS(mine, FLOAT(.5f)), spvShuffle3(s, here), blurred), W(here)));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, pick3(s, P_LESS(mine, FLOAT(.5f)), spvShuffle3(s, here), blurred), W(here)));
 POST_FINISH()
 
 /* ---- bloom: as bloomDownRow and bloomUpRow; the push constant is the level ---- */

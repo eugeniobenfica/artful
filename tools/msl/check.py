@@ -13,7 +13,7 @@ import os, re, subprocess, sys, tempfile
 folder = sys.argv[1]
 compiler = sys.argv[2] if len(sys.argv) > 2 else "clang++"
 here = os.path.dirname(os.path.abspath(__file__))
-constructor = re.compile(r"\b(float|uint|int|bool)([234])\(")
+constructor = re.compile(r"\b(float|uint|int|bool|half)([234])\(")
 failed = 0
 names = sorted(n for n in os.listdir(folder) if n.endswith(".metal"))
 with tempfile.TemporaryDirectory() as scratch:

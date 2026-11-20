@@ -948,27 +948,22 @@ void testPacing(void) {
             ++frames;
         }
         const float up = artfRendererRenderScale(r);
-        /* (what a frame takes here, at .9: a budget with half again to spare holds it, unless the device is hot) */
-        artfRendererSetPacing(r, 0, .5f);
-        double took = 0;
-        for (int i = 0; i < 24; ++i) {
-            CHECK(artfRendererDraw(r, s));
-            ArtfFrameStats st;
-            artfRendererStats(r, &st);
-            if (i >= 8) took += (st.gpuMs > st.cpuMs ? st.gpuMs : st.cpuMs) / 16;
-        }
-        artfRendererSetPacing(r, (float)took * 1.5f, .5f);
+        /* (a frame said to take 8 ms, at .9: a budget of 10 holds it; near throttling, 10 is 6, and the scene goes to
+         * .9 times the square root of 6 / 8, by thirty-seconds down: .75) */
+        artfPaceTestMs = 8;
+        artfRendererSetPacing(r, 10, .5f);
         for (int i = 0; i < 40; ++i) CHECK(artfRendererDraw(r, s));
         const float cool = artfRendererRenderScale(r);
         artfRendererSetThermalHeadroom(r, 1);
-        for (int i = 0; i < 80; ++i) CHECK(artfRendererDraw(r, s));
+        for (int i = 0; i < 40; ++i) CHECK(artfRendererDraw(r, s));
         const float hot = artfRendererRenderScale(r);
+        artfPaceTestMs = 0;
         uint32_t* a = artfMalloc(W * H * 4);
         CHECK(artfRendererReadPixels(r, a)); /* (the frame keeps its size) */
         artfFree(a);
-        printf("%s, pacing: at a budget no frame keeps, %.3f of the width at once; back to %.3f in %d frames; %.2f ms a frame "
-               "held at %.3f, and at the same budget near throttling, %.3f\n", name, down, up, frames, took, cool, hot);
-        CHECK(fabsf(down - .5f) < 1e-6f && fabsf(up - .9f) < 1e-6f && frames < 300 && fabsf(cool - .9f) < 1e-6f && hot < .9f);
+        printf("%s, pacing: at a budget no frame keeps, %.3f of the width at once; back to %.3f in %d frames; 8 ms of 10 "
+               "held at %.3f, and near throttling, %.3f\n", name, down, up, frames, cool, hot);
+        CHECK(fabsf(down - .5f) < 1e-6f && fabsf(up - .9f) < 1e-6f && frames < 300 && fabsf(cool - .9f) < 1e-6f && fabsf(hot - .75f) < 1e-6f);
         artfSceneFree(s);
         artfRendererFree(r);
     }
@@ -1020,5 +1015,45 @@ void testPreRotate(void) {
     }
     for (int k = 0; k < 4; ++k) artfFree(frames[k]);
     artfFree(corner);
+#endif
+}
+
+/* Occlusion and motion blur's velocities in the memory of the scene's light (the frame graph's aliasing): the same
+ * bytes as with a buffer of their own, every effect on, over frames (what the frame before wrote is there when the
+ * scene draws again). */
+void testPostAliasing(void) {
+#ifdef ARTFUL_VULKAN
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    bool drawn = true;
+    for (int alone = 0; alone < 2 && drawn; ++alone) {
+        artfVulkanNoAliasing = alone != 0;
+        ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        artfVulkanNoAliasing = false;
+        if (!r) {
+            drawn = false;
+            break;
+        }
+        ArtfScene* s = bleedScene();
+        const ArtfInstance ball = addAt(s, artfSceneAddSphere(s, .5f, 16, 24), whiteMaterial(s), 0, 0, 0, 1);
+        const ArtfPostDesc all = {.lens.bloom = .3f, .screen.occlusion = 1, .screen.reflections = 1, .screen.temporal = true, .lens.motionBlur = .5f};
+        artfSceneSetPost(s, &all);
+        for (int f = 0; f < 6; ++f) {
+            const ArtfTransform t = artfTransformAt(.2f * (float)f, 0, 0, 1);
+            artfInstanceSetTransform(s, ball, &t);
+            CHECK(artfRendererDraw(r, s));
+        }
+        CHECK(artfRendererReadPixels(r, alone ? b : a));
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (drawn) {
+        printf("occlusion and velocities over the scene's light, against a buffer of their own: %.4f%% of pixels apart\n", differentShare(a, b, 0) * 100);
+        CHECK(differentShare(a, b, 0) == 0);
+    }
+    artfFree(a);
+    artfFree(b);
 #endif
 }

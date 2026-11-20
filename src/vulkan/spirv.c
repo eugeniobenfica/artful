@@ -40,8 +40,13 @@ static SpvId typeOf(Spv* s, uint32_t op, const uint32_t* operands, uint32_t n) {
     return words[0];
 }
 
-void spvInit(Spv* s) {
+bool artfShaderDebugInfo = false;
+
+void spvInitAt(Spv* s, const char* file, int line, const char* function) {
     memset(s, 0, sizeof *s);
+    s->file = file;
+    s->line = line;
+    s->function = function;
     irInit(&s->ir);
     s->head = (SpvWords){&s->ir, IR_HEAD};
     s->annotations = (SpvWords){&s->ir, IR_ANNOTATIONS};
@@ -402,6 +407,7 @@ uint32_t* spvFinish(Spv* s, size_t* wordCount) {
             artfLog("artful: a shader's IR is not sound: %s", why);
         }
     }
+    if (artfShaderDebugInfo && s->file) irDebugInfo(&s->ir, s->file, s->function ? s->function : "main", (uint32_t)s->line);
     if (artfSpvFinished) artfSpvFinished(&s->ir);
     return irSpirv(&s->ir, wordCount);
 }

@@ -59,6 +59,7 @@ typedef struct GpuBuffer {
     VkDeviceSize held; /* bytes of its memory (size, rounded as the driver wants) */
     void* mapped;
     uint64_t serial; /* which allocation this is: a handle can come back the same for another (see Slot's bound) */
+    bool borrowed;   /* its memory is another's (an image's, bufferOver): freed with that, not with this */
 } GpuBuffer;
 
 typedef struct GpuImage {
@@ -66,6 +67,7 @@ typedef struct GpuImage {
     VkDeviceMemory memory;
     VkImageView view;
     VkDeviceSize held; /* bytes of its memory */
+    int type;          /* of which memory type */
 } GpuImage;
 
 /* What belongs to one frame in flight. */
@@ -228,6 +230,7 @@ typedef struct Vulkan {
     int turn, imageWidth, imageHeight;
     bool lost;         /* nothing more can be drawn: it can only be freed */
     bool deviceFault;  /* VK_EXT_device_fault is on: when the device is lost, the driver is asked why */
+    bool shaderDebug;  /* VK_KHR_shader_non_semantic_info is on, and the shaders carry where in C each is built */
     uint64_t deviceBytes; /* of the device's memory, what Artful holds (ArtfFrameStats.gpuBytes) */
     uint64_t shadowKeys[ARTF_SHADOW_VIEWS]; /* what each map holds */
     uint64_t shadowSeen;                    /* the scene's changes these know of */
@@ -379,6 +382,7 @@ typedef struct Vulkan {
     bool exposureValid;             /* auto exposure has a state to go on from */
     VkPipeline fogPipeline;         /* fog that light goes through, over what is behind the scene */
     GpuBuffer postLight, postDepth, postSurface, postScratch, postHistory, postOcclusion, postFog, postBloom;
+    bool postAliased; /* postOcclusion is in floatColor's memory (postBuffersMake) */
     /* Light, the second light and the history are three buffers alike, and which plays which part changes in a frame
      * in place of copying one into another: the passes read and write them through set 1 (0 light, 1 second, 2 history),
      * one set for each way of giving the three parts to the three buffers (roleSets[light * 9 + second * 3 + history],
@@ -502,10 +506,13 @@ static bool bufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage,
 
 static void bufferFree(Vulkan* v, GpuBuffer* b) {
     if (b->buffer) v->vkDestroyBuffer(v->device, b->buffer, NULL);
-    if (b->memory) v->vkFreeMemory(v->device, b->memory, NULL);
+    if (b->memory && !b->borrowed) v->vkFreeMemory(v->device, b->memory, NULL);
     v->deviceBytes -= b->held;
     memset(b, 0, sizeof *b);
 }
+
+/* (imageNew's memory at least this large: for a buffer that lives in it when the image does not, bufferOver) */
+static VkDeviceSize imageLeast;
 
 static bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, uint32_t mips, int samples, VkFlags usage, VkFlags aspect) {
     memset(g, 0, sizeof *g);
@@ -515,6 +522,7 @@ static bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, 
     v->vkGetImageMemoryRequirements(v->device, g->image, &req);
     int type = memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL);
     if (type < 0) return false;
+    if (imageLeast > req.size) req.size = (imageLeast + req.alignment - 1) / req.alignment * req.alignment;
     MemoryAllocateInfo alloc = {ST_MEMORY_ALLOCATE_INFO, NULL, req.size, (uint32_t)type};
     const bool texture = (usage & IMAGE_SAMPLED) && (usage & IMAGE_TRANSFER_DST);
     const bool tooLarge = (texture && artfVulkanTextureMemoryLimit >= 0 && (long long)req.size > artfVulkanTextureMemoryLimit) ||
@@ -527,10 +535,32 @@ static bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, 
         return false;
     }
     g->held = req.size;
+    g->type = type;
     v->deviceBytes += req.size;
     v->vkBindImageMemory(v->device, g->image, g->memory, 0);
     ImageViewCreateInfo view = {ST_IMAGE_VIEW_CREATE_INFO, NULL, 0, g->image, 1 /* 2D */, format, {0, 0, 0, 0}, {aspect, 0, mips, 0, 1}};
     return v->vkCreateImageView(v->device, &view, NULL, &g->view) == VK_OK;
+}
+
+/* A buffer in an image's memory, for what lives only where the image does not (the frame graph's aliasing): false
+ * when the image's memory would not do (too small, or of a type the buffer cannot have), and the buffer gets its own. */
+static bool bufferOver(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, const GpuImage* g) {
+    memset(b, 0, sizeof *b);
+    if (!g->memory) return false;
+    BufferCreateInfo info = {ST_BUFFER_CREATE_INFO, NULL, 0, size, usage, 0, 0, NULL};
+    if (v->vkCreateBuffer(v->device, &info, NULL, &b->buffer) != VK_OK) return false;
+    MemoryRequirements req;
+    v->vkGetBufferMemoryRequirements(v->device, b->buffer, &req);
+    if (!(req.typeBits >> g->type & 1) || req.size > g->held || v->vkBindBufferMemory(v->device, b->buffer, g->memory, 0) != VK_OK) {
+        v->vkDestroyBuffer(v->device, b->buffer, NULL);
+        b->buffer = 0;
+        return false;
+    }
+    b->memory = g->memory;
+    b->borrowed = true;
+    b->size = size;
+    b->serial = ++v->bufferSerial;
+    return true;
 }
 
 static void imageFree(Vulkan* v, GpuImage* g) {
@@ -643,8 +673,10 @@ int artfVulkanSubmitsLeft = -1;
 
 
 static void lose(Vulkan* v, VkResult result);
+extern bool artfShaderDebugInfo; /* (spirv.h) */
 bool artfVulkanRefuseSwapchain = false;
 int artfVulkanTestTurn = 0;
+bool artfVulkanNoAliasing = false;
 
 static void lightDescriptors(Vulkan* v, Slot* s);
 static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b);
@@ -719,10 +751,14 @@ static bool postBuffersMake(Vulkan* v) {
     const VkDeviceSize occlusion = v->postNeeds & NEED_OCCLUSION ? pixels * 4 : 0, blur = v->postNeeds & NEED_BLUR ? (framePixels + blurTiles * 2) * 8 : 0;
     /* (bloom's levels, and past them auto exposure's state; the surface's words, then the instance that shows at each
      * pixel; light, the second and the history end at the frame's size) */
-    const VkDeviceSize sizes[8] = {framePixels * 16, pixels * 4, pixels * 8, v->postNeeds & NEED_SECOND ? framePixels * 16 : 0, v->postNeeds & NEED_HISTORY ? framePixels * 16 : 0,
+    /* (light, the second and the history: four halves a pixel, postShaders.inc's postLight) */
+    const VkDeviceSize sizes[8] = {framePixels * 8, pixels * 4, pixels * 8, v->postNeeds & NEED_SECOND ? framePixels * 8 : 0, v->postNeeds & NEED_HISTORY ? framePixels * 8 : 0,
                                    occlusion > blur ? occlusion : blur, v->postNeeds & NEED_FOG ? fog * 16 : 0, (bloom + 1 + v->lutRoom) * 16};
+    /* (occlusion and motion blur's velocities live after the gather, the scene's light only until it: the same memory,
+     * when it is large enough, with a barrier after the gather and the scene's pass waiting for what wrote it) */
+    v->postAliased = sizes[5] && !artfVulkanNoAliasing && bufferOver(v, buffers[5], sizes[5], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, &v->floatColor);
     for (int i = 0; i < 8; ++i)
-        if (sizes[i] && !bufferNew(v, buffers[i], sizes[i], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
+        if (sizes[i] && !buffers[i]->buffer && !bufferNew(v, buffers[i], sizes[i], BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
     if (!v->postNone.buffer && !bufferNew(v, &v->postNone, 64, BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
 #define OR_NONE(b) ((b)->buffer ? (b) : &v->postNone)
     for (int k = 0; k < SLOTS; ++k) {
@@ -769,7 +805,12 @@ static bool postBuffersMake(Vulkan* v) {
 
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
 static bool postTargetsMake(Vulkan* v) {
-    if (!imageNew(v, &v->floatColor, v->sceneFormat, v->sceneWidth, v->sceneHeight, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    /* (the scene's light: with room for motion blur's velocities, which can live in its memory: postBuffersMake) */
+    const VkDeviceSize blurTiles = (VkDeviceSize)((v->width + 15) / 16) * ((v->height + 15) / 16);
+    imageLeast = v->sceneWidth == v->width && v->sceneHeight == v->height ? ((VkDeviceSize)v->width * v->height + blurTiles * 2) * 8 : 0;
+    const bool made = imageNew(v, &v->floatColor, v->sceneFormat, v->sceneWidth, v->sceneHeight, 1, 1, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR);
+    imageLeast = 0;
+    if (!made) return false;
     /* (the surface word, and where motion is followed, the instance that shows + 1 or where it was) */
     if (!imageNew(v, &v->floatSurface, v->surfaceWide ? FORMAT_R32G32_UINT : FORMAT_R32_UINT, v->sceneWidth, v->sceneHeight, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
     return postBuffersMake(v);
@@ -977,7 +1018,7 @@ static bool renderPassMake(const Vulkan* v, VkRenderPass* out, bool load, bool s
      * they must match, dependencies too, to share pipelines and a framebuffer.) */
     /* (and within: a draw after one whose pixels wrote what it writes, layers' lists drawn one at a time; by region) */
     const SubpassDependency dependencies[3] = {
-        {~0u, 0, draw | STAGE_COMPUTE, draw, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE, ACCESS_COLOR_READ | ACCESS_COLOR_WRITE | ACCESS_DEPTH_READ | ACCESS_DEPTH_WRITE, 0},
+        {~0u, 0, draw | STAGE_COMPUTE, draw, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE | ACCESS_SHADER_WRITE, ACCESS_COLOR_READ | ACCESS_COLOR_WRITE | ACCESS_DEPTH_READ | ACCESS_DEPTH_WRITE, 0},
         {0, ~0u, draw, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE, ACCESS_SHADER_READ, 0},
         {0, 0, STAGE_FRAGMENT, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE, 1 /* by region */}};
     const RenderPassCreateInfo pass = {ST_RENDER_PASS, NULL, 0, count, used, 1, &subpass, 3, dependencies};
@@ -4292,6 +4333,8 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     v->role[1] = (uint8_t)(3 - v->role[0] - v->role[2]);
     rolesBind(v, c, 1);
     postStep(v, c, POST_GATHER, 0, pixels);
+    /* (what reads the scene's light is done: occlusion and velocities may write over its memory) */
+    if (v->postAliased) memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
     passMark(v, c, s, "gather");
     if (frame->post[0][2] > 0) {
         postStep(v, c, POST_OCCLUSION, 0, pixels);
@@ -5413,7 +5456,7 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
         features.pNext = &f12;
         v->vkGetPhysicalDeviceFeatures2(gpus[i], &features);
         /* the ray tracing hardware: both extensions, and what they need (ARTFUL_NO_RAY_QUERY: as a device without) */
-        bool rayQuery = false, deviceFault = false;
+        bool rayQuery = false, deviceFault = false, nonSemantic = false;
         {
             ExtensionProperties* have = artfMalloc(512 * sizeof *have);
             uint32_t extensionCount = 512;
@@ -5421,7 +5464,8 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             if (v->vkEnumerateDeviceExtensionProperties && v->vkEnumerateDeviceExtensionProperties(gpus[i], NULL, &extensionCount, have) >= 0)
                 for (uint32_t e = 0; e < extensionCount; ++e)
                     found |= (!strcmp(have[e].name, "VK_KHR_acceleration_structure") ? 1 : 0) | (!strcmp(have[e].name, "VK_KHR_ray_query") ? 2 : 0) | (!strcmp(have[e].name, "VK_KHR_deferred_host_operations") ? 4 : 0) |
-                             (!strcmp(have[e].name, "VK_EXT_device_fault") ? 8 : 0);
+                             (!strcmp(have[e].name, "VK_EXT_device_fault") ? 8 : 0) | (!strcmp(have[e].name, "VK_KHR_shader_non_semantic_info") ? 16 : 0);
+            nonSemantic = (found & 16) != 0;
             artfFree(have);
             if (found & 8) {
                 FaultFeatures fault = {ST_FAULT_FEATURES, NULL, 0, 0};
@@ -5474,6 +5518,8 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             v->fragmentStores = features.features.fragmentStoresAndAtomics;
             v->rayQuery = rayQuery;
             v->deviceFault = deviceFault;
+            /* (ARTFUL_SHADER_DEBUG: shaders that say which C built them, for RenderDoc: spirv.h's artfShaderDebugInfo) */
+            v->shaderDebug = nonSemantic && getenv("ARTFUL_SHADER_DEBUG");
             v->sampleShading = features.features.sampleRateShading;
             v->independentBlend = features.features.independentBlend;
             v->primitiveIds = features.features.geometryShader && !getenv("ARTFUL_NO_PRIMITIVE_ID"); /* (for the meshlets view) */
@@ -5562,7 +5608,7 @@ static bool createDevice(Vulkan* v) {
     features.features.sampleRateShading = v->sampleShading;
     features.features.independentBlend = v->independentBlend;
     features.features.geometryShader = v->primitiveIds;
-    const char* extensions[6];
+    const char* extensions[8];
     uint32_t extensionCount = 0;
     if (v->surface) extensions[extensionCount++] = "VK_KHR_swapchain";
     if (v->surface && v->native.kind == ARTF_SURFACE_METAL) extensions[extensionCount++] = "VK_KHR_portability_subset";
@@ -5574,6 +5620,11 @@ static bool createDevice(Vulkan* v) {
         extensions[extensionCount++] = "VK_KHR_deferred_host_operations";
         f12.rest[8] = 1; /* bufferDeviceAddress */
         f12.pNext = &as;
+    }
+    if (v->shaderDebug) {
+        extensions[extensionCount++] = "VK_KHR_shader_non_semantic_info";
+        artfShaderDebugInfo = true; /* (for every renderer after: a process that asks for it debugs) */
+        artfLog("artful: shaders carry where in C each is built (ARTFUL_SHADER_DEBUG)");
     }
     FaultFeatures fault = {ST_FAULT_FEATURES, &f12, 1, 0};
     if (v->deviceFault) {

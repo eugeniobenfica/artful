@@ -1,6 +1,7 @@
 /* artful-shaders — writes the GPU's shaders to a folder, for spirv-val and spirv-dis.
  *
- *   artful-shaders folder [--ir]: and each one's IR as text (name.ir), and as Metal (name.metal, shaderir/msl.h) */
+ *   artful-shaders folder [--ir]: and each one's IR as text (name.ir), and as Metal (name.metal, shaderir/msl.h)
+ *   artful-shaders folder --debug: with debugging information, pointing at the C that builds each (irDebugInfo) */
 #include "scene/sceneInternal.h"
 #include "vulkan/shaders.h"
 #include "holeInternal.h" /* (extensions/blackhole) */
@@ -58,6 +59,7 @@ int main(int argc, char** argv) {
     artfSpvCheck = true; /* (each module's IR checked too: irCheck) */
     folderOut = argv[1];
     withIr = argc > 2 && !strcmp(argv[2], "--ir");
+    artfShaderDebugInfo = argc > 2 && !strcmp(argv[2], "--debug");
     artfSpvFinished = finished;
     size_t size;
     uint32_t* code;

@@ -70,6 +70,7 @@ static void tryOcclusion(ArtfRenderer* r, ArtfScene* scene) {
 /* ---- pacing ---- */
 
 enum { PACE_WAIT = 30 };
+double artfPaceTestMs = 0;
 
 void artfRendererSetPacing(ArtfRenderer* r, float frameMs, float least) {
     r->paceMs = frameMs > 0 ? frameMs : 0;
@@ -88,7 +89,8 @@ static void pace(ArtfRenderer* r) {
     if (r->paceMs <= 0 || r->renderScaleMost >= 1.f) return;
     ArtfFrameStats stats;
     artfRendererStats(r, &stats);
-    const double took = stats.gpuMs > stats.cpuMs ? stats.gpuMs : stats.cpuMs;
+    const double scaled = (double)r->renderScale / r->renderScaleMost;
+    const double took = artfPaceTestMs > 0 ? artfPaceTestMs * scaled * scaled : stats.gpuMs > stats.cpuMs ? stats.gpuMs : stats.cpuMs;
     if (!(took > 0)) return;
     r->paceTook = r->paceTook > 0 ? r->paceTook * .8 + took * .2 : took;
     if (r->paceWait > 0) {

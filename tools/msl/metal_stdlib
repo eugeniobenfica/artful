@@ -14,6 +14,7 @@
 #define vertex
 
 typedef unsigned int uint;
+typedef _Float16 half;
 #define ARTF_VEC_TYPES(T)                                   \
     typedef T T##2 __attribute__((ext_vector_type(2)));     \
     typedef T T##3 __attribute__((ext_vector_type(3)));     \
@@ -22,6 +23,7 @@ ARTF_VEC_TYPES(float)
 ARTF_VEC_TYPES(uint)
 ARTF_VEC_TYPES(int)
 ARTF_VEC_TYPES(bool)
+ARTF_VEC_TYPES(half)
 
 namespace metal {
 
@@ -40,10 +42,12 @@ template <class E> inline void put(E* out, int& n, float v) { out[n++] = (E)v; }
 template <class E> inline void put(E* out, int& n, uint v) { out[n++] = (E)v; }
 template <class E> inline void put(E* out, int& n, int v) { out[n++] = (E)v; }
 template <class E> inline void put(E* out, int& n, bool v) { out[n++] = (E)v; }
+template <class E> inline void put(E* out, int& n, half v) { out[n++] = (E)v; }
 ARTF_PUT(float2, 2) ARTF_PUT(float3, 3) ARTF_PUT(float4, 4)
 ARTF_PUT(uint2, 2) ARTF_PUT(uint3, 3) ARTF_PUT(uint4, 4)
 ARTF_PUT(int2, 2) ARTF_PUT(int3, 3) ARTF_PUT(int4, 4)
 ARTF_PUT(bool2, 2) ARTF_PUT(bool3, 3) ARTF_PUT(bool4, 4)
+ARTF_PUT(half2, 2) ARTF_PUT(half3, 3) ARTF_PUT(half4, 4)
 
 #define ARTF_MAKE(T, N)                                                             \
     template <class... A> inline T##N make_##T##N(A... a) {                         \
@@ -59,6 +63,7 @@ ARTF_MAKE(float, 2) ARTF_MAKE(float, 3) ARTF_MAKE(float, 4)
 ARTF_MAKE(uint, 2) ARTF_MAKE(uint, 3) ARTF_MAKE(uint, 4)
 ARTF_MAKE(int, 2) ARTF_MAKE(int, 3) ARTF_MAKE(int, 4)
 ARTF_MAKE(bool, 2) ARTF_MAKE(bool, 3) ARTF_MAKE(bool, 4)
+ARTF_MAKE(half, 2) ARTF_MAKE(half, 3) ARTF_MAKE(half, 4)
 
 struct sampler {};
 struct level {

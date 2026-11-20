@@ -70,6 +70,11 @@ int irUses(const IrModule* m, IrUse* out, int max);
  * the first function, then the code). false: the words are not SPIR-V (m holds what was read). */
 bool irFromSpirv(IrModule* m, const uint32_t* words, size_t count);
 
+/* Debugging information (NonSemantic.Shader.DebugInfo.100, for RenderDoc and the like): the module's main is the
+ * function named function at line of file, the C that builds it. The words change; a device needs
+ * VK_KHR_shader_non_semantic_info (core in Vulkan 1.3). */
+void irDebugInfo(IrModule* m, const char* file, const char* function, uint32_t line);
+
 /* SPIR-V 1.3's words (artfFree), the sections in their order. */
 uint32_t* irSpirv(const IrModule* m, size_t* wordCount);
 

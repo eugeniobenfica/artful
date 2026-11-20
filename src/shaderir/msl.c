@@ -328,6 +328,8 @@ static const char* glslOf(uint32_t inst, int* args) {
     case 43: case 44: case 45: *args = 3; return "clamp";
     case 46: *args = 3; return "mix";
     case 50: *args = 3; return "fma";
+    case 58: return "spvPackHalf2x16";
+    case 62: return "spvUnpackHalf2x16";
     case 64: return "unpack_unorm4x8_to_float";
     case 66: return "length";
     case 67: *args = 2; return "distance";
@@ -461,6 +463,9 @@ static void instruction(Msl* s, const IrInst* i) {
     }
     case 12: {
         int args;
+        /* (debugging information, NonSemantic's: nothing in Metal) */
+        const IrInst* set = irDef(s->m, w[0]);
+        if (set && set->op == 11 && irOperands(s->m, set)[0] == 0x536E6F4Eu /* "NonS" */) return;
         const char* f = glslOf(w[1], &args);
         if (w[1] == 75) { /* FindUMsb: -1 for 0, as clz gives 32 */
             line(s, "_%u = %s(31 - int(clz(%s)));", r, typeName(s, i->type), valueOf(s, w[2]));
@@ -506,7 +511,12 @@ static void instruction(Msl* s, const IrInst* i) {
     case 208: line(s, "_%u = dfdy(%s);", r, valueOf(s, w[0])); return;
     case 209: line(s, "_%u = fwidth(%s);", r, valueOf(s, w[0])); return;
     case 224: case 225: line(s, "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);"); return;
-    case 234: line(s, "_%u = atomic_fetch_add_explicit((device atomic_uint*)&%s, %s, memory_order_relaxed);", r, valueOf(s, w[0]), valueOf(s, w[3])); return;
+    case 234: {
+        /* (in the group's memory or a buffer's, as the pointer is: Apple's compiler takes no cast across the two) */
+        const bool group = storageOf(s, irTypeOf(s->m, w[0])) == 4;
+        line(s, "_%u = atomic_fetch_add_explicit((%s atomic_uint*)&%s, %s, memory_order_relaxed);", r, group ? "threadgroup" : "device", valueOf(s, w[0]), valueOf(s, w[3]));
+        return;
+    }
     case 245: return; /* (set by the edges into its block) */
     default:
         if (i->op >= 4472 || i->op == 5341) fail(s, "ray queries (Op%u): not written for Metal", i->op);
@@ -693,6 +703,9 @@ char* irMsl(const IrModule* m, const IrMslOptions* options, char* why, size_t si
 
     Text head = {0}, out = {0};
     say(&head, "#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n");
+    /* (GLSL's half packing, as SPIRV-Cross writes it) */
+    say(&head, "static inline __attribute__((always_inline)) uint spvPackHalf2x16(float2 v) { return as_type<uint>(half2(v)); }\n"
+               "static inline __attribute__((always_inline)) float2 spvUnpackHalf2x16(uint v) { return float2(as_type<half2>(v)); }\n\n");
     declareStructs(&s, &head);
 
     /* what is global: resources, push constants, what comes in and goes out, what a group shares */

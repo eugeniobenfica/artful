@@ -24,7 +24,8 @@ static void pictureFree(Picture* p) {
 }
 #define pictureRow(p, y) ((p)->pixels + (size_t)(y) * (p)->width)
 #define vecResize(v, n) do { artfVecReserve((v), (n)); (v)->len = (n); } while (0)
-#define vecAppend(v, p, n) do { size_t count_ = (n); artfVecReserve((v), (v)->len + count_); memcpy((v)->items + (v)->len, (p), count_ * sizeof *(v)->items); (v)->len += count_; } while (0)
+/* (nothing appended to nothing: no memcpy, whose pointers may then be null, which UBSan stops on; the fuzzer found it) */
+#define vecAppend(v, p, n) do { size_t count_ = (n); if (!count_) break; artfVecReserve((v), (v)->len + count_); memcpy((v)->items + (v)->len, (p), count_ * sizeof *(v)->items); (v)->len += count_; } while (0)
 #define vecClear(v) ((v)->len = 0)
 /* A table made the first time it is needed. A model's images are decoded on all cores at once, so: one thread makes it,
  * the others wait for it, and all see it whole (on ARM, a plain flag can be seen set before the table is written). */

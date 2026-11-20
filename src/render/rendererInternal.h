@@ -64,6 +64,11 @@ extern bool artfVulkanRefuseSwapchain;
 /* For tests: with preRotate and no surface, the turn the frame is made with (0 to 3: 0, 90, 180, 270 degrees
  * clockwise), as a turned screen's swapchain would ask; artfRendererReadPixels then gives the image as it is. */
 extern int artfVulkanTestTurn;
+/* For tests and measures: no buffer in an image's memory (postBuffersMake), as before there was. */
+extern bool artfVulkanNoAliasing;
+/* For tests: above 0, what pacing takes a frame to have taken at renderScale, in place of what it did (ms), going
+ * as the pixels drawn at another. */
+extern double artfPaceTestMs;
 /* For tests: a texture whose image would take more than this many bytes cannot be made, as when the GPU's memory has
  * run out. Below 0: no such limit. */
 extern long long artfVulkanTextureMemoryLimit;

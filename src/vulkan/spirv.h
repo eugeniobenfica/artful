@@ -20,6 +20,8 @@ typedef struct Spv {
     SpvId glsl;           /* the GLSL.std.450 set */
     SpvId voidType, boolType, uintType, intType, floatType, vec2, vec3, vec4;
     SpvId block;          /* the label of the block being written */
+    const char *file, *function; /* where in C it is built (spvInit), for the debugging information */
+    int line;
 } Spv;
 
 enum {
@@ -37,7 +39,11 @@ enum { SPV_BUILTIN_Position = 0, SPV_BUILTIN_FragCoord = 15, SPV_BUILTIN_FrontFa
 enum { SPV_MODEL_Vertex = 0, SPV_MODEL_Fragment = 4, SPV_MODEL_GLCompute = 5 };
 enum { SPV_GLSL_UnpackUnorm4x8 = 64, SPV_GLSL_FAbs = 4, SPV_GLSL_Floor = 8, SPV_GLSL_Log2 = 30, SPV_GLSL_Sin = 13, SPV_GLSL_Cos = 14, SPV_GLSL_Atan2 = 25, SPV_GLSL_Sqrt = 31, SPV_GLSL_FMin = 37, SPV_GLSL_UMin = 38, SPV_GLSL_FMax = 40, SPV_GLSL_UMax = 41, SPV_GLSL_Length = 66, SPV_GLSL_Cross = 68, SPV_GLSL_Normalize = 69, SPV_GLSL_FindUMsb = 75 };
 
-void spvInit(Spv* s);
+void spvInitAt(Spv* s, const char* file, int line, const char* function);
+#define spvInit(s) spvInitAt(s, __FILE__, __LINE__, __func__)
+/* Each module built carries debugging information (irDebugInfo) pointing at the C that built it: for RenderDoc. Off: the
+ * words as they always were. Vulkan sets it from ARTFUL_SHADER_DEBUG where the device takes it. */
+extern bool artfShaderDebugInfo;
 void spvFini(Spv* s);
 SpvId spvNewId(Spv* s);
 /* An instruction with n operands; result 0 and type 0 are left out. */

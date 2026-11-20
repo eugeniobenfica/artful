@@ -611,7 +611,12 @@ On the GPU light, the second light and the history are three buffers alike, and 
 plays which part is a descriptor set of their own (set 1, one of 27, each a way of giving the parts to the buffers), so
 what a pass wrote becomes the light by binding another, and what temporal antialiasing or upscaling wrote is the history
 for the frame after as it is, while the passes after it go between the other two (`postSwap`). That took two copies of
-the frame out of each frame with temporal antialiasing: 1.60 to 1.13 ms on a Radeon RX 9060 XT at 1920 x 1080. On the
+the frame out of each frame with temporal antialiasing: 1.60 to 1.13 ms on a Radeon RX 9060 XT at 1920 x 1080. Each
+holds a pixel's four as 16-bit floats, two words (`postLight`, `postLightStore`): half the memory, eleven bits of each,
+finer than what is shown of it; the CPU keeps floats. Occlusion and motion blur's velocities share a buffer, and it lives
+in the memory of the scene's light (its image is made with room for it), dead from the gather on: a barrier after the
+gather, and the scene's pass waiting for the compute writes of the frame before (`bufferOver`). At 1080p with every
+effect the targets take 141.3 MB where they took 204.7. On the
 CPU temporal antialiasing and upscaling go through the kernels eight pixels at a time where they can (`temporalLanes`,
 `upscaleLanes`, `boxLanes`: in perspective, away from the frame's sides, and where no pixel went by its vertices), and a
 pixel at a time where they cannot, with the same arithmetic: 5.8 to 2.6 ms and 6.6 to 4.2 ms.

@@ -23,8 +23,8 @@ static uint8_t shapeOf(uint32_t op) {
     case 10: case 14: case 15: case 16: case 17: case 56: case 62: case 71: case 72: case 224: case 225: case 246: case 247: case 249: case 250:
     case 251: case 252: case 253: case 254: case 255: case 4473: case 4478:
         return 0;
-    /* a result alone: an import, the types, a label */
-    case 11: case 248: case 4472: case 5341:
+    /* a result alone: a string, an import, the types, a label */
+    case 7: case 11: case 248: case 4472: case 5341:
         return IR_HAS_RESULT;
     default:
         return op >= 19 && op <= 39 ? IR_HAS_RESULT : IR_HAS_TYPE | IR_HAS_RESULT;
@@ -43,7 +43,7 @@ static void kindsOf(uint32_t op, const uint32_t* w, uint32_t n, uint8_t* k) {
 #define FROM(first, kind) for (uint32_t i = (first); i < n; ++i) k[i] = (kind)
 #define AT(i, kind) if ((i) < n) k[i] = (kind)
     switch (op) {
-    case 10: case 11: FROM(0, IR_OPERAND_STRING); break;           /* Extension, ExtInstImport */
+    case 7: case 10: case 11: FROM(0, IR_OPERAND_STRING); break;   /* String, Extension, ExtInstImport */
     case 12: AT(1, IR_OPERAND_LITERAL); break;                      /* ExtInst: set, instruction, operands */
     case 14: case 17: case 21: case 22: case 43: FROM(0, IR_OPERAND_LITERAL); break;
     case 15: {                                                      /* EntryPoint: model, function, name, interface */
@@ -89,6 +89,99 @@ uint32_t irAppend(IrModule* m, int section, uint32_t op, const uint32_t* words, 
     }
     if (i.result > m->bound) m->bound = i.result;
     return index;
+}
+
+/* The last instruction appended, moved to index: what follows moves one on, and what defines each id is found again. */
+static void moveLastTo(IrModule* m, uint32_t index) {
+    const IrInst last = m->insts.items[m->insts.len - 1];
+    memmove(&m->insts.items[index + 1], &m->insts.items[index], (m->insts.len - 1 - index) * sizeof last);
+    m->insts.items[index] = last;
+    memset(m->defs.items, 0, m->defs.len * sizeof *m->defs.items);
+    for (uint32_t k = 0; k < (uint32_t)m->insts.len; ++k) {
+        const IrId r = m->insts.items[k].result;
+        if (r && !m->defs.items[r]) m->defs.items[r] = k + 1;
+    }
+}
+
+/* A string's words, 0-ended, into w (at most max): how many. */
+static uint32_t stringInto(const char* text, uint32_t* w, uint32_t max) {
+    const size_t length = strlen(text);
+    uint32_t n = (uint32_t)(length / 4 + 1);
+    if (n > max) n = max;
+    memset(w, 0, n * 4);
+    memcpy(w, text, length < (size_t)n * 4 ? length : (size_t)n * 4 - 1);
+    return n;
+}
+
+void irDebugInfo(IrModule* m, const char* file, const char* function, uint32_t line) {
+    IrId voidType = 0, uintType = 0, entry = 0;
+    uint32_t firstImport = UINT32_MAX, memoryModel = UINT32_MAX;
+    for (uint32_t k = 0; k < (uint32_t)m->insts.len; ++k) {
+        const IrInst* i = &m->insts.items[k];
+        const uint32_t* w = irOperands(m, i);
+        if (i->op == 19 && !voidType) voidType = i->result;
+        if (i->op == 21 && i->count == 2 && w[0] == 32 && w[1] == 0 && !uintType) uintType = i->result;
+        if (i->op == 15 && !entry) entry = w[1];
+        if (i->op == 11 && firstImport == UINT32_MAX) firstImport = k;
+        if (i->op == 14 && memoryModel == UINT32_MAX) memoryModel = k;
+    }
+    if (!voidType || !uintType || !entry || memoryModel == UINT32_MAX) return;
+    uint32_t w[64];
+    /* what it needs: the extension, before the imports; the set, after them */
+    uint32_t n = stringInto("SPV_KHR_non_semantic_info", w, 64);
+    irAppend(m, IR_HEAD, 10, w, n);
+    moveLastTo(m, firstImport != UINT32_MAX ? firstImport : memoryModel);
+    ++memoryModel;
+    const IrId set = irNewId(m);
+    w[0] = set;
+    n = 1 + stringInto("NonSemantic.Shader.DebugInfo.100", w + 1, 63);
+    irAppend(m, IR_HEAD, 11, w, n);
+    moveLastTo(m, memoryModel);
+    /* the strings, after the entry points' modes */
+    const IrId fileName = irNewId(m), functionName = irNewId(m);
+    w[0] = fileName;
+    irAppend(m, IR_HEAD, 7, w, 1 + stringInto(file, w + 1, 63));
+    w[0] = functionName;
+    irAppend(m, IR_HEAD, 7, w, 1 + stringInto(function, w + 1, 63));
+    /* its numbers, as constants */
+    const uint32_t values[5] = {100, 4, 0, line, 3};
+    IrId constants[5];
+    for (int k = 0; k < 5; ++k) {
+        constants[k] = irNewId(m);
+        const uint32_t c[3] = {uintType, constants[k], values[k]};
+        irAppend(m, IR_TYPES, 43, c, 3);
+    }
+    const IrId version = constants[0], dwarf = constants[1], zero = constants[2], at = constants[3], flags = constants[4];
+    /* the source, the compilation unit, main's type and main (DebugSource, DebugCompilationUnit, DebugTypeFunction, DebugFunction) */
+    const IrId source = irNewId(m), unit = irNewId(m), type = irNewId(m), fn = irNewId(m);
+    const uint32_t sourceWords[5] = {voidType, source, set, 35, fileName};
+    irAppend(m, IR_TYPES, 12, sourceWords, 5);
+    const uint32_t unitWords[8] = {voidType, unit, set, 1, version, dwarf, source, zero};
+    irAppend(m, IR_TYPES, 12, unitWords, 8);
+    const uint32_t typeWords[6] = {voidType, type, set, 8, zero, voidType};
+    irAppend(m, IR_TYPES, 12, typeWords, 6);
+    const uint32_t fnWords[13] = {voidType, fn, set, 20, functionName, type, source, at, zero, unit, functionName, flags, at};
+    irAppend(m, IR_TYPES, 12, fnWords, 13);
+    /* in main's first block, after its variables: the definition, and the scope */
+    uint32_t place = UINT32_MAX;
+    bool inMain = false;
+    for (uint32_t k = 0; k < (uint32_t)m->insts.len; ++k) {
+        const IrInst* i = &m->insts.items[k];
+        if (i->section != IR_CODE) continue; /* (types and constants made as the code was are kept apart in the list) */
+        if (i->op == 54) inMain = i->result == entry;
+        if (!inMain) continue;
+        if (i->op == 248 && place == UINT32_MAX) place = k + 1;
+        else if (place != UINT32_MAX && i->op == 59) place = k + 1;
+        else if (place != UINT32_MAX) break;
+    }
+    if (place == UINT32_MAX) return;
+    const IrId definition = irNewId(m), scope = irNewId(m);
+    const uint32_t definitionWords[6] = {voidType, definition, set, 101, fn, entry};
+    irAppend(m, IR_CODE, 12, definitionWords, 6);
+    moveLastTo(m, place);
+    const uint32_t scopeWords[5] = {voidType, scope, set, 23, fn};
+    irAppend(m, IR_CODE, 12, scopeWords, 5);
+    moveLastTo(m, place + 1);
 }
 
 const IrInst* irDef(const IrModule* m, IrId id) {

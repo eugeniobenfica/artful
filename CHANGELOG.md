@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Phase 4, in part: less memory after the frame, and shaders that say where they come from.**
+  - *Light in halves* (the owner's choice): the three buffers of light after the frame hold four 16-bit floats a pixel,
+    not 32-bit; and occlusion with motion blur's velocities lives in the memory of the scene's light, which is dead by
+    then. At 1080p with every effect, 204.7 MB of targets become 141.3 (-31%). The GPU's frames with effects change by
+    less than a level; the CPU's do not change.
+  - *Debugging information*: `ARTFUL_SHADER_DEBUG` (where the device has `VK_KHR_shader_non_semantic_info`) and
+    `artful-shaders dir --debug` put in each shader the C file, function and line that build it, for RenderDoc.
+  - *Found by CI*: the fuzzer's first runs found a PNG with an empty palette appending nothing with a null pointer
+    (fixed, and kept in `files/fuzzFindings`); Apple's compiler found the Metal written from the IR casting a group's
+    memory to a device atomic (fixed).
+
 - **Phase 3, what this machine can do of it.**
   - *Pacing.* `artfRendererSetPacing(r, frameMs, least)` keeps a frame within a budget by drawing the scene smaller,
     down to `least`, by steps of a thirty-second of the width; `artfRendererSetThermalHeadroom` takes how near the
