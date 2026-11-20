@@ -29,9 +29,9 @@ The headers say what each call does. This is the map, and the rules that hold fo
 - **Colors.** Materials, lights and fog are linear light. Bytes (textures, vertex colors, frames, the background) are
   BGRA and sRGB, as pictures and screens are. Frames and overlays are premultiplied; textures are not.
 
-## What 1.x will keep (proposed)
+## What 1.x will keep
 
-To be decided before 1.0; as it stands, for the owner to confirm:
+Decided (plan 1.4): source compatibility, not binary.
 
 - **Source compatibility.** A program written for 1.0 compiles and behaves the same against every 1.x: no function,
   type, enum value or field is removed or changes meaning in 1.x. New ones are added. What is to go is marked

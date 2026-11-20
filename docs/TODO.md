@@ -18,11 +18,11 @@ identificado; macOS com `scale/skinLod`). Run 44764119231 em andamento, com `ART
 - [x] 0.5 Linha de base de desempenho — `--json` no 3D e no 2D, `tools/bench.py --render2d` (2D na CPU varia 4,3%, acima dos 3%)
 
 ## Fase 1 — Contrato público
-- [x] 1.1 Handles de malha com geração
-- [~] 1.2 Falta de memória na GPU — feito para texturas; malhas, instâncias e buffers do quadro ainda derrubam o renderizador
+- [x] 1.1 Handles com geração — malhas e texturas
+- [x] 1.2 Falta de memória na GPU — texturas (com residência), malhas recusadas, instâncias/quadro pulam e se recuperam
 - [x] 1.3 Callback de eventos
-- [ ] 1.4 Política de ABI 🔒 — rascunho em `docs/api.md` ("What 1.x will keep (proposed)")
-- [x] 1.5 Contrato de threads
+- [x] 1.4 Política de ABI — compatibilidade de fonte (decisão do dono)
+- [x] 1.5 Contrato de threads — 3D e 2D
 - [x] 1.6 Camadas de suporte publicadas
 - [~] 1.7 Mistura de clipes — feito na CPU; nada a fazer na GPU (pose é calculada na CPU)
 

@@ -1,4 +1,5 @@
 /* artful-2d — the scene: what handles name, textures and their mipmaps, sprites, lights, the camera. */
+#include "core/threads.h"
 #include "2d/internal2d.h"
 #include "core/trig.h"
 
@@ -57,6 +58,13 @@ ArtfScene2D* artfScene2DNew(void) {
 static void textureEmpty(Texture2D* t) {
     for (int l = 0; l < t->levels; ++l) artfFree(t->texels[l]);
     t->levels = 0;
+}
+
+/* A scene belongs to one thread at a time: what changes it while another draws it is said (as the 3D scene's). */
+static void changing2D(const ArtfScene2D* s, const char* what) {
+    const uintptr_t drawing = s->drawingThread;
+    if (drawing && drawing != artfThreadId())
+        artfLog("artful: %s of a 2D scene changed from another thread while it was drawn: a scene belongs to one thread at a time", what);
 }
 
 void artfScene2DFree(ArtfScene2D* s) {
@@ -151,6 +159,7 @@ static void textureFill(Texture2D* t, const ArtfTexture2DDesc* d) {
 }
 
 ArtfTexture2D artfScene2DAddTexture(ArtfScene2D* s, const ArtfTexture2DDesc* desc) {
+    changing2D(s, "a texture");
     uint32_t i;
     TAKE_SLOT(&s->textures, i);
     textureFill(&s->textures.items[i], desc);
@@ -159,6 +168,7 @@ ArtfTexture2D artfScene2DAddTexture(ArtfScene2D* s, const ArtfTexture2DDesc* des
 }
 
 void artfScene2DSetTexture(ArtfScene2D* s, ArtfTexture2D h, const ArtfTexture2DDesc* desc) {
+    changing2D(s, "a texture");
     Texture2D* t = artf2DTexture(s, h);
     if (!t) return;
     textureFill(t, desc);
@@ -166,6 +176,7 @@ void artfScene2DSetTexture(ArtfScene2D* s, ArtfTexture2D h, const ArtfTexture2DD
 }
 
 void artfScene2DRemoveTexture(ArtfScene2D* s, ArtfTexture2D h) {
+    changing2D(s, "a texture");
     Texture2D* t = artf2DTexture(s, h);
     if (!t) return;
     textureEmpty(t);
@@ -199,6 +210,7 @@ static void spriteFill(Sprite2D* sp, const ArtfSprite2DDesc* d) {
 }
 
 ArtfSprite2D artfScene2DAddSprite(ArtfScene2D* s, const ArtfSprite2DDesc* desc) {
+    changing2D(s, "a sprite");
     uint32_t i;
     TAKE_SLOT(&s->sprites, i);
     Sprite2D* sp = &s->sprites.items[i];
@@ -208,11 +220,13 @@ ArtfSprite2D artfScene2DAddSprite(ArtfScene2D* s, const ArtfSprite2DDesc* desc) 
 }
 
 void artfSprite2DSet(ArtfScene2D* s, ArtfSprite2D h, const ArtfSprite2DDesc* desc) {
+    changing2D(s, "a sprite");
     const long i = FIND(s->sprites, h, "sprite");
     if (i >= 0) spriteFill(&s->sprites.items[i], desc);
 }
 
 void artfSprite2DPlace(ArtfScene2D* s, ArtfSprite2D h, ArtfVec2 position, float rotation) {
+    changing2D(s, "a sprite");
     const long i = FIND(s->sprites, h, "sprite");
     if (i < 0) return;
     s->sprites.items[i].desc.position = position;
@@ -220,6 +234,7 @@ void artfSprite2DPlace(ArtfScene2D* s, ArtfSprite2D h, ArtfVec2 position, float 
 }
 
 void artfScene2DRemoveSprite(ArtfScene2D* s, ArtfSprite2D h) {
+    changing2D(s, "a sprite");
     const long i = FIND(s->sprites, h, "sprite");
     if (i < 0) return;
     Sprite2D* sp = &s->sprites.items[i];
@@ -231,6 +246,7 @@ void artfScene2DRemoveSprite(ArtfScene2D* s, ArtfSprite2D h) {
 /* ---- occluders ---- */
 
 ArtfOccluder2D artfScene2DAddOccluder(ArtfScene2D* s, const ArtfVec2* points, int count, bool closed) {
+    changing2D(s, "an occluder");
     uint32_t i;
     TAKE_SLOT(&s->occluders, i);
     Occluder2D* o = &s->occluders.items[i];
@@ -244,6 +260,7 @@ ArtfOccluder2D artfScene2DAddOccluder(ArtfScene2D* s, const ArtfVec2* points, in
 }
 
 void artfScene2DRemoveOccluder(ArtfScene2D* s, ArtfOccluder2D h) {
+    changing2D(s, "an occluder");
     const long i = FIND(s->occluders, h, "occluder");
     if (i < 0) return;
     artfFree(s->occluders.items[i].points);
@@ -266,6 +283,7 @@ ArtfLight2DDesc artfLight2DDefaults(void) {
 }
 
 ArtfLight2D artfScene2DAddLight(ArtfScene2D* s, const ArtfLight2DDesc* desc) {
+    changing2D(s, "a light");
     uint32_t i;
     TAKE_SLOT(&s->lights, i);
     s->lights.items[i].desc = *desc;
@@ -273,18 +291,23 @@ ArtfLight2D artfScene2DAddLight(ArtfScene2D* s, const ArtfLight2DDesc* desc) {
 }
 
 void artfLight2DSet(ArtfScene2D* s, ArtfLight2D h, const ArtfLight2DDesc* desc) {
+    changing2D(s, "a light");
     const long i = FIND(s->lights, h, "light");
     if (i >= 0) s->lights.items[i].desc = *desc;
 }
 
 void artfScene2DRemoveLight(ArtfScene2D* s, ArtfLight2D h) {
+    changing2D(s, "a light");
     const long i = FIND(s->lights, h, "light");
     if (i >= 0) s->lights.items[i].slot.alive = false;
 }
 
 /* ---- the scene's own ---- */
 
-void artfScene2DSetAmbient(ArtfScene2D* s, ArtfVec3 color) { s->ambient = color; }
+void artfScene2DSetAmbient(ArtfScene2D* s, ArtfVec3 color) {
+    changing2D(s, "the ambient light");
+    s->ambient = color;
+}
 
 ArtfGI2DDesc artfGI2DDefaults(void) {
     ArtfGI2DDesc d = {.enabled = true, .scale = 4, .intensity = 1, .bounce = .5f};
@@ -292,6 +315,7 @@ ArtfGI2DDesc artfGI2DDefaults(void) {
 }
 
 void artfScene2DSetGI(ArtfScene2D* s, const ArtfGI2DDesc* desc) {
+    changing2D(s, "gi");
     if (!desc) {
         s->gi.enabled = false;
         return;
@@ -304,16 +328,19 @@ void artfScene2DSetGI(ArtfScene2D* s, const ArtfGI2DDesc* desc) {
 }
 
 void artfScene2DSetPost(ArtfScene2D* s, const ArtfPost2DDesc* desc) {
+    changing2D(s, "what comes after");
     if (desc) s->post = *desc;
     else memset(&s->post, 0, sizeof s->post);
 }
 
 void artfScene2DSetBackground(ArtfScene2D* s, ArtfVec3 color, float alpha) {
+    changing2D(s, "the background");
     s->background = color;
     s->backgroundAlpha = artfClampf(alpha, 0, 1);
 }
 
 void artfScene2DSetCamera(ArtfScene2D* s, const ArtfCamera2D* camera) {
+    changing2D(s, "the camera");
     s->camera = *camera;
     if (!(s->camera.zoom > 0)) s->camera.zoom = 1;
 }

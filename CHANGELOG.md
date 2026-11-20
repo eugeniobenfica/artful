@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Phase 1 done.** Textures' handles have a generation, as meshes' do: a removed texture's place is taken again with
+  another handle, and the old one is refused, and said, where it is given (materials, graphs, decals, residency).
+  The GPU's memory running out no longer takes the renderer down: a mesh that does not fit is refused
+  (`ARTF_EVENT_REFUSED`) and tried again when a mesh goes; instances, materials and the frame's buffers that do not fit
+  leave the frame as it was (`ARTF_EVENT_OUT_OF_MEMORY`), the draw returning true, and are tried again; textures never
+  end worse than they were, and with automatic residency the others give up levels (`artfSceneResidencyPress`). A
+  mesh refused, or sent away by residency, made the GPU read past its buffers through the meshlets' table: fixed. A
+  frame given up after its fence was reset signals it. The 2D scene checks the one-thread rule too. 1.x keeps source
+  compatibility, not binary (`docs/api.md`).
+
 - **Phase 0.5 done: the 2D room in the baseline.** `artful-render2d --json` writes what its frames took as
   `artful-render --json` does (with `frameMs`, frame to frame, and the parts of a frame); `tools/bench.py run --render2d`
   adds the room to the sequences, and `compare` reads `frameMs` too. On Vulkan two runs are within 0.4%.

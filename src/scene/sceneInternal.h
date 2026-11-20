@@ -125,6 +125,7 @@ typedef struct ArtfTextureData {
     uint32_t* pixels;      /* the mipmaps, the largest first; NULL until blocks are turned into them */
     uint32_t offsets[16];  /* of each mipmap, in pixels */
     uint32_t generation;   /* a new one in this place */
+    uint32_t place;        /* how many have been in this place: the top byte of its handle (artfTextureHandleOf) */
     int residentMip;       /* what is drawn from */
     bool removed;
     uint32_t format;       /* what Vulkan calls its blocks; 0: plain pixels */
@@ -873,6 +874,7 @@ struct ArtfScene {
     ARTF_VEC(uint32_t) freeTextures;
     ARTF_VEC(uint32_t) freeMeshes;
     ArtfResidencyDesc residency;
+    size_t residencyCeiling;    /* the GPU's memory ran out for textures: what they may hold at most (artfSceneResidencyPress) */
     int residencyWait;
     size_t decodedTextures;     /* those before this have pixels */
     uint32_t cutoutCount;       /* instances with ARTF_INSTANCE_CUTOUT, likewise */
@@ -939,6 +941,16 @@ void artfSceneInstanceChanged(ArtfScene* s, ArtfInstanceData* d);
 /* A mesh's handle: its place + 1 in the low 24 bits and its place's generation in the top 8, so that the handle of
  * a mesh removed does not stand for the one put in its place after it (for 255 places over). */
 ArtfMesh artfMeshHandleOf(const ArtfScene* s, uint32_t index);
+/* A texture's handle, as meshes': its place (an index into the scene's textures, which materials, graphs, decals and the
+ * GPU's array hold) in the low 24 bits, and how many have been in that place in the top 8, so that the handle of one
+ * removed does not stand for the one that takes its place. A place never taken again has its index for a handle. */
+ArtfTexture artfTextureHandleOf(const ArtfScene* s, uint32_t index);
+/* The place of a handle: 0 for 0, and for one that is not there (removed, or of a texture that was in its place
+ * before), said once in the log by `where`. */
+uint32_t artfTextureIndexOf(const ArtfScene* s, ArtfTexture handle, const char* where);
+/* A GPU's memory ran out for a texture: with automatic residency, the textures may hold a quarter less than they do
+ * now (and less again, each time), and residency looks again at once, the least needed giving up levels first. */
+void artfSceneResidencyPress(ArtfScene* s);
 /* Its place, or UINT32_MAX when the handle stands for nothing: 0, never given, or of a mesh removed. */
 uint32_t artfMeshIndexOf(const ArtfScene* s, ArtfMesh mesh);
 

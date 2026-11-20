@@ -733,3 +733,30 @@ void test2DWindow(void) {
 #else
 void test2DWindow(void) { missing("window"); }
 #endif
+
+/* The rule of one thread at a time, as the 3D scene's: what changes a 2D scene from a thread other than the one drawing
+ * it is said; from the drawing thread, or between frames, nothing is. (The thread that draws it is set by hand: a
+ * frame of the 2D renderer has no step that runs the program's code.) */
+void test2DThreadRule(void) {
+    ArtfScene2D* s = artfScene2DNew();
+    ArtfSprite2DDesc d = artfSprite2DDefaults();
+    d.size = (ArtfVec2){10, 10};
+    const ArtfSprite2D sprite = artfScene2DAddSprite(s, &d);
+    ArtfRenderer2D* r = renderer2D(1);
+    logged = 0;
+    artfSetLog(countLog, &logged);
+    CHECK(artfRenderer2DDraw(r, s));
+    artfSprite2DPlace(s, sprite, (ArtfVec2){5, 5}, 0);
+    CHECK(logged == 0 && s->drawingThread == 0);
+    s->drawingThread = artfThreadId();
+    artfSprite2DPlace(s, sprite, (ArtfVec2){6, 6}, 0);
+    CHECK(logged == 0); /* (the drawing thread's own) */
+    s->drawingThread = artfThreadId() + 1;
+    artfSprite2DPlace(s, sprite, (ArtfVec2){7, 7}, 0);
+    artfScene2DSetAmbient(s, (ArtfVec3){.1f, .1f, .1f});
+    CHECK(logged == 2);
+    s->drawingThread = 0;
+    artfSetLog(NULL, NULL);
+    artfRenderer2DFree(r);
+    artfScene2DFree(s);
+}

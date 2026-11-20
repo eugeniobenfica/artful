@@ -77,6 +77,9 @@ uint32_t artfSceneAddGraph(ArtfScene* s, const ArtfGraph* g) {
     d.count = g->count;
     d.nodes = artfMalloc(((size_t)g->count + 1) * sizeof *d.nodes);
     memcpy(d.nodes, g->nodes, (size_t)g->count * sizeof *d.nodes);
+    /* (a texture's handle, as its place: artfTextureIndexOf) */
+    for (uint32_t i = 0; i < d.count; ++i)
+        if (d.nodes[i].op == ARTF_OP_TEXTURE) d.nodes[i].b = artfTextureIndexOf(s, d.nodes[i].b, "a graph's");
     memcpy(d.outputs, g->outputs, sizeof d.outputs);
     artfVecPush(&s->graphs, d);
     return (uint32_t)s->graphs.len;

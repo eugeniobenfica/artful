@@ -57,6 +57,9 @@ extern bool artfVulkanRefuseSwapchain;
 /* For tests: a texture whose image would take more than this many bytes cannot be made, as when the GPU's memory has
  * run out. Below 0: no such limit. */
 extern long long artfVulkanTextureMemoryLimit;
+/* For tests: the GPU's memory as if it held no more than this many bytes in all (what the renderer holds counted, as
+ * ArtfFrameStats.gpuBytes); -1: as it is. */
+extern long long artfVulkanMemoryBudget;
 /* For tests: every new pipeline a feature asks for (the scene's pixel shaders' variants, shadows from rays, a
  * program's materials, the tracing shader, temporal antialiasing and motion blur) is made before the frame that asks
  * for it, as on the first frame, never on a thread of its own while frames go on without it. */

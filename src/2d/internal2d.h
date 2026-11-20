@@ -47,6 +47,7 @@ typedef struct Occluder2D {
 } Occluder2D;
 
 struct ArtfScene2D {
+    uintptr_t drawingThread; /* the thread drawing it now, or 0 (the rule of one thread at a time: changing2D) */
     ARTF_VEC(Texture2D) textures;
     ARTF_VEC(Sprite2D) sprites;
     ARTF_VEC(Light2D) lights;

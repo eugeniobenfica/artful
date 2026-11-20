@@ -240,6 +240,124 @@ void testTextureMemory(void) {
     drawInto(r, s, frame);
     CHECK(eventCounts[ARTF_EVENT_REFUSED] == 1);
     artfVulkanTextureMemoryLimit = -1;
+    artfSceneFree(s);
+    /* with residency automatic, the textures there make room: a texture that did not fit is white at first, then, as
+     * the others give up levels (artfSceneResidencyPress), there in its color */
+    s = plainScene();
+    const ArtfResidencyDesc automatic = {ARTF_RESIDENCY_AUTOMATIC, 0, 1, NULL, NULL};
+    artfSceneSetResidency(s, &automatic);
+    static uint32_t blue[512 * 512], yellow[256 * 256];
+    for (int i = 0; i < 512 * 512; ++i) blue[i] = 0xFF0000FFu;
+    for (int i = 0; i < 256 * 256; ++i) yellow[i] = 0xFFFFFF00u;
+    /* (two of them near the eye, about 256 pixels each: they hold their second mipmap; and the square in front of them) */
+    for (int k = 0; k < 2; ++k) {
+        ArtfMaterialDesc b = {artfVec3(1, 1, 1), artfSceneAddTexture(s, blue, 512, 512, 0), 0, 1, artfVec3(0, 0, 0)};
+        addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &b), k ? 1.4f : -1.4f, 0, 3, 1.4f);
+    }
+    /* (the square first, plain: what is short is the texture's room alone, 32 KB past what is there) */
+    const ArtfInstance square = addAt(s, addSquare(s, 0, 0, 0, 0), whiteMaterial(s), 0, -.5f, 3.5f, .3f);
+    for (int k = 0; k < 4; ++k) drawInto(r, s, frame);
+    ArtfFrameStats stats;
+    artfRendererStats(r, &stats);
+    artfVulkanMemoryBudget = (long long)stats.gpuBytes + 32 * 1024;
+    memset(eventCounts, 0, sizeof eventCounts);
+    ArtfMaterialDesc y = {artfVec3(1, 1, 1), artfSceneAddTexture(s, yellow, 256, 256, 0), 0, 1, artfVec3(0, 0, 0)};
+    artfInstanceSetMaterial(s, square, artfSceneAddMaterial(s, &y));
+    CHECK(artfRendererDraw(r, s) && artfRendererReadPixels(r, frame));
+    const uint32_t first = frame[(H / 2 + 61) * W + W / 2];
+    for (int k = 0; k < 3; ++k) drawInto(r, s, frame);
+    const uint32_t later = frame[(H / 2 + 61) * W + W / 2];
+    printf("a texture past the GPU's memory, residency automatic: %s at first, %s once the others gave up levels (%u bytes the textures may hold now)\n", CHANNEL(first, 0) > 200 ? "white" : "yellow",
+           CHANNEL(later, 0) < 80 ? "yellow" : "white", (unsigned)s->residencyCeiling);
+    CHECK(eventCounts[ARTF_EVENT_OUT_OF_MEMORY] >= 1 && CHANNEL(first, 0) > 200 && s->residencyCeiling > 0);
+    CHECK(CHANNEL(later, 16) > 200 && CHANNEL(later, 8) > 200 && CHANNEL(later, 0) < 80 && eventCounts[ARTF_EVENT_DEVICE_LOST] == 0);
+    artfVulkanMemoryBudget = -1;
+    artfSetEvents(NULL, NULL);
+    artfFree(frame);
+    artfSceneFree(s);
+    artfRendererFree(r);
+}
+
+/* The GPU's memory run out for what is not a texture (artfVulkanMemoryBudget, as if the GPU held only so much):
+ * - a mesh that does not fit is refused (ARTF_EVENT_REFUSED), not drawn, and the rest is; when a mesh goes, it is tried
+ *   again, and drawn when it fits;
+ * - instances that outgrow their room, and post buffers that do not fit, leave a frame undrawn, said, and the renderer
+ *   goes on: when there is room again, it draws them. */
+static int countGreen(const uint32_t* f) {
+    int n = 0;
+    for (int i = 0; i < W * H; ++i) n += CHANNEL(f[i], 8) > 150 && CHANNEL(f[i], 16) < 80;
+    return n;
+}
+static void oomLog(void* u, const char* m) { (void)u; printf("LOG %s\n", m); }
+void testGpuMemory(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    if (!r) return;
+    ArtfScene* s = plainScene();
+    uint32_t* frame = artfMalloc((size_t)W * H * 4);
+    const ArtfMaterial white = whiteMaterial(s);
+    const ArtfMaterialDesc greenDesc = {artfVec3(0, 1, 0), 0, 0, 1, artfVec3(0, 0, 0)};
+    const ArtfMaterial green = artfSceneAddMaterial(s, &greenDesc);
+    addAt(s, addSquare(s, 0, 0, 0, 0), white, -1.5f, 0, 0, .8f);
+    const ArtfMesh spare = addSquare(s, 0, 0, 0, 0);
+    drawInto(r, s, frame);
+    memset(eventCounts, 0, sizeof eventCounts);
+    artfSetEvents(countEvent, NULL);
+    ArtfFrameStats stats;
+    artfRendererStats(r, &stats);
+    /* (room for what is there and a little: not for a ball of 600,000 triangles) */
+    artfVulkanMemoryBudget = (long long)stats.gpuBytes + 4 * 1024 * 1024;
+    const ArtfMesh ball = artfSceneAddSphere(s, 1, 512, 600);
+    addAt(s, ball, green, 1.2f, 0, 0, 1);
+    CHECK(artfRendererDraw(r, s) && artfRendererDraw(r, s) && artfRendererReadPixels(r, frame));
+    const uint32_t left = frame[(H / 2) * W + W / 2 - 75];
+    printf("a mesh past the GPU's memory: refused %d times, %d of its pixels drawn, the square beside it %s\n", eventCounts[ARTF_EVENT_REFUSED], countGreen(frame),
+           CHANNEL(left, 8) > 150 ? "drawn" : "not drawn");
+    /* (the ball, and its lighter levels: each refused once) */
+    const int refused = eventCounts[ARTF_EVENT_REFUSED];
+    CHECK(refused >= 1 && eventCounts[ARTF_EVENT_DEVICE_LOST] == 0 && countGreen(frame) == 0 && CHANNEL(left, 8) > 150);
+    /* not tried again each frame; when a mesh goes, it is, and with room it is drawn */
+    drawInto(r, s, frame);
+    CHECK(eventCounts[ARTF_EVENT_REFUSED] == refused);
+    artfVulkanMemoryBudget = -1;
+    artfSceneRemoveMesh(s, spare);
+    drawInto(r, s, frame);
+    CHECK(countGreen(frame) > 1000);
+    /* instances past their room: a frame given up (the one before stays: not lost), then drawn */
+    artfRendererStats(r, &stats);
+    artfVulkanMemoryBudget = (long long)stats.gpuBytes;
+    memset(eventCounts, 0, sizeof eventCounts);
+    for (int k = 0; k < 4000; ++k) addAt(s, ball, green, 40.f + (float)k, 0, 0, .1f);
+    const bool drawnWithout = artfRendererDraw(r, s);
+    CHECK(drawnWithout && eventCounts[ARTF_EVENT_OUT_OF_MEMORY] >= 1 && eventCounts[ARTF_EVENT_DEVICE_LOST] == 0);
+    artfVulkanMemoryBudget = -1;
+    drawInto(r, s, frame);
+    CHECK(countGreen(frame) > 1000);
+    printf("instances past the GPU's memory: %d events, the device %s; then drawn\n", eventCounts[ARTF_EVENT_OUT_OF_MEMORY], eventCounts[ARTF_EVENT_DEVICE_LOST] ? "lost" : "not lost");
+    artfSetEvents(NULL, NULL);
+    artfFree(frame);
+    artfSceneFree(s);
+    artfRendererFree(r);
+    /* post buffers that do not fit: with floats and temporal antialiasing, at once */
+    o.hdr = true;
+    r = artfRendererNew(&o);
+    if (!r) return;
+    s = plainScene();
+    frame = artfMalloc((size_t)W * H * 4);
+    addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &greenDesc), 0, 0, 0, 1);
+    drawInto(r, s, frame);
+    artfRendererStats(r, &stats);
+    artfVulkanMemoryBudget = (long long)stats.gpuBytes;
+    const ArtfPostDesc temporal = {.screen.temporal = true, .screen.occlusion = 1};
+    artfSceneSetPost(s, &temporal);
+    memset(eventCounts, 0, sizeof eventCounts);
+    artfSetEvents(countEvent, NULL);
+    const bool postDrawn = artfRendererDraw(r, s);
+    artfVulkanMemoryBudget = -1;
+    drawInto(r, s, frame);
+    printf("post buffers past the GPU's memory: %d events, the device %s; then drawn with %d green pixels\n", eventCounts[ARTF_EVENT_OUT_OF_MEMORY],
+           eventCounts[ARTF_EVENT_DEVICE_LOST] ? "lost" : "not lost", countGreen(frame));
+    CHECK(postDrawn && eventCounts[ARTF_EVENT_OUT_OF_MEMORY] >= 1 && eventCounts[ARTF_EVENT_DEVICE_LOST] == 0 && countGreen(frame) > 1000);
     artfSetEvents(NULL, NULL);
     artfFree(frame);
     artfSceneFree(s);

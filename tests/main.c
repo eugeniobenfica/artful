@@ -229,6 +229,7 @@ int main(int argc, char** argv) {
     RUN("streaming/meshStreaming/software", testMeshStreaming(ARTF_BACKEND_SOFTWARE));
     RUN("streaming/meshStreaming/vulkan", testMeshStreaming(ARTF_BACKEND_VULKAN));
     RUN("streaming/meshHandles", testMeshHandles());
+    RUN("streaming/textureHandles", testTextureHandles());
     RUN("tracing/traceHardware", testTraceHardware());
     RUN("views/views", testViews());
     RUN("backends/shadersAhead", testShadersAhead());
@@ -254,6 +255,7 @@ int main(int argc, char** argv) {
     RUN("backends/spirvRoundTrip", testSpirvRoundTrip());
     RUN("backends/frameGraph", testFrameGraph());
     RUN("backends/textureMemory", testTextureMemory());
+    RUN("backends/gpuMemory", testGpuMemory());
     RUN("backends/refusedSwapchain", testRefusedSwapchain());
     RUN("files/blocks", testBlocks());
     RUN("streaming/prepared", testPrepared());
@@ -270,6 +272,7 @@ int main(int argc, char** argv) {
     RUN("2d/atan", test2DAtan());
     RUN("2d/shapes", test2DShapes());
     RUN("2d/textures", test2DTextures());
+    RUN("2d/threadRule", test2DThreadRule());
     RUN("2d/lights", test2DLights());
     RUN("2d/shadows", test2DShadows());
     RUN("2d/gi", test2DGI());

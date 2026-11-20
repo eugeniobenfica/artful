@@ -1,5 +1,6 @@
 /* artful-2d — a frame: the scene brought into the frame's pixels (sprites, their outlines, lights), put into tiles;
  * the lights' shadow maps, one a thread; gi; the tiles, one a thread; then what comes after. */
+#include "core/threads.h"
 #include "2d/internal2d.h"
 #include "core/trig.h"
 #ifdef ARTFUL_VULKAN
@@ -543,7 +544,7 @@ static void drawTile(void* user, uint32_t index, uint32_t worker) {
     artf2DDrawTile(&job->r->frame, index, &job->r->scratch[worker]);
 }
 
-bool artfRenderer2DDraw(ArtfRenderer2D* r, ArtfScene2D* s) {
+static bool draw2D(ArtfRenderer2D* r, ArtfScene2D* s) {
     const double start = artfNowMs();
     Frame2D* f = &r->frame;
     prepare(r, s);
@@ -613,4 +614,11 @@ bool artfRenderer2DDraw(ArtfRenderer2D* r, ArtfScene2D* s) {
     r->stats.lightsDrawn = (uint32_t)f->lamps.len;
     r->stats.shadowMaps = (uint32_t)maps;
     return shown;
+}
+
+bool artfRenderer2DDraw(ArtfRenderer2D* r, ArtfScene2D* s) {
+    s->drawingThread = artfThreadId();
+    const bool drawn = draw2D(r, s);
+    s->drawingThread = 0;
+    return drawn;
 }

@@ -458,18 +458,30 @@ void artfPreparedTextureFree(ArtfPreparedTexture* p) {
 }
 
 /* In the place of one that went, or a new one. */
+ArtfTexture artfTextureHandleOf(const ArtfScene* s, uint32_t index) { return index ? index | (s->textures.items[index].place & 255u) << 24 : 0; }
+
+uint32_t artfTextureIndexOf(const ArtfScene* s, ArtfTexture handle, const char* where) {
+    if (!handle) return 0;
+    const uint32_t index = handle & 0xFFFFFFu;
+    if (index < s->textures.len && !s->textures.items[index].removed && (s->textures.items[index].place & 255u) == handle >> 24) return index;
+    artfLog("artful: texture %u is not there (%s): none is used", handle, where);
+    return 0;
+}
+
 ArtfTexture artfSceneStoreTexture(ArtfScene* s, const ArtfTextureData* t) {
     changing(s, "a texture");
     ++s->textureVersion;
     s->decodedTextures = 0;
     if (s->freeTextures.len) {
         const uint32_t index = s->freeTextures.items[--s->freeTextures.len];
-        const uint32_t generation = s->textures.items[index].generation;
+        const uint32_t generation = s->textures.items[index].generation, place = s->textures.items[index].place;
         s->textures.items[index] = *t;
         s->textures.items[index].generation = generation + 1;
-        return index;
+        s->textures.items[index].place = place + 1;
+        return artfTextureHandleOf(s, index);
     }
     artfVecPush(&s->textures, *t);
+    s->textures.items[s->textures.len - 1].place = 0;
     return (ArtfTexture)(s->textures.len - 1);
 }
 
@@ -555,10 +567,11 @@ ArtfTexture artfSceneAddTexture(ArtfScene* s, const uint32_t* pixels, int width,
     return artfSceneAddPreparedTexture(s, artfPrepareTexture(pixels, width, height, stride));
 }
 
-bool artfSceneRemoveTexture(ArtfScene* s, ArtfTexture texture) {
+bool artfSceneRemoveTexture(ArtfScene* s, ArtfTexture handle) {
     changing(s, "a texture");
-    if (!texture || texture >= s->textures.len || s->textures.items[texture].removed) {
-        artfLog("artful: texture %u is not there", texture);
+    const uint32_t texture = handle ? artfTextureIndexOf(s, handle, "to remove") : 0;
+    if (!texture) {
+        if (!handle) artfLog("artful: texture 0 is not there");
         return false;
     }
     for (size_t i = 0; i < s->materials.len; ++i) {
@@ -613,9 +626,21 @@ void artfSceneMemory(const ArtfScene* s, ArtfSceneMemory* out) {
     }
 }
 
+static size_t leastOf(size_t a, size_t b) { return a < b ? a : b; }
+
 void artfSceneSetResidency(ArtfScene* s, const ArtfResidencyDesc* desc) {
     memset(&s->residency, 0, sizeof s->residency);
     if (desc) s->residency = *desc;
+    s->residencyWait = 0;
+    s->residencyCeiling = 0; /* (set again: what the GPU's memory said before is forgotten) */
+}
+
+void artfSceneResidencyPress(ArtfScene* s) {
+    if (s->residency.mode != ARTF_RESIDENCY_AUTOMATIC) return;
+    ArtfSceneMemory m;
+    artfSceneMemory(s, &m);
+    const size_t now = s->residencyCeiling ? leastOf(s->residencyCeiling, m.residentTextures) : m.residentTextures;
+    s->residencyCeiling = now - now / 4 ? now - now / 4 : 1;
     s->residencyWait = 0;
 }
 
@@ -660,8 +685,8 @@ ArtfTexture artfSceneAddTextureStreamed(ArtfScene* s, int width, int height, int
     return artfSceneStoreTexture(s, &t);
 }
 
-void artfTextureSetResidentMip(ArtfScene* s, ArtfTexture texture, int mip) {
-    if (texture >= s->textures.len || s->textures.items[texture].removed) return;
+static void residentMipAt(ArtfScene* s, uint32_t texture, int mip) {
+    if (!texture || texture >= s->textures.len || s->textures.items[texture].removed) return;
     ArtfTextureData* t = &s->textures.items[texture];
     const int clamped = artfClampi(mip, 0, t->mipCount - 1);
     if (t->residentMip == clamped) return;
@@ -669,6 +694,7 @@ void artfTextureSetResidentMip(ArtfScene* s, ArtfTexture texture, int mip) {
     t->residentMip = clamped;
     ++s->textureVersion;
 }
+void artfTextureSetResidentMip(ArtfScene* s, ArtfTexture texture, int mip) { residentMipAt(s, artfTextureIndexOf(s, texture, "its resident mipmap"), mip); }
 
 /* The mipmap a texture needs to show across this many pixels. */
 static int mipFor(const ArtfTextureData* t, float pixels) {
@@ -712,8 +738,10 @@ void artfSceneResidencyStep(ArtfScene* s, const ArtfFrameData* frame, int height
                 if (g->nodes[n].op == ARTF_OP_TEXTURE && g->nodes[n].b && g->nodes[n].b < count) wanted[g->nodes[n].b] = 0;
         }
     }
-    /* over the budget: the largest gives up a level, until it fits */
-    if (s->residency.budget) {
+    /* over the budget (or what the GPU's memory said it holds: artfSceneResidencyPress): the largest gives up a level,
+     * until it fits */
+    const size_t budget = s->residency.budget && s->residencyCeiling ? leastOf(s->residency.budget, s->residencyCeiling) : s->residency.budget ? s->residency.budget : s->residencyCeiling;
+    if (budget) {
         for (;;) {
             size_t total = 0, largest = 0;
             uint32_t chosen = 0;
@@ -724,38 +752,39 @@ void artfSceneResidencyStep(ArtfScene* s, const ArtfFrameData* frame, int height
                 total += bytes;
                 if (bytes > largest && wanted[i] + 1 < t->mipCount) { largest = bytes; chosen = i; }
             }
-            if (total <= s->residency.budget || !chosen) break;
+            if (total <= budget || !chosen) break;
             ++wanted[chosen];
         }
     }
     for (uint32_t i = 1; i < count; ++i) {
         if (s->textures.items[i].removed || s->textures.items[i].residentMip == wanted[i]) continue;
-        if (s->residency.mode == ARTF_RESIDENCY_AUTOMATIC) artfTextureSetResidentMip(s, i, wanted[i]);
-        else if (s->residency.report) s->residency.report(s->residency.user, i, wanted[i]);
+        if (s->residency.mode == ARTF_RESIDENCY_AUTOMATIC) residentMipAt(s, i, wanted[i]);
+        else if (s->residency.report) s->residency.report(s->residency.user, artfTextureHandleOf(s, i), wanted[i]);
     }
     artfFree(wanted);
 }
 
 static ArtfMaterialData materialData(const ArtfScene* s, const ArtfMaterialDesc* d) {
     const bool mask = d->alphaMode == ARTF_ALPHA_MASK, blend = d->alphaMode == ARTF_ALPHA_BLEND;
-    const uint32_t count = (uint32_t)s->textures.len;
+    /* (its maps' handles, as their places: artfTextureIndexOf) */
+#define MAP(t) artfTextureIndexOf(s, t, "a material's")
     ArtfMaterialData m = {{d->baseColor.x, d->baseColor.y, d->baseColor.z}, artfClampf(d->specular, 0, 1),
                           {d->emissive.x, d->emissive.y, d->emissive.z}, artfClampf(d->roughness, .045f, 1.f),
-                          d->texture < s->textures.len ? d->texture : 0,
+                          MAP(d->texture),
                           blend ? 1.f - artfClampf(d->transparency, 0, 1) : 1.f,
                           mask ? (d->alphaCutoff > 0 ? d->alphaCutoff : .5f) : 0.f,
                           (mask ? ARTF_MATERIAL_MASK : 0u) | (blend ? ARTF_MATERIAL_BLEND : 0u) | (d->doubleSided ? ARTF_MATERIAL_DOUBLE : 0u) | (d->unlit ? ARTF_MATERIAL_UNLIT : 0u),
                           d->ior > 0 ? d->ior : 0.f, artfClampf(d->metallic, 0, 1), d->normalScale > 0 ? d->normalScale : 1.f, d->occlusionStrength > 0 ? d->occlusionStrength : 1.f,
-                          d->normalMap < count ? d->normalMap : 0, d->surfaceMap < count ? d->surfaceMap : 0, d->occlusionMap < count ? d->occlusionMap : 0,
+                          MAP(d->normalMap), MAP(d->surfaceMap), MAP(d->occlusionMap),
                           d->graph <= s->graphs.len ? d->graph : 0, {{0}}};
+#undef MAP
     return m;
 }
 
 static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc* d) {
     ArtfMaterialMore m;
     memset(&m, 0, sizeof m);
-    const uint32_t count = (uint32_t)s->textures.len;
-#define MAP(t) ((t) < count ? (t) : 0u)
+#define MAP(t) artfTextureIndexOf(s, t, "a material's")
     m.coat = artfClampf(d->clearcoat, 0, 1);
     m.coatRoughness = artfClampf(d->clearcoatRoughness, .045f, 1.f);
     m.sheenRoughness = artfClampf(d->sheenRoughness, .07f, 1.f);

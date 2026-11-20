@@ -314,13 +314,17 @@ ArtfDecal artfSceneAddDecal(ArtfScene* s, const ArtfDecalDesc* desc) {
         if (!s->decalOn[i]) {
             s->decalOn[i] = true;
             s->decals[i] = *desc;
+            s->decals[i].texture = artfTextureIndexOf(s, desc->texture, "a decal's"); /* (kept as its place) */
             return i + 1;
         }
     return 0;
 }
 
 void artfDecalSet(ArtfScene* s, ArtfDecal d, const ArtfDecalDesc* desc) {
-    if (d && d <= ARTF_MAX_DECALS && s->decalOn[d - 1]) s->decals[d - 1] = *desc;
+    if (d && d <= ARTF_MAX_DECALS && s->decalOn[d - 1]) {
+        s->decals[d - 1] = *desc;
+        s->decals[d - 1].texture = artfTextureIndexOf(s, desc->texture, "a decal's");
+    }
 }
 
 void artfSceneRemoveDecal(ArtfScene* s, ArtfDecal d) {

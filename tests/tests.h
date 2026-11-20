@@ -41,6 +41,11 @@ ArtfRenderer2D* testRenderer2DNew(const ArtfRenderer2DOptions* o);
 
 /* ---- how far apart two frames look: FLIP (tools/flip.h), 0 alike to about 1 ---- */
 #include "flip.h"
+/* FLIP of the last frames differentShare compared; and that its mean is at most so much (the plan's 0.4: a case's
+ * threshold by FLIP, beside its old one). */
+extern FlipStats lastFlip;
+bool flipAlike(double meanAtMost, const char* file, int line);
+#define FLIP_ALIKE(meanAtMost) CHECK(flipAlike(meanAtMost, __FILE__, __LINE__))
 /* With ARTFUL_FLIP_LOG=file, every pair of frames differentShare compares is measured by FLIP too and written to it
  * (test, threshold, share, FLIP's mean, 99th percentile and most): what thresholds by FLIP will be set from. */
 void flipSummary(void);
@@ -117,6 +122,7 @@ void testShaderIr(void);
 void testSpirvRoundTrip(void);
 void testFrameGraph(void);
 void testTextureMemory(void);
+void testGpuMemory(void);
 void testRefusedSwapchain(void);
 void testShadersAhead(void);
 void testPipelinesAhead(void);
@@ -126,6 +132,8 @@ void testLightClusters(void);
 void testAreaLights(void);
 void testUpscaleQuality(void);
 void testProbesHard(void);
+void test2DThreadRule(void);
+void testTextureHandles(void);
 void testLayers(ArtfBackend backend);
 void testMaterials(ArtfBackend backend, bool antialias);
 void testSamePixelsOfLayers(void);

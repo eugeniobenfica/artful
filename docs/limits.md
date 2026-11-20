@@ -165,8 +165,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   texels, a little darker than the mean of their light. Its mipmaps are means of light when only colors use it, of bytes
   otherwise; a KTX2 file's and a streamed texture's are as they were given.
 - A removed mesh gives back GPU memory and its place in the scene; the next mesh takes the place with another
-  generation in its handle. A removed texture's place is taken again with the same handle, which then stands for the
-  new texture. Residency keeps textures'
+  generation in its handle; so does a removed texture's, and the old handle is refused (and said) where it is given. Residency keeps textures'
   mipmaps in main memory. A glTF file's JSON is read on the calling thread, and its images and meshes made on
   all cores; all of it can go to another thread with `artfPrepareModel`. A scene holds up to 1024 textures on the GPU (beyond that they
   draw white).

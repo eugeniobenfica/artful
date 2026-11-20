@@ -56,7 +56,7 @@ void testRemoving(ArtfBackend backend) {
     CHECK(a[mid] == 0xFF0000FFu);
     artfSceneFree(s);
 
-    /* a texture's place is used again, and what uses a texture keeps it */
+    /* a texture's place is used again (its handle another), and what uses a texture keeps it */
     s = plainScene();
     ArtfTexture t = oneColor(s, 0xFFFF0000u);
     ArtfMaterialDesc d = {artfVec3(1, 1, 1), t, 0, 1, artfVec3(0, 0, 0)};
@@ -69,7 +69,7 @@ void testRemoving(ArtfBackend backend) {
     artfMaterialSet(s, tm, &d);
     CHECK(artfSceneRemoveTexture(s, t));
     ArtfTexture again = oneColor(s, 0xFF00FF00u);
-    CHECK(again == t);
+    CHECK(again != t && (again & 0xFFFFFFu) == (t & 0xFFFFFFu)); /* (its place, with another generation in the handle) */
     d.texture = again;
     artfMaterialSet(s, tm, &d);
     drawInto(r, s, a);
@@ -420,5 +420,43 @@ void testMeshHandles(void) {
         CHECK(artfSceneRemoveMesh(s, m));
     }
     CHECK(s->meshes.len == places);
+    artfSceneFree(s);
+}
+
+/* Textures' handles as meshes': a removed texture's place is taken again, with another generation in its handle; the
+ * old handle is not there any more (removing it, a material, a resident mipmap: each said once, and none used), and
+ * the places do not grow with textures that come and go. */
+void testTextureHandles(void) {
+    ArtfScene* s = plainScene();
+    static const uint32_t red[4] = {0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u};
+    const ArtfTexture first = artfSceneAddTexture(s, red, 2, 2, 0);
+    CHECK(first != 0 && (first >> 24) == 0); /* (a place never taken again: its handle is its index) */
+    CHECK(artfSceneRemoveTexture(s, first));
+    const ArtfTexture second = artfSceneAddTexture(s, red, 2, 2, 0);
+    CHECK(second != first && (second & 0xFFFFFFu) == (first & 0xFFFFFFu)); /* (the same place, another generation) */
+    logged = 0;
+    artfSetLog(countLog, &logged);
+    CHECK(!artfSceneRemoveTexture(s, first));
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.texture = first;
+    const ArtfMaterial stale = artfSceneAddMaterial(s, &d);
+    CHECK(s->materials.items[stale].texture == 0);
+    artfTextureSetResidentMip(s, first, 0);
+    CHECK(logged == 3);
+    artfSetLog(NULL, NULL);
+    d.texture = second;
+    const ArtfMaterial fresh = artfSceneAddMaterial(s, &d);
+    CHECK(s->materials.items[fresh].texture == (second & 0xFFFFFFu));
+    CHECK(!artfSceneRemoveTexture(s, second)); /* (still in use) */
+    d.texture = 0;
+    artfMaterialSet(s, fresh, &d);
+    CHECK(artfSceneRemoveTexture(s, second));
+    const size_t places = s->textures.len;
+    for (int k = 0; k < 20000; ++k) {
+        const ArtfTexture t = artfSceneAddTexture(s, red, 2, 2, 0);
+        CHECK(t != 0);
+        CHECK(artfSceneRemoveTexture(s, t));
+    }
+    CHECK(s->textures.len == places);
     artfSceneFree(s);
 }

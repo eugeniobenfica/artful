@@ -63,6 +63,17 @@ double differentShare(const uint32_t* a, const uint32_t* b, int threshold) {
     return share;
 }
 
+/* FLIP of the last two frames compared (differentShare): for flipAlike. */
+FlipStats lastFlip;
+
+/* The plan's 0.4: beside a share of pixels apart, FLIP's mean of the same two frames, at most meanAtMost (the case's own,
+ * from what this machine and CI measured, with room). Said when it is not, with what it was. */
+bool flipAlike(double meanAtMost, const char* file, int line) {
+    if (lastFlip.mean <= meanAtMost) return true;
+    printf("%s:%d: FLIP %.4f (p99 %.4f), past %.4f\n", file, line, lastFlip.mean, lastFlip.p99, meanAtMost);
+    return false;
+}
+
 /* FLIP beside the share, for every comparison: written to ARTFUL_FLIP_LOG, to set thresholds by it later. */
 static FILE* flipLog;
 static bool flipLogOpened;
@@ -77,8 +88,9 @@ void flipRecord(const uint32_t* a, const uint32_t* b, int threshold, double shar
             if (flipLog && ftell(flipLog) == 0) fputs("test,threshold,share,flipMean,flipP99,flipMax\n", flipLog);
         }
     }
-    if (!flipLog) return;
     const FlipStats f = flipFrames(a, b, W, H, 0, NULL);
+    lastFlip = f;
+    if (!flipLog) return;
     fprintf(flipLog, "%s,%d,%.6f,%.6f,%.6f,%.6f\n", currentTest(), threshold, share, f.mean, f.p99, f.max);
     ++flipCompared;
 }

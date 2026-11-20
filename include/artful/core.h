@@ -62,9 +62,11 @@ typedef enum ArtfEventKind {
      * renderer goes on, on the CPU. source: the renderer. */
     ARTF_EVENT_DEVICE_LOST = 1,
     /* The GPU's memory ran out (bytes: what was asked for). For a texture, it is taken without its largest mipmaps,
-     * as many as it takes to fit, or refused (ARTF_EVENT_REFUSED) and drawn white; the frame goes on. For anything
-     * else (meshes, instances, the frame's own buffers), the frame cannot be drawn, and the renderer says
-     * ARTF_EVENT_DEVICE_LOST after it. source: the renderer. */
+     * as many as it takes to fit, or refused (ARTF_EVENT_REFUSED) and drawn white, never worse than it was; with
+     * automatic residency the other textures give up levels to make room. A mesh that does not fit is refused, not
+     * drawn, and tried again when a mesh goes; the frame goes on. For instances, materials or the frame's own buffers,
+     * the frame stays as it was (artfRendererDraw is still true: false is for a device lost) and the next one tries
+     * again. source: the renderer. */
     ARTF_EVENT_OUT_OF_MEMORY,
     /* What was asked for could not be taken, and is not drawn: handle, the mesh or the texture, as the scene gave it
      * (0 when it was not one of them). source: the renderer. */
