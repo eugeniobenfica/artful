@@ -271,6 +271,133 @@ S_DEF S_V3 S_FN(Iridescence)(S_SELF S_V3 f0, S_F cosine, S_F amount, S_F ior, S_
     const S_F b = S_FN(FilmChannel)(S_PASS S_Z(f0), r12, ior, S_MUL(phase, S_C(1.f / 475.f)), amount);
     return S_V3_OF(r, g, b);
 }
+
+/* ---- light from a rectangle or a tube ----
+ *
+ * A light with a shape is, as the tracer has it, the mean of point lights over it: each as bright as a point light, its
+ * own fade by its own distance, no falling off with the square of it. Over the shape's solid angle that is the lobe
+ * times d^2 fade^2 / area, d the distance to each point of it.
+ *
+ * Diffuse: the shape by Gauss's three points each way, which the mean of point lights is smooth enough for (a
+ * rectangle's nine, a tube's three, for which its width is 0).
+ *
+ * The highlight: the lobe's integral over the shape (Heitz, Dupuy, Hill and Neubelt, 2016: the lobe is a cosine put
+ * through a matrix, M^-1 taking it back; src/shading/ltc.inc, fitted to this lobe by tools/ltc/fit.py), the polygon's
+ * edges by acos as artfAcosFast's polynomial, and what is below the horizon taken off as from a sphere of the same
+ * vector form factor (Snyder's, as Frostbite has it); times d^2 fade^2 / area at the point of the shape where the
+ * lobe's own centroid points. A tube's highlight is a rectangle's as wide as the tube, turned to face the surface. */
+
+/* acos(x) / sqrt(1 - x^2), by artfAcosFast's polynomial P: for x >= 0, acos is sqrt(1 - x) P(x), so the root goes. */
+S_DEF S_F S_FN(AcosPoly)(S_SELF S_F a) { return S_ADD(S_C(1.5707288f), S_MUL(a, S_ADD(S_C(-.2121144f), S_MUL(a, S_SUB(S_C(.0742610f), S_MUL(a, S_C(.0187293f))))))); }
+S_DEF S_F S_FN(ThetaOverSin)(S_SELF S_F x) {
+    const S_F a = S_MIN(S_MAX(x, S_SUB(S_C(0.f), x)), S_C(1.f)), p = S_FN(AcosPoly)(S_PASS a);
+    const S_F ahead = S_DIV(p, S_SQRT(S_ADD(S_C(1.f), a)));
+    const S_F back = S_DIV(S_SUB(S_C(3.14159265f), S_MUL(S_SQRT(S_SUB(S_C(1.f), a)), p)), S_SQRT(S_MAX(S_SUB(S_C(1.f), S_MUL(x, x)), S_C(1e-7f))));
+    return S_SELECT(S_GT(S_C(0.f), x), back, ahead);
+}
+/* acos, as artfAcosFast; and atan2 of y and x both at least 0, as artfAtan2Fast. */
+S_DEF S_F S_FN(Acos)(S_SELF S_F x) {
+    const S_F a = S_MIN(S_MAX(x, S_SUB(S_C(0.f), x)), S_C(1.f)), r = S_MUL(S_SQRT(S_SUB(S_C(1.f), a)), S_FN(AcosPoly)(S_PASS a));
+    return S_SELECT(S_GT(S_C(0.f), x), S_SUB(S_C(3.14159265f), r), r);
+}
+S_DEF S_F S_FN(AtanUp)(S_SELF S_F y, S_F x) {
+    const S_F big = S_MAX(x, y), small = S_MIN(x, y);
+    const S_F z = S_DIV(small, S_MAX(big, S_C(1e-30f))), z2 = S_MUL(z, z);
+    S_F p = S_SUB(S_C(.05265332f), S_MUL(z2, S_C(.01172120f)));
+    p = S_ADD(S_C(-.11643287f), S_MUL(z2, p));
+    p = S_ADD(S_C(.19354346f), S_MUL(z2, p));
+    p = S_ADD(S_C(-.33262347f), S_MUL(z2, p));
+    const S_F r = S_MUL(z, S_ADD(S_C(.99997726f), S_MUL(z2, p)));
+    return S_SELECT(S_GT(y, x), S_SUB(S_C(1.57079633f), r), r);
+}
+S_DEF S_V3 S_FN(Cross)(S_SELF S_V3 a, S_V3 b) {
+    return S_V3_OF(S_SUB(S_MUL(S_Y(a), S_Z(b)), S_MUL(S_Z(a), S_Y(b))), S_SUB(S_MUL(S_Z(a), S_X(b)), S_MUL(S_X(a), S_Z(b))), S_SUB(S_MUL(S_X(a), S_Y(b)), S_MUL(S_Y(a), S_X(b))));
+}
+#define S_SELECT3_(c, a, b) S_V3_OF(S_SELECT(c, S_X(a), S_X(b)), S_SELECT(c, S_Y(a), S_Y(b)), S_SELECT(c, S_Z(a), S_Z(b)))
+
+/* A corner (from the surface) in the lobe's frame (t1, t2, n), taken back to the cosine by M^-1 = [[a, 0, b], [0, c, 0],
+ * [d, 0, 1]], of length 1. */
+S_DEF S_V3 S_FN(ToCosine)(S_SELF S_V3 q, S_V3 t1, S_V3 t2, S_V3 n, S_F a, S_F b, S_F c, S_F d) {
+    const S_F x = S_DOT3(q, t1), y = S_DOT3(q, t2), z = S_DOT3(q, n);
+    return S_NORMALIZE(S_V3_OF(S_ADD(S_MUL(a, x), S_MUL(b, z)), S_MUL(c, y), S_ADD(S_MUL(d, x), z)));
+}
+/* An edge's share of the vector form factor. */
+S_DEF S_V3 S_FN(Edge)(S_SELF S_V3 v1, S_V3 v2) { return S_SCALE3(S_FN(Cross)(S_PASS v1, v2), S_FN(ThetaOverSin)(S_PASS S_DOT3(v1, v2))); }
+
+/* Of a polygon of four corners (from the surface, its front toward it), what of the cosine through M it holds above
+ * the horizon (a form factor: 0 to 1); and toward: which way the lobe's light from it comes, on the whole. */
+S_DEF S_F S_FN(LtcQuad)(S_SELF S_V3 t1, S_V3 t2, S_V3 n, S_F a, S_F b, S_F c, S_F d, S_V3 q0, S_V3 q1, S_V3 q2, S_V3 q3, S_V3* toward) {
+    const S_V3 v0 = S_FN(ToCosine)(S_PASS q0, t1, t2, n, a, b, c, d), v1 = S_FN(ToCosine)(S_PASS q1, t1, t2, n, a, b, c, d);
+    const S_V3 v2 = S_FN(ToCosine)(S_PASS q2, t1, t2, n, a, b, c, d), v3 = S_FN(ToCosine)(S_PASS q3, t1, t2, n, a, b, c, d);
+    S_V3 f = S_ADD3(S_ADD3(S_FN(Edge)(S_PASS v0, v1), S_FN(Edge)(S_PASS v1, v2)), S_ADD3(S_FN(Edge)(S_PASS v2, v3), S_FN(Edge)(S_PASS v3, v0)));
+    f = S_SCALE3(f, S_C(-.159154943f)); /* (- 1 / 2 pi: the corners go round the other way, seen from the surface) */
+    const S_F l = S_SQRT(S_DOT3(f, f));
+    const S_F cosT = S_DIV(S_Z(f), S_MAX(l, S_C(1e-12f))), s2 = S_MIN(S_MAX(l, S_C(1e-9f)), S_C(.9999f));
+    /* all above the horizon, or some below it */
+    const S_F above = S_MUL(S_MAX(cosT, S_C(0.f)), s2);
+    const S_F sinT = S_SQRT(S_MAX(S_SUB(S_C(1.f), S_MUL(cosT, cosT)), S_C(1e-9f)));
+    const S_F x = S_SQRT(S_SUB(S_DIV(S_C(1.f), s2), S_C(1.f)));
+    const S_F y = S_MIN(S_MAX(S_DIV(S_MUL(S_SUB(S_C(0.f), x), cosT), sinT), S_C(-1.f)), S_C(1.f));
+    const S_F sy = S_MUL(sinT, S_SQRT(S_MAX(S_SUB(S_C(1.f), S_MUL(y, y)), S_C(0.f))));
+    const S_F cut = S_MAX(S_MUL(S_ADD(S_MUL(S_SUB(S_MUL(cosT, S_FN(Acos)(S_PASS y)), S_MUL(x, sy)), s2), S_FN(AtanUp)(S_PASS sy, x)), S_C(.318309886f)), S_C(0.f));
+    const S_F held = S_SELECT(S_GT(S_MUL(cosT, cosT), s2), above, cut);
+    /* toward: f's way, through M (M^-1 inverted: its xz block's, and 1 / c), in the world */
+    const S_F fx = S_X(f), fy = S_Y(f), fz = S_Z(f);
+    const S_V3 back = S_V3_OF(S_SUB(fx, S_MUL(b, fz)), S_DIV(S_MUL(S_SUB(a, S_MUL(b, d)), fy), c), S_SUB(S_MUL(a, fz), S_MUL(d, fx)));
+    *toward = S_NORMALIZE(S_ADD3(S_ADD3(S_SCALE3(t1, S_X(back)), S_SCALE3(t2, S_Y(back))), S_SCALE3(n, S_Z(back))));
+    return S_SELECT(S_GT(l, S_C(1e-9f)), held, S_C(0.f));
+}
+
+/* A light with a shape, from a surface at p facing n, seen along view: d, its middle from p; u its way along and hl half
+ * its length; f its way forward and hw half its width (0: a tube, its radius ball); reach2 1 / its radius^2.
+ * ltc: the table's a, b, c, d and the lobe's integral at this roughness and n . v (artfLtcAt). Out: its diffuse light
+ * (n . l in it, and its fade); its highlight, which the lobe's Fresnel and the surface's scale multiply (*toward: which
+ * way it comes from, on the whole, for the Fresnel). Neither has the light's color, cone or profile. */
+S_DEF void S_FN(AreaLight)(S_SELF S_V3 d, S_V3 u, S_F hl, S_V3 f, S_F hw, S_F ball, S_F reach2, S_V3 n, S_V3 view, S_F a, S_F b, S_F c, S_F dd, S_F total,
+                           S_F* diffuse, S_F* highlight, S_V3* toward) {
+    const S_FLAG flat = S_GT(hw, S_C(0.f));
+    const S_V3 side = S_FN(Cross)(S_PASS f, u);
+    /* diffuse: Gauss's points, at -sqrt(3/5), 0 and sqrt(3/5) of half the length and of half the width */
+    static const float at[3] = {-.774596669f, 0.f, .774596669f}, weight[3] = {.277777778f, .444444444f, .277777778f};
+    S_F sum = S_C(0.f);
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            const S_V3 q = S_ADD3(S_ADD3(d, S_SCALE3(u, S_MUL(hl, S_C(at[i])))), S_SCALE3(side, S_MUL(hw, S_C(at[j]))));
+            const S_F q2 = S_MAX(S_DOT3(q, q), S_C(1e-8f));
+            const S_V3 l = S_SCALE3(q, S_DIV(S_C(1.f), S_SQRT(q2)));
+            const S_F share = S_SELECT(flat, S_MAX(S_SUB(S_C(0.f), S_DOT3(l, f)), S_C(0.f)), S_C(1.f));
+            const S_F fade = S_MAX(S_SUB(S_C(1.f), S_MUL(q2, reach2)), S_C(0.f));
+            sum = S_ADD(sum, S_MUL(S_C(weight[i] * weight[j]), S_MUL(S_MUL(share, S_MAX(S_DOT3(n, l), S_C(0.f))), S_MUL(fade, fade))));
+        }
+    *diffuse = sum;
+    /* the highlight's polygon: the rectangle, or the tube as one turned to face p, as wide as it */
+    const S_V3 out = S_SUB3(S_SCALE3(u, S_DOT3(d, u)), d); /* (from the tube's line to p) */
+    const S_V3 faces = S_SELECT3_(flat, f, S_NORMALIZE(out));
+    const S_V3 across = S_FN(Cross)(S_PASS faces, u);
+    const S_F wide = S_SELECT(flat, hw, S_MAX(ball, S_MUL(hl, S_C(.02f))));
+    const S_V3 along = S_SCALE3(u, hl), aside = S_SCALE3(across, wide);
+    const S_V3 q0 = S_SUB3(S_SUB3(d, along), aside), q1 = S_SUB3(S_ADD3(d, along), aside), q2 = S_ADD3(S_ADD3(d, along), aside), q3 = S_ADD3(S_SUB3(d, along), aside);
+    /* the lobe's frame: n, and v's way across it (any, where v is n) */
+    const S_V3 flatView = S_SUB3(view, S_SCALE3(n, S_DOT3(n, view)));
+    const S_V3 other = S_SELECT3_(S_GT(S_C(.9f), S_MAX(S_X(n), S_SUB(S_C(0.f), S_X(n)))), S_V3_OF(S_C(1.f), S_C(0.f), S_C(0.f)), S_V3_OF(S_C(0.f), S_C(1.f), S_C(0.f)));
+    const S_V3 t1 = S_NORMALIZE(S_SELECT3_(S_GT(S_DOT3(flatView, flatView), S_C(1e-8f)), flatView, S_FN(Cross)(S_PASS n, other)));
+    const S_V3 t2 = S_FN(Cross)(S_PASS n, t1);
+    S_V3 way;
+    const S_F held = S_MUL(total, S_FN(LtcQuad)(S_PASS t1, t2, n, a, b, c, dd, q0, q1, q2, q3, &way));
+    /* where that way meets the shape (kept on it): its d^2 fade^2 / area; a tube's over its share there, as a
+     * tube's points light all ways and the rectangle's share is in the integral */
+    const S_F before = S_SUB(S_C(0.f), S_DOT3(d, faces));
+    const S_F t = S_DIV(before, S_MAX(S_SUB(S_C(0.f), S_DOT3(way, faces)), S_C(1e-4f)));
+    const S_V3 e = S_SUB3(S_SCALE3(way, t), d);
+    const S_F ea = S_CLAMP(S_DOT3(e, u), S_SUB(S_C(0.f), hl), hl), eb = S_CLAMP(S_DOT3(e, across), S_SUB(S_C(0.f), wide), wide);
+    const S_V3 hit = S_ADD3(S_ADD3(d, S_SCALE3(u, ea)), S_SCALE3(across, eb));
+    const S_F h2 = S_MAX(S_DOT3(hit, hit), S_C(1e-8f)), hitFade = S_MAX(S_SUB(S_C(1.f), S_MUL(h2, reach2)), S_C(0.f));
+    const S_F tubeShare = S_MAX(S_DIV(before, S_SQRT(h2)), S_C(1e-3f));
+    const S_F per = S_DIV(S_MUL(h2, S_MUL(hitFade, hitFade)), S_MUL(S_MUL(S_C(4.f), hl), wide));
+    *highlight = S_SELECT(S_GT(before, S_C(0.f)), S_DIV(S_MUL(held, per), S_SELECT(flat, S_C(1.f), tubeShare)), S_C(0.f));
+    *toward = way;
+}
+#undef S_SELECT3_
 #endif
 
 /* (what a way defined goes with it: the next defines its own) */

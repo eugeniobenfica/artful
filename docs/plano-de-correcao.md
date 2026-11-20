@@ -241,6 +241,21 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 - **Critério (`post/lightClusters`):** num corredor de 3 andares com 344 luzes além das 16, a 1080p, um quadrado é alcançado por até 324 luzes e um cluster por no máximo 132. Com o teto antigo de 64 por quadrado, 1.846 pares ficavam de fora; agora **nenhum**. A construção leva **0,09 ms** (meta 0,2) e a diferença GPU contra CPU é de 0,01% dos pixels.
 - **Efeito nas imagens:** só mudam onde um quadrado recebia mais de 64 dessas luzes.
 
+**Estado da 5.3: feito.**
+- **A referência:** o traçador define uma luz com forma como a média de luzes pontuais sobre ela, sem queda com o quadrado da distância, como as luzes pontuais do Artful. Sobre o ângulo sólido, isso é o lobo vezes d² fade² / área. O LTC calcula a integral do lobo; o peso d² fade² é tomado no ponto onde a direção média do lobo encontra a forma.
+- **Difuso:** quadratura de Gauss 3×3 sobre o retângulo (3 pontos no tubo). O integrando é suave nesse modelo, e o erro fica perto de 0,1% no protótipo.
+- **Especular:** LTC com tabela 32×32 ajustada ao lobo do próprio Artful (GGX sem 1/π, Smith-Schlick) por `tools/ltc/fit.py`, sem usar a tabela de Heitz. O ajuste é pela distância L1 e sai idêntico a cada geração. As arestas usam o polinômio do `artfAcosFast`, e o horizonte é recortado pela esfera equivalente (Snyder, como no Frostbite), sem desvios, então a CPU e o shader usam a mesma fórmula, que está no `shading.inc`.
+- **Tubo:** retângulo da largura do tubo, virado para o ponto.
+- **Critério (`materials/areaLights`, contra o traçador, rugosidade 0,2 a 0,8):**
+
+  | Forma | Ponto representativo | Agora |
+  |---|---|---|
+  | Retângulo | 54% a 58% | 4% a 9% |
+  | Tubo | 22% | 0,3% a 0,5% |
+
+  A GPU fica abaixo de 0,5% dos pixels contra a CPU.
+- **O que fica:** coat, sheen e subsuperfície ainda usam o ponto mais próximo; lobos anisotrópicos são tratados como redondos; o erro restante vem do ajuste em ângulos rasantes. No Metal, formas e perfis viram pontos, porque o buffer que eles leem nunca é enviado.
+
 **Ordem sugerida dentro da fase:** 5.1, 5.2 e 5.4 primeiro (baratos, atacam limites documentados); depois 5.5 e 5.6 (dependem de 4.3); depois 5.7 (depende de 2.2 e se beneficia de 5.6). 5.8 a 5.12 são independentes e entram por demanda de consumidor.
 
 ---

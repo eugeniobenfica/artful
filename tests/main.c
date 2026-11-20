@@ -198,6 +198,7 @@ int main(int argc, char** argv) {
     RUN("post/grading", testGrading());
     RUN("materials/coat", testCoat());
     RUN("materials/lightShapes", testLightShapes());
+    RUN("materials/areaLights", testAreaLights());
     RUN("materials/profiles", testProfiles());
     RUN("materials/moreMaterials", testMoreMaterials());
     RUN("materials/textureRoles", testTextureRoles());

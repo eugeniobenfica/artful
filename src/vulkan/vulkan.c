@@ -5451,7 +5451,11 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     for (int i = 0; i < SLOTS; ++i) {
         Slot* s = &v->slots[i];
         if (!bufferNew(v, &s->frame, sizeof(ArtfFrameData), BUFFER_UNIFORM, true)) goto failed;
-        if (!bufferNew(v, &s->extraLights, (VkDeviceSize)ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + ARTF_FRAME_LIGHTS * ARTF_PROFILE_FLOATS * sizeof(float), BUFFER_STORAGE, true)) goto failed;
+        /* (the lights past the frame's, the profiles of its own, and the highlight's linearly transformed cosines,
+         * written once) */
+        const size_t profilesEnd = (size_t)ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + ARTF_FRAME_LIGHTS * ARTF_PROFILE_FLOATS * sizeof(float);
+        if (!bufferNew(v, &s->extraLights, (VkDeviceSize)(profilesEnd + sizeof artfLtcTable), BUFFER_STORAGE, true)) goto failed;
+        memcpy((char*)s->extraLights.mapped + profilesEnd, artfLtcTable, sizeof artfLtcTable);
         if (!bufferNew(v, &s->decals, (VkDeviceSize)ARTF_MAX_DECALS * sizeof(ArtfDecalData), BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->tileLights, 4, BUFFER_STORAGE, true)) goto failed;
         if (!bufferNew(v, &s->probes, 16, BUFFER_STORAGE, true)) goto failed;

@@ -116,9 +116,12 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   so only the sun and the sixteen lights with shadows bring light through, and from what is first in their way, not
   from how thick the thing itself is. Traced, a ray inside toward each light finds how thick it is, and the wrap stops
   where the surface turns from the light. Neither blurs light across the surface, as diffusion would.
-- Lights' sizes, shapes and profiles count for the sixteen lights the frame holds. A shape's light reaches as far from
-  each point of it as a point's would; a rectangle's highlight comes from where the mirror ray meets it, not from its
-  integral over the lobe (no LTC), and its shadow map is drawn from its middle; its barn doors are not there. A
+- Lights' sizes, shapes and profiles count for the sixteen lights the frame holds. A shape is the mean of point lights
+  over it (each reaching as far as a point's would), as the tracer has it: drawn, its diffuse light is Gauss's 3 x 3
+  points of it, and its highlight the lobe's integral over it (linearly transformed cosines) weighted at one point, 4%
+  to 9% of a rectangle's light from the traced, more at grazing angles. Coat, sheen and what is under the surface take
+  its nearest point; a drawn-out lobe is taken as round there. Its shadow map is drawn from its middle; its barn doors
+  are not there. A
   profile is 96 x 16, by its own steps (2 degrees down, 22.5 round): a very narrow beam is softened. IES files of
   photometry type C are read as such; A and B are read as if they were C, and a lamp's tilt is left out. Soft shadows
   (`ArtfShadowDesc.soft`) take 50 reads a pixel and light; their penumbra is at most 12 texels wide, and lights past the

@@ -842,14 +842,35 @@ past it.
 
 ## Lights with a shape, and profiles
 
-A tube is a line with a ball around it; a rectangle has a length, a width, and a side it lights. Their diffuse light
-comes from their point nearest the place, as far as the light reaches from it, and a rectangle's less to the side as
-it faces away (its cosine there); their highlight from their point nearest the mirror ray: on a tube, the point of
-the line nearest it, then the ball's; on a rectangle, where the ray meets its plane, kept on it. That highlight is made
-longer, and wider, by as much as the shape looks long and wide, and dimmer by as much (Karis, 2013), so that its light
-in all is a point's. It is `artfShapeLight`, one function in C that the CPU calls lane by lane, and the shaders as the
-same arithmetic. Traced, each path aims at a point of the tube or the rectangle, so shadows go soft. Shadow maps are
-drawn from the middle, and soft shadows are as wide as the shape is long.
+A tube is a line with a ball around it; a rectangle has a length, a width, and a side it lights. What a shape is, the
+tracer says: each path aims at a point of it, and that point lights as a point light would, its own fade by its own
+distance, so a shape is the mean of point lights over it, and shadows go soft. Drawn, both the diffuse light and the
+highlight are of all of it (`AreaLight`, in `shading.inc`, so the CPU and the GPU have one formula):
+
+- **Diffuse:** the mean of point lights is smooth over the shape, so Gauss's three points each way take it (nine on a
+  rectangle, each with its cosine toward the place, its share as the rectangle faces away and its fade; three on a
+  tube).
+- **The highlight:** over the shape's solid angle, the mean of point lights is the lobe times d^2 fade^2 / area, d the
+  distance to each point. The lobe's integral over the polygon is linearly transformed cosines (Heitz, Dupuy, Hill and
+  Neubelt, 2016): the lobe is a cosine put through a matrix, and its integral over a polygon is the cosine's over the
+  polygon taken back through it, which edges give in closed form. The table of matrices (`src/shading/ltc.inc`, 32 x 32
+  by roughness and n . v, 20 KB) is fitted to Artful's own lobe (GGX without 1 / pi, Smith's visibility with Schlick's
+  k) by `tools/ltc/fit.py`, by the L1 distance of the two distributions, which bounds what their integrals over any
+  polygon differ by; it is made the same each time. An edge's share takes acos / sin of the angle between its corners
+  by `artfAcosFast`'s polynomial, in which the root cancels where the corners are near; what is below the horizon is
+  taken off as from a sphere of the same vector form factor (Snyder's, as Frostbite has it), with no branch, so the
+  shaders take it as it is. The weight d^2 fade^2 is taken where the lobe's light comes from on the whole: the vector
+  form factor's way, taken back through the matrix, where it meets the shape. A tube's highlight is that of a rectangle
+  as wide as the tube, turned to face the place, over its share there (a tube's points light all ways). Fresnel is
+  Schlick's from that way.
+
+Against the tracer, in `materials/areaLights` (a floor, roughness .2 to .8): a rectangle's light was 54% to 58% of it
+apart when it came from a point of the shape (diffuse from the nearest, the highlight from where the mirror ray meets
+it, widened, Karis 2013), and is 4% to 9% now; a tube's was 22%, and is 0.5% at most. What is left is the fit, at
+grazing angles most, and the weight taken at one point. A clear coat, sheen and what is under the surface still take a
+shape's point nearest the place; a drawn-out (anisotropic) lobe is taken as a round one. Shadow maps are drawn from
+the middle, and soft shadows are as wide as the shape is long. The table is on the GPU in the lights' buffer, past the
+profiles; Metal, which never sends that buffer, draws shapes and profiles as points.
 
 A profile, from an IES file (`artfIesDecode`), is a table of how much light goes each way: by the angle from the light's
 direction (or down), and round it. It is kept as 96 x 16, read bilinearly; the angles come from polynomials for acos

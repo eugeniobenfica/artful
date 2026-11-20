@@ -867,6 +867,8 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     frame.sky[3] = frame.ground[3] = 0; /* (light from all around is left out here: the maps are never sent) */
     /* (as are lights past the frame's own, light that bounced and what comes after a frame in floats) */
     frame.eye[2][3] = 0;
+    /* (and lights' shapes and profiles: what they read, in the lights' buffer, is never sent; they are points) */
+    memset(frame.lightShapes, 0, sizeof frame.lightShapes);
     memset(frame.indirect, 0, sizeof frame.indirect);
     memset(frame.post, 0, sizeof frame.post);
     artfSceneResidencyStep(scene, &frame, v->height);

@@ -520,6 +520,35 @@ ARTF_INLINE ArtfShade3 artfShadeNormalize(ArtfShade3 a) {
 #define S_CLAMP(a, lo, hi) artfClampf(a, lo, hi)
 #include "shading/shading.inc"
 
+/* Linearly transformed cosines for the highlight (src/shading/ltc.inc, made by tools/ltc/fit.py): of each roughness,
+ * from ARTF_LTC_MIN_ROUGH to 1, and sqrt(1 - n . v), from 0 to 1, ARTF_LTC_SIZE each way, five numbers: M^-1's a, b,
+ * c, d, and the lobe's integral. In scene/lights.c; on the GPU, in the lights' buffer past the profiles. */
+#define ARTF_LTC_SIZE 32
+#define ARTF_LTC_MIN_ROUGH .06f
+#define ARTF_LTC_FLOATS (ARTF_LTC_SIZE * ARTF_LTC_SIZE * 5)
+extern const float artfLtcTable[ARTF_LTC_FLOATS];
+/* Where a roughness and n . v are in it: the cell's corner (x along roughness, y along the angle) and how far past. */
+ARTF_INLINE void artfLtcPlace(float rough, float ndv, int* x, int* y, float* tx, float* ty) {
+    const float fx = (artfClampf(rough, ARTF_LTC_MIN_ROUGH, 1.f) - ARTF_LTC_MIN_ROUGH) * ((float)(ARTF_LTC_SIZE - 1) / (1.f - ARTF_LTC_MIN_ROUGH));
+    const float fy = sqrtf(artfClampf(1.f - ndv, 0.f, 1.f)) * (float)(ARTF_LTC_SIZE - 1);
+    *x = artfMini((int)fx, ARTF_LTC_SIZE - 2);
+    *y = artfMini((int)fy, ARTF_LTC_SIZE - 2);
+    *tx = fx - (float)*x;
+    *ty = fy - (float)*y;
+}
+/* Its five numbers there, bilinear. */
+ARTF_INLINE void artfLtcAt(float rough, float ndv, float out[5]) {
+    int x, y;
+    float tx, ty;
+    artfLtcPlace(rough, ndv, &x, &y, &tx, &ty);
+    const float* c00 = artfLtcTable + (x * ARTF_LTC_SIZE + y) * 5;
+    const float* c10 = c00 + ARTF_LTC_SIZE * 5;
+    for (int k = 0; k < 5; ++k) {
+        const float a = c00[k] + (c10[k] - c00[k]) * tx, b = c00[k + 5] + (c10[k + 5] - c00[k + 5]) * tx;
+        out[k] = a + (b - a) * ty;
+    }
+}
+
 /* A light's profile (artfLightSetProfile): vertical angles from 0 to 180 degrees, ends included, in rows by horizontal
  * angles from 0 to 360. */
 #define ARTF_PROFILE_V 96
@@ -541,13 +570,16 @@ ARTF_INLINE float artfProfileAt(const float* table, const float* axis, const flo
 }
 
 /* A light with a shape (artfLightSetShape), for a surface at p facing n, seen along view (toward the eye), this rough.
- * shape: along and half its length; facing and half its width (0: a tube). ball: a tube's radius. Out: toward its
+ * shape: along and half its length; facing and half its width (0: a tube). ball: a tube's radius; reach2: 1 / the
+ * light's radius squared. Out: toward its
  * point nearest p, which its diffuse light comes from, and that light's share (a rectangle's light goes one way, and
  * less to the side); toward its point nearest the mirror ray, which its highlight comes from, and what that keeps as it
  * is spread over as long and as wide as the shape looks (Karis, 2013); the square of the distance to the first point,
- * which its light fades with. */
-typedef struct ArtfShapeLit { float toDiffuse[3], diffuse, toHighlight[3], highlight, distance2; } ArtfShapeLit;
-ARTF_INLINE void artfShapeLight(const float* shape, const float* center, float ball, const float* p, const float* n, const float* view, float rough, ArtfShapeLit* out) {
+ * which its light fades with. Those are what a clear coat, sheen and what is under the surface take, and a ball's or
+ * a point's light. A shape's own light is over all of it (shading.inc's AreaLight): lambert, its diffuse light (n . l
+ * and fade in it); glossy, its highlight, which the Fresnel at toHighlight and the surface's scale multiply. */
+typedef struct ArtfShapeLit { float toDiffuse[3], diffuse, toHighlight[3], highlight, distance2, lambert, glossy; } ArtfShapeLit;
+ARTF_INLINE void artfShapeLight(const float* shape, const float* center, float ball, float reach2, const float* p, const float* n, const float* view, float rough, ArtfShapeLit* out) {
     const float* u = shape;
     const float* f = shape + 4;
     const float hl = shape[3], hw = shape[7];
@@ -595,15 +627,25 @@ ARTF_INLINE void artfShapeLight(const float* shape, const float* center, float b
     const float wider = artfMinf(a + (hw > 0 ? hw : ball) * .5f * hi, 1.f);
     out->highlight = a / longer * (hw > 0 ? a / wider : (a / wider) * (a / wider));
     out->highlight = hw > 0 && before <= 0 ? 0.f : out->highlight;
+    /* the light of all of it */
+    float ltc[5];
+    artfLtcAt(rough, artfMaxf(n[0] * view[0] + n[1] * view[1] + n[2] * view[2], 0.f), ltc);
+    ArtfShade3 toward;
+    const ArtfShade3 dd = {d[0], d[1], d[2]}, uu = {u[0], u[1], u[2]}, ff = {f[0], f[1], f[2]}, nn = {n[0], n[1], n[2]}, vv = {view[0], view[1], view[2]};
+    artfShadeAreaLight(dd, uu, hl, ff, hw, ball, reach2, nn, vv, ltc[0], ltc[1], ltc[2], ltc[3], ltc[4], &out->lambert, &out->glossy, &toward);
+    out->toHighlight[0] = toward.x;
+    out->toHighlight[1] = toward.y;
+    out->toHighlight[2] = toward.z;
 }
 
 /* The same for a light that may have no shape: a ball's or a point's, as shading.inc's BallNearest but for its
  * rounding. */
-ARTF_INLINE void artfLightPlace(const float* shape, const float* center, float ball, const float* p, const float* n, const float* view, float rough, ArtfShapeLit* out) {
+ARTF_INLINE void artfLightPlace(const float* shape, const float* center, float ball, float reach2, const float* p, const float* n, const float* view, float rough, ArtfShapeLit* out) {
     if (shape[3] > 0) {
-        artfShapeLight(shape, center, ball, p, n, view, rough, out);
+        artfShapeLight(shape, center, ball, reach2, p, n, view, rough, out);
         return;
     }
+    out->lambert = out->glossy = 0;
     const float d[3] = {center[0] - p[0], center[1] - p[1], center[2] - p[2]};
     const float d2 = artfMaxf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2], 1e-8f), inv = 1.f / sqrtf(d2);
     for (int k = 0; k < 3; ++k) out->toDiffuse[k] = out->toHighlight[k] = d[k] * inv;

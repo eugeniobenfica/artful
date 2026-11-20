@@ -1143,9 +1143,26 @@ static SpvId profileAt(Spv* s, const Resources* r, SpvId buffer, SpvId slot, Spv
     return ADD_F(a, MUL_F(SUB_F(b, a), ty));
 }
 
-/* artfLightPlace: a light's shape (its rows A and B), ball or point, seen from p. */
-typedef struct ShapeLit { SpvId toDiffuse, diffuse, toHighlight, highlight, distance2; } ShapeLit;
-static ShapeLit lightPlace(Spv* s, SpvId rowA, SpvId rowB, SpvId center, SpvId ball, SpvId p, SpvId n, SpvId view, SpvId rough) {
+/* The highlight's linearly transformed cosines, past the profiles in the lights' buffer: artfLtcAt. */
+#define G_LTC (G_PROFILES + ARTF_FRAME_LIGHTS * ARTF_PROFILE_FLOATS)
+static void ltcAt(Spv* s, const Resources* r, SpvId buffer, SpvId rough, SpvId ndv, SpvId out[5]) {
+    SpvId fx = MUL_F(SUB_F(G_CLAMP(rough, FLOAT(ARTF_LTC_MIN_ROUGH), FLOAT(1.f)), FLOAT(ARTF_LTC_MIN_ROUGH)), FLOAT((float)(ARTF_LTC_SIZE - 1) / (1.f - ARTF_LTC_MIN_ROUGH)));
+    SpvId fy = MUL_F(G_SQRT(G_CLAMP(SUB_F(FLOAT(1.f), ndv), FLOAT(0.f), FLOAT(1.f))), FLOAT((float)(ARTF_LTC_SIZE - 1)));
+    SpvId x = MIN_F(G_FLOOR(fx), FLOAT((float)(ARTF_LTC_SIZE - 2))), y = MIN_F(G_FLOOR(fy), FLOAT((float)(ARTF_LTC_SIZE - 2)));
+    SpvId tx = SUB_F(fx, x), ty = SUB_F(fy, y);
+    SpvId at = ADD_U(UINT(G_LTC), MUL_U(ADD_U(MUL_U(G_U(x), UINT(ARTF_LTC_SIZE)), G_U(y)), UINT(5)));
+    for (uint32_t k = 0; k < 5; ++k) {
+        SpvId c00 = profileFloat(s, r, buffer, ADD_U(at, UINT(k))), c10 = profileFloat(s, r, buffer, ADD_U(at, UINT(ARTF_LTC_SIZE * 5 + k)));
+        SpvId c01 = profileFloat(s, r, buffer, ADD_U(at, UINT(5 + k))), c11 = profileFloat(s, r, buffer, ADD_U(at, UINT(ARTF_LTC_SIZE * 5 + 5 + k)));
+        SpvId a = ADD_F(c00, MUL_F(SUB_F(c10, c00), tx)), b = ADD_F(c01, MUL_F(SUB_F(c11, c01), tx));
+        out[k] = ADD_F(a, MUL_F(SUB_F(b, a), ty));
+    }
+}
+
+/* artfLightPlace: a light's shape (its rows A and B), ball or point, seen from p; and a shape's light from all of it
+ * (shading.inc's AreaLight: lambert, glossy, from way), reach2 being 1 / its radius^2 and ltc artfLtcAt's. */
+typedef struct ShapeLit { SpvId toDiffuse, diffuse, toHighlight, highlight, distance2, lambert, glossy, way; } ShapeLit;
+static ShapeLit lightPlace(Spv* s, SpvId rowA, SpvId rowB, SpvId center, SpvId ball, SpvId p, SpvId n, SpvId view, SpvId rough, SpvId reach2, const SpvId* ltc) {
     SpvId u = spvShuffle3(s, rowA), hl = W(rowA), f = spvShuffle3(s, rowB), hw = W(rowB);
     SpvId zero = FLOAT(0.f), one = FLOAT(1.f);
     SpvId d = SUB_V3(center, p);
@@ -1187,7 +1204,8 @@ static ShapeLit lightPlace(Spv* s, SpvId rowA, SpvId rowB, SpvId center, SpvId b
     SpvId toBall = pick3(s, sized, SCALE_V3(hb, DIV_F(one, G_SQRT(MAX_F(DOT3(hb, hb), FLOAT(1e-12f))))), toPoint);
     SpvId keptBall = DIV_F(alpha, MIN_F(ADD_F(alpha, MUL_F(MUL_F(ball, FLOAT(.5f)), pi)), one));
     ShapeLit out = {pick3(s, shaped, SCALE_V3(q, qi), toPoint), G_PICK(shaped, G_PICK(rect, MUL_F(MAX_F(before, zero), qi), one), one),
-                    pick3(s, shaped, SCALE_V3(h, hi), toBall), G_PICK(shaped, energy, G_PICK(sized, MUL_F(keptBall, keptBall), one)), G_PICK(shaped, q2, p2)};
+                    pick3(s, shaped, SCALE_V3(h, hi), toBall), G_PICK(shaped, energy, G_PICK(sized, MUL_F(keptBall, keptBall), one)), G_PICK(shaped, q2, p2), 0, 0, 0};
+    shaderAreaLight(s, d, u, hl, f, hw, ball, reach2, n, view, ltc[0], ltc[1], ltc[2], ltc[3], ltc[4], &out.lambert, &out.glossy, &out.way);
     return out;
 }
 
@@ -1231,6 +1249,15 @@ static SpvId lightHighlight(Spv* s, const Reflecting* f, SpvId n, SpvId view, Sp
     SpvId fresnel = shaderSchlick3(s, f->f0, shaderFifth(s, vdh));
     if (f->gain) fresnel = MUL_V3(fresnel, f->gain);
     return SCALE_V3(fresnel, lit);
+}
+
+/* A shape's highlight (shading.inc's AreaLight's glossy, its strength): Schlick's Fresnel from where it comes on the
+ * whole, as addShaped. */
+static SpvId areaHighlight(Spv* s, const Reflecting* f, SpvId view, SpvId way, SpvId strength) {
+    SpvId vdh = MAX_F(DOT3(view, shaderHalfway(s, view, way)), FLOAT(0.f));
+    SpvId fresnel = shaderSchlick3(s, f->f0, shaderFifth(s, vdh));
+    if (f->gain) fresnel = MUL_V3(fresnel, f->gain);
+    return SCALE_V3(fresnel, MUL_F(strength, f->strength));
 }
 
 /* Past glTF's core (ArtfMaterialMore), as Extras in kernels.inc: where the coat, sheen and light under the surface add
@@ -1981,15 +2008,21 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
             shapedHere = spvOp2(s, 166 /* OpLogicalOr */, s->boolType, G_GT(W(shapeA), FLOAT(0.f)), G_GT(W(shapeC), FLOAT(0.f)));
             spvIfBegin(s, shapedHere, &shapedMerge);
             SpvId ball = frameFloatAt(s, &r, ADD_U(UINT(F_LIGHT_SIZES), spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, i, UINT(2))), spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, i, UINT(3)));
-            ShapeLit place = lightPlace(s, shapeA, shapeB, spvShuffle3(s, lightA), ball, world, n, view, rough);
+            SpvId ltc[5];
+            ltcAt(s, &r, extraLights, rough, MAX_F(DOT3(n, view), FLOAT(0.f)), ltc);
+            ShapeLit place = lightPlace(s, shapeA, shapeB, spvShuffle3(s, lightA), ball, world, n, view, rough, DIV_F(FLOAT(1.f), MUL_F(radius, radius)), ltc);
             SpvId near_ = MAX_F(SUB_F(FLOAT(1.f), DIV_F(place.distance2, MUL_F(radius, radius))), FLOAT(0.f));
             SpvId from = NORMALIZE(spvOp1(s, SPV_OP_FNegate, s->vec3, d));
             SpvId profile = G_PICK(G_GT(W(shapeC), FLOAT(0.f)), profileAt(s, &r, extraLights, i, spvShuffle3(s, shapeC), spvShuffle3(s, shapeD), from), FLOAT(1.f));
             SpvId lit = MUL_F(MUL_F(near_, near_), profile), shadow = spvLoad(s, s->floatType, shadowed);
             SpvId amount = MUL_F(MUL_F(MUL_F(lit, place.diffuse), spot), shadow), color = spvShuffle3(s, lightB);
-            spvStore(s, acc.diffuse, ADD_V3(spvLoad(s, s->vec3, acc.diffuse), SCALE_V3(color, MUL_F(MAX_F(DOT3(n, place.toDiffuse), FLOAT(0.f)), amount))));
+            /* a shape's from all of it (as addShaped), a ball's or a point's from a point of it */
+            SpvId area = G_GT(W(shapeA), FLOAT(0.f));
+            SpvId shown = G_PICK(area, MUL_F(MUL_F(MUL_F(place.lambert, profile), spot), shadow), MUL_F(MAX_F(DOT3(n, place.toDiffuse), FLOAT(0.f)), amount));
+            spvStore(s, acc.diffuse, ADD_V3(spvLoad(s, s->vec3, acc.diffuse), SCALE_V3(color, shown)));
             SpvId towardNdl = MAX_F(DOT3(n, place.toHighlight), FLOAT(0.f));
-            SpvId shine = lightHighlight(s, &reflecting, n, view, place.toHighlight, towardNdl, MUL_F(MUL_F(MUL_F(lit, place.highlight), spot), shadow));
+            SpvId shine = pick3(s, area, areaHighlight(s, &reflecting, view, place.way, MUL_F(MUL_F(MUL_F(place.glossy, profile), spot), shadow)),
+                                lightHighlight(s, &reflecting, n, view, place.toHighlight, towardNdl, MUL_F(MUL_F(MUL_F(lit, place.highlight), spot), shadow)));
             spvStore(s, acc.highlight, ADD_V3(spvLoad(s, s->vec3, acc.highlight), MUL_V3(color, shine)));
             if (coats) addExtras(s, layers, n, view, place.toDiffuse, amount, MUL_F(MUL_F(lit, place.diffuse), spot), spvLoad(s, s->floatType, through), color);
             spvIfEnd(s, shapedMerge);

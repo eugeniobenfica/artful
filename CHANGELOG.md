@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Phase 5.3: rectangles and tubes by linearly transformed cosines.** A light's shape is lit from all of it, as the
+  tracer has it (the mean of point lights over it): diffuse by Gauss's 3 x 3 points, the highlight by the lobe's
+  integral over the polygon (`AreaLight` in `shading.inc`, one formula for the CPU and the GPU), with a table fitted to
+  Artful's own lobe by `tools/ltc/fit.py` (`src/shading/ltc.inc`), acos by `artfAcosFast`'s polynomial and the horizon
+  as a sphere's. Against the tracer (`materials/areaLights`): a rectangle 54-58% of its light apart before, 4-9% now; a
+  tube 22% before, 0.5% now; the GPU as the CPU. Pictures with a rectangle or a tube change; Metal draws shapes and
+  profiles as points, as it never sends what they read.
+
 - **Phase 5.2: lights in clusters.** On the GPU, the lights past the frame's 16 are listed by each 64 x 64 square and
   16 slices of depth (`artfSceneLightSlices`, the frame's `slices`), in compact lists with no cap a list (4M places in
   all); the CPU lists all that reach a square, so both make the same picture where a list once was full. A light is

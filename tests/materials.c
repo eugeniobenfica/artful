@@ -477,6 +477,75 @@ void testLightShapes(void) {
     artfFree(b);
 }
 
+/* Light from a rectangle and a tube, drawn, against the same traced (the mean of points over the shape, many paths):
+ * how far the drawn picture is from it, as a share of its light, on a floor rough and less so. Lit from a point of the
+ * shape (before linearly transformed cosines), the rectangle was 54% to 58% of its light apart and the tube 22%; over
+ * all of it, no more than 12% and 2% (4.0, 8.2, 9.2; 0.3, 0.5, 0.4 when it was written). The GPU draws it as the CPU. */
+static ArtfScene* areaScene(int kind, float rough) {
+    ArtfScene* s = plainScene();
+    artfSceneSetAmbient(s, artfVec3(0, 0, 0), artfVec3(0, 0, 0));
+    setCamera(s, 0, 1.2f, 3.5f, 0, -1, -.6f);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.45f, .45f, .45f);
+    d.roughness = rough;
+    const ArtfTransform floor = artfTransformAt(0, -1, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 20, 1), artfSceneAddMaterial(s, &d), &floor);
+    const ArtfLight l = artfSceneAddLight(s, artfVec3(0, -.2f, -.8f), artfVec3(.8f, .8f, .8f), 6);
+    if (kind == 0) artfLightSetShape(s, l, artfVec3(1, 0, 0), artfVec3(0, -1, -.2f), 2.f, 1.f);
+    else {
+        artfLightSetShape(s, l, artfVec3(1, 0, .3f), artfVec3(0, 0, 0), 2.4f, 0);
+        artfLightSetSize(s, l, .05f);
+    }
+    return s;
+}
+
+static double areaError(ArtfRenderer* r, int kind, float rough, uint32_t* a, uint32_t* b) {
+    ArtfScene* s = areaScene(kind, rough);
+    drawInto(r, s, a);
+    const ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 64, 0, 1, false, false};
+    artfSceneSetTrace(s, &rays);
+    for (int k = 0; k < 40; ++k) CHECK(artfRendererDraw(r, s));
+    CHECK(artfRendererReadPixels(r, b));
+    artfSceneFree(s);
+    double apart = 0, lit = 0;
+    for (int i = 0; i < W * H; ++i)
+        for (int k = 0; k < 24; k += 8) {
+            apart += abs((int)(a[i] >> k & 255) - (int)(b[i] >> k & 255));
+            lit += (double)(b[i] >> k & 255);
+        }
+    return apart / (lit > 1 ? lit : 1.);
+}
+
+void testAreaLights(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    static const float roughs[3] = {.2f, .45f, .8f};
+    for (int kind = 0; kind < 2; ++kind)
+        for (int k = 0; k < 3; ++k) {
+            const double e = areaError(cpu, kind, roughs[k], a, b);
+            printf("a %s, roughness %.2f: drawn against traced, %.1f%% of its light apart\n", kind ? "tube" : "rectangle", roughs[k], e * 100);
+            CHECK(e < (kind ? .02 : .12));
+        }
+    o.backend = ARTF_BACKEND_VULKAN;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    for (int kind = 0; kind < 2 && gpu; ++kind)
+        for (int k = 0; k < 3; ++k) {
+            ArtfScene* s = areaScene(kind, roughs[k]);
+            drawInto(cpu, s, a);
+            drawInto(gpu, s, b);
+            const double apart = differentShare(a, b, 8);
+            if (apart >= .005) printf("a %s, roughness %.2f, the GPU against the CPU: %.2f%% of pixels apart\n", kind ? "tube" : "rectangle", roughs[k], apart * 100);
+            CHECK(apart < .005);
+            artfSceneFree(s);
+        }
+    artfRendererFree(gpu);
+    artfRendererFree(cpu);
+    artfFree(a);
+    artfFree(b);
+}
+
 /* IES files read, by their symmetry; a light with a narrow profile lights a small round below it, on both backends, drawn
  * and traced; taken away, the bytes are as they were. */
 void testProfiles(void) {

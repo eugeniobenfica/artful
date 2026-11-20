@@ -589,9 +589,11 @@ static V8F throughLanes(const ArtfSoftFrame* f, int light, Lanes3 world, float r
     return v8fLoad(out);
 }
 
-/* A light with a shape or a profile (artfLightSetShape, artfLightSetProfile), place by place as artfShapeLight: its
- * diffuse light from its point nearest each, its highlight from its point nearest the mirror ray; both times its
- * profile. spot: its cone and shadow, open: its cone alone. Called, as addBall is. */
+/* A light with a shape or a profile (artfLightSetShape, artfLightSetProfile), place by place as artfLightPlace: a
+ * shape's diffuse light and highlight from all of it (shading.inc's AreaLight), a ball's or a point's diffuse light
+ * from its point nearest each and its highlight from its point nearest the mirror ray; both times its profile. A clear
+ * coat, sheen and what is under the surface take a shape's point nearest. spot: its cone and shadow, open: its cone
+ * alone. Called, as addBall is. */
 #ifdef _MSC_VER
 __declspec(noinline)
 #else
@@ -604,7 +606,8 @@ static void addShaped(const ArtfSoftFrame* f, uint32_t i, Lanes3 n, Lanes3 view,
     const float(*shape)[4] = frame->lightShapes[i];
     const float* profile = shape[2][3] > 0 ? f->scene->lightProfile[(int)shape[2][3] - 1] : NULL;
     const float ball = frame->lightSizes[i], reach2 = 1.f / (L->radius * L->radius);
-    _Alignas(32) float ln[3][8], lv[3][8], lw[3][8], lr[8], td[3][8], th[3][8], ds[8], hs[8];
+    _Alignas(32) float ln[3][8], lv[3][8], lw[3][8], lr[8], td[3][8], th[3][8], ds[8], hs[8], lam[8], gl[8];
+    const bool area = shape[0][3] > 0;
     v8fStore(ln[0], n.x); v8fStore(ln[1], n.y); v8fStore(ln[2], n.z);
     v8fStore(lv[0], view.x); v8fStore(lv[1], view.y); v8fStore(lv[2], view.z);
     v8fStore(lw[0], world.x); v8fStore(lw[1], world.y); v8fStore(lw[2], world.z);
@@ -612,13 +615,14 @@ static void addShaped(const ArtfSoftFrame* f, uint32_t i, Lanes3 n, Lanes3 view,
     for (int k = 0; k < 8; ++k) {
         const float p[3] = {lw[0][k], lw[1][k], lw[2][k]}, nn[3] = {ln[0][k], ln[1][k], ln[2][k]}, vv[3] = {lv[0][k], lv[1][k], lv[2][k]};
         ArtfShapeLit lit;
-        artfLightPlace(shape[0], L->position, ball, p, nn, vv, lr[k], &lit);
+        artfLightPlace(shape[0], L->position, ball, reach2, p, nn, vv, lr[k], &lit);
         const float fade = artfMaxf(1.f - lit.distance2 * reach2, 0);
-        float strength = fade * fade;
+        float strength = fade * fade, profiled = 1.f;
         if (profile) {
             const float d[3] = {p[0] - L->position[0], p[1] - L->position[1], p[2] - L->position[2]}, inv = 1.f / sqrtf(artfMaxf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2], 1e-12f));
             const float dir[3] = {d[0] * inv, d[1] * inv, d[2] * inv};
-            strength *= artfProfileAt(profile, shape[2], shape[3], dir);
+            profiled = artfProfileAt(profile, shape[2], shape[3], dir);
+            strength *= profiled;
         }
         for (int c = 0; c < 3; ++c) {
             td[c][k] = lit.toDiffuse[c];
@@ -626,15 +630,34 @@ static void addShaped(const ArtfSoftFrame* f, uint32_t i, Lanes3 n, Lanes3 view,
         }
         ds[k] = strength * lit.diffuse;
         hs[k] = strength * lit.highlight;
+        /* (a shape's own: its fades are in them, the profile not) */
+        lam[k] = lit.lambert * profiled;
+        gl[k] = lit.glossy * profiled;
     }
     const Lanes3 toLight = {v8fLoad(td[0]), v8fLoad(td[1]), v8fLoad(td[2])}, toward = {v8fLoad(th[0]), v8fLoad(th[1]), v8fLoad(th[2])};
     const V8F lit = v8fLoad(ds), amount = v8fMul(lit, spot), ndl = v8fMax(dot3(n, toLight), v8fSet(0.f));
-    diffuse->x = v8fAdd(diffuse->x, v8fMul(v8fSet(L->color[0]), v8fMul(ndl, amount)));
-    diffuse->y = v8fAdd(diffuse->y, v8fMul(v8fSet(L->color[1]), v8fMul(ndl, amount)));
-    diffuse->z = v8fAdd(diffuse->z, v8fMul(v8fSet(L->color[2]), v8fMul(ndl, amount)));
-    if (shiny) {
-        Lanes3 none = {ndl, ndl, ndl};
-        addLight(n, view, toward, v8fMul(v8fLoad(hs), spot), L->color, true, r, &none, highlight);
+    if (area) {
+        /* all of the shape: its light as it is, and the highlight's Fresnel from where it comes on the whole */
+        const V8F shown = v8fMul(v8fLoad(lam), spot);
+        diffuse->x = v8fAdd(diffuse->x, v8fMul(v8fSet(L->color[0]), shown));
+        diffuse->y = v8fAdd(diffuse->y, v8fMul(v8fSet(L->color[1]), shown));
+        diffuse->z = v8fAdd(diffuse->z, v8fMul(v8fSet(L->color[2]), shown));
+        if (shiny) {
+            const V8F vdh = v8fMax(dot3(view, lanesHalfway(view, toward)), v8fSet(0.f));
+            const Lanes3 fresnel = lanesMul3(lanesSchlick3(r->f0, lanesFifth(vdh)), r->gain);
+            const V8F shine = v8fMul(v8fMul(v8fLoad(gl), spot), r->strength);
+            highlight->x = v8fAdd(highlight->x, v8fMul(v8fMul(v8fSet(L->color[0]), shine), fresnel.x));
+            highlight->y = v8fAdd(highlight->y, v8fMul(v8fMul(v8fSet(L->color[1]), shine), fresnel.y));
+            highlight->z = v8fAdd(highlight->z, v8fMul(v8fMul(v8fSet(L->color[2]), shine), fresnel.z));
+        }
+    } else {
+        diffuse->x = v8fAdd(diffuse->x, v8fMul(v8fSet(L->color[0]), v8fMul(ndl, amount)));
+        diffuse->y = v8fAdd(diffuse->y, v8fMul(v8fSet(L->color[1]), v8fMul(ndl, amount)));
+        diffuse->z = v8fAdd(diffuse->z, v8fMul(v8fSet(L->color[2]), v8fMul(ndl, amount)));
+        if (shiny) {
+            Lanes3 none = {ndl, ndl, ndl};
+            addLight(n, view, toward, v8fMul(v8fLoad(hs), spot), L->color, true, r, &none, highlight);
+        }
     }
     if (x) addExtras(x, n, view, toLight, amount, v8fMul(lit, open), through, L->color);
 }

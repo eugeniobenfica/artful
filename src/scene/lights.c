@@ -4,6 +4,9 @@
 
 #include <stdlib.h>
 
+/* The highlight's linearly transformed cosines (sceneInternal.h: artfLtcAt). */
+#include "shading/ltc.inc"
+
 void artfLightSetShape(ArtfScene* s, ArtfLight l, ArtfVec3 along, ArtfVec3 facing, float length, float width) {
     if (!l || l > ARTF_MAX_LIGHTS) return;
     float* d = s->lightShape[l - 1];

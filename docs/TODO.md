@@ -66,8 +66,8 @@ identificado; macOS com `scale/skinLod`). Run 44764119231 em andamento, com `ART
 ## Fase 5 — Alcance de conteúdo
 - [ ] 5.1 Probes escaláveis
 - [x] 5.2 Luzes em clusters — 0 omitidas no corredor (antes 1.846), 0,09 ms a 1080p
-- [ ] 5.3 LTC para retângulos e tubos ← **próxima**
-- [ ] 5.4 Upscaler (travas, máscaras, Lanczos, mistura adaptativa)
+- [x] 5.3 LTC para retângulos e tubos — retângulo 54–58% → 4–9% do traçado, tubo 22% → 0,5%
+- [ ] 5.4 Upscaler (travas, máscaras, Lanczos, mistura adaptativa) ← **próxima**
 - [ ] 5.5 DAG de clusters
 - [ ] 5.6 Raios contra o corte grosso; BVH largo
 - [ ] 5.7 Luzes estocásticas, denoiser de sombra, A-SVGF
