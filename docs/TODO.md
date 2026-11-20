@@ -69,7 +69,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [x] 5.2 Luzes em clusters — 0 omitidas no corredor (antes 1.846), 0,09 ms a 1080p
 - [x] 5.3 LTC para retângulos e tubos — retângulo 54–58% → 4–9% do traçado, tubo 22% → 0,5%
 - [~] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); histórico cúbico (`sharpHistory`); faltam máscaras reativa/composição
-- [ ] 5.5 DAG de clusters
+- [~] 5.5 DAG de clusters — construção e corte (`artfDagBuild`, `artfDagCut`): sem rachaduras, menos triângulos que os 3 níveis perto e longe; falta desenhar nos dois backends e cozinhar
 - [ ] 5.6 Raios contra o corte grosso; BVH largo
 - [ ] 5.7 Luzes estocásticas, denoiser de sombra, A-SVGF
 - [ ] 5.8 Transparência por transmitância em froxels

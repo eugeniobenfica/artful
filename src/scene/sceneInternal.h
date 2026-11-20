@@ -51,6 +51,32 @@ typedef struct ArtfMeshlet {
     float cone[3], coneCutoff;
 } ArtfMeshlet;
 
+/* A mesh as a graph of clusters at every level of detail (dag.c, phase 5.5). Each cluster's triangles are indices into
+ * the mesh's vertices; self and parent: a ball (center, radius) and an error, in the mesh's units: its own, from the
+ * group it was made from (error 0 on the first level), and that of the group it went into (error infinite: none). */
+typedef struct ArtfDagCluster {
+    uint32_t indexOffset, indexCount, level;
+    float self[5], parent[5];
+} ArtfDagCluster;
+typedef struct ArtfDag {
+    uint32_t* indices;
+    uint32_t indexCount;
+    ArtfDagCluster* clusters; /* the first level first */
+    uint32_t clusterCount, levels;
+} ArtfDag;
+bool artfDagBuild(const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, ArtfDag* out);
+void artfDagFree(ArtfDag* d);
+/* Bounds are fine from an eye when their error, at the nearest of their ball, is within what lodScale allows (as
+ * artfMeshLevel's: e * lodScale <= distance); none (an infinite error) never are. A cluster is drawn when its own are
+ * and its parent's are not. */
+ARTF_INLINE bool artfDagFine(const float* bounds, const float* eye, float lodScale) {
+    if (!(bounds[4] < INFINITY)) return false;
+    const float dx = bounds[0] - eye[0], dy = bounds[1] - eye[1], dz = bounds[2] - eye[2];
+    return bounds[4] * lodScale <= artfMaxf(sqrtf((dx * dx + dy * dy) + dz * dz) - bounds[3], 0.f);
+}
+/* The clusters drawn from eye: how many, and which, in order, in chosen (or NULL). */
+uint32_t artfDagCut(const ArtfDag* d, const float* eye, float lodScale, uint32_t* chosen);
+
 /* What a mesh that bends was, by the order of its packed vertices. */
 typedef struct ArtfSkinData {
     float* rest;       /* position and normal: six floats a vertex */

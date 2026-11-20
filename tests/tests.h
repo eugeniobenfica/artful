@@ -242,6 +242,7 @@ void testClips(void);
 void testParticleForces(void);
 void testTerrainLayers(void);
 void testHlod(void);
+void testClusterDag(void);
 void testHlodCooked(void);
 void testSkinLod(void);
 void testTracedSkinLod(void);

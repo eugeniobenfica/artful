@@ -248,6 +248,7 @@ int main(int argc, char** argv) {
     RUN("scale/particleForces", testParticleForces());
     RUN("scale/terrainLayers", testTerrainLayers());
     RUN("scale/hlod", testHlod());
+    RUN("scale/clusterDag", testClusterDag());
     RUN("scale/hlodCooked", testHlodCooked());
     RUN("scale/skinLod", testSkinLod());
     RUN("scale/tracedSkinLod", testTracedSkinLod());

@@ -1,5 +1,6 @@
 /* artful-tests: particles, terrain, many as one, emitters of many. */
 #include "tests.h"
+#include "scene/simplifyInternal.h"
 
 /* Particles: a burst gives that many; none goes through the ground they bounce on; turbulence moves them, and spin
  * turns them; the same steps give the same places. */
@@ -745,4 +746,120 @@ void testHlodCooked(void) {
     artfFree(a);
     artfFree(b);
     artfRendererFree(cpu);
+}
+
+static int compareU64(const void* a, const void* b) {
+    const uint64_t x = *(const uint64_t*)a, y = *(const uint64_t*)b;
+    return x < y ? -1 : x > y;
+}
+
+/* Edges of the triangles given (welded by place) that only one of them has. */
+static uint32_t openEdges(const ArtfVertex* v, const uint32_t* const* lists, const uint32_t* counts, uint32_t listCount) {
+    size_t n = 0;
+    for (uint32_t l = 0; l < listCount; ++l) n += counts[l];
+    uint64_t* edges = artfMalloc(n * 8 + 8);
+    size_t e = 0;
+    for (uint32_t l = 0; l < listCount; ++l)
+        for (uint32_t k = 0; k < counts[l]; ++k) {
+            /* (the grid's vertices are not split: an index is a place) */
+            const uint32_t a = lists[l][k], b = lists[l][k / 3 * 3 + (k + 1) % 3];
+            edges[e++] = a < b ? (uint64_t)a << 32 | b : (uint64_t)b << 32 | a;
+        }
+    (void)v;
+    qsort(edges, e, 8, compareU64);
+    uint32_t open = 0;
+    for (size_t i = 0; i < e;) {
+        size_t j = i + 1;
+        while (j < e && edges[j] == edges[i]) ++j;
+        open += j - i == 1;
+        i = j;
+    }
+    artfFree(edges);
+    return open;
+}
+
+/* Phase 5.5: a terrain as a graph of clusters. From its edge, the cut draws far fewer triangles than the three levels
+ * (which take the whole for what is nearest) from near and far, its error is within a pixel by construction, it has no cracks (the only
+ * open edges are the terrain's own border), bounds grow up each line, and it is made the same twice. */
+void testClusterDag(void) {
+    enum { N = 192 };
+    ArtfVertex* v = artfMalloc((size_t)(N + 1) * (N + 1) * sizeof *v);
+    for (int z = 0; z <= N; ++z)
+        for (int x = 0; x <= N; ++x) {
+            ArtfVertex* p = &v[z * (N + 1) + x];
+            memset(p, 0, sizeof *p);
+            p->px = (float)x * 100.f / N;
+            p->pz = (float)z * 100.f / N;
+            p->py = 1.5f * sinf(p->px * .21f) * cosf(p->pz * .17f) + .4f * sinf(p->px * 1.3f + p->pz * .9f);
+            p->ny = 1;
+            p->u = (float)x / N;
+            p->v = (float)z / N;
+            p->color = 0xFFFFFFFFu;
+        }
+    uint32_t* ix = artfMalloc((size_t)N * N * 6 * 4);
+    uint32_t n = 0;
+    for (int z = 0; z < N; ++z)
+        for (int x = 0; x < N; ++x) {
+            const uint32_t a = (uint32_t)(z * (N + 1) + x), b = a + 1, c = a + N + 1, d = c + 1;
+            ix[n++] = a; ix[n++] = c; ix[n++] = b;
+            ix[n++] = b; ix[n++] = c; ix[n++] = d;
+        }
+    const uint32_t vertexCount = (N + 1) * (N + 1), triangles = n / 3;
+    ArtfDag dag, again;
+    double t0 = artfNowMs();
+    CHECK(artfDagBuild(v, vertexCount, ix, n, &dag));
+    const double took = artfNowMs() - t0;
+    CHECK(artfDagBuild(v, vertexCount, ix, n, &again));
+    CHECK(dag.clusterCount == again.clusterCount && dag.indexCount == again.indexCount && !memcmp(dag.indices, again.indices, (size_t)dag.indexCount * 4) &&
+          !memcmp(dag.clusters, again.clusters, (size_t)dag.clusterCount * sizeof *dag.clusters));
+    artfDagFree(&again);
+    uint32_t roots = 0, topLevel = 0;
+    bool grows = true;
+    for (uint32_t i = 0; i < dag.clusterCount; ++i) {
+        const ArtfDagCluster* c = &dag.clusters[i];
+        if (!(c->parent[4] < INFINITY)) { ++roots; topLevel = c->level > topLevel ? c->level : topLevel; continue; }
+        const float dx = c->parent[0] - c->self[0], dy = c->parent[1] - c->self[1], dz = c->parent[2] - c->self[2];
+        grows = grows && c->parent[4] >= c->self[4] && sqrtf(dx * dx + dy * dy + dz * dz) + c->self[3] <= c->parent[3] * 1.0001f;
+    }
+    CHECK(grows);
+    /* the three levels, as the scene makes them, for what each draws */
+    const uint32_t targets[3] = {triangles / 4, triangles / 16, triangles / 64};
+    ArtfSimplified levels[3];
+    const uint32_t levelCount = artfSimplify(v, vertexCount, ix, n, targets, 3, levels);
+    const float lodScale = 1080.f * .5f / tanf(.45f); /* (a pixel at 1080p, 0.9 radians tall) */
+    const float eyes[3][3] = {{50, 4, -2}, {50, 30, -150}, {50, 200, -1500}};
+    uint32_t* chosen = artfMalloc((size_t)dag.clusterCount * 4);
+    float center[3] = {50, 0, 50};
+    const float radius = 71.f;
+    for (int e = 0; e < 3; ++e) {
+        const uint32_t count = artfDagCut(&dag, eyes[e], lodScale, chosen);
+        uint32_t drawn = 0;
+        const uint32_t** lists = artfMalloc((size_t)count * sizeof *lists + 8);
+        uint32_t* counts = artfMalloc((size_t)count * 4 + 4);
+        for (uint32_t i = 0; i < count; ++i) {
+            const ArtfDagCluster* c = &dag.clusters[chosen[i]];
+            drawn += c->indexCount / 3;
+            lists[i] = dag.indices + c->indexOffset;
+            counts[i] = c->indexCount;
+        }
+        const uint32_t open = openEdges(v, lists, counts, count);
+        artfFree(lists);
+        artfFree(counts);
+        /* the three levels: the lightest whose error is fine at the nearest of the terrain */
+        const float dx = center[0] - eyes[e][0], dy = center[1] - eyes[e][1], dz = center[2] - eyes[e][2];
+        const float distance = artfMaxf(sqrtf(dx * dx + dy * dy + dz * dz) - radius, 0.f);
+        uint32_t whole = triangles;
+        for (uint32_t l = 0; l < levelCount; ++l)
+            if (levels[l].error * lodScale <= distance) whole = levels[l].indexCount / 3;
+        printf("a terrain of %u triangles as %u clusters in %u levels (%u at the top), made in %.0f ms; from %.0f m: the cut draws %u in %u clusters, the three levels %u; open edges %u (the border: %u)\n",
+               triangles, dag.clusterCount, dag.levels, roots, took, sqrtf(dx * dx + dy * dy + dz * dz), drawn, count, whole, open, 4u * N);
+        CHECK(open == 4u * N);
+        CHECK(drawn < whole);
+    }
+    (void)topLevel;
+    for (uint32_t l = 0; l < levelCount; ++l) artfFree(levels[l].indices);
+    artfFree(chosen);
+    artfDagFree(&dag);
+    artfFree(ix);
+    artfFree(v);
 }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A graph of clusters** (phase 5.5, in part: built and cut, not drawn yet): `artfDagBuild` cuts a mesh into clusters,
+  groups them, simplifies each group to half with its border held, and again a level at a time; `artfDagCut` takes
+  the clusters fine from an eye. A 73,728-triangle terrain seen from its edge at a pixel's error draws 45,492 where
+  the three levels draw all of it, and fewer from afar too, with no cracks.
+
 - **Probes that follow the camera** (`ArtfIndirectDesc.follow`, phase 5.1): the volume of probes is around the camera
   and moves a cell at a time, in place of a box that stays. Nothing is copied: probes are kept by their cell modulo
   the volume's size, and each carries the cell of the world it stands for, so one that came into a new cell starts
