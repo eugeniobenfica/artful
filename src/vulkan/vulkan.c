@@ -16,454 +16,18 @@
  * With occlusion, that is done in two parts. What showed last frame is drawn; a depth pyramid is made
  * of it; and the rest of what is in view is tested against that and drawn after. Nothing that should
  * show can be missing, and the frame after starts from what this one found. */
-#include "render/rendererInternal.h"
-#include "scene/sceneInternal.h"
-#include "core/threads.h"
-#include "shaderir/ir.h"
-#include "vulkan/frameGraph.h"
-#include "vulkan/shaders.h"
-#include "vulkan/vulkanApi.h"
-
-#include <stdio.h>
-#include <stdlib.h>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
-
-enum {
-    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_R32G32_UINT = 101, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
-    LAYOUT_UNDEFINED = 0, LAYOUT_COLOR = 2, LAYOUT_DEPTH = 3, LAYOUT_DEPTH_READ = 4, LAYOUT_SHADER_READ = 5, LAYOUT_TRANSFER_SRC = 6, LAYOUT_TRANSFER_DST = 7, LAYOUT_PRESENT = 1000001002,
-    IMAGE_TRANSFER_SRC = 1, IMAGE_TRANSFER_DST = 2, IMAGE_SAMPLED = 4, IMAGE_COLOR = 0x10, IMAGE_DEPTH = 0x20,
-    BUFFER_TRANSFER_SRC = 1, BUFFER_TRANSFER_DST = 2, BUFFER_UNIFORM = 0x10, BUFFER_STORAGE = 0x20, BUFFER_INDEX = 0x40, BUFFER_VERTEX = 0x80, BUFFER_INDIRECT = 0x100,
-    MEMORY_DEVICE_LOCAL = 1, MEMORY_HOST_VISIBLE = 2, MEMORY_HOST_COHERENT = 4, MEMORY_HOST_CACHED = 8,
-    STAGE_TOP = 1, STAGE_DRAW_INDIRECT = 2, STAGE_VERTEX_INPUT = 4, STAGE_VERTEX_SHADER = 8, STAGE_FRAGMENT = 0x80, STAGE_EARLY_TESTS = 0x100, STAGE_LATE_TESTS = 0x200, STAGE_COLOR = 0x400, STAGE_COMPUTE = 0x800, STAGE_TRANSFER = 0x1000, STAGE_BOTTOM = 0x2000, STAGE_HOST = 0x4000,
-    ACCESS_INDIRECT = 1, ACCESS_VERTEX_READ = 4, ACCESS_SHADER_READ = 0x20, ACCESS_SHADER_WRITE = 0x40, ACCESS_COLOR_READ = 0x80, ACCESS_COLOR_WRITE = 0x100, ACCESS_DEPTH_READ = 0x200, ACCESS_DEPTH_WRITE = 0x400, ACCESS_TRANSFER_READ = 0x800, ACCESS_TRANSFER_WRITE = 0x1000, ACCESS_HOST_READ = 0x2000,
-    DESCRIPTOR_COMBINED = 1, DESCRIPTOR_UNIFORM = 6, DESCRIPTOR_STORAGE = 7,
-    SHADER_VERTEX = 1, SHADER_FRAGMENT = 0x10, SHADER_COMPUTE = 0x20,
-    ASPECT_COLOR = 1, ASPECT_DEPTH = 2
-};
-
-#define SLOTS 2            /* frames in flight */
-#define QUERIES (ARTF_PASS_TIMES + 1) /* timestamps of a slot: where its frame starts, and where each pass ends */
-#define MAX_TEXTURES 1024  /* in the one descriptor array, where the device allows; what is beyond draws white */
-#define MAX_SWAPCHAIN_IMAGES 8
-
-typedef struct GpuBuffer {
-    VkBuffer buffer;
-    VkDeviceMemory memory;
-    VkDeviceSize size;
-    VkDeviceSize held; /* bytes of its memory (size, rounded as the driver wants) */
-    void* mapped;
-    uint64_t serial; /* which allocation this is: a handle can come back the same for another (see Slot's bound) */
-    bool borrowed;   /* its memory is another's (an image's, bufferOver): freed with that, not with this */
-} GpuBuffer;
-
-typedef struct GpuImage {
-    VkImage image;
-    VkDeviceMemory memory;
-    VkImageView view;
-    VkDeviceSize held; /* bytes of its memory */
-    int type;          /* of which memory type */
-} GpuImage;
-
-/* What belongs to one frame in flight. */
-typedef struct Slot {
-    VkCommandBuffer commands;
-    VkFence fence;
-    VkSemaphore acquired;
-    VkDescriptorSet set;
-    bool timed; /* its timestamps hold a frame */
-    const char* passNames[ARTF_PASS_TIMES]; /* the passes its timestamps end, after the first */
-    uint32_t passCount;
-    GpuBuffer frame, instances, visible, indirect, template_, materials, overlayStaging, background, stream, layerList, trace;
-    GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
-    GpuBuffer decals;                  /* the decals that may show (63) */
-    GpuBuffer probes;                  /* light that bounced, gathered on the CPU (artfVulkanProbesOnCpu) */
-    /* the GPU's probes on their way back to the scene (PROBES_KEPT_EVERY): copied in this slot's frame, read when its
-     * fence says it is done, if the scene's probes are still those (its id, their serial); and how many steps they had */
-    GpuBuffer probesBack;
-    bool probesBackHeld;
-    uint64_t probesBackScene;
-    uint32_t probesBackSerial, probesBackFrames;
-    VkBuffer probesBound, probesNextBound; /* what its set says bindings 62 and 70 are: its probes, or the GPU's */
-    /* What rays read of the instances, this slot's, as they move: the trees' top and the table of instances (20, 21);
-     * with the hardware, its instances, the top level built from them in the frame's own commands (64), and that
-     * build's scratch. Each says which of tracing's versions it holds. */
-    GpuBuffer traceTop, traceInstances, rtInstances, rtTop, rtScratch;
-    GpuBuffer traceStaging; /* what bones moved of the trees, on its way up in the frame's commands (slotMeshSync) */
-    VkAccelerationStructureKHR rtTopLevel;
-    uint32_t rtTopRoom;
-    uint64_t traceTopVersion, traceTopScene, rtTopVersion, rtTopScene, rtTopBottoms;
-    GpuBuffer swarmRows;               /* this frame's rows for emitters of many (67) */
-    GpuBuffer shadow, shadowList, shadowCommands, shadowViewCommands, shadowCasters, posed, skinTable, motion, meshletCommands, meshletState, layerCommands;
-    uint64_t meshletBoundTable; /* what its set says bindings 40 and 41 are (serials: see GpuBuffer) */
-    bool meshletBound;
-    uint32_t shadowCasterCount, shadowViews;
-    uint64_t motionVersion;
-    uint64_t motionStep;  /* (what of ArtfMotion this slot holds, after its instances) */
-    size_t motionCount;
-    uint64_t skinBoundData, skinBoundVertices; /* what its set says binding 34 and 36 are (serials) */
-    uint64_t shadowInstances, shadowStructure, shadowMaterials, shadowScene;
-    uint32_t shadowMeshes;
-    uint64_t instanceVersion, structureVersion, materialVersion, lodVersion, streamStamp, streamScene;
-    bool fresh; /* nothing written yet */
-} Slot;
-
-typedef struct SkinPlace { const ArtfSkinData* skin; uint32_t row; } SkinPlace;
-
-/* refused: it did not fit in the GPU's memory, and is not drawn (ARTF_EVENT_REFUSED); tried again when a mesh goes. */
-typedef struct MeshRange { uint32_t firstIndex; int32_t vertexOffset; uint32_t indexCount, colorBase; uint64_t deformVersion; uint32_t vertexLength, colorLength, generation, refused; } MeshRange;
-
-/* Stretches of a buffer that were given back, by where they start. */
-typedef struct Span { uint32_t at, length; } Span;
-typedef ARTF_VEC(Span) SpanList;
-
-/* Room for length, in what was given back or after end; UINT32_MAX: none. */
-static uint32_t spanTake(SpanList* list, uint32_t length, uint32_t* end, uint32_t capacity) {
-    for (size_t i = 0; i < list->len; ++i) {
-        Span* s = &list->items[i];
-        if (s->length < length) continue;
-        const uint32_t at = s->at;
-        s->at += length;
-        s->length -= length;
-        if (!s->length) {
-            memmove(s, s + 1, (list->len - i - 1) * sizeof *s);
-            --list->len;
-        }
-        return at;
-    }
-    if (length > capacity || *end > capacity - length) return UINT32_MAX;
-    const uint32_t at = *end;
-    *end += length;
-    return at;
-}
-
-static void spanGive(SpanList* list, uint32_t at, uint32_t length) {
-    if (!length) return;
-    size_t i = 0;
-    while (i < list->len && list->items[i].at < at) ++i;
-    /* (joined to what touches it, so that large meshes find room again) */
-    if (i && list->items[i - 1].at + list->items[i - 1].length == at) {
-        list->items[i - 1].length += length;
-        if (i < list->len && list->items[i].at == at + length) {
-            list->items[i - 1].length += list->items[i].length;
-            memmove(&list->items[i], &list->items[i + 1], (list->len - i - 1) * sizeof *list->items);
-            --list->len;
-        }
-        return;
-    }
-    if (i < list->len && list->items[i].at == at + length) {
-        list->items[i].at = at;
-        list->items[i].length += length;
-        return;
-    }
-    artfVecReserve(list, list->len + 1);
-    memmove(&list->items[i + 1], &list->items[i], (list->len - i) * sizeof *list->items);
-    list->items[i].at = at;
-    list->items[i].length = length;
-    ++list->len;
-}
-
-/* What a compute shader that reads the scene's materials was made for (the tracing shader, reflections from rays):
- * the filter's guides, the ray tracing hardware, materials past glTF's core and lights' shapes, and the program's own
- * materials, the first graphCount of scene's. */
-enum { MAKE_TRACE, MAKE_REFLECTIONS, MAKE_COMPUTE };
-typedef struct ComputeKey {
-    bool guides, hardware, more;
-    uint32_t graphCount;
-    uint64_t scene;
-} ComputeKey;
-
-typedef struct Vulkan {
-    ArtfRenderer base;
-    void* library;
-    void* (VKAPI* getInstanceProcAddr)(VkInstance, const char*);
-    VkResult (VKAPI* vkCreateInstance)(const InstanceCreateInfo*, const void*, VkInstance*);
-#define X(name, result, args) result (VKAPI* name) args;
-    ARTF_VK_INSTANCE_FUNCTIONS(X)
-    ARTF_VK_DEVICE_FUNCTIONS(X)
-#undef X
-    VkInstance instance;
-    VkPhysicalDevice gpu;
-    VkDevice device;
-    VkQueue queue;
-    uint32_t family;
-    PhysicalDeviceMemoryProperties memory;
-    char description[300];
-    bool noVsync;
-    bool compressTextures, takesBc, takesEtc, takesAstc;
-    char* pipelineCachePath;
-    VkPipelineCache pipelineCache;
-    VkQueryPool timestamps;
-    float timestampPeriod; /* nanoseconds a tick; 0: this device has no timestamps */
-    double gpuMs;
-    ArtfPassTime passTimes[ARTF_PASS_TIMES]; /* of the last frame the GPU finished */
-    uint32_t passTimeCount;
-
-    ArtfSurface native;
-    VkSurfaceKHR surface;
-    int colorFormat, colorSpace; /* what the frame is drawn in: what the surface offers */
-    VkSwapchainKHR swapchain;
-    uint32_t imageCount;
-    VkImage images[MAX_SWAPCHAIN_IMAGES];
-    VkImageView views[MAX_SWAPCHAIN_IMAGES];
-    VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES];
-    VkSemaphore rendered[MAX_SWAPCHAIN_IMAGES];
-    GpuImage offscreen; /* in place of a swapchain */
-    GpuBuffer readback; /* where artfRendererReadPixels copies it, kept from one frame to the next */
-    GpuImage depth;
-    GpuImage samples4;  /* with antialiasing: what is drawn, before it is resolved into the frame */
-    int samples;        /* of a pixel: 1 or 4 */
-    int width, height;
-    bool targetsStale; /* a new size: made again before the next frame */
-    /* What the surface said when the swapchain was made: a frame that is only suboptimal makes it again
-     * when this changes, not each time (Android says suboptimal for as long as the compositor turns it). */
-    VkFlags surfaceTransform;
-    uint32_t surfaceWidth, surfaceHeight;
-    /* ArtfRendererOptions.preRotate; how the image the frame goes into is turned (0 to 3, a quarter clockwise each), and
-     * its size: the frame's, or its sides the other way round at a quarter or three */
-    bool preRotate;
-    int turn, imageWidth, imageHeight;
-    bool lost;         /* nothing more can be drawn: it can only be freed */
-    bool deviceFault;  /* VK_EXT_device_fault is on: when the device is lost, the driver is asked why */
-    bool shaderDebug;  /* VK_KHR_shader_non_semantic_info is on, and the shaders carry where in C each is built */
-    uint64_t deviceBytes; /* of the device's memory, what Artful holds (ArtfFrameStats.gpuBytes) */
-    uint64_t shadowKeys[ARTF_SHADOW_VIEWS]; /* what each map holds */
-    uint64_t shadowSeen;                    /* the scene's changes these know of */
-    /* layers by each pixel's depth */
-    bool fragmentStores, sampleShading;
-    GpuBuffer layerCounts, layerFragments;
-    VkPipeline layerListPipeline, layerResolvePipeline;
-    VkRenderPass midPass, resolvePass;
-    VkFramebuffer resolveFramebuffer;
-    /* meshlets on the GPU: their table, and what each mesh has of it */
-    bool drawCounted;
-    GpuBuffer meshletTable, meshletMeshes;
-    uint32_t mostMeshlets;
-    VkPipeline meshletPipelines[3]; /* by ArtfCullPhase */
-    /* whether each meshlet of each instance showed, and where each instance's are; 0: none has */
-    GpuBuffer meshletFlags, meshletFlagStarts;
-    uint64_t meshletFlagVersion;
-    uint32_t shadowMapsDrawn;
-    VkPipeline shadowCullPipeline;
-    /* bones, on the GPU: what meshes were, where each skin is in it, and what this frame moves */
-    GpuBuffer skinData;
-    ARTF_VEC(SkinPlace) skinPlaces;
-    uint64_t skinRemovals, skinScene;
-    VkPipeline skinPipeline;
-    ARTF_VEC(uint32_t) skinJobs, scratchSkinCounts;
-    /* emitters of many (particles.c): their particles, each emitter's after the one before (binding 66); which they
-     * are, how many steps each has seen, and where each starts */
-    GpuBuffer swarmState;
-    VkPipeline swarmPipeline;
-    ARTF_VEC(ArtfSwarm*) swarms, swarmsBefore;
-    ARTF_VEC(uint64_t) swarmSeen;
-    ARTF_VEC(uint32_t) swarmAt;
-    uint32_t swarmRoom;   /* particles the instances' and copies' buffers have room for, after the rest */
-    uint32_t swarmPlaces; /* this frame's */
-    uint64_t swarmScene;
-
-    VkRenderPass renderPass, earlyPass, latePass;
-    VkDescriptorSetLayout setLayout;
-    VkPipelineLayout pipelineLayout;
-    VkPipeline cullPipelines[3], hizFirstPipeline, hizNextPipeline, scenePipeline, cutoutPipeline, overlayPipeline, layerDepthPipeline, layerPipeline;
-    VkPipeline particlePipeline;  /* particles one after another, in one draw: depth tested and written as each goes */
-    VkPipeline tracePipeline, traceShowPipeline, shadowPipeline, shadowHolesPipeline;
-    VkShaderModule sceneVertexModule; /* kept: a scene's graphs make new pipelines */
-    uint64_t graphScene;
-    uint32_t graphCount;
-    bool probes, walls, froxels, coats, softShadows, shapes; /* the scene's pixel shaders read probes, their maps, the fog's grid, coats, lights' shapes: made again when that changes */
-    /* views (ArtfView): the scene's pixel shaders have them, and each triangle's meshlet; the overdraw view's pipelines,
-     * one for what is culled and one for both sides; and each triangle's meshlet, by mesh (binding 65) */
-    bool viewShaders, meshletShaders, primitiveIds;
-    VkPipeline overdrawPipelines[2];
-    GpuBuffer meshletIds;
-    uint64_t meshletIdsKey;
-    bool tracedShadows, tracedHardware; /* and shadows from rays (ArtfShadowDesc.traced), through the trees or the hardware */
-    VkPipeline reflectionTraced;        /* reflections from rays (ArtfPostDesc.screen.tracedReflections): made when first asked */
-    /* shadow maps: all in one atlas of depth */
-    VkRenderPass shadowPass;
-    VkFramebuffer shadowFramebuffer;
-    GpuImage shadowAtlas;
-    int shadowWidth, shadowHeight;
-    VkPipeline backgroundPipeline, bloomFirstPipeline, bloomNextPipeline, bloomUpPipeline, backdropPipeline;
-    VkDescriptorPool descriptorPool;
-    VkSampler sampler, depthSampler;
-    bool multiDraw;       /* several draws in one indirect call */
-    /* The ray tracing hardware (ArtfTraceDesc.hardware): a bottom level for each mesh traced, in one buffer; the top
-     * level over the traced instances, in their order (binding 64). */
-    bool rayQuery;        /* the device has acceleration structures and ray queries, and they are on */
-    bool traceHardware;   /* the trace pipeline goes through them */
-    bool traceMore;       /* the trace pipeline reads materials past glTF's core and lights' shapes */
-    /* Each mesh's bottom level is its own, built or refitted in the frame's commands (slotMeshSync), in a room of one of
-     * the blocks; the corners are each mesh's own (from 0), and the positions are the trees' vertices (binding 19). */
-    GpuBuffer rtIndices, rtScratch;
-    struct RtBottom* rtBottoms;
-    uint32_t rtBottomCount;
-    ARTF_VEC(struct RtBlock) rtBlocks;
-    uint64_t rtBottomsBuilt; /* how many times bottom levels were built: a slot's top level built before is stale */
-    uint64_t rtMeshVersion, rtScene, rtRemovals;
-    uint64_t rtIndexScene, rtIndexRemovals; /* what the corners were written for, and how many triangles */
-    size_t rtIndexTriangles;
-    uint32_t maxTextures;
-    /* the depth pyramid; flags: what showed last frame */
-    GpuBuffer hiz, flags;
-    uint32_t hizLevels;
-    uint32_t hizTable[ARTF_HIZ_LEVELS][4];
-    VkCommandPool commandPool;
-    Slot slots[SLOTS];
-    uint64_t frameNumber;
-    uint64_t bufferSerial; /* the last GpuBuffer's serial */
-    /* Pipelines being made on a thread of their own while frames go on with these (see pipelinesFollow): the scene's
-     * pixel shaders and passes, and the compute shaders that read its materials (tracePipeline, reflectionTraced, and
-     * what each was made for); warmed: artfRendererWarm was called, and the next frame makes what is left before it
-     * draws. And pipelines no frame takes any more, destroyed once the frames that took them are done. */
-    struct ShaderJob* shaderJob;
-    struct ComputeJob* computeJobs[MAKE_COMPUTE];
-    ComputeKey computeKeys[MAKE_COMPUTE];
-    bool warmed;
-    ARTF_VEC(struct Retired) retired;
-
-    /* the scene, as the GPU has it */
-    uint64_t sceneId;
-    GpuBuffer vertices, indices, meshTable, colors;
-    SpanList vertexSpans, indexSpans, colorSpans;
-    uint64_t meshRemovals, textureVersion;
-    ARTF_VEC(uint64_t) textureMarks; /* of each texture here: its generation and resident mipmap */
-    ARTF_VEC(uint8_t) textureHeld;   /* and the first mipmap its image holds (TEXTURE_NONE: none, or white) */
-    uint32_t vertexCount, indexCount, colorCount;
-    ARTF_VEC(MeshRange) meshes;
-    ARTF_VEC(GpuImage) textures;
-    uint32_t instanceCapacity, materialCapacity, meshCapacity;
-    ARTF_VEC(uint32_t) copyStarts; /* scratch: where each mesh's copies start */
-    ARTF_VEC(ArtfLayer) layers;    /* scratch: what shows what is behind it, in view */
-    ARTF_VEC(BufferCopy) posedCopies; /* scratch: meshes a pose moved */
-    ARTF_VEC(BufferCopy) pastCopies;  /* scratch: what the vertices of meshes that bend were */
-    uint64_t meshTableVersion;
-
-    /* tracing: what rays read, and what each pixel gathered */
-    GpuBuffer traceNodes, traceTriangles, traceVertices, traceSum;
-    /* the filter: what surfaces are, what was gathered, what its passes hand on */
-    GpuBuffer denoiseBuffers[7], denoiseShift;
-    VkPipeline denoiseLight, denoiseTime, denoiseSpace[3], denoiseEnd;
-    bool denoiseFirst;
-    uint32_t traceFrames;
-    float tracePrevious[16];
-    uint64_t traceScene, traceMeshVersion, traceKey;
-    uint32_t traceDone;
-    /* what the trees on the GPU were last sent up as: their lengths, and each mesh's pose (what bones move goes up in
-     * the frame's commands, slotMeshSync) */
-    size_t traceLengths[4];
-    uint64_t traceRemovals;
-    struct TraceUp* traceUp;
-    uint32_t traceUpCount;
-    ARTF_VEC(BufferCopy) traceCopies[2]; /* scratch: of the trees' nodes and vertices */
-
-    /* a background pass: its light, its bloom and its data; its shader, the program's */
-    GpuBuffer hdr, bloom, backgroundData;
-    GpuBuffer environment;          /* a scene's maps of all around (binding 49): four bytes until one has some */
-    uint64_t environmentVersion, environmentScene;
-    VkPipeline environmentPipeline; /* behind the scene */
-    /* A frame in floats (ArtfRendererOptions.hdr): the scene draws light and surfaces, the passes of postShaders.inc
-     * follow, and presentPass puts it in the frame, with the overlay. */
-    bool floats, independentBlend;
-    int sceneFormat;                /* what the scene's passes draw into: floats, or the frame's own */
-    GpuImage floatColor, floatSurface;
-    VkRenderPass presentPass;
-    VkFramebuffer presentFramebuffers[MAX_SWAPCHAIN_IMAGES];
-    VkPipeline presentPipeline;
-    VkPipeline postPipelines[16];   /* gather, occlusion, its blur, reflections, froxels, temporal, focus, bloom down, up, reflections' use, meter, motion blur,
-                                     * velocity, tiles' largest, upscaling, sharpening */
-    ArtfMotion motion;              /* how each instance moved: after the instances in each slot's buffer */
-    bool exposureValid;             /* auto exposure has a state to go on from */
-    VkPipeline fogPipeline;         /* fog that light goes through, over what is behind the scene */
-    GpuBuffer postLight, postDepth, postSurface, postScratch, postHistory, postOcclusion, postFog, postBloom;
-    bool postAliased; /* postOcclusion is in floatColor's memory (postBuffersMake) */
-    /* Light, the second light and the history are three buffers alike, and which plays which part changes in a frame
-     * in place of copying one into another: the passes read and write them through set 1 (0 light, 1 second, 2 history),
-     * one set for each way of giving the three parts to the three buffers (roleSets[light * 9 + second * 3 + history],
-     * of postLight, postScratch and postHistory), and role says which is which now. */
-    VkDescriptorSetLayout roleLayout;
-    VkDescriptorPool rolePool;
-    VkDescriptorSet roleSets[27];
-    uint8_t role[3];
-    uint32_t postBloomSizes[6][3];  /* of each level: where it starts, its width, its height */
-    /* The look-up table (ArtfPostDesc.look.lut), in bloom's buffer past auto exposure's state: room for so many vec4s, which
-     * scene and version it holds, and a copy of it to make from the staging buffer at the next frame. */
-    VkDeviceSize lutRoom;
-    uint64_t lutScene, lutVersion;
-    bool lutPending;
-    GpuBuffer lutStaging;
-    float previous[16];             /* the frame before's viewProj */
-    bool hasPrevious, historyValid;
-    uint32_t postFrames;
-    uint32_t grainFrames;           /* for film grain */
-    /* The scene's size: the frame's, unless it is drawn smaller and upscaled (ArtfRendererOptions.renderScale). What
-     * the scene draws and what reads it before upscaling are this size; the rest, the overlay and the frame, the
-     * frame's. */
-    int sceneWidth, sceneHeight;
-    float renderScale;
-    bool surfaceWide;               /* the surface target has its second word: motion is followed */
-    GpuBuffer pastVertices;         /* what the vertex buffer held a frame ago, where a pose moves vertices (binding 68) */
-    GpuBuffer postBlur;             /* motion blur's velocities (binding 69): unused since they share postOcclusion */
-    GpuBuffer postLocks;            /* upscaling's locks (binding 71): two floats a pixel of the frame, the halves in turn */
-    uint32_t lockHalf;              /* which half this frame's upscaling writes */
-    struct Slot* owed;              /* a frame begun whose fence was reset, until it is submitted (frameOwed) */
-    bool memoryShort;               /* this frame, the GPU's memory ran out for something (ARTF_EVENT_OUT_OF_MEMORY) */
-    bool texturesShort;             /* and a texture went up with less than was asked, or white (artfSceneResidencyPress) */
-    uint32_t owedImage;
-    uint32_t postNeeds;             /* what effects that are on need of the post buffers (postNeedsOf) */
-    /* What each post pipeline reads and writes (its IR, from its words: postAccessOf), as bits: the three parts of set 1
-     * (0 to 2), then set 0's post buffers; and, while postRecord records, what the dispatches since the last barrier read
-     * and wrote, by the buffers the parts are then: a barrier goes only where a dispatch would race one before it. */
-    uint32_t postReads[16], postWrites[16];
-    uint32_t pendingReads, pendingWrites;
-    bool postTracking;
-    uint32_t postBarriers, postDispatches; /* (of the last frame: how many barriers its post dispatches took) */
-    GpuBuffer postNone;             /* what binds where an effect is off: a buffer of nothing */
-    ArtfPool* pool;                 /* workers for what the CPU does for the GPU: the probes, for tests */
-    /* Light that bounced, gathered here (artfShaderProbes): what the probes hold and what a step makes of them, which
-     * all frames share, as each step reads what the one before made (62, 70); its pipeline and what it was made for;
-     * the steps since they started over, and whose probes they are (a scene, and its artfSceneSetIndirect) */
-    GpuBuffer probesNow, probesNext;
-    VkPipeline probePipeline;
-    uint64_t probeKey, probeScene, probeGraphScene;
-    uint32_t probeGraphs; /* the scene's materials in C the probes' shader was made for */
-    uint32_t probeFrames, probeSerial;
-    bool probeClear;
-    ArtfLightData* lightScratch;    /* lights past the frame's own, and their lists, before they go up */
-    uint32_t* listScratch;
-    uint32_t lightsOmitted; /* ArtfFrameStats.lightsOmitted, of the last frame */
-    size_t listScratchSize; /* (in numbers) */
-    uint64_t backgroundDataStamp, backgroundDataScene, backgroundModuleStamp, backgroundModuleScene;
-
-    /* the overlay */
-    GpuImage overlay;
-    const uint32_t* overlayPixels;
-    int overlayWidth, overlayHeight, overlayStride;
-    bool overlayFull;     /* all of it must go up */
-    bool overlayPending;  /* something must go up */
-    bool overlayUsable;   /* the image holds a picture */
-    ARTF_VEC(ArtfRect) overlayDamage;
-
-    double cpuMs;
-} Vulkan;
+#include "vulkan/vulkanInternal.h"
 
 /* ---- memory ---- */
 
-static int memoryType(const Vulkan* v, uint32_t bits, VkFlags wanted) {
+int memoryType(const Vulkan* v, uint32_t bits, VkFlags wanted) {
     for (uint32_t i = 0; i < v->memory.typeCount; ++i)
         if ((bits >> i & 1) && (v->memory.types[i].propertyFlags & wanted) == wanted) return (int)i;
     return -1;
 }
 
-typedef enum BufferUse { BUFFER_GPU, BUFFER_WRITTEN_BY_CPU, BUFFER_READ_BY_CPU } BufferUse;
 
-static bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, BufferUse use) {
+bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, BufferUse use) {
     memset(b, 0, sizeof *b);
     BufferCreateInfo info = {ST_BUFFER_CREATE_INFO, NULL, 0, size ? size : 16, usage, 0, 0, NULL};
     if (v->vkCreateBuffer(v->device, &info, NULL, &b->buffer) != VK_OK) return false;
@@ -500,11 +64,11 @@ static bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usa
     return true;
 }
 
-static bool bufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, bool hostVisible) {
+bool bufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, bool hostVisible) {
     return bufferNewFor(v, b, size, usage, hostVisible ? BUFFER_WRITTEN_BY_CPU : BUFFER_GPU);
 }
 
-static void bufferFree(Vulkan* v, GpuBuffer* b) {
+void bufferFree(Vulkan* v, GpuBuffer* b) {
     if (b->buffer) v->vkDestroyBuffer(v->device, b->buffer, NULL);
     if (b->memory && !b->borrowed) v->vkFreeMemory(v->device, b->memory, NULL);
     v->deviceBytes -= b->held;
@@ -514,7 +78,7 @@ static void bufferFree(Vulkan* v, GpuBuffer* b) {
 /* (imageNew's memory at least this large: for a buffer that lives in it when the image does not, bufferOver) */
 static VkDeviceSize imageLeast;
 
-static bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, uint32_t mips, int samples, VkFlags usage, VkFlags aspect) {
+bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, uint32_t mips, int samples, VkFlags usage, VkFlags aspect) {
     memset(g, 0, sizeof *g);
     ImageCreateInfo info = {ST_IMAGE_CREATE_INFO, NULL, 0, 1 /* 2D */, format, {(uint32_t)width, (uint32_t)height, 1}, mips, 1, samples, 0 /* optimal */, usage, 0, 0, NULL, LAYOUT_UNDEFINED};
     if (v->vkCreateImage(v->device, &info, NULL, &g->image) != VK_OK) return false;
@@ -544,7 +108,7 @@ static bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, 
 
 /* A buffer in an image's memory, for what lives only where the image does not (the frame graph's aliasing): false
  * when the image's memory would not do (too small, or of a type the buffer cannot have), and the buffer gets its own. */
-static bool bufferOver(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, const GpuImage* g) {
+bool bufferOver(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, const GpuImage* g) {
     memset(b, 0, sizeof *b);
     if (!g->memory) return false;
     BufferCreateInfo info = {ST_BUFFER_CREATE_INFO, NULL, 0, size, usage, 0, 0, NULL};
@@ -563,7 +127,7 @@ static bool bufferOver(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage
     return true;
 }
 
-static void imageFree(Vulkan* v, GpuImage* g) {
+void imageFree(Vulkan* v, GpuImage* g) {
     if (g->view) v->vkDestroyImageView(v->device, g->view, NULL);
     if (g->image) v->vkDestroyImage(v->device, g->image, NULL);
     if (g->memory) v->vkFreeMemory(v->device, g->memory, NULL);
@@ -571,18 +135,18 @@ static void imageFree(Vulkan* v, GpuImage* g) {
     memset(g, 0, sizeof *g);
 }
 
-static void imageBarrier(Vulkan* v, VkCommandBuffer c, VkImage image, uint32_t mips, int from, int to, VkFlags srcStage, VkFlags dstStage, VkFlags srcAccess, VkFlags dstAccess) {
+void imageBarrier(Vulkan* v, VkCommandBuffer c, VkImage image, uint32_t mips, int from, int to, VkFlags srcStage, VkFlags dstStage, VkFlags srcAccess, VkFlags dstAccess) {
     ImageMemoryBarrier b = {ST_IMAGE_MEMORY_BARRIER, NULL, srcAccess, dstAccess, from, to, ~0u, ~0u, image, {ASPECT_COLOR, 0, mips, 0, 1}};
     v->vkCmdPipelineBarrier(c, srcStage, dstStage, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
-static void memoryBarrier(Vulkan* v, VkCommandBuffer c, VkFlags srcStage, VkFlags dstStage, VkFlags srcAccess, VkFlags dstAccess) {
+void memoryBarrier(Vulkan* v, VkCommandBuffer c, VkFlags srcStage, VkFlags dstStage, VkFlags srcAccess, VkFlags dstAccess) {
     GlobalBarrier b = {ST_MEMORY_BARRIER, NULL, srcAccess, dstAccess};
     v->vkCmdPipelineBarrier(c, srcStage, dstStage, 0, 1, &b, 0, NULL, 0, NULL);
 }
 
 /* Commands to run now, for what happens rarely: loading a mesh, say. */
-static VkCommandBuffer oneShotBegin(Vulkan* v) {
+VkCommandBuffer oneShotBegin(Vulkan* v) {
     CommandBufferAllocateInfo alloc = {ST_COMMAND_BUFFER_ALLOCATE, NULL, v->commandPool, 0, 1};
     VkCommandBuffer c = NULL;
     v->vkAllocateCommandBuffers(v->device, &alloc, &c);
@@ -591,7 +155,7 @@ static VkCommandBuffer oneShotBegin(Vulkan* v) {
     return c;
 }
 
-static bool oneShotEnd(Vulkan* v, VkCommandBuffer c) {
+bool oneShotEnd(Vulkan* v, VkCommandBuffer c) {
     v->vkEndCommandBuffer(c);
     SubmitInfo submit = {ST_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &c, 0, NULL};
     VkResult r = v->vkQueueSubmit(v->queue, 1, &submit, 0);
@@ -602,7 +166,7 @@ static bool oneShotEnd(Vulkan* v, VkCommandBuffer c) {
 
 /* ---- the frame's targets ---- */
 
-static void targetsFree(Vulkan* v) {
+void targetsFree(Vulkan* v) {
     if (v->resolveFramebuffer) v->vkDestroyFramebuffer(v->device, v->resolveFramebuffer, NULL);
     v->resolveFramebuffer = 0;
     for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i) {
@@ -635,7 +199,7 @@ static void targetsFree(Vulkan* v) {
     v->overlayUsable = false;
 }
 
-static void writeOverlayDescriptor(Vulkan* v) {
+void writeOverlayDescriptor(Vulkan* v) {
     DescriptorImageInfo image = {v->sampler, v->overlay.view, LAYOUT_SHADER_READ};
     for (int i = 0; i < SLOTS; ++i) {
         WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[i].set, 7, 0, 1, DESCRIPTOR_COMBINED, &image, NULL, NULL};
@@ -644,7 +208,7 @@ static void writeOverlayDescriptor(Vulkan* v) {
 }
 
 /* The pyramid's levels, from half the frame down to a texel, and what the depth buffer's size is. */
-static bool hizMake(Vulkan* v) {
+bool hizMake(Vulkan* v) {
     uint32_t w = (uint32_t)v->sceneWidth, h = (uint32_t)v->sceneHeight, at = 0, level = 0;
     v->hizTable[ARTF_HIZ_LEVELS - 1][1] = w;
     v->hizTable[ARTF_HIZ_LEVELS - 1][2] = h;
@@ -672,20 +236,17 @@ static bool hizMake(Vulkan* v) {
 int artfVulkanSubmitsLeft = -1;
 
 
-static void lose(Vulkan* v, VkResult result);
 extern bool artfShaderDebugInfo; /* (spirv.h) */
 bool artfVulkanRefuseSwapchain = false;
 int artfVulkanTestTurn = 0;
 bool artfVulkanNoAliasing = false;
 
-static void lightDescriptors(Vulkan* v, Slot* s);
-static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b);
 
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
 /* What a post shader reads and writes, from its words (irFromSpirv, irUses): set 1's parts as bits 0 to 2, set 0's
  * bindings 50 to 59 as bits 3 to 12, 69 as 55's (they are one buffer), 71 as bit 13; what else it binds is only read, and
  * left out. */
-static void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* writes) {
+void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* writes) {
     *reads = *writes = ~0u; /* (not known: as all) */
     IrModule m;
     irInit(&m);
@@ -706,11 +267,10 @@ static void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uin
     irFree(&m);
 }
 
-enum { NEED_OCCLUSION = 1, NEED_BLUR = 2, NEED_FOG = 4, NEED_SECOND = 8, NEED_HISTORY = 16 };
 
 /* What the frame's effects need past the light, its depth and surfaces, and bloom (the frame graph's targets that
  * effects that are off leave unused: frameGraph.c). */
-static uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f) {
+uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f) {
     const bool scaled = v->sceneWidth != v->width || v->sceneHeight != v->height, temporal = f->post[1][3] > 0;
     uint32_t n = 0;
     if (f->post[0][2] > 0) n |= NEED_OCCLUSION;
@@ -725,7 +285,7 @@ static uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f) {
  * a buffer of nothing (postNone); ambient occlusion's and motion blur's velocities are one buffer, as large as the larger,
  * as no pass uses both (the frame graph: one lives in its pass, the other in its own). Made again when an effect comes
  * or goes (postNeedsOf): the device is idle then. */
-static bool postBuffersMake(Vulkan* v) {
+bool postBuffersMake(Vulkan* v) {
     const VkDeviceSize pixels = (VkDeviceSize)v->sceneWidth * v->sceneHeight, framePixels = (VkDeviceSize)v->width * v->height;
     const VkDeviceSize fog = (VkDeviceSize)((v->sceneWidth + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ((v->sceneHeight + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ARTF_FROXEL_SLICES;
     VkDeviceSize bloom = 0;
@@ -804,7 +364,7 @@ static bool postBuffersMake(Vulkan* v) {
 }
 
 /* With floats: what the scene draws into, and what comes after reads and writes, bound once for every slot. */
-static bool postTargetsMake(Vulkan* v) {
+bool postTargetsMake(Vulkan* v) {
     /* (the scene's light: with room for motion blur's velocities, which can live in its memory: postBuffersMake) */
     const VkDeviceSize blurTiles = (VkDeviceSize)((v->width + 15) / 16) * ((v->height + 15) / 16);
     imageLeast = v->sceneWidth == v->width && v->sceneHeight == v->height ? ((VkDeviceSize)v->width * v->height + blurTiles * 2) * 8 : 0;
@@ -818,7 +378,7 @@ static bool postTargetsMake(Vulkan* v) {
 
 /* The scene's look-up table, into the staging buffer, and bloom's buffer made larger when it has no room for it: the
  * copy is made as the frame's commands begin (postRecord). Rare: it waits for the GPU. */
-static bool syncLut(Vulkan* v, const ArtfScene* scene) {
+bool syncLut(Vulkan* v, const ArtfScene* scene) {
     if (!scene->lut || (v->lutScene == scene->id && v->lutVersion == scene->lutVersion)) return true;
     const VkDeviceSize entries = (VkDeviceSize)(scene->lutFloats / 3);
     v->vkDeviceWaitIdle(v->device);
@@ -849,7 +409,7 @@ static bool syncLut(Vulkan* v, const ArtfScene* scene) {
     return true;
 }
 
-static bool targetsMake(Vulkan* v) {
+bool targetsMake(Vulkan* v) {
     if (v->surface) {
         SurfaceCapabilities caps;
         if (v->vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v->gpu, v->surface, &caps) != VK_OK) return false;
@@ -951,13 +511,13 @@ static bool targetsMake(Vulkan* v) {
 }
 
 /* Whether the surface turned or changed size since the swapchain was made. */
-static bool surfaceChanged(Vulkan* v) {
+bool surfaceChanged(Vulkan* v) {
     SurfaceCapabilities caps;
     if (v->vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v->gpu, v->surface, &caps) != VK_OK) return true;
     return caps.currentTransform != v->surfaceTransform || caps.current.width != v->surfaceWidth || caps.current.height != v->surfaceHeight;
 }
 
-static bool targetsRemake(Vulkan* v) {
+bool targetsRemake(Vulkan* v) {
     v->vkDeviceWaitIdle(v->device);
     targetsFree(v);
     if (v->overlayPixels) { v->overlayFull = true; v->overlayPending = true; }
@@ -966,7 +526,7 @@ static bool targetsRemake(Vulkan* v) {
 
 /* ---- pipelines ---- */
 
-static VkShaderModule shaderModule(Vulkan* v, uint32_t* code, size_t size) {
+VkShaderModule shaderModule(Vulkan* v, uint32_t* code, size_t size) {
     ShaderModuleCreateInfo info = {ST_SHADER_MODULE_CREATE_INFO, NULL, 0, size, code};
     VkShaderModule module = 0;
     v->vkCreateShaderModule(v->device, &info, NULL, &module);
@@ -977,7 +537,7 @@ static VkShaderModule shaderModule(Vulkan* v, uint32_t* code, size_t size) {
 /* colorLoad, depthLoad: 0 clears, 1 keeps what is there; depthStore: what is drawn stays for a shader. */
 /* A pipeline's blending into the scene's passes: with a frame in floats, the surface is beside the color, and only
  * what is solid writes it. */
-static PipelineColorBlend blendOf(const Vulkan* v, ColorBlendAttachment* pair, ColorBlendAttachment color, bool surface) {
+PipelineColorBlend blendOf(const Vulkan* v, ColorBlendAttachment* pair, ColorBlendAttachment color, bool surface) {
     pair[0] = color;
     const ColorBlendAttachment kept = {0, 0, 0, 0, 0, 0, 0, surface ? 3u : 0u};
     pair[1] = kept;
@@ -986,7 +546,7 @@ static PipelineColorBlend blendOf(const Vulkan* v, ColorBlendAttachment* pair, C
 }
 
 /* wide: the surface with its second word (surfaceWide). On any thread. */
-static bool renderPassMake(const Vulkan* v, VkRenderPass* out, bool load, bool store, int colorFinal, bool readDepth, bool wide) {
+bool renderPassMake(const Vulkan* v, VkRenderPass* out, bool load, bool store, int colorFinal, bool readDepth, bool wide) {
     /* (with a frame in floats, depth is kept for what comes after, and the surface goes beside the color) */
     if (v->floats) store = true;
     const int colorFrom = load ? LAYOUT_COLOR : LAYOUT_UNDEFINED, depthFrom = load ? LAYOUT_DEPTH_READ : LAYOUT_UNDEFINED;
@@ -1027,7 +587,7 @@ static bool renderPassMake(const Vulkan* v, VkRenderPass* out, bool load, bool s
 }
 
 /* The scene's passes: renderPass, earlyPass, latePass, midPass, resolvePass. On any thread; none if one fails. */
-static bool scenePassesCreate(const Vulkan* v, bool wide, int finalLayout, VkRenderPass* passes) {
+bool scenePassesCreate(const Vulkan* v, bool wide, int finalLayout, VkRenderPass* passes) {
     for (int i = 0; i < 5; ++i) passes[i] = 0;
     const bool ok = renderPassMake(v, &passes[0], false, false, finalLayout, false, wide) && renderPassMake(v, &passes[1], false, true, LAYOUT_COLOR, false, wide) &&
               renderPassMake(v, &passes[2], true, false, finalLayout, false, wide) && renderPassMake(v, &passes[3], true, true, LAYOUT_COLOR, false, wide) &&
@@ -1040,7 +600,7 @@ static bool scenePassesCreate(const Vulkan* v, bool wide, int finalLayout, VkRen
 }
 
 /* What the driver compiled last time, if a file was named. */
-static void pipelineCacheOpen(Vulkan* v) {
+void pipelineCacheOpen(Vulkan* v) {
     void* data = NULL;
     size_t size = 0;
     FILE* f = v->pipelineCachePath ? fopen(v->pipelineCachePath, "rb") : NULL;
@@ -1060,7 +620,7 @@ static void pipelineCacheOpen(Vulkan* v) {
     artfFree(data);
 }
 
-static void pipelineCacheSave(Vulkan* v) {
+void pipelineCacheSave(Vulkan* v) {
     size_t size = 0;
     if (!v->pipelineCachePath || !v->pipelineCache || v->vkGetPipelineCacheData(v->device, v->pipelineCache, &size, NULL) != VK_OK || !size) return;
     void* data = artfMalloc(size);
@@ -1078,7 +638,7 @@ static void pipelineCacheSave(Vulkan* v) {
 
 /* Depth alone, kept for the frame's pass to read; and it waits for the frame before to be done with it. What is there
  * stays: a map that did not change is not drawn again. */
-static bool shadowPassMake(Vulkan* v) {
+bool shadowPassMake(Vulkan* v) {
     const AttachmentDescription attachment = {0, FORMAT_D32, 1, 0, 0, 2, 1, LAYOUT_DEPTH_READ, LAYOUT_DEPTH_READ};
     const AttachmentReference depth = {0, LAYOUT_DEPTH};
     const SubpassDescription subpass = {0, 0, 0, NULL, 0, NULL, NULL, &depth, 0, NULL};
@@ -1092,7 +652,7 @@ static bool shadowPassMake(Vulkan* v) {
 }
 
 /* An atlas of this size, in the layout the frame's pass reads. */
-static bool shadowAtlasMake(Vulkan* v, int width, int height) {
+bool shadowAtlasMake(Vulkan* v, int width, int height) {
     if (v->shadowFramebuffer) v->vkDestroyFramebuffer(v->device, v->shadowFramebuffer, NULL);
     v->shadowFramebuffer = 0;
     imageFree(v, &v->shadowAtlas);
@@ -1114,15 +674,13 @@ static bool shadowAtlasMake(Vulkan* v, int width, int height) {
     return true;
 }
 
-/* What the scene's pixel shaders are made with, beyond floats: what vkDraw finds the scene asks for. */
-typedef struct Features { bool probes, walls, froxels, coats, softShadows, shapes, viewShaders, meshletShaders, tracedShadows, tracedHardware; } Features;
 
-static Features featuresOf(const Vulkan* v) {
+Features featuresOf(const Vulkan* v) {
     const Features f = {v->probes, v->walls, v->froxels, v->coats, v->softShadows, v->shapes, v->viewShaders, v->meshletShaders, v->tracedShadows, v->tracedHardware};
     return f;
 }
 
-static void featuresSet(Vulkan* v, const Features* f) {
+void featuresSet(Vulkan* v, const Features* f) {
     v->probes = f->probes;
     v->walls = f->walls;
     v->froxels = f->froxels;
@@ -1135,22 +693,18 @@ static void featuresSet(Vulkan* v, const Features* f) {
     v->tracedHardware = f->tracedHardware;
 }
 
-static uint32_t variantOf(bool floats, const Features* f) {
+uint32_t variantOf(bool floats, const Features* f) {
     return (floats ? ARTF_SHADER_FLOATS : 0u) | (f->probes ? ARTF_SHADER_PROBES : 0u) | (f->probes && f->walls ? ARTF_SHADER_WALLS : 0u) | (f->froxels ? ARTF_SHADER_FROXELS : 0u) |
            (f->coats ? ARTF_SHADER_COAT : 0u) | (f->softShadows ? ARTF_SHADER_SOFT : 0u) | (f->viewShaders ? ARTF_SHADER_VIEW : 0u) | (f->meshletShaders ? ARTF_SHADER_MESHLETS : 0u) | (f->tracedShadows ? ARTF_SHADER_TRACED : 0u) | (f->shapes ? ARTF_SHADER_SHAPES : 0u) | (f->tracedShadows && f->tracedHardware ? ARTF_SHADER_RAY_QUERY : 0u);
 }
 
-static uint32_t shaderVariant(const Vulkan* v) {
+uint32_t shaderVariant(const Vulkan* v) {
     const Features f = featuresOf(v);
     return variantOf(v->floats, &f);
 }
 
-/* A pipeline no frame will take from now on: destroyed when the frames before this one are done (retiredFree), so
- * that making another needs no wait for the device. So too what the ray tracing hardware no longer takes: a bottom
- * level, a buffer (of bottom levels, scratch, corners). */
-typedef struct Retired { VkPipeline pipeline; VkAccelerationStructureKHR structure; GpuBuffer buffer; uint64_t frame; } Retired;
 
-static void pipelineRetire(Vulkan* v, VkPipeline pipeline) {
+void pipelineRetire(Vulkan* v, VkPipeline pipeline) {
     if (!pipeline) return;
     Retired r;
     memset(&r, 0, sizeof r);
@@ -1159,7 +713,7 @@ static void pipelineRetire(Vulkan* v, VkPipeline pipeline) {
     artfVecPush(&v->retired, r);
 }
 
-static void structureRetire(Vulkan* v, VkAccelerationStructureKHR structure) {
+void structureRetire(Vulkan* v, VkAccelerationStructureKHR structure) {
     if (!structure) return;
     Retired r;
     memset(&r, 0, sizeof r);
@@ -1169,7 +723,7 @@ static void structureRetire(Vulkan* v, VkAccelerationStructureKHR structure) {
 }
 
 /* (the buffer is the list's now: b is left empty) */
-static void bufferRetire(Vulkan* v, GpuBuffer* b) {
+void bufferRetire(Vulkan* v, GpuBuffer* b) {
     if (!b->buffer && !b->memory) return;
     Retired r;
     memset(&r, 0, sizeof r);
@@ -1181,7 +735,7 @@ static void bufferRetire(Vulkan* v, GpuBuffer* b) {
 
 /* all: the device is idle. Otherwise those whose last frame the slot's fence has seen done: frames before
  * frameNumber - SLOTS + 1 are. (Structures go before the buffers that hold them: they were retired first.) */
-static void retiredFree(Vulkan* v, bool all) {
+void retiredFree(Vulkan* v, bool all) {
     size_t kept = 0;
     for (size_t i = 0; i < v->retired.len; ++i) {
         Retired r = v->retired.items[i];
@@ -1197,13 +751,13 @@ static void retiredFree(Vulkan* v, bool all) {
 }
 
 /* The scene's pixel shader's code: with shadows from rays, what they meet may be of the program's own materials. */
-static uint32_t* sceneFragmentCode(const Vulkan* v, bool cutout, const ArtfGraphData* graphs, uint32_t count, uint32_t variant, size_t* size) {
+uint32_t* sceneFragmentCode(const Vulkan* v, bool cutout, const ArtfGraphData* graphs, uint32_t count, uint32_t variant, size_t* size) {
     if (!cutout && !(variant & ARTF_SHADER_TRACED)) graphs = NULL, count = 0;
     return artfShaderSceneFragment(size, v->maxTextures, cutout, graphs, count, 0, variant);
 }
 
 /* The overdraw view's: each triangle adds its step wherever it is, whatever is in front (artfShaderOverdraw). */
-static bool overdrawPipelinesMake(Vulkan* v) {
+bool overdrawPipelinesMake(Vulkan* v) {
     if (v->overdrawPipelines[0]) return true;
     size_t size;
     uint32_t* code = artfShaderOverdraw(&size, v->floats);
@@ -1236,7 +790,7 @@ static bool overdrawPipelinesMake(Vulkan* v) {
 
 /* The pipeline of what is plain and solid, from its pixel shader, in pass (renderPass's or a new one's). On any
  * thread: it reads only what stays while it is made (passes are made again only by shaderJobEnd). */
-static bool scenePipelineCreate(Vulkan* v, VkShaderModule fragment, VkRenderPass pass, VkPipeline* out) {
+bool scenePipelineCreate(Vulkan* v, VkShaderModule fragment, VkRenderPass pass, VkPipeline* out) {
     const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
     const VertexAttribute attributes[3] = {{0, 0, FORMAT_RGBA16_UNORM, 0}, {1, 0, FORMAT_RG16_SNORM, 8}, {2, 0, FORMAT_RG16_FLOAT, 12}};
     const PipelineVertexInput vertexInput = {ST_PIPELINE_VERTEX_INPUT, NULL, 0, 1, &binding, 3, attributes};
@@ -1264,7 +818,7 @@ static bool scenePipelineCreate(Vulkan* v, VkShaderModule fragment, VkRenderPass
 /* What depends on a scene's materials of its own: all that is drawn with the cutout shader, which has a branch
  * for each. That is what plain surfaces do not pay for. */
 /* made[4]: a layer's depth, a layer, what has holes, particles. On any thread, as scenePipelineCreate. */
-static bool cutoutPipelinesCreate(Vulkan* v, VkShaderModule fragment, VkRenderPass pass, VkPipeline* made) {
+bool cutoutPipelinesCreate(Vulkan* v, VkShaderModule fragment, VkRenderPass pass, VkPipeline* made) {
     const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
     const VertexAttribute attributes[3] = {{0, 0, FORMAT_RGBA16_UNORM, 0}, {1, 0, FORMAT_RG16_SNORM, 8}, {2, 0, FORMAT_RG16_FLOAT, 12}};
     const PipelineVertexInput vertexInput = {ST_PIPELINE_VERTEX_INPUT, NULL, 0, 1, &binding, 3, attributes};
@@ -1304,7 +858,7 @@ static bool cutoutPipelinesCreate(Vulkan* v, VkShaderModule fragment, VkRenderPa
 }
 
 /* What the cutout shader draws, and what is made from it when first asked (the layers' lists), retired. */
-static void cutoutPipelinesRetire(Vulkan* v) {
+void cutoutPipelinesRetire(Vulkan* v) {
     VkPipeline* const old[5] = {&v->layerDepthPipeline, &v->layerPipeline, &v->cutoutPipeline, &v->layerListPipeline, &v->particlePipeline};
     for (int i = 0; i < 5; ++i) {
         pipelineRetire(v, *old[i]);
@@ -1314,7 +868,7 @@ static void cutoutPipelinesRetire(Vulkan* v) {
 
 /* What is behind the scene, what was traced, the environment and the fog over what is behind, in pass, as
  * pipelinesMake has them in a frame in floats: made[4]. On any thread, as scenePipelineCreate. */
-static bool behindPipelinesCreate(Vulkan* v, VkRenderPass pass, VkPipeline* made) {
+bool behindPipelinesCreate(Vulkan* v, VkRenderPass pass, VkPipeline* made) {
     for (int i = 0; i < 4; ++i) made[i] = 0;
     size_t size;
     uint32_t* code = artfShaderOverlayVertex(&size);
@@ -1361,7 +915,7 @@ static bool behindPipelinesCreate(Vulkan* v, VkRenderPass pass, VkPipeline* made
 /* The layers' lists: made[0] lists each pixel's layers (the cutout shader, of variant, that lists), in pass; made[1]
  * resolves them, in resolvePass with samples, pass without. Those asked for (list, resolve). On any thread, as
  * scenePipelineCreate. */
-static bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uint32_t count, uint32_t variant, VkRenderPass pass, VkRenderPass resolvePass, bool list, bool resolve, VkPipeline* made) {
+bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uint32_t count, uint32_t variant, VkRenderPass pass, VkRenderPass resolvePass, bool list, bool resolve, VkPipeline* made) {
     made[0] = made[1] = 0;
     size_t size;
     uint32_t* code;
@@ -1415,7 +969,7 @@ static bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uin
 }
 
 /* A compute pipeline from code. On any thread, as scenePipelineCreate. */
-static bool computePipelineCreate(Vulkan* v, uint32_t* code, size_t size, VkPipeline* out) {
+bool computePipelineCreate(Vulkan* v, uint32_t* code, size_t size, VkPipeline* out) {
     *out = 0;
     VkShaderModule module = shaderModule(v, code, size);
     if (!module) return false;
@@ -1447,7 +1001,7 @@ static bool computePipelineCreate(Vulkan* v, uint32_t* code, size_t size, VkPipe
 bool artfVulkanShadersWait = false;
 
 /* The scene's materials of its own, copied: the program may change the scene's while a thread makes their shaders. */
-static ArtfGraphData* graphsCopy(const ArtfScene* scene) {
+ArtfGraphData* graphsCopy(const ArtfScene* scene) {
     const uint32_t count = (uint32_t)scene->graphs.len;
     if (!count) return NULL;
     ArtfGraphData* graphs = artfMalloc(count * sizeof *graphs);
@@ -1459,35 +1013,19 @@ static ArtfGraphData* graphsCopy(const ArtfScene* scene) {
     return graphs;
 }
 
-static void graphsFree(ArtfGraphData* graphs, uint32_t count) {
+void graphsFree(ArtfGraphData* graphs, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) artfFree(graphs[i].nodes);
     artfFree(graphs);
 }
 
 /* Pipelines made for the first count materials of their own of the scene madeFor draw this scene: those past count by
  * their own values. (Graphs are only added; another scene's would be other branches.) */
-static bool graphsPrefix(uint32_t count, uint64_t madeFor, const ArtfScene* scene) {
+bool graphsPrefix(uint32_t count, uint64_t madeFor, const ArtfScene* scene) {
     return count <= scene->graphs.len && (!count || madeFor == scene->id);
 }
 
-typedef struct ShaderJob {
-    Vulkan* v;
-    ArtfTask* task; /* NULL: made at once, or artfVulkanWarm waited for it */
-    Features features;
-    uint32_t variant;
-    ArtfGraphData* graphs; /* a copy: the program may change the scene's while this is made */
-    uint32_t graphCount;
-    uint64_t scene;
-    bool wide;                      /* the surface's second word */
-    bool passesNew;                 /* wide is not what the scene's passes have: new ones, and what is drawn in them */
-    bool lists, resolve;            /* the layers' lists' pipeline (it was there), and their resolve (new passes) */
-    VkRenderPass pass, resolvePass; /* those the pipelines are made in */
-    VkRenderPass passes[5];
-    VkPipeline plain, cutout[4], lister[2], behind[4];
-    bool ok;
-} ShaderJob;
 
-static void shaderJobRun(void* user) {
+void shaderJobRun(void* user) {
     ShaderJob* j = user;
     Vulkan* v = j->v;
     bool ok = true;
@@ -1513,7 +1051,7 @@ static void shaderJobRun(void* user) {
 
 /* The scene's pixel shaders for want and its materials of its own, in passes for wide: on a thread of their own, or
  * now. */
-static void shaderJobStart(Vulkan* v, const ArtfScene* scene, const Features* want, bool wide, bool now) {
+void shaderJobStart(Vulkan* v, const ArtfScene* scene, const Features* want, bool wide, bool now) {
     ShaderJob* j = ARTF_NEW(ShaderJob);
     j->v = v;
     j->features = *want;
@@ -1534,7 +1072,7 @@ static void shaderJobStart(Vulkan* v, const ArtfScene* scene, const Features* wa
 
 /* Waits for what is being made (if anything), and takes it if use and it can draw the scene; or throws it away, as no
  * frame has drawn with it. false: use, and making failed. */
-static bool shaderJobEnd(Vulkan* v, const ArtfScene* scene, bool use) {
+bool shaderJobEnd(Vulkan* v, const ArtfScene* scene, bool use) {
     ShaderJob* j = v->shaderJob;
     if (!j) return true;
     artfTaskJoin(j->task);
@@ -1588,20 +1126,8 @@ static bool shaderJobEnd(Vulkan* v, const ArtfScene* scene, bool use) {
     return !failed;
 }
 
-/* The tracing shader (MAKE_TRACE: with the filter's passes, the first time its guides are asked for) or reflections
- * from rays (MAKE_REFLECTIONS), for key. */
-typedef struct ComputeJob {
-    Vulkan* v;
-    ArtfTask* task; /* as ShaderJob's */
-    int kind;
-    ComputeKey key;
-    ArtfGraphData* graphs;
-    bool denoise;
-    VkPipeline made, denoised[6]; /* the filter's: light, time, three in space, the end */
-    bool ok;
-} ComputeJob;
 
-static ComputeKey computeKeyOf(const Vulkan* v, const ArtfScene* scene, int kind) {
+ComputeKey computeKeyOf(const Vulkan* v, const ArtfScene* scene, int kind) {
     ComputeKey k = {false, v->rayQuery, false, (uint32_t)scene->graphs.len, scene->id};
     if (kind == MAKE_TRACE) {
         k.guides = scene->trace.desc.denoise;
@@ -1611,9 +1137,9 @@ static ComputeKey computeKeyOf(const Vulkan* v, const ArtfScene* scene, int kind
     return k;
 }
 
-static bool computeFlagsSame(const ComputeKey* a, const ComputeKey* b) { return a->guides == b->guides && a->hardware == b->hardware && a->more == b->more; }
+bool computeFlagsSame(const ComputeKey* a, const ComputeKey* b) { return a->guides == b->guides && a->hardware == b->hardware && a->more == b->more; }
 
-static void computeJobRun(void* user) {
+void computeJobRun(void* user) {
     ComputeJob* j = user;
     Vulkan* v = j->v;
     size_t size;
@@ -1634,7 +1160,7 @@ static void computeJobRun(void* user) {
     }
 }
 
-static void computeJobStart(Vulkan* v, const ArtfScene* scene, int kind, const ComputeKey* key, bool now) {
+void computeJobStart(Vulkan* v, const ArtfScene* scene, int kind, const ComputeKey* key, bool now) {
     ComputeJob* j = ARTF_NEW(ComputeJob);
     j->v = v;
     j->kind = kind;
@@ -1647,7 +1173,7 @@ static void computeJobStart(Vulkan* v, const ArtfScene* scene, int kind, const C
 }
 
 /* As shaderJobEnd: taken if it is made for what the scene asks, with materials of its own it can draw. */
-static bool computeJobEnd(Vulkan* v, const ArtfScene* scene, int kind, bool use) {
+bool computeJobEnd(Vulkan* v, const ArtfScene* scene, int kind, bool use) {
     ComputeJob* j = v->computeJobs[kind];
     if (!j) return true;
     artfTaskJoin(j->task);
@@ -1685,7 +1211,7 @@ static bool computeJobEnd(Vulkan* v, const ArtfScene* scene, int kind, bool use)
 /* What the scene asks of a compute shader of kind, against the one there: usable, it can draw the scene (its
  * materials of their own past those it was made for by their own values). One that is not what is asked is made: now
  * if wait, otherwise on a thread of its own. false: making it failed. */
-static bool computeFollow(Vulkan* v, const ArtfScene* scene, int kind, bool wait, bool* usable) {
+bool computeFollow(Vulkan* v, const ArtfScene* scene, int kind, bool wait, bool* usable) {
     const ComputeKey want = computeKeyOf(v, scene, kind);
     VkPipeline* have = kind == MAKE_TRACE ? &v->tracePipeline : &v->reflectionTraced;
     const ComputeKey* had = &v->computeKeys[kind];
@@ -1706,10 +1232,9 @@ static bool computeFollow(Vulkan* v, const ArtfScene* scene, int kind, bool wait
     return true;
 }
 
-static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b);
 
 /* Layers by each pixel's depth, when a scene first asks: their lists, for this size, and what fills and reads them. */
-static bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
+bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
     const VkDeviceSize pixels = (VkDeviceSize)v->sceneWidth * v->sceneHeight;
     if (v->layerCounts.size < pixels * 4) {
         v->vkDeviceWaitIdle(v->device);
@@ -1731,7 +1256,7 @@ static bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
     return ok;
 }
 
-static bool pipelinesMake(Vulkan* v) {
+bool pipelinesMake(Vulkan* v) {
     pipelineCacheOpen(v);
     if (!shadowPassMake(v)) return false;
     const int frameLayout = v->surface ? LAYOUT_PRESENT : LAYOUT_TRANSFER_SRC;
@@ -2016,7 +1541,7 @@ static bool pipelinesMake(Vulkan* v) {
 
 /* ---- the scene, on the GPU ---- */
 
-static void writeBufferDescriptors(Vulkan* v, Slot* s) {
+void writeBufferDescriptors(Vulkan* v, Slot* s) {
     const DescriptorBufferInfo infos[6] = {{s->frame.buffer, 0, ~(VkDeviceSize)0}, {s->instances.buffer, 0, ~(VkDeviceSize)0}, {s->visible.buffer, 0, ~(VkDeviceSize)0},
                                            {v->meshTable.buffer, 0, ~(VkDeviceSize)0}, {s->materials.buffer, 0, ~(VkDeviceSize)0}, {s->indirect.buffer, 0, ~(VkDeviceSize)0}};
     WriteDescriptorSet writes[6];
@@ -2046,7 +1571,7 @@ static void writeBufferDescriptors(Vulkan* v, Slot* s) {
 }
 
 /* Room for each instance's flag, none set. */
-static bool flagsMake(Vulkan* v) {
+bool flagsMake(Vulkan* v) {
     bufferFree(v, &v->flags);
     if (!bufferNew(v, &v->flags, (VkDeviceSize)v->instanceCapacity * 4, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
     VkCommandBuffer c = oneShotBegin(v);
@@ -2055,7 +1580,7 @@ static bool flagsMake(Vulkan* v) {
 }
 
 /* Copies data to a buffer of the GPU's. */
-static bool upload(Vulkan* v, GpuBuffer* to, VkDeviceSize offset, const void* data, VkDeviceSize size) {
+bool upload(Vulkan* v, GpuBuffer* to, VkDeviceSize offset, const void* data, VkDeviceSize size) {
     if (!size) return true;
     if (to->mapped) { memcpy((char*)to->mapped + offset, data, size); return true; }
     GpuBuffer staging;
@@ -2069,13 +1594,13 @@ static bool upload(Vulkan* v, GpuBuffer* to, VkDeviceSize offset, const void* da
     return ok;
 }
 
-static bool takesFormat(const Vulkan* v, uint32_t format) { return format >= 157 ? v->takesAstc : format >= 147 ? v->takesEtc : v->takesBc; }
+bool takesFormat(const Vulkan* v, uint32_t format) { return format >= 157 ? v->takesAstc : format >= 147 ? v->takesEtc : v->takesBc; }
 
 long long artfVulkanTextureMemoryLimit = -1;
 long long artfVulkanMemoryBudget = -1;
 
 /* What a texture that cannot be made at all shows: white, which every entry of the array must have anyway. */
-static void textureWhite(Vulkan* v, uint32_t index) {
+void textureWhite(Vulkan* v, uint32_t index) {
     const DescriptorImageInfo white = {v->sampler, v->textures.items[0].view, LAYOUT_SHADER_READ};
     for (int k = 0; k < SLOTS; ++k) {
         const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 6, index, 1, DESCRIPTOR_COMBINED, &white, NULL, NULL};
@@ -2090,7 +1615,7 @@ static void textureWhite(Vulkan* v, uint32_t index) {
 /* Blocks go up as they are, where the device takes them; plain pixels are made into blocks if that was asked. When the
  * GPU's memory has run out, it goes up without its largest mipmaps, as many as it takes; when not even the smallest
  * fits, it is white, and said so (ARTF_EVENT_REFUSED). Only the white texture itself not fitting fails. */
-static bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool compress, ArtfTexture handle) {
+bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool compress, ArtfTexture handle) {
     GpuImage image;
     /* (what its image holds now: it is not let go for less) */
     const int held = index < v->textureHeld.len ? v->textureHeld.items[index] : TEXTURE_NONE;
@@ -2234,7 +1759,7 @@ static bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool co
 }
 
 /* Colors start with a white one, which is what the vertices of a mesh without colors read. */
-static bool colorsReset(Vulkan* v) {
+bool colorsReset(Vulkan* v) {
     const uint32_t white = 0xFFFFFFFFu;
     v->colorCount = 1;
     return upload(v, &v->colors, 0, &white, 4);
@@ -2243,20 +1768,18 @@ static bool colorsReset(Vulkan* v) {
 /* The list of copies: two words each, for four parts (early and late, plain and with holes or backs), with
  * room for every instance in each of its levels, as any of them may be the one chosen; then the layers,
  * which the CPU writes. */
-static uint32_t layersAt(const Vulkan* v) { return v->instanceCapacity * (ARTF_MAX_LODS + 1) * 4; }
+uint32_t layersAt(const Vulkan* v) { return v->instanceCapacity * (ARTF_MAX_LODS + 1) * 4; }
 /* (and after all that, a copy for each particle of emitters of many: their instances follow the instances and their
  * motion, at twice the room for instances) */
-static uint32_t swarmCopiesAt(const Vulkan* v) { return layersAt(v) + v->instanceCapacity * 3; }
-static VkDeviceSize visibleSize(const Vulkan* v) { return ((VkDeviceSize)swarmCopiesAt(v) + v->swarmRoom) * 2 * 4; }
-static VkDeviceSize instanceBytes(const Vulkan* v) { return (VkDeviceSize)v->instanceCapacity * 128 + (VkDeviceSize)v->swarmRoom * 64; }
+uint32_t swarmCopiesAt(const Vulkan* v) { return layersAt(v) + v->instanceCapacity * 3; }
+VkDeviceSize visibleSize(const Vulkan* v) { return ((VkDeviceSize)swarmCopiesAt(v) + v->swarmRoom) * 2 * 4; }
+VkDeviceSize instanceBytes(const Vulkan* v) { return (VkDeviceSize)v->instanceCapacity * 128 + (VkDeviceSize)v->swarmRoom * 64; }
 
-/* (below that many meshlets, about 65,000 triangles, what culling saves is less than it costs) */
-enum { MESHLET_COMMANDS = 1 << 16, MESHLET_LEAST = 512, MESHLET_HEADER = 12, MESHLET_DRAWN = 8 };
 
 /* What the shaders need of meshlets, for meshes that have many, do not bend, and are on the GPU (not removed, sent
  * away by residency, or refused for want of memory: their ranges hold nothing to read). */
-static bool meshletsUsed(const Vulkan* v, const ArtfMeshData* m, size_t i) { return m->meshletCount >= MESHLET_LEAST && !m->skin && !m->removed && i < v->meshes.len && v->meshes.items[i].indexCount; }
-static bool meshletsUp(Vulkan* v, const ArtfScene* scene) {
+bool meshletsUsed(const Vulkan* v, const ArtfMeshData* m, size_t i) { return m->meshletCount >= MESHLET_LEAST && !m->skin && !m->removed && i < v->meshes.len && v->meshes.items[i].indexCount; }
+bool meshletsUp(Vulkan* v, const ArtfScene* scene) {
     size_t rows = 1;
     for (size_t i = 0; i < scene->meshes.len; ++i) {
         const ArtfMeshData* m = &scene->meshes.items[i];
@@ -2297,7 +1820,7 @@ static bool meshletsUp(Vulkan* v, const ArtfScene* scene) {
 }
 
 /* What the scene gained since it was last drawn. That is rare, so it may wait for the GPU. */
-static bool syncScene(Vulkan* v, ArtfScene* scene) {
+bool syncScene(Vulkan* v, ArtfScene* scene) {
     bool rebind = false;
     if (v->sceneId != scene->id) {
         v->vkDeviceWaitIdle(v->device);
@@ -2548,7 +2071,7 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
 }
 
 /* Brings this slot's copy of what changes up to date. */
-static void syncSlot(Vulkan* v, Slot* s, const ArtfScene* scene) {
+void syncSlot(Vulkan* v, Slot* s, const ArtfScene* scene) {
     if (s->fresh || s->materialVersion != scene->materialVersion) {
         memcpy(s->materials.mapped, scene->materials.items, scene->materials.len * sizeof(ArtfMaterialData));
         /* (a coat and sheen after them all: ArtfFrameData.materials says where) */
@@ -2589,659 +2112,11 @@ static void syncSlot(Vulkan* v, Slot* s, const ArtfScene* scene) {
     s->fresh = false;
 }
 
-/* ---- light from all around ---- */
-
-/* The scene's maps go up when they change; until a scene has some, a buffer of four bytes stands in, which the
- * shaders do not read. */
-static bool syncEnvironment(Vulkan* v, const ArtfScene* scene) {
-    const VkDeviceSize full = ARTF_ENV_FLOATS * sizeof(float);
-    const bool fresh = scene->environment && (v->environmentVersion != scene->environmentVersion || v->environmentScene != scene->id);
-    if (v->environment.buffer && !fresh) return true;
-    if (v->environment.buffer) v->vkDeviceWaitIdle(v->device);
-    if (!v->environment.buffer || (fresh && v->environment.size < full)) {
-        bufferFree(v, &v->environment);
-        if (!bufferNew(v, &v->environment, fresh ? full : 4, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
-        const DescriptorBufferInfo info = {v->environment.buffer, 0, ~(VkDeviceSize)0};
-        for (int i = 0; i < SLOTS; ++i) {
-            const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[i].set, 49, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
-            v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
-        }
-    }
-    if (fresh) {
-        if (!upload(v, &v->environment, 0, scene->environment, full)) return false;
-        v->environmentVersion = scene->environmentVersion;
-        v->environmentScene = scene->id;
-    }
-    return true;
-}
-
-/* ---- tracing ---- */
-
-/* ---- the ray tracing hardware: acceleration structures ---- */
-
-enum {
-    BUFFER_DEVICE_ADDRESS = 0x20000, BUFFER_AS_INPUT = 0x80000, BUFFER_AS_STORAGE = 0x100000, STAGE_AS_BUILD = 0x02000000, ACCESS_AS_READ = 0x00200000, ACCESS_AS_WRITE = 0x00400000
-};
-
-/* A buffer the GPU knows by its address: where the CPU writes it (inputs), or the GPU's own (the structures, scratch). */
-static bool rtBufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, bool written) {
-    memset(b, 0, sizeof *b);
-    BufferCreateInfo info = {ST_BUFFER_CREATE_INFO, NULL, 0, size ? size : 16, usage | BUFFER_DEVICE_ADDRESS, 0, 0, NULL};
-    if (v->vkCreateBuffer(v->device, &info, NULL, &b->buffer) != VK_OK) return false;
-    MemoryRequirements req;
-    v->vkGetBufferMemoryRequirements(v->device, b->buffer, &req);
-    int type = written ? memoryType(v, req.typeBits, MEMORY_HOST_VISIBLE | MEMORY_HOST_COHERENT) : memoryType(v, req.typeBits, MEMORY_DEVICE_LOCAL);
-    if (type < 0) return false;
-    const MemoryAllocateFlagsInfo flags = {ST_MEMORY_ALLOCATE_FLAGS_INFO, NULL, 2 /* device address */, 0};
-    MemoryAllocateInfo alloc = {ST_MEMORY_ALLOCATE_INFO, &flags, req.size, (uint32_t)type};
-    if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) return false;
-    b->held = req.size;
-    v->deviceBytes += req.size;
-    v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
-    b->size = info.size;
-    b->serial = ++v->bufferSerial;
-    if (written && v->vkMapMemory(v->device, b->memory, 0, ~(VkDeviceSize)0, 0, &b->mapped) != VK_OK) return false;
-    return true;
-}
-
-static VkDeviceAddress rtAddress(Vulkan* v, const GpuBuffer* b) {
-    const BufferDeviceAddressInfo info = {ST_BUFFER_DEVICE_ADDRESS_INFO, NULL, b->buffer};
-    return v->vkGetBufferDeviceAddress(v->device, &info);
-}
-
-/* ---- tracing ---- */
-
-/* One of the buffers rays read: replaced when it has outgrown its room. built: the vertices, with the hardware, which
- * its bottom levels are built from, by their address. */
-static bool traceBuffer(Vulkan* v, GpuBuffer* b, uint32_t binding, const void* data, VkDeviceSize size, bool built) {
-    if (size > b->size || !b->buffer) {
-        bufferFree(v, b);
-        const VkFlags usage = BUFFER_STORAGE | BUFFER_TRANSFER_DST;
-        if (built ? !rtBufferNew(v, b, size * 2, usage | BUFFER_AS_INPUT, false) : !bufferNew(v, b, size * 2, usage, false)) return false;
-        const DescriptorBufferInfo info = {b->buffer, 0, ~(VkDeviceSize)0};
-        for (int i = 0; i < SLOTS; ++i) {
-            const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[i].set, binding, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
-            v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
-        }
-    }
-    return upload(v, b, 0, data, size);
-}
-
-/* Rays on the GPU go through the same trees as on the CPU, which makes them, as they change only when
- * the scene does: the scene's arrays go up as they are. The shader is large, so it is made only when a
- * scene first asks. It needs no ray tracing hardware. */
-
-/* A mesh's bottom level: where it is (a room in one of the blocks, as big as the structure made there), what it was
- * built from, and how often it was refitted since. */
-typedef struct RtBottom {
-    VkAccelerationStructureKHR structure;
-    VkDeviceAddress address;
-    uint32_t block;
-    VkDeviceSize offset, room, buildScratch, updateScratch;
-    uint64_t deform, generation;
-    uint32_t firstTriangle, triangleCount, firstVertex, vertexCount;
-    uint32_t refits;  /* since it was built */
-    float extent;     /* the diagonal of its box when it was built */
-    bool refittable;  /* built to allow an update: what bones or targets move */
-} RtBottom;
-
-/* Bottom levels side by side, each in its room; a block goes once none is left in it. */
-typedef struct RtBlock { GpuBuffer buffer; VkDeviceSize used; uint32_t live; } RtBlock;
-
-/* Of each mesh, the pose its nodes and vertices on the GPU are at. */
-typedef struct TraceUp { uint64_t deform; bool moved; } TraceUp;
-
-/* A refit makes the boxes fit where the triangles went, not the tree fit them: after so many, or once the mesh's box
- * has grown by half, it is built again. */
-enum { RT_REFITS = 60 };
-
-/* The structure goes once the frames that may read it are done; its room, with the block once that is empty. */
-static void rtRelease(Vulkan* v, RtBottom* b) {
-    structureRetire(v, b->structure);
-    if (b->room && b->block < v->rtBlocks.len) {
-        RtBlock* k = &v->rtBlocks.items[b->block];
-        if (k->live && --k->live == 0) {
-            bufferRetire(v, &k->buffer);
-            k->used = 0;
-        }
-    }
-    memset(b, 0, sizeof *b);
-}
-
-/* now: the device is idle. */
-static void rtBottomsFree(Vulkan* v, bool now) {
-    for (uint32_t i = 0; i < v->rtBottomCount; ++i) {
-        if (now && v->rtBottoms[i].structure) v->vkDestroyAccelerationStructureKHR(v->device, v->rtBottoms[i].structure, NULL);
-        else if (v->rtBottoms[i].structure) structureRetire(v, v->rtBottoms[i].structure);
-    }
-    for (size_t i = 0; i < v->rtBlocks.len; ++i) {
-        if (now) bufferFree(v, &v->rtBlocks.items[i].buffer);
-        else bufferRetire(v, &v->rtBlocks.items[i].buffer);
-    }
-    v->rtBlocks.len = 0;
-    artfFree(v->rtBottoms);
-    v->rtBottoms = NULL;
-    v->rtBottomCount = 0;
-}
-
-static void rtFree(Vulkan* v) {
-    if (!v->rayQuery) return;
-    rtBottomsFree(v, true);
-    artfVecFree(&v->rtBlocks);
-    for (int k = 0; k < SLOTS; ++k) {
-        Slot* s = &v->slots[k];
-        if (s->rtTopLevel) v->vkDestroyAccelerationStructureKHR(v->device, s->rtTopLevel, NULL);
-        s->rtTopLevel = 0;
-        s->rtTopRoom = 0;
-        GpuBuffer* const tops[3] = {&s->rtInstances, &s->rtTop, &s->rtScratch};
-        for (int i = 0; i < 3; ++i) bufferFree(v, tops[i]);
-    }
-    bufferFree(v, &v->rtIndices);
-    bufferFree(v, &v->rtScratch);
-}
-
-/* A room of this size: at the end of a block with that much left, or in a new block, of at least `block`. */
-static bool rtRoom(Vulkan* v, RtBottom* b, VkDeviceSize size, VkDeviceSize block) {
-    size = (size + 255) & ~(VkDeviceSize)255;
-    uint32_t at = UINT32_MAX;
-    for (uint32_t k = 0; k < v->rtBlocks.len && at == UINT32_MAX; ++k)
-        if (v->rtBlocks.items[k].buffer.buffer && v->rtBlocks.items[k].buffer.size - v->rtBlocks.items[k].used >= size) at = k;
-    if (at == UINT32_MAX) {
-        for (uint32_t k = 0; k < v->rtBlocks.len && at == UINT32_MAX; ++k)
-            if (!v->rtBlocks.items[k].buffer.buffer) at = k;
-        if (at == UINT32_MAX) {
-            const RtBlock none = {{0}, 0, 0};
-            artfVecPush(&v->rtBlocks, none);
-            at = (uint32_t)v->rtBlocks.len - 1;
-        }
-        RtBlock* k = &v->rtBlocks.items[at];
-        k->used = 0;
-        k->live = 0;
-        if (!rtBufferNew(v, &k->buffer, block > size ? block : size, BUFFER_AS_STORAGE, false)) return false;
-    }
-    RtBlock* k = &v->rtBlocks.items[at];
-    b->block = at;
-    b->offset = k->used;
-    b->room = size;
-    k->used += size;
-    ++k->live;
-    return true;
-}
-
-/* Each mesh's corners, from its first vertex (so that they do not change as meshes come or go before it): written
- * anew when meshes come or go, into a buffer of their own, the one before retired. */
-static bool rtIndicesSync(Vulkan* v, const ArtfScene* scene) {
-    const ArtfTrace* t = &scene->trace;
-    if (v->rtIndices.buffer && v->rtIndexScene == scene->id && v->rtIndexRemovals == t->meshRemovals && v->rtIndexTriangles == t->triangles.len) return true;
-    bufferRetire(v, &v->rtIndices);
-    if (!rtBufferNew(v, &v->rtIndices, (VkDeviceSize)t->triangles.len * 12 + 12, BUFFER_AS_INPUT, true)) return false;
-    uint32_t* corners = v->rtIndices.mapped;
-    for (size_t m = 0; m < t->ranges.len; ++m) {
-        const ArtfTraceRange* r = &t->ranges.items[m];
-        for (uint32_t i = r->firstTriangle; i < r->firstTriangle + r->triangleCount; ++i)
-            for (int c = 0; c < 3; ++c) corners[(size_t)i * 3 + (size_t)c] = t->triangles.items[i].v[c] - r->firstVertex;
-    }
-    v->rtIndexScene = scene->id;
-    v->rtIndexRemovals = t->meshRemovals;
-    v->rtIndexTriangles = t->triangles.len;
-    return true;
-}
-
-/* A mesh's triangles as the hardware reads them: its corners, and the positions the trees have of its vertices (on the
- * GPU, binding 19, as this frame's commands leave them). */
-static AsGeometry rtTriangles(VkDeviceAddress vertices, VkDeviceAddress corners, const ArtfTraceRange* r, uint32_t vertexCount) {
-    AsGeometry g;
-    memset(&g, 0, sizeof g);
-    g.sType = ST_AS_GEOMETRY;
-    g.geometryType = 0; /* triangles */
-    g.flags = 1;        /* opaque */
-    AsGeometryTriangles* tri = &g.geometry.triangles;
-    tri->sType = ST_AS_GEOMETRY_TRIANGLES;
-    tri->vertexFormat = 106; /* R32G32B32_SFLOAT */
-    tri->vertexData = vertices + (VkDeviceAddress)r->firstVertex * sizeof(ArtfTraceVertex);
-    tri->vertexStride = sizeof(ArtfTraceVertex);
-    tri->maxVertex = vertexCount ? vertexCount - 1 : 0;
-    tri->indexType = 1; /* uint32 */
-    tri->indexData = corners;
-    return g;
-}
-
-_Static_assert(offsetof(ArtfTraceVertex, p) == 0, "the hardware reads the trees' vertices' positions where they are");
-
-/* The diagonal of the box of a mesh's vertices, as the trees have them. */
-static float rtExtent(const ArtfTrace* t, const ArtfTraceRange* r, uint32_t vertexCount) {
-    float lo[3] = {3e38f, 3e38f, 3e38f}, hi[3] = {-3e38f, -3e38f, -3e38f};
-    for (uint32_t i = 0; i < vertexCount && r->firstVertex + i < t->vertices.len; ++i) {
-        const float* p = t->vertices.items[r->firstVertex + i].p;
-        for (int k = 0; k < 3; ++k) {
-            lo[k] = p[k] < lo[k] ? p[k] : lo[k];
-            hi[k] = p[k] > hi[k] ? p[k] : hi[k];
-        }
-    }
-    if (lo[0] > hi[0]) return 0;
-    return sqrtf((hi[0] - lo[0]) * (hi[0] - lo[0]) + (hi[1] - lo[1]) * (hi[1] - lo[1]) + (hi[2] - lo[2]) * (hi[2] - lo[2]));
-}
-
-uint64_t artfVulkanBottomLevels[2];
-
-/* What one bottom level does this frame. */
-typedef struct RtPlan { uint32_t mesh; bool update, fresh; VkDeviceSize size, scratch; } RtPlan;
-
-/* The trees' lengths, as they are on the GPU: when they are the same, only poses changed them. */
-static bool traceLayoutSame(const Vulkan* v, const ArtfScene* scene) {
-    const ArtfTrace* t = &scene->trace;
-    return v->traceUp && v->traceScene == scene->id && v->traceRemovals == t->meshRemovals && v->traceLengths[0] == t->nodes.len && v->traceLengths[1] == t->triangles.len &&
-           v->traceLengths[2] == t->vertices.len && v->traceLengths[3] == t->ranges.len;
-}
-
-/* What bones or targets moved of the trees: each such mesh's nodes and vertices, from the slot's staging into the trees,
- * in the frame's commands. Recorded in v->traceCopies; false when out of memory. */
-static bool traceMovedUp(Vulkan* v, Slot* s, const ArtfScene* scene) {
-    const ArtfTrace* t = &scene->trace;
-    v->traceCopies[0].len = v->traceCopies[1].len = 0;
-    VkDeviceSize bytes = 0;
-    for (size_t i = 0; i < scene->deforming.len; ++i) {
-        const uint32_t mesh = scene->deforming.items[i];
-        if (mesh >= t->ranges.len || mesh >= v->traceUpCount) continue;
-        const ArtfTraceRange* r = &t->ranges.items[mesh];
-        TraceUp* up = &v->traceUp[mesh];
-        if (up->deform == r->deformVersion && up->moved == r->moved) continue;
-        up->deform = r->deformVersion;
-        up->moved = r->moved;
-        if (r->nodeEnd > r->firstNode) {
-            const BufferCopy n = {bytes, (VkDeviceSize)r->firstNode * sizeof(ArtfTraceNode), (VkDeviceSize)(r->nodeEnd - r->firstNode) * sizeof(ArtfTraceNode)};
-            artfVecPush(&v->traceCopies[0], n);
-            bytes += n.size;
-        }
-        /* (as tracing wrote them: what its refit wrote, the GPU has) */
-        const size_t first = r->firstVertex, count = scene->meshes.items[mesh].vertexCount;
-        const size_t end = first + count < t->vertices.len ? first + count : t->vertices.len;
-        if (end > first) {
-            const BufferCopy p = {bytes, (VkDeviceSize)first * sizeof(ArtfTraceVertex), (VkDeviceSize)(end - first) * sizeof(ArtfTraceVertex)};
-            artfVecPush(&v->traceCopies[1], p);
-            bytes += p.size;
-        }
-    }
-    if (!bytes) return true;
-    if (s->traceStaging.size < bytes) {
-        /* (what the slot held is done with: its fence was waited for) */
-        bufferFree(v, &s->traceStaging);
-        if (!bufferNew(v, &s->traceStaging, bytes + bytes / 2, BUFFER_TRANSFER_SRC, true)) return false;
-    }
-    const char* from[2] = {(const char*)t->nodes.items, (const char*)t->vertices.items};
-    for (int k = 0; k < 2; ++k)
-        for (size_t i = 0; i < v->traceCopies[k].len; ++i) {
-            const BufferCopy* b = &v->traceCopies[k].items[i];
-            memcpy((char*)s->traceStaging.mapped + b->src, from[k] + b->dst, b->size);
-        }
-    return true;
-}
-
-/* What changed of the meshes rays meet, made so in the frame's own commands c, before anything reads it, with no wait
- * for the device: the trees' nodes and vertices of what bones or targets moved (all else that changes meshes went up at
- * once, waiting, in traceBuffersSync); and with the hardware, the bottom level of each mesh that came, changed or moved,
- * and of no other. What bones or targets move is built to allow an update, and refitted in place from this frame's
- * vertices; built again after RT_REFITS refits, or when its box has grown by half. A bottom level gone, or one that
- * outgrew its room, is retired: destroyed once the frames that read it are done. Frames before this one read what is
- * written here: the barrier first waits for them, on the GPU. */
-static bool slotMeshSync(Vulkan* v, Slot* s, VkCommandBuffer c, const ArtfScene* scene, bool hardware) {
-    const ArtfTrace* t = &scene->trace;
-    const bool trees = v->traceMeshVersion != t->meshVersion && traceLayoutSame(v, scene);
-    const bool bottoms = hardware && (v->rtScene != scene->id || v->rtMeshVersion != t->meshVersion || !v->rtBottoms);
-    if (!trees && !bottoms) return true;
-    if (trees) {
-        if (!traceMovedUp(v, s, scene)) return false;
-        v->traceMeshVersion = t->meshVersion;
-    }
-    const bool copies = trees && (v->traceCopies[0].len || v->traceCopies[1].len);
-    const VkFlags as = v->rayQuery ? STAGE_AS_BUILD : 0;
-    const VkFlags readers = STAGE_COMPUTE | STAGE_FRAGMENT | as;
-
-    RtPlan* plans = NULL;
-    uint32_t planCount = 0;
-    bool released = false;
-    VkDeviceSize scratch = 0;
-    if (bottoms) {
-        if (v->rtScene != scene->id) rtBottomsFree(v, false);
-        if (!rtIndicesSync(v, scene)) return false;
-        const uint32_t meshes = (uint32_t)t->ranges.len;
-        if (v->rtBottomCount < meshes || !v->rtBottoms) {
-            v->rtBottoms = artfRealloc(v->rtBottoms, ((size_t)meshes + 1) * sizeof *v->rtBottoms);
-            memset(v->rtBottoms + v->rtBottomCount, 0, ((size_t)meshes + 1 - v->rtBottomCount) * sizeof *v->rtBottoms);
-            v->rtBottomCount = meshes;
-        }
-        /* (meshes come and go: the trees' arrays started over, and each mesh's triangles may be elsewhere in them) */
-        const bool relaid = v->rtRemovals != t->meshRemovals;
-        const VkDeviceAddress vertices = rtAddress(v, &v->traceVertices), corners = rtAddress(v, &v->rtIndices);
-        plans = artfMalloc(((size_t)v->rtBottomCount + 1) * sizeof *plans);
-        VkDeviceSize fresh = 0;
-        for (uint32_t m = 0; m < v->rtBottomCount; ++m) {
-            RtBottom* b = &v->rtBottoms[m];
-            const ArtfTraceRange* r = m < meshes ? &t->ranges.items[m] : NULL;
-            if (!r || !r->triangleCount || m >= scene->meshes.len) {
-                if (b->structure) {
-                    rtRelease(v, b);
-                    released = true;
-                }
-                continue;
-            }
-            const ArtfMeshData* mesh = &scene->meshes.items[m];
-            const bool bends = mesh->skin != NULL;
-            /* (the same mesh, as it was built: what does not bend stays where it is in the trees or not, as its corners
-             * are its own; what bends was put in the trees again in the pose it had, its triangles maybe in another order) */
-            const bool same = b->structure && b->generation == mesh->generation && b->triangleCount == r->triangleCount && b->vertexCount == mesh->vertexCount && !(relaid && bends);
-            if (same && b->deform == r->deformVersion) {
-                b->firstTriangle = r->firstTriangle;
-                b->firstVertex = r->firstVertex;
-                continue;
-            }
-            RtPlan p = {m, false, false, 0, 0};
-            const float extent = rtExtent(t, r, mesh->vertexCount);
-            p.update = same && b->refittable && b->firstTriangle == r->firstTriangle && b->firstVertex == r->firstVertex && b->refits + 1 < RT_REFITS && extent <= b->extent * 1.5f;
-            if (p.update) {
-                p.scratch = b->updateScratch;
-            } else {
-                AsGeometry g = rtTriangles(vertices, corners, r, mesh->vertexCount);
-                const AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1 /* bottom */, 4 /* fast to trace */ | (bends ? 1u /* allow update */ : 0u), 0, 0, 0, 1, &g, NULL, 0};
-                AsBuildSizes sizes = {ST_AS_BUILD_SIZES, NULL, 0, 0, 0};
-                v->vkGetAccelerationStructureBuildSizesKHR(v->device, 1 /* on the device */, &build, &r->triangleCount, &sizes);
-                p.size = sizes.structureSize;
-                p.scratch = sizes.buildScratchSize;
-                /* (built again where it was, if it fits: the frames before are done with it, by the barrier) */
-                p.fresh = !b->structure || ((p.size + 255) & ~(VkDeviceSize)255) > b->room;
-                if (p.fresh) fresh += (p.size + 255) & ~(VkDeviceSize)255;
-                b->buildScratch = sizes.buildScratchSize;
-                b->updateScratch = sizes.updateScratchSize;
-                b->refittable = bends;
-                b->extent = extent;
-            }
-            scratch += (p.scratch + 255) & ~(VkDeviceSize)255;
-            plans[planCount++] = p;
-        }
-        /* rooms: those that are new go together in one block, with some to spare for meshes to come */
-        for (uint32_t i = 0; i < planCount; ++i) {
-            if (!plans[i].fresh) continue;
-            RtBottom* b = &v->rtBottoms[plans[i].mesh];
-            const RtBottom kept = *b;
-            if (b->structure) rtRelease(v, b);
-            b->buildScratch = kept.buildScratch;
-            b->updateScratch = kept.updateScratch;
-            b->refittable = kept.refittable;
-            b->extent = kept.extent;
-            if (!rtRoom(v, b, plans[i].size, fresh + fresh / 4 + (1u << 20))) {
-                artfFree(plans);
-                return false;
-            }
-            const AsCreateInfo create = {ST_AS_CREATE_INFO, NULL, 0, v->rtBlocks.items[b->block].buffer.buffer, b->offset, b->room, 1 /* bottom */, 0};
-            if (v->vkCreateAccelerationStructureKHR(v->device, &create, NULL, &b->structure) != VK_OK) {
-                artfFree(plans);
-                return false;
-            }
-            const AsDeviceAddressInfo address = {ST_AS_DEVICE_ADDRESS_INFO, NULL, b->structure};
-            b->address = v->vkGetAccelerationStructureDeviceAddressKHR(v->device, &address);
-            /* (staggered: so that what bends is not all built again in the same frame) */
-            b->refits = plans[i].mesh % RT_REFITS;
-            released = true;
-        }
-        if (scratch > v->rtScratch.size) {
-            bufferRetire(v, &v->rtScratch);
-            if (!rtBufferNew(v, &v->rtScratch, scratch + scratch / 2, BUFFER_STORAGE, false)) {
-                artfFree(plans);
-                return false;
-            }
-        }
-    }
-
-    /* the frames before are done reading, and building, what is written now */
-    memoryBarrier(v, c, readers | STAGE_TRANSFER, STAGE_TRANSFER | as, ACCESS_TRANSFER_WRITE | (as ? ACCESS_AS_WRITE : 0u),
-                  ACCESS_TRANSFER_WRITE | (as ? ACCESS_AS_READ | ACCESS_AS_WRITE : 0u));
-    if (copies) {
-        if (v->traceCopies[0].len) v->vkCmdCopyBuffer(c, s->traceStaging.buffer, v->traceNodes.buffer, (uint32_t)v->traceCopies[0].len, v->traceCopies[0].items);
-        if (v->traceCopies[1].len) v->vkCmdCopyBuffer(c, s->traceStaging.buffer, v->traceVertices.buffer, (uint32_t)v->traceCopies[1].len, v->traceCopies[1].items);
-        memoryBarrier(v, c, STAGE_TRANSFER, readers, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
-    }
-    if (planCount) {
-        AsGeometry* geometries = artfMalloc((size_t)planCount * sizeof *geometries);
-        AsBuildGeometryInfo* builds = artfMalloc((size_t)planCount * sizeof *builds);
-        AsBuildRange* ranges = artfMalloc((size_t)planCount * sizeof *ranges);
-        const AsBuildRange** rangeOf = artfMalloc((size_t)planCount * sizeof *rangeOf);
-        const VkDeviceAddress vertices = rtAddress(v, &v->traceVertices), corners = rtAddress(v, &v->rtIndices);
-        VkDeviceAddress scratchAt = rtAddress(v, &v->rtScratch);
-        for (uint32_t i = 0; i < planCount; ++i) {
-            const RtPlan* p = &plans[i];
-            RtBottom* b = &v->rtBottoms[p->mesh];
-            const ArtfTraceRange* r = &t->ranges.items[p->mesh];
-            const uint32_t vertexCount = scene->meshes.items[p->mesh].vertexCount;
-            geometries[i] = rtTriangles(vertices, corners, r, vertexCount);
-            /* an update: as it was built (the same flags, triangles, corners and format), in place, from where the
-             * vertices are now; the scratch of an update, each its own */
-            const AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 1 /* bottom */, 4 /* fast to trace */ | (b->refittable ? 1u /* allow update */ : 0u),
-                                               p->update ? 1 /* update */ : 0 /* build */, p->update ? b->structure : 0, b->structure, 1, &geometries[i], NULL, scratchAt};
-            builds[i] = build;
-            /* (the mesh's triangles, from its first: the triangle a ray meets is the first plus what the hardware says) */
-            const AsBuildRange range = {r->triangleCount, r->firstTriangle * 12, 0, 0};
-            ranges[i] = range;
-            rangeOf[i] = &ranges[i];
-            scratchAt += (p->scratch + 255) & ~(VkDeviceSize)255;
-            b->deform = r->deformVersion;
-            b->generation = scene->meshes.items[p->mesh].generation;
-            b->firstTriangle = r->firstTriangle;
-            b->triangleCount = r->triangleCount;
-            b->firstVertex = r->firstVertex;
-            b->vertexCount = vertexCount;
-            if (p->update) ++b->refits;
-            else if (!p->fresh) b->refits = 0;
-            ++artfVulkanBottomLevels[p->update ? 1 : 0];
-        }
-        /* (all at once: each its own structure and scratch) */
-        v->vkCmdBuildAccelerationStructuresKHR(c, planCount, builds, rangeOf);
-        memoryBarrier(v, c, STAGE_AS_BUILD, readers, ACCESS_AS_WRITE, ACCESS_AS_READ);
-        artfFree(geometries);
-        artfFree(builds);
-        artfFree(ranges);
-        artfFree(rangeOf);
-    }
-    artfFree(plans);
-    if (bottoms) {
-        /* (the top levels hold the bottom levels' boxes and addresses) */
-        if (planCount || released) ++v->rtBottomsBuilt;
-        v->rtMeshVersion = t->meshVersion;
-        v->rtRemovals = t->meshRemovals;
-        v->rtScene = scene->id;
-    }
-    return true;
-}
-
-/* A slot's buffer of what rays read that changes as instances move: host-visible, written where the GPU reads it, as
- * the slot's fence was waited for. */
-static bool slotTraceBuffer(Vulkan* v, Slot* s, GpuBuffer* b, uint32_t binding, const void* data, VkDeviceSize size) {
-    if (size > b->size || !b->buffer) {
-        bufferFree(v, b);
-        if (!bufferNew(v, b, size * 2, BUFFER_STORAGE, true)) return false;
-        bindStorage(v, s, binding, b);
-    }
-    if (size) memcpy(b->mapped, data, size);
-    return true;
-}
-
-/* What rays read of the instances, for this slot's frame: the trees' top and the table of instances; and with the
- * hardware, the top level, built in the frame's own commands c, before anything reads it. No wait: what the slot held
- * is done with, and the other slot's frame keeps its own. */
-static bool slotTopSync(Vulkan* v, Slot* s, VkCommandBuffer c, const ArtfScene* scene, bool hardware) {
-    const ArtfTrace* t = &scene->trace;
-    if (s->traceTopScene != scene->id || s->traceTopVersion != t->topVersion || !s->traceTop.buffer) {
-        if (!slotTraceBuffer(v, s, &s->traceTop, 20, t->top.items, t->top.len * sizeof *t->top.items)) return false;
-        if (!slotTraceBuffer(v, s, &s->traceInstances, 21, t->instances.items, (t->instances.len + 1) * sizeof *t->instances.items)) return false;
-        s->traceTopScene = scene->id;
-        s->traceTopVersion = t->topVersion;
-    }
-    if (!hardware || (s->rtTopLevel && s->rtTopScene == scene->id && s->rtTopVersion == t->topVersion && s->rtTopBottoms == v->rtBottomsBuilt)) return true;
-    {
-        const uint32_t count = (uint32_t)t->instances.len;
-        if (s->rtInstances.size < (VkDeviceSize)(count + 1) * sizeof(AsInstance)) {
-            bufferFree(v, &s->rtInstances);
-            if (!rtBufferNew(v, &s->rtInstances, (VkDeviceSize)(count + 1) * 2 * sizeof(AsInstance), BUFFER_AS_INPUT, true)) return false;
-        }
-        AsInstance* out = s->rtInstances.mapped;
-        uint32_t made = 0;
-        for (uint32_t i = 0; i < count; ++i) {
-            const uint32_t mesh = t->instanceMeshes.items[i];
-            const VkAccelerationStructureKHR bottom = mesh < v->rtBottomCount ? v->rtBottoms[mesh].structure : 0;
-            AsInstance o;
-            memcpy(o.transform, t->instanceWorlds.items + (size_t)i * 12, 48);
-            /* (no custom index: the table of instances has its mesh's first triangle, with no limit of 24 bits; fronts
-             * counter-clockwise, as the trees have them; and both sides of what has two) */
-            o.customAndMask = 0xFFu << 24;
-            o.offsetAndFlags = (uint32_t)(4u /* opaque; counter-clockwise is the front, as the trees have it, with no flag */ | (t->instances.items[i].twoSided & 1u ? 1u /* no culling */ : 0u)) << 24;
-            o.reference = bottom ? v->rtBottoms[mesh].address : 0;
-            /* (one with no triangles is there, empty: ids are places among the traced instances) */
-            if (!bottom) o.customAndMask &= 0xFFFFFFu; /* (a mask of 0: no ray meets it) */
-            out[made++] = o;
-        }
-        AsGeometry geometry;
-        memset(&geometry, 0, sizeof geometry);
-        geometry.sType = ST_AS_GEOMETRY;
-        geometry.geometryType = 2; /* instances */
-        geometry.geometry.instances.sType = ST_AS_GEOMETRY_INSTANCES;
-        geometry.geometry.instances.data = rtAddress(v, &s->rtInstances);
-        AsBuildGeometryInfo build = {ST_AS_BUILD_GEOMETRY_INFO, NULL, 0 /* top */, 4, 0, 0, 0, 1, &geometry, NULL, 0};
-        if (!s->rtTopLevel || made > s->rtTopRoom) {
-            /* (room for more than there are, so that a few more do not make it again; a build of fewer fits) */
-            const uint32_t room = made + made / 2 + 16;
-            AsBuildSizes sizes = {ST_AS_BUILD_SIZES, NULL, 0, 0, 0};
-            v->vkGetAccelerationStructureBuildSizesKHR(v->device, 1, &build, &room, &sizes);
-            if (s->rtTopLevel) v->vkDestroyAccelerationStructureKHR(v->device, s->rtTopLevel, NULL);
-            s->rtTopLevel = 0;
-            if (s->rtTop.size < sizes.structureSize) {
-                bufferFree(v, &s->rtTop);
-                if (!rtBufferNew(v, &s->rtTop, sizes.structureSize, BUFFER_AS_STORAGE, false)) return false;
-            }
-            if (s->rtScratch.size < sizes.buildScratchSize) {
-                bufferFree(v, &s->rtScratch);
-                if (!rtBufferNew(v, &s->rtScratch, sizes.buildScratchSize, BUFFER_STORAGE, false)) return false;
-            }
-            const AsCreateInfo create = {ST_AS_CREATE_INFO, NULL, 0, s->rtTop.buffer, 0, sizes.structureSize, 0, 0};
-            if (v->vkCreateAccelerationStructureKHR(v->device, &create, NULL, &s->rtTopLevel) != VK_OK) return false;
-            s->rtTopRoom = room;
-            const WriteDescriptorSetAs structures = {ST_WRITE_DESCRIPTOR_SET_AS, NULL, 1, &s->rtTopLevel};
-            const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, &structures, s->set, 64, 0, 1, DESCRIPTOR_AS, NULL, NULL, NULL};
-            v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
-        }
-        build.dst = s->rtTopLevel;
-        build.scratch = rtAddress(v, &s->rtScratch);
-        const AsBuildRange range = {made, 0, 0, 0};
-        const AsBuildRange* ranges = &range;
-        v->vkCmdBuildAccelerationStructuresKHR(c, 1, &build, &ranges);
-        memoryBarrier(v, c, STAGE_AS_BUILD, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_AS_WRITE, ACCESS_AS_READ);
-        s->rtTopScene = scene->id;
-        s->rtTopVersion = t->topVersion;
-        s->rtTopBottoms = v->rtBottomsBuilt;
-    }
-    return true;
-}
-
-/* (with pointers of 8 bytes: of 4, as armv7's, the same structures are smaller, Vulkan's as well as these) */
-_Static_assert(sizeof(void*) != 8 || (sizeof(AsGeometryTriangles) == 64 && sizeof(AsGeometry) == 96 && sizeof(AsBuildGeometryInfo) == 80 && sizeof(AsInstance) == 64 && sizeof(AsCreateInfo) == 64),
-               "the ray tracing structures are laid out as Vulkan's");
-
-/* The trees rays walk, as tracing holds them (artfSceneTraceSync first): sent up when they changed, waiting for the
- * device, when meshes came or went. When only poses changed them, what they moved goes up in the frame's own commands,
- * and so do the bottom levels (slotMeshSync); what moves with the instances is the slot's (slotTopSync). */
-static bool traceBuffersSync(Vulkan* v, const ArtfScene* scene) {
-    const ArtfTrace* t = &scene->trace;
-    if ((v->traceScene != scene->id || v->traceMeshVersion != t->meshVersion) && !traceLayoutSame(v, scene)) {
-        v->vkDeviceWaitIdle(v->device);
-        if (!traceBuffer(v, &v->traceNodes, 17, t->nodes.items, t->nodes.len * sizeof *t->nodes.items, false)) return false;
-        if (!traceBuffer(v, &v->traceTriangles, 18, t->triangles.items, t->triangles.len * sizeof *t->triangles.items, false)) return false;
-        if (!traceBuffer(v, &v->traceVertices, 19, t->vertices.items, t->vertices.len * sizeof *t->vertices.items, v->rayQuery)) return false;
-        v->traceMeshVersion = t->meshVersion;
-        v->traceRemovals = t->meshRemovals;
-        v->traceLengths[0] = t->nodes.len;
-        v->traceLengths[1] = t->triangles.len;
-        v->traceLengths[2] = t->vertices.len;
-        v->traceLengths[3] = t->ranges.len;
-        artfFree(v->traceUp);
-        v->traceUpCount = (uint32_t)t->ranges.len;
-        v->traceUp = artfCalloc((size_t)v->traceUpCount + 1, sizeof *v->traceUp);
-        for (uint32_t m = 0; m < v->traceUpCount; ++m) {
-            v->traceUp[m].deform = t->ranges.items[m].deformVersion;
-            v->traceUp[m].moved = t->ranges.items[m].moved;
-        }
-    }
-    v->traceScene = scene->id;
-    return true;
-}
-
-/* Shadows and reflections from rays while drawing: what rays read, kept up to date as instances move (particles left
- * out), with the hardware's structures where there are some. (The reflections' pass: computeFollow.) */
-static bool syncTraced(Vulkan* v, ArtfScene* scene) {
-    artfSceneTraceSync(scene);
-    if (!traceBuffersSync(v, scene)) return false;
-    return true;
-}
-
-/* What tracing reads and writes. (Its shader and the filter's: computeFollow.) */
-static bool syncTrace(Vulkan* v, ArtfScene* scene) {
-    artfSceneTraceSync(scene);
-    const ArtfTrace* t = &scene->trace;
-    const bool guides = t->desc.denoise;
-    if (!traceBuffersSync(v, scene)) return false;
-    if (!v->traceSum.buffer) {
-        v->vkDeviceWaitIdle(v->device);
-        if (!bufferNew(v, &v->traceSum, (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
-        const DescriptorBufferInfo info = {v->traceSum.buffer, 0, ~(VkDeviceSize)0};
-        for (int i = 0; i < SLOTS; ++i) {
-            const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[i].set, 22, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
-            v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
-        }
-        v->traceDone = 0;
-    }
-    if (guides && !v->denoiseBuffers[0].buffer) {
-        v->vkDeviceWaitIdle(v->device);
-        for (uint32_t i = 0; i < 7; ++i) {
-            if (!bufferNew(v, &v->denoiseBuffers[i], (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16, BUFFER_STORAGE | BUFFER_TRANSFER_SRC | BUFFER_TRANSFER_DST, false)) return false;
-            const DescriptorBufferInfo info = {v->denoiseBuffers[i].buffer, 0, ~(VkDeviceSize)0};
-            for (int k = 0; k < SLOTS; ++k) {
-                const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 27 + i, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
-                v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
-            }
-        }
-        if (!bufferNew(v, &v->denoiseShift, (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16, BUFFER_STORAGE, false)) return false;
-        for (int k = 0; k < SLOTS; ++k) {
-            const DescriptorBufferInfo info = {v->denoiseShift.buffer, 0, ~(VkDeviceSize)0};
-            const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 48, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
-            v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
-        }
-        v->denoiseFirst = true;
-    }
-    return true;
-}
-
-/* The frame's light, time, three passes in space and back to light; then what this frame found becomes the frame
- * before. */
-static void denoise(Vulkan* v, VkCommandBuffer c, Slot* s) {
-    const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
-    const uint32_t gx = ((uint32_t)v->sceneWidth + 7) / 8, gy = ((uint32_t)v->sceneHeight + 7) / 8;
-    const VkPipeline passes[6] = {v->denoiseLight, v->denoiseTime, v->denoiseSpace[0], v->denoiseSpace[1], v->denoiseSpace[2], v->denoiseEnd};
-    v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
-    for (int i = 0; i < 6; ++i) {
-        memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_WRITE, readWrite);
-        v->vkCmdBindPipeline(c, 1, passes[i]);
-        v->vkCmdDispatch(c, gx, gy, 1);
-    }
-    memoryBarrier(v, c, STAGE_COMPUTE, STAGE_TRANSFER | STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_TRANSFER_READ | ACCESS_SHADER_READ);
-    /* guide to the frame before's, what is gathered to what was */
-    const BufferCopy all = {0, 0, (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16};
-    v->vkCmdCopyBuffer(c, v->denoiseBuffers[0].buffer, v->denoiseBuffers[2].buffer, 1, &all);
-    v->vkCmdCopyBuffer(c, v->denoiseBuffers[4].buffer, v->denoiseBuffers[3].buffer, 1, &all);
-    memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE, ACCESS_TRANSFER_WRITE, readWrite);
-}
-
 /* ---- a background pass ---- */
 
 /* The program's shader, as a pipeline, when the scene's is another. It goes out in bands, each from a base:
  * VK_PIPELINE_CREATE_DISPATCH_BASE_BIT. No shader, or one the driver will not take: no pipeline, and no light. */
-static void backgroundPipelineMake(Vulkan* v, const ArtfScene* scene) {
+void backgroundPipelineMake(Vulkan* v, const ArtfScene* scene) {
     const ArtfBackground* b = &scene->backgroundPass;
     if (v->backgroundModuleStamp == b->moduleStamp && v->backgroundModuleScene == scene->id) return;
     v->backgroundModuleStamp = b->moduleStamp;
@@ -3264,7 +2139,7 @@ static void backgroundPipelineMake(Vulkan* v, const ArtfScene* scene) {
 }
 
 /* Room for its light at this size, and its data, where they changed. That is rare, so it may wait. */
-static bool syncBackground(Vulkan* v, const ArtfScene* scene, uint32_t bloomPixels) {
+bool syncBackground(Vulkan* v, const ArtfScene* scene, uint32_t bloomPixels) {
     const VkDeviceSize hdrSize = (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16, bloomSize = (VkDeviceSize)bloomPixels * 16;
     bool rebind = false;
     if (v->hdr.size != hdrSize || v->bloom.size != bloomSize) {
@@ -3310,13 +2185,13 @@ static bool syncBackground(Vulkan* v, const ArtfScene* scene, uint32_t bloomPixe
 #define BACKGROUND_RAYS_APART 64000000ull
 #define BACKGROUND_RAYS_A_BAND 8000000u
 
-static uint32_t backgroundRaysPerPixel(const ArtfScene* scene) { return (uint32_t)artfMaxi(scene->backgroundPass.pass.raysPerPixel, 1); }
+uint32_t backgroundRaysPerPixel(const ArtfScene* scene) { return (uint32_t)artfMaxi(scene->backgroundPass.pass.raysPerPixel, 1); }
 
-static uint64_t backgroundRays(const Vulkan* v, const ArtfScene* scene) {
+uint64_t backgroundRays(const Vulkan* v, const ArtfScene* scene) {
     return (uint64_t)v->sceneWidth * (uint64_t)v->sceneHeight * backgroundRaysPerPixel(scene);
 }
 
-static bool traceBackgroundApart(Vulkan* v, Slot* s, const ArtfScene* scene) {
+bool traceBackgroundApart(Vulkan* v, Slot* s, const ArtfScene* scene) {
     const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
     const uint32_t groupsX = ((uint32_t)v->sceneWidth + 7) / 8, groupsY = ((uint32_t)v->sceneHeight + 7) / 8;
     const uint32_t raysPerGroupRow = groupsX * 64u * backgroundRaysPerPixel(scene);
@@ -3334,7 +2209,7 @@ static bool traceBackgroundApart(Vulkan* v, Slot* s, const ArtfScene* scene) {
 }
 
 /* Its rays, unless they went out apart, and its bloom: all that comes before the render pass. */
-static void traceBackground(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfBackgroundBlock* h, bool raysDone) {
+void traceBackground(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfBackgroundBlock* h, bool raysDone) {
     const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
     /* (the frame before reads what this one is about to write; or, the bands wrote it) */
     memoryBarrier(v, c, STAGE_COMPUTE | STAGE_FRAGMENT, STAGE_COMPUTE, readWrite, readWrite);
@@ -3368,7 +2243,7 @@ static void traceBackground(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfBac
 
 /* ---- the overlay ---- */
 
-static void vkSetOverlay(ArtfRenderer* r, const ArtfOverlay* o) {
+void vkSetOverlay(ArtfRenderer* r, const ArtfOverlay* o) {
     Vulkan* v = (Vulkan*)r;
     if (!o || !o->pixels) {
         v->overlayPixels = NULL;
@@ -3390,7 +2265,7 @@ static void vkSetOverlay(ArtfRenderer* r, const ArtfOverlay* o) {
 }
 
 /* Sends what changed of the overlay up; only that, so that a page that barely changes costs nothing. */
-static bool uploadOverlay(Vulkan* v, Slot* s, VkCommandBuffer c) {
+bool uploadOverlay(Vulkan* v, Slot* s, VkCommandBuffer c) {
     if (!v->overlayPending) return true;
     const size_t bytes = (size_t)v->width * v->height * 4;
     if (!s->overlayStaging.buffer && !bufferNew(v, &s->overlayStaging, bytes, BUFFER_TRANSFER_SRC, true)) return false;
@@ -3437,7 +2312,7 @@ static bool uploadOverlay(Vulkan* v, Slot* s, VkCommandBuffer c) {
 /* ---- a frame ---- */
 
 /* The scene's commands from first on: in one call where the device can, or one by one. */
-static void drawCommands(Vulkan* v, VkCommandBuffer c, Slot* s, VkPipeline pipeline, uint32_t first, uint32_t count) {
+void drawCommands(Vulkan* v, VkCommandBuffer c, Slot* s, VkPipeline pipeline, uint32_t first, uint32_t count) {
     const VkDeviceSize zero = 0;
     v->vkCmdBindPipeline(c, 0, pipeline);
     v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
@@ -3452,7 +2327,7 @@ static void drawCommands(Vulkan* v, VkCommandBuffer c, Slot* s, VkPipeline pipel
 
 /* Vertices a pose moved go up with the frame, in its own commands, so that nothing has to wait. */
 /* What only bones move goes on the GPU. */
-static bool bonesAlone(const ArtfMeshData* m) {
+bool bonesAlone(const ArtfMeshData* m) {
     if (!m->skin->joints || !m->pose.jointCount || m->pose.jointCount > 65535) return false;
     for (uint32_t t = 0; m->pose.weights && t < m->skin->morphCount; ++t)
         if (m->pose.weights[t] != 0) return false;
@@ -3460,7 +2335,7 @@ static bool bonesAlone(const ArtfMeshData* m) {
 }
 
 /* All skins in use go up together, when one is new: rare. */
-static bool syncSkinData(Vulkan* v, const ArtfScene* scene) {
+bool syncSkinData(Vulkan* v, const ArtfScene* scene) {
     if (v->skinScene != scene->id || v->skinRemovals != scene->meshRemovals) {
         v->skinPlaces.len = 0;
         v->skinScene = scene->id;
@@ -3511,7 +2386,7 @@ static bool syncSkinData(Vulkan* v, const ArtfScene* scene) {
     return ok;
 }
 
-static bool shadowCullMake(Vulkan* v) {
+bool shadowCullMake(Vulkan* v) {
     if (v->shadowCullPipeline) return true;
     size_t size;
     uint32_t* code = artfShaderShadowCull(&size);
@@ -3523,9 +2398,8 @@ static bool shadowCullMake(Vulkan* v) {
     return ok;
 }
 
-static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b);
 
-static bool meshletPipelineMake(Vulkan* v) {
+bool meshletPipelineMake(Vulkan* v) {
     for (int phase = 0; phase < 3; ++phase) {
         if (v->meshletPipelines[phase]) continue;
         size_t size;
@@ -3542,7 +2416,7 @@ static bool meshletPipelineMake(Vulkan* v) {
 
 /* A place for each meshlet of each instance to remember whether it showed: instances go by their mesh, the largest of
  * its levels. What no room is left for goes whole. */
-static bool meshletFlagsUp(Vulkan* v, const ArtfScene* scene) {
+bool meshletFlagsUp(Vulkan* v, const ArtfScene* scene) {
     enum { MOST = 1 << 22 };
     const uint64_t version = scene->structureVersion ^ scene->id << 32;
     if (v->meshletFlags.buffer && v->meshletFlagVersion == version) return true;
@@ -3575,10 +2449,10 @@ static bool meshletFlagsUp(Vulkan* v, const ArtfScene* scene) {
 }
 
 /* Where occlusion's second pass has its half of a slot's jobs. */
-static uint32_t meshletHalf(const Vulkan* v) { return v->instanceCapacity * 4 + MESHLET_HEADER; }
+uint32_t meshletHalf(const Vulkan* v) { return v->instanceCapacity * 4 + MESHLET_HEADER; }
 
 /* This slot's room for jobs, and its header for this frame: 0 commands fit when meshlets are not for this frame. */
-static bool stageMeshlets(Vulkan* v, Slot* s, bool on) {
+bool stageMeshlets(Vulkan* v, Slot* s, bool on) {
     const VkDeviceSize stateBytes = (VkDeviceSize)meshletHalf(v) * 8;
     if (stateBytes > s->meshletState.size) {
         bufferFree(v, &s->meshletState);
@@ -3604,7 +2478,7 @@ static bool stageMeshlets(Vulkan* v, Slot* s, bool on) {
     return true;
 }
 
-static bool skinPipelineMake(Vulkan* v) {
+bool skinPipelineMake(Vulkan* v) {
     if (v->skinPipeline) return true;
     size_t size;
     uint32_t* code = artfShaderSkin(&size);
@@ -3617,7 +2491,7 @@ static bool skinPipelineMake(Vulkan* v) {
 }
 
 /* Jobs for the GPU, in this slot's table: three rows each, then their bones. */
-static bool stageBones(Vulkan* v, Slot* s, const ArtfScene* scene) {
+bool stageBones(Vulkan* v, Slot* s, const ArtfScene* scene) {
     v->skinJobs.len = 0;
     size_t bones = 0;
     for (size_t i = 0; i < scene->deforming.len; ++i) {
@@ -3670,7 +2544,7 @@ static bool stageBones(Vulkan* v, Slot* s, const ArtfScene* scene) {
     return true;
 }
 
-static void runBones(Vulkan* v, VkCommandBuffer c, Slot* s) {
+void runBones(Vulkan* v, VkCommandBuffer c, Slot* s) {
     if (!v->skinJobs.len) return;
     memoryBarrier(v, c, STAGE_VERTEX_INPUT, STAGE_COMPUTE, ACCESS_VERTEX_READ, ACCESS_SHADER_WRITE);
     v->vkCmdBindPipeline(c, 1, v->skinPipeline);
@@ -3685,7 +2559,7 @@ static void runBones(Vulkan* v, VkCommandBuffer c, Slot* s) {
     memoryBarrier(v, c, STAGE_COMPUTE, STAGE_VERTEX_INPUT, ACCESS_SHADER_WRITE, ACCESS_VERTEX_READ);
 }
 
-static bool stagePoses(Vulkan* v, Slot* s, ArtfScene* scene) {
+bool stagePoses(Vulkan* v, Slot* s, ArtfScene* scene) {
     if (!stageBones(v, s, scene)) return false;
     v->scratchSkinCounts.len = 0;
     for (size_t j = 0; j < v->skinJobs.len; ++j) artfVecPush(&v->scratchSkinCounts, scene->meshes.items[v->skinJobs.items[j]].vertexCount);
@@ -3721,13 +2595,13 @@ static bool stagePoses(Vulkan* v, Slot* s, ArtfScene* scene) {
 
 /* What casts shadows, by mesh: plain ones and then those with holes, each with its draw command. It changes
  * only with the scene. What the driver reads of it is this slot's. */
-static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b) {
+void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b) {
     const DescriptorBufferInfo info = {b->buffer, 0, ~(VkDeviceSize)0};
     const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, binding, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
     v->vkUpdateDescriptorSets(v->device, 1, &w, 0, NULL);
 }
 
-static bool syncShadowList(Vulkan* v, Slot* s, const ArtfScene* scene, uint32_t views) {
+bool syncShadowList(Vulkan* v, Slot* s, const ArtfScene* scene, uint32_t views) {
     const uint32_t meshes = (uint32_t)v->meshes.len;
     if (s->shadowInstances == scene->tracedVersion && s->shadowStructure == scene->structureVersion && s->shadowMaterials == scene->materialVersion && s->shadowScene == scene->id && s->shadowMeshes == meshes && s->shadowViews == views && s->shadowList.buffer) return true;
     /* room for all that casts in every view; what is really there, the shader says */
@@ -3798,7 +2672,7 @@ static bool syncShadowList(Vulkan* v, Slot* s, const ArtfScene* scene, uint32_t 
     return true;
 }
 
-static void shadowDraw(Vulkan* v, VkCommandBuffer c, Slot* s, VkPipeline pipeline, uint32_t first, uint32_t count) {
+void shadowDraw(Vulkan* v, VkCommandBuffer c, Slot* s, VkPipeline pipeline, uint32_t first, uint32_t count) {
     v->vkCmdBindPipeline(c, 0, pipeline);
     if (v->multiDraw) {
         v->vkCmdDrawIndexedIndirect(c, s->shadowViewCommands.buffer, (VkDeviceSize)first * 20, count, 20);
@@ -3808,7 +2682,7 @@ static void shadowDraw(Vulkan* v, VkCommandBuffer c, Slot* s, VkPipeline pipelin
 }
 
 /* The maps that changed, each in its square of the atlas, with only what can reach it. */
-static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowFrame* shadows, uint32_t views, uint64_t changed) {
+void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowFrame* shadows, uint32_t views, uint64_t changed) {
     if (!changed) return;
     /* each view's commands start empty, and the shader fills them */
     const VkFlags reading = STAGE_DRAW_INDIRECT | STAGE_VERTEX_SHADER;
@@ -3854,7 +2728,7 @@ static void drawShadows(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfShadowF
 /* ---- emitters of many ---- */
 
 /* Which there are, and how many particles in all. */
-static uint32_t swarmList(Vulkan* v, const ArtfScene* scene) {
+uint32_t swarmList(Vulkan* v, const ArtfScene* scene) {
     v->swarms.len = 0;
     const uint32_t count = artfSceneSwarms(scene, NULL, 0);
     if (!count) return 0;
@@ -3865,7 +2739,7 @@ static uint32_t swarmList(Vulkan* v, const ArtfScene* scene) {
     return places;
 }
 
-static bool swarmPipelineMake(Vulkan* v) {
+bool swarmPipelineMake(Vulkan* v) {
     if (v->swarmPipeline) return true;
     size_t size;
     uint32_t* code = artfShaderSwarm(&size);
@@ -3879,7 +2753,7 @@ static bool swarmPipelineMake(Vulkan* v) {
 
 /* Where each emitter's particles are: when they change, each that was there keeps what it had, in its new place; and
  * this slot's rows: the steps each has not seen, and how to face the eye. */
-static bool syncSwarms(Vulkan* v, Slot* s, const ArtfScene* scene) {
+bool syncSwarms(Vulkan* v, Slot* s, const ArtfScene* scene) {
     const size_t count = v->swarms.len;
     if (!count) return true;
     if (!swarmPipelineMake(v)) return false;
@@ -3960,7 +2834,7 @@ static bool syncSwarms(Vulkan* v, Slot* s, const ArtfScene* scene) {
 }
 
 /* Each emitter's particles, moved and turned to the eye, into this slot's instances and copies. */
-static void runSwarms(Vulkan* v, VkCommandBuffer c, Slot* s) {
+void runSwarms(Vulkan* v, VkCommandBuffer c, Slot* s) {
     if (!v->swarms.len) return;
     memoryBarrier(v, c, STAGE_COMPUTE | STAGE_VERTEX_SHADER, STAGE_COMPUTE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
     v->vkCmdBindPipeline(c, 1, v->swarmPipeline);
@@ -3973,7 +2847,7 @@ static void runSwarms(Vulkan* v, VkCommandBuffer c, Slot* s) {
 }
 
 /* All of them, after the other layers, in one draw of the quad: each over what is there, in their order. */
-static void drawSwarms(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene) {
+void drawSwarms(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene) {
     if (!v->swarms.len || !scene->particleQuad) return;
     const MeshRange* quad = &v->meshes.items[artfMeshIndexOf(scene, scene->particleQuad)];
     const VkDeviceSize zero = 0;
@@ -3986,7 +2860,7 @@ static void drawSwarms(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* s
 
 /* What shows what is behind it, the farthest first: its depth among what is there, and then its colors
  * where that depth is its own, so that only its nearest surface shows. */
-static void drawLayers(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene, uint32_t count) {
+void drawLayers(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene, uint32_t count) {
 #define PARTICLE(k) (scene->instances.items[v->layers.items[k].instance].flags & ARTF_INSTANCE_PARTICLE)
     if (v->base.view == ARTF_VIEW_OVERDRAW) {
         /* (each once, both sides: as they count on the CPU) */
@@ -4018,7 +2892,7 @@ static void drawLayers(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene, uin
 
 /* ---- lights past the frame's own ---- */
 
-static void lightDescriptors(Vulkan* v, Slot* s) {
+void lightDescriptors(Vulkan* v, Slot* s) {
     if (!s->probesBound) s->probesBound = s->probes.buffer;
     const DescriptorBufferInfo lights = {s->extraLights.buffer, 0, ~(VkDeviceSize)0}, lists = {s->tileLights.buffer, 0, ~(VkDeviceSize)0}, probes = {s->probesBound, 0, ~(VkDeviceSize)0};
     const DescriptorBufferInfo decals = {s->decals.buffer, 0, ~(VkDeviceSize)0};
@@ -4030,7 +2904,7 @@ static void lightDescriptors(Vulkan* v, Slot* s) {
 }
 
 /* What this slot's set says the probes are: 62, what pixels and a step read; 70, what a step writes (0: left as it is). */
-static void probeDescriptors(Vulkan* v, Slot* s, VkBuffer now, VkBuffer next) {
+void probeDescriptors(Vulkan* v, Slot* s, VkBuffer now, VkBuffer next) {
     const DescriptorBufferInfo a = {now, 0, ~(VkDeviceSize)0}, b = {next, 0, ~(VkDeviceSize)0};
     const WriteDescriptorSet writes[2] = {{ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 62, 0, 1, DESCRIPTOR_STORAGE, NULL, &a, NULL},
                                           {ST_WRITE_DESCRIPTOR_SET, NULL, s->set, 70, 0, 1, DESCRIPTOR_STORAGE, NULL, &b, NULL}};
@@ -4048,7 +2922,7 @@ bool artfVulkanProbesOnCpu = false;
 /* Light that bounced. On the GPU: the step's pipeline (artfShaderProbes), made for what the probes are, and the buffers
  * all frames share; *gather says this frame takes a step (with the trees or the hardware's structures, which the caller
  * keeps up to date). Or, for tests, a step on this thread's workers, and what they hold into this slot's buffer. */
-static bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameData* frame, bool* gather) {
+bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameData* frame, bool* gather) {
     *gather = false;
     if (frame->indirect[0][3] <= 0 || scene->trace.desc.mode != ARTF_TRACE_NONE) return true;
     const ArtfIndirect* g = &scene->indirect;
@@ -4133,7 +3007,7 @@ static bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameDa
 
 /* A step of the probes, in the frame's commands: from what they held, which the frames before read, into the next;
  * then that into what this frame's pixels read. */
-static void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene) {
+void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene) {
     const ArtfIndirect* g = &scene->indirect;
     const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
     if (v->probeClear) {
@@ -4192,7 +3066,7 @@ bool artfVulkanProbesRead(ArtfRenderer* r, float* out, size_t floats) {
 
 /* Into this slot's buffers: the lights, and each cluster's list (its fence was waited for); into the frame, its
  * slices of depth. */
-static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, ArtfFrameData* frame) {
+bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, ArtfFrameData* frame) {
     v->lightsOmitted = 0;
     if (frame->eye[2][3] <= 0) return true;
     /* (made in main memory, then copied: what the GPU reads is slow to read back, as the lists' counts are) */
@@ -4214,7 +3088,7 @@ static bool syncLights(Vulkan* v, Slot* s, const ArtfScene* scene, ArtfFrameData
 /* ---- what moves: the surface's second word, and what the vertices were ---- */
 
 /* Room for what the vertex buffer held a frame ago, as large as it is. */
-static bool pastVerticesRoom(Vulkan* v) {
+bool pastVerticesRoom(Vulkan* v) {
     if (v->pastVertices.size >= v->vertices.size) return true;
     v->vkDeviceWaitIdle(v->device);
     bufferFree(v, &v->pastVertices);
@@ -4224,7 +3098,7 @@ static bool pastVerticesRoom(Vulkan* v) {
 }
 
 /* Before poses move them: the vertices of what bends, as the frame before drew them. */
-static void pastVerticesCopy(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene) {
+void pastVerticesCopy(Vulkan* v, VkCommandBuffer c, const ArtfScene* scene) {
     v->pastCopies.len = 0;
     for (size_t i = 0; i < scene->deforming.len; ++i) {
         const uint32_t index = scene->deforming.items[i];
@@ -4241,186 +3115,10 @@ static void pastVerticesCopy(Vulkan* v, VkCommandBuffer c, const ArtfScene* scen
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_TRANSFER | STAGE_VERTEX_SHADER, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE);
 }
 
-/* ---- what comes after a frame in floats: post.c's order ---- */
-
-/* The end of a pass, on the GPU's clock: what it took is from the mark before. */
-static void passMark(Vulkan* v, VkCommandBuffer c, Slot* s, const char* name) {
-    if (!s->timed || s->passCount >= ARTF_PASS_TIMES) return;
-    const uint32_t slot = (uint32_t)(s - v->slots);
-    v->vkCmdWriteTimestamp(c, STAGE_BOTTOM, v->timestamps, slot * QUERIES + 1 + s->passCount);
-    s->passNames[s->passCount++] = name;
-}
-
-static uint32_t postPhysical(const Vulkan* v, uint32_t mask);
-
-static void postBarrier(Vulkan* v, VkCommandBuffer c) {
-    memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE | STAGE_TRANSFER, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE | ACCESS_TRANSFER_READ);
-    v->pendingReads = v->pendingWrites = 0;
-    ++v->postBarriers;
-}
-
-/* A post pass's dispatch. index: its pipeline's place in postPipelines, whose reads and writes are known; -1 one that is
- * not (traced reflections'): a barrier on each side of it. Outside postRecord, a barrier after each, as before. */
-static void postStepWith(Vulkan* v, VkCommandBuffer c, VkPipeline pipeline, int index, uint32_t push, uint32_t count) {
-    uint32_t reads = ~0u, writes = ~0u;
-    if (index >= 0) {
-        reads = postPhysical(v, v->postReads[index]);
-        writes = postPhysical(v, v->postWrites[index]);
-    }
-    const bool tracked = v->postTracking && index >= 0;
-    if (v->postTracking && (((reads | writes) & v->pendingWrites) || (writes & v->pendingReads))) postBarrier(v, c);
-    v->vkCmdBindPipeline(c, 1, pipeline);
-    v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &push);
-    v->vkCmdDispatch(c, (count + 63) / 64, 1, 1);
-    ++v->postDispatches;
-    if (tracked) {
-        v->pendingReads |= reads;
-        v->pendingWrites |= writes;
-    } else {
-        postBarrier(v, c);
-    }
-}
-
-static void postStep(Vulkan* v, VkCommandBuffer c, int pipeline, uint32_t push, uint32_t count) { postStepWith(v, c, v->postPipelines[pipeline], pipeline, push, count); }
-
-/* (a post pipeline's reads and writes as bits, by role: what writes to the parts' buffers rotates with them) */
-static uint32_t postPhysical(const Vulkan* v, uint32_t mask) {
-    uint32_t out = mask & ~7u;
-    for (int r = 0; r < 3; ++r)
-        if (mask >> r & 1) out |= 1u << v->role[r];
-    return out;
-}
-
-/* Set 1 as the parts are given now, for compute (1) or drawing (0). */
-static void rolesBind(Vulkan* v, VkCommandBuffer c, int point) {
-    v->vkCmdBindDescriptorSets(c, point, v->pipelineLayout, 1, 1, &v->roleSets[v->role[0] * 9 + v->role[1] * 3 + v->role[2]], 0, NULL);
-}
-
-/* What a pass wrote into the second light is the light from now on: it is that buffer's part, and the second goes to
- * the buffer that is neither, nor the history. With keep, it is the history too, for the frame after (temporal
- * antialiasing, upscaling). No copy: the passes before only wrote, and the barrier after each is enough. */
-static void postSwap(Vulkan* v, VkCommandBuffer c, bool keep) {
-    const uint8_t light = v->role[1], was = v->role[0];
-    if (keep) v->role[2] = light;
-    v->role[0] = light;
-    v->role[1] = was != v->role[2] && was != light ? was : (uint8_t)(3 - light - v->role[2]);
-    rolesBind(v, c, 1);
-}
-
-enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY, POST_METER,
-       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN };
-
-static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* frame, uint32_t image) {
-    /* (the scene's size, until it is upscaled; then the frame's) */
-    const uint32_t pixels = (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight, framePixels = (uint32_t)v->width * (uint32_t)v->height;
-    const bool scaled = pixels != framePixels;
-    const Viewport frameViewport = {0, (float)v->height, (float)v->width, -(float)v->height, 0, 1};
-    const Viewport* viewport = &frameViewport;
-    if (v->lutPending) {
-        /* (past bloom's levels and auto exposure's state) */
-        const VkDeviceSize at = ((VkDeviceSize)v->postBloomSizes[5][0] + v->postBloomSizes[5][1] * v->postBloomSizes[5][2] + 1) * 16;
-        const BufferCopy copy = {0, at, v->lutStaging.size < v->lutRoom * 16 ? v->lutStaging.size : v->lutRoom * 16};
-        v->vkCmdCopyBuffer(c, v->lutStaging.buffer, v->postBloom.buffer, 1, &copy);
-        memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
-        v->lutPending = false;
-    }
-    v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
-    v->postTracking = true;
-    v->pendingReads = v->pendingWrites = 0;
-    v->postBarriers = v->postDispatches = 0;
-    /* (the light and the second are the two buffers that do not hold the history) */
-    v->role[0] = v->role[2] ? 0 : 1;
-    v->role[1] = (uint8_t)(3 - v->role[0] - v->role[2]);
-    rolesBind(v, c, 1);
-    postStep(v, c, POST_GATHER, 0, pixels);
-    /* (what reads the scene's light is done: occlusion and velocities may write over its memory) */
-    if (v->postAliased) memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
-    passMark(v, c, s, "gather");
-    if (frame->post[0][2] > 0) {
-        postStep(v, c, POST_OCCLUSION, 0, pixels);
-        postStep(v, c, POST_OCCLUSION_BLUR, 0, pixels);
-        passMark(v, c, s, "ambient occlusion");
-    }
-    if (frame->post[1][0] > 0) {
-        /* (from rays, or marched across the frame) */
-        const bool traced = frame->traced & ARTF_TRACED_REFLECTIONS && v->reflectionTraced;
-        postStepWith(v, c, traced ? v->reflectionTraced : v->postPipelines[POST_REFLECTION], traced ? -1 : POST_REFLECTION, 0, v->postBloomSizes[0][1] * v->postBloomSizes[0][2]);
-        postStep(v, c, POST_REFLECTION_APPLY, 0, pixels);
-        passMark(v, c, s, "reflections");
-    }
-    const bool temporal = frame->post[1][3] > 0;
-    if (scaled) {
-        /* (from here on, the frame's size) */
-        postStep(v, c, POST_UPSCALE, (temporal && v->historyValid ? 1u : 0u) | v->lockHalf << 1, framePixels);
-        v->lockHalf ^= 1; /* (what this frame's locks are, the next reads) */
-        postSwap(v, c, temporal);
-        passMark(v, c, s, "upscaling");
-    } else if (temporal) {
-        postStep(v, c, POST_TEMPORAL, v->historyValid ? 1u : 0u, pixels);
-        postSwap(v, c, true);
-        passMark(v, c, s, "temporal antialiasing");
-    }
-    v->historyValid = temporal;
-    if (frame->output[2] > 0 && (scaled || temporal)) {
-        postStep(v, c, POST_SHARPEN, 0, framePixels);
-        postSwap(v, c, false);
-        passMark(v, c, s, "sharpening");
-    }
-    if (frame->post[2][1] > 0 && frame->post[2][0] > 0) {
-        postStep(v, c, POST_FOCUS, 0, framePixels);
-        postSwap(v, c, false);
-        passMark(v, c, s, "depth of field");
-    }
-    if (frame->motionBlur > 0) {
-        const uint32_t tiles = (((uint32_t)v->width + 15) / 16) * (((uint32_t)v->height + 15) / 16);
-        postStep(v, c, POST_VELOCITY, 0, framePixels);
-        postStep(v, c, POST_TILE_MOST, 0, tiles);
-        postStep(v, c, POST_TILE_MOST, 1, tiles);
-        postStep(v, c, POST_MOTION_BLUR, 0, framePixels);
-        postSwap(v, c, false);
-        passMark(v, c, s, "motion blur");
-    }
-    if (frame->grade[0][1] > 0) {
-        postStep(v, c, POST_METER, v->exposureValid ? 1u : 0u, 1);
-        v->exposureValid = true;
-        passMark(v, c, s, "auto exposure");
-    } else {
-        v->exposureValid = false;
-    }
-    if (frame->post[0][0] > 0) {
-        for (uint32_t l = 0; l < 6; ++l) postStep(v, c, POST_BLOOM_DOWN, l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
-        for (int l = 4; l >= 0; --l) postStep(v, c, POST_BLOOM_UP, (uint32_t)l, v->postBloomSizes[l][1] * v->postBloomSizes[l][2]);
-        passMark(v, c, s, "bloom");
-    }
-    v->postTracking = false;
-    memoryBarrier(v, c, STAGE_COMPUTE | STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
-    /* (the image's own size and way, turned or not: preRotate) */
-    const Rect2D imageArea = {{0, 0}, {(uint32_t)v->imageWidth, (uint32_t)v->imageHeight}};
-    const Viewport imageViewport = {0, (float)v->imageHeight, (float)v->imageWidth, -(float)v->imageHeight, 0, 1};
-    RenderPassBeginInfo present = {ST_RENDER_PASS_BEGIN, NULL, v->presentPass, v->presentFramebuffers[image], imageArea, 0, NULL};
-    v->vkCmdBeginRenderPass(c, &present, 0);
-    v->vkCmdSetViewport(c, 0, 1, v->turn ? &imageViewport : viewport);
-    v->vkCmdSetScissor(c, 0, 1, &imageArea);
-    if (v->preRotate) {
-        const uint32_t word = (uint32_t)v->turn | (uint32_t)v->width << 2 | (uint32_t)v->height << 17;
-        v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_FRAGMENT, 8, 4, &word);
-    }
-    v->vkCmdBindPipeline(c, 0, v->presentPipeline);
-    v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
-    rolesBind(v, c, 0);
-    v->vkCmdDraw(c, 3, 1, 0, 0);
-    if (v->overlayPixels && v->overlayUsable) {
-        v->vkCmdBindPipeline(c, 0, v->overlayPipeline);
-        v->vkCmdDraw(c, 3, 1, 0, 0);
-    }
-    v->vkCmdEndRenderPass(c);
-    passMark(v, c, s, "tone map and out");
-}
-
 /* The meshlets view's table (binding 65): of each mesh, where its triangles start in it; then of each triangle, its
  * meshlet, numbered as the CPU numbers them. A triangle is known by PrimitiveId, which counts from its draw's first:
  * so the meshlets view draws whole meshes. Made when the view first asks, and again when meshes come or go. */
-static bool meshletIdsUp(Vulkan* v, const ArtfScene* scene) {
+bool meshletIdsUp(Vulkan* v, const ArtfScene* scene) {
     const uint64_t key = (scene->id * 1000003u) ^ ((uint64_t)scene->meshes.len * 7919u) ^ (scene->meshRemovals * 31u) ^ (scene->lodVersion << 40);
     if (v->meshletIds.buffer && key == v->meshletIdsKey) return true;
     v->vkDeviceWaitIdle(v->device);
@@ -4445,7 +3143,7 @@ static bool meshletIdsUp(Vulkan* v, const ArtfScene* scene) {
 }
 
 /* What was being made off the frame, where it is done: taken (see shaderJobEnd). */
-static bool pipelinesTake(Vulkan* v, const ArtfScene* scene) {
+bool pipelinesTake(Vulkan* v, const ArtfScene* scene) {
     bool taken = false;
     if (v->shaderJob && (!v->shaderJob->task || artfTaskDone(v->shaderJob->task))) {
         if (!shaderJobEnd(v, scene, true)) return false;
@@ -4467,7 +3165,7 @@ static bool pipelinesTake(Vulkan* v, const ArtfScene* scene) {
 /* The scene's pixel shaders and passes for want, wide (the surface's second word) and the scene's materials of its
  * own, against those there: made on a thread of their own if they differ, or now if wait or if those there were made
  * for another scene's materials. Until then, frames are drawn with those there. */
-static bool shadersFollow(Vulkan* v, const ArtfScene* scene, const Features* want, bool wide, bool wait) {
+bool shadersFollow(Vulkan* v, const ArtfScene* scene, const Features* want, bool wide, bool wait) {
     const Features have = featuresOf(v);
     const bool graphs = graphsPrefix(v->graphCount, v->graphScene, scene);
     if (!memcmp(want, &have, sizeof have) && graphs && v->graphCount == scene->graphs.len && wide == v->surfaceWide) return true;
@@ -4480,13 +3178,12 @@ static bool shadersFollow(Vulkan* v, const ArtfScene* scene, const Features* wan
     return true;
 }
 
-static bool vkDrawAs(Vulkan* v, ArtfScene* scene);
 
 /* The scene, as the pipelines there can draw it (vkDrawAs): what that changes of it, for the frame, is given back. */
 /* A frame given up after its fence was reset (the GPU's memory ran out for what it needed): nothing submitted but the
  * fence's signal, and with a window, the image it took given back as it was; so the next frame of this slot does not wait
  * for ever, and the renderer goes on. */
-static void frameOwed(Vulkan* v) {
+void frameOwed(Vulkan* v) {
     Slot* s = v->owed;
     v->owed = NULL;
     const VkFlags waitStage = STAGE_COLOR;
@@ -4510,7 +3207,7 @@ static void frameOwed(Vulkan* v) {
     }
 }
 
-static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
+bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     const ArtfTraceMode mode = scene->trace.desc.mode;
     const bool traced = scene->shadows.traced, temporal = scene->post.screen.temporal;
     const float blur = scene->post.lens.motionBlur;
@@ -4529,7 +3226,7 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
     return drawn;
 }
 
-static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
+bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const double start = artfNowMs();
     if (v->lost) return false;
     if (v->base.renderScale != v->renderScale) {
@@ -5110,7 +3807,7 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     return true;
 }
 
-static bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
+bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
     Vulkan* v = (Vulkan*)r;
     if (v->lost || v->swapchain || !v->frameNumber) return false; /* (what was presented is the window system's) */
     if (v->vkDeviceWaitIdle(v->device) != VK_OK) return false;
@@ -5131,7 +3828,7 @@ static bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
     return ok;
 }
 
-static void vkResize(ArtfRenderer* r, int width, int height) {
+void vkResize(ArtfRenderer* r, int width, int height) {
     Vulkan* v = (Vulkan*)r;
     if (width == v->width && height == v->height) return;
     v->width = width;
@@ -5139,9 +3836,9 @@ static void vkResize(ArtfRenderer* r, int width, int height) {
     v->targetsStale = true;
 }
 
-static uint32_t* vkPixels(ArtfRenderer* r) { (void)r; return NULL; }
-static const char* vkDescription(const ArtfRenderer* r) { return ((const Vulkan*)r)->description; }
-static void vkStats(const ArtfRenderer* r, ArtfFrameStats* out) {
+uint32_t* vkPixels(ArtfRenderer* r) { (void)r; return NULL; }
+const char* vkDescription(const ArtfRenderer* r) { return ((const Vulkan*)r)->description; }
+void vkStats(const ArtfRenderer* r, ArtfFrameStats* out) {
     const Vulkan* v = (const Vulkan*)r;
     out->cpuMs = v->cpuMs;
     out->traceSamples = v->traceDone;
@@ -5172,7 +3869,7 @@ void artfVulkanWarm(ArtfRenderer* r) {
     v->warmed = true;
 }
 
-static void vkFree(ArtfRenderer* r) {
+void vkFree(ArtfRenderer* r) {
     Vulkan* v = (Vulkan*)r;
     if (v->device) {
         shaderJobEnd(v, NULL, false);
@@ -5348,7 +4045,7 @@ static void vkFree(ArtfRenderer* r) {
 
 static const ArtfRendererVtbl vkTable = {vkDescription, vkResize, vkSetOverlay, vkDraw, vkReadPixels, vkPixels, vkStats, vkFree};
 
-static bool loadLibrary(Vulkan* v) {
+bool loadLibrary(Vulkan* v) {
 #ifdef _WIN32
     v->library = LoadLibraryA("vulkan-1.dll");
     if (!v->library) return false;
@@ -5366,7 +4063,7 @@ static bool loadLibrary(Vulkan* v) {
     return v->getInstanceProcAddr != NULL;
 }
 
-static bool createSurface(Vulkan* v) {
+bool createSurface(Vulkan* v) {
     typedef VkResult(VKAPI * Create)(VkInstance, const void*, const void*, VkSurfaceKHR*);
     Create create;
     const ArtfSurface* n = &v->native;
@@ -5405,7 +4102,7 @@ static bool createSurface(Vulkan* v) {
     }
 }
 
-static bool createInstance(Vulkan* v) {
+bool createInstance(Vulkan* v) {
     *(void**)&v->vkCreateInstance = v->getInstanceProcAddr(NULL, "vkCreateInstance");
     if (!v->vkCreateInstance) return false;
     const char* extensions[3];
@@ -5435,7 +4132,7 @@ static bool createInstance(Vulkan* v) {
 }
 
 /* The best device with what this backend needs; its queue family. */
-static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
+bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
     VkPhysicalDevice gpus[16];
     uint32_t count = 16;
     if (v->vkEnumeratePhysicalDevices(v->instance, &count, gpus) < 0) return false;
@@ -5537,7 +4234,7 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
 
 /* BGRA, as the frames in memory are; or else RGBA, as Android offers. Shaders write colors, not bytes,
  * so nothing else changes. */
-static bool chooseFormat(Vulkan* v) {
+bool chooseFormat(Vulkan* v) {
     v->colorFormat = FORMAT_BGRA8;
     v->colorSpace = 0;
     if (!v->surface) return true;
@@ -5556,7 +4253,7 @@ static bool chooseFormat(Vulkan* v) {
 /* The device is lost (result: what said so): nothing more is drawn. Where VK_EXT_device_fault is on, the driver is
  * asked why, and what it says goes to the log and to ARTF_EVENT_DEVICE_LOST: its words, each place on the GPU that was
  * at fault (read, written, run) and the vendor's codes. */
-static void lose(Vulkan* v, VkResult result) {
+void lose(Vulkan* v, VkResult result) {
     v->lost = true;
     if (result != -4 /* VK_ERROR_DEVICE_LOST */ || !v->deviceFault || !v->vkGetDeviceFaultInfoEXT || v->base.lostWhy[0]) return;
     FaultCounts counts = {ST_FAULT_COUNTS, NULL, 0, 0, 0};
@@ -5587,7 +4284,7 @@ static void lose(Vulkan* v, VkResult result) {
 
 bool artfVulkanFaultReports(const ArtfRenderer* r) { return r && r->backend == ARTF_BACKEND_VULKAN && ((const Vulkan*)r)->deviceFault; }
 
-static bool createDevice(Vulkan* v) {
+bool createDevice(Vulkan* v) {
     const float priority = 1.f;
     const DeviceQueueCreateInfo queue = {ST_DEVICE_QUEUE_CREATE_INFO, NULL, 0, v->family, 1, &priority};
     Vulkan12Features f12;

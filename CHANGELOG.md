@@ -9,6 +9,12 @@
     less than a level; the CPU's do not change.
   - *Debugging information*: `ARTFUL_SHADER_DEBUG` (where the device has `VK_KHR_shader_non_semantic_info`) and
     `artful-shaders dir --debug` put in each shader the C file, function and line that build it, for RenderDoc.
+  - *`vulkan.c` split*: its types in `vulkanInternal.h`, tracing in `vulkanTrace.c`, what comes after the frame in
+    `vulkanPost.c`; moved, not changed, and no slower.
+  - *Linux CI*: on lavapipe, run one at a time, eleven tests fall over, all of them walking the trees while the scene
+    is drawn (probes on the GPU, shadows and reflections from rays); the cause, in the code llvmpipe makes, is not
+    found. `ARTFUL_SKIP` (tests named by commas, said skipped) leaves them out there, the reason in the workflow; the
+    rest of Vulkan runs on lavapipe again. Upscaling's FLIP threshold now has lavapipe's measure in it.
   - *Found by CI*: the fuzzer's first runs found a PNG with an empty palette appending nothing with a null pointer
     (fixed, and kept in `files/fuzzFindings`); Apple's compiler found the Metal written from the IR casting a group's
     memory to a device atomic (fixed).

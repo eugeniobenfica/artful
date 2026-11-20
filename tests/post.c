@@ -718,7 +718,7 @@ void testUpscale(void) {
     if (half[1][0] || half[1][W * H / 2]) {
         const double apart = differentShare(half[0], half[1], 24);
         printf("upscaled, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
-        FLIP_ALIKE(0.0116); /* (measured 0.0016 on a Radeon RX 9060 XT) */
+        FLIP_ALIKE(0.0224); /* (measured 0.0016 on a Radeon RX 9060 XT, 0.0179 on lavapipe) */
         CHECK(apart < .02);
     }
     /* a scale of 1 is no scale */

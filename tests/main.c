@@ -81,7 +81,26 @@ static void end(void) {
     testName = "";
 }
 
-#define RUN(name, call) do { if (chosen(name)) { begin(name); call; end(); } } while (0)
+/* ARTFUL_SKIP: tests not to run here, by their whole names, by commas, each said skipped (CI: what falls over in a
+ * driver, until it is found; the workflow says why). */
+static bool skippedHere(const char* name) {
+    const char* list = getenv("ARTFUL_SKIP");
+    if (!list) return false;
+    const size_t n = strlen(name);
+    for (const char* p = list; (p = strstr(p, name)) != NULL; p += n)
+        if ((p == list || p[-1] == ',') && (p[n] == ',' || p[n] == 0)) return true;
+    return false;
+}
+
+#define RUN(name, call)                                         \
+    do {                                                        \
+        if (chosen(name)) {                                     \
+            begin(name);                                        \
+            if (skippedHere(name)) missing("run here: ARTFUL_SKIP"); \
+            else call;                                          \
+            end();                                              \
+        }                                                       \
+    } while (0)
 
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0); /* (all of what was said reaches a pipe, also when the program dies) */

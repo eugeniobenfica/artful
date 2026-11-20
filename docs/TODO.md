@@ -47,7 +47,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [-] 3.7 Hardware real na CI — pulado pelo dono
 - [~] 3.8 Ensaio longo — ferramenta feita; repetir as 4 h com a suspensão do Windows desligada
 - [~] 3.9 Mac com CPU passa inteiro no CI; Linux com GPU e janela sem máquina 📱
-- [ ] CI: segfault no Linux (lavapipe) — reproduzido aqui (Mesa do MSYS2): o shader das probes na GPU; causa não isolada
+- [~] CI: lavapipe — rodados um a um, só 11 testes caem: os que percorrem as árvores enquanto a cena é desenhada (probes na GPU, sombras e reflexos por raios). Não é leitura fora do buffer, pilha nem textura; causa não achada. O CI os pula por `ARTFUL_SKIP`, com o motivo no workflow; o resto do Vulkan roda lá. Limite de FLIP do upscale recalibrado com o lavapipe
 - [x] CI: macOS `scale/skinLod` — os testes compilavam sem `-ffp-contract=off`; corrigido, o Mac passa inteiro
 - [x] CI: Metal pelo IR — `postFinal` declarava `thread_position_in_grid` num fragment; entradas não lidas ficam de fora
 
@@ -61,7 +61,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
   - [x] passo 1: descrição a partir do IR, `--graph`, medição
   - [~] passo 2: barreiras do pós a partir dos acessos dos shaders; faltam os passes da cena
   - [x] passo 3: luz em 16 bits e aliasing imagem↔buffer — −31% com tudo ligado a 1080p (meta 30%)
-  - [ ] passo 4: backend de CPU percorrendo o grafo; dividir o `vulkan.c` por passe
+  - [~] passo 4: `vulkan.c` dividido (tipos em `vulkanInternal.h`, traçado em `vulkanTrace.c`, pós em `vulkanPost.c`), sem perda de desempenho; falta o backend de CPU percorrer o grafo
 - [x] 4.3 Cozimento — HLOD (`artfSceneSaveHlod`), glTF (`artfPrepareModelCooked`), `artful-cook`, alvo de fuzzing
 
 ## Fase 5 — Alcance de conteúdo
