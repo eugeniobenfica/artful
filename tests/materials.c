@@ -789,3 +789,88 @@ void testTextureRoles(void) {
     (void)m;
     artfSceneFree(s);
 }
+
+/* Highlights smaller than a pixel (shading.inc's Widened): a shiny floor with a fine normal map, its texels a third of a
+ * pixel, under a sun it mirrors toward the eye. Moved by a quarter of a pixel at a time, as a frame's jitter does,
+ * without widening each pixel catches the sun on some texels and not others, and flickers; widened by the variance of
+ * the texels it covers (Toksvig's, from how much shorter their mean is), it flickers less. Its light is near what eight
+ * times as many pixels a side show (each a texel or less, not widened): GGX's lobe has a longer tail than these
+ * texels, which turn no more than so far, and sends a little of the sun out of the frame. The sun is faint, so that no
+ * highlight is more than white. The CPU's, where it can be turned off (artfWidenHighlights). */
+static double flickerOf(ArtfScene* s, double* mean) {
+    enum { FRAMES = 8 };
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    static double sum[W * H], square[W * H];
+    memset(sum, 0, sizeof sum);
+    memset(square, 0, sizeof square);
+    uint32_t* frame = artfMalloc((size_t)W * H * 4);
+    const float pixel = 4.47f * 2.f * tanf(.5f) / (float)H;
+    for (int k = 0; k < FRAMES; ++k) {
+        const float dx = ((float)(k & 3) - 1.5f) * .25f * pixel, dy = ((float)(k >> 2) - .5f) * .5f * pixel;
+        setCamera(s, dx, 2 + dy, 4, dx, dy, 0);
+        CHECK(artfRendererDraw(r, s));
+        CHECK(artfRendererReadPixels(r, frame));
+        for (int i = 0; i < W * H; ++i) {
+            double light = 0;
+            for (int c = 0; c < 24; c += 8) light += artfSrgbDecode((float)(frame[i] >> c & 255) / 255.f) / 3;
+            sum[i] += light;
+            square[i] += light * light;
+        }
+    }
+    double apart = 0, all = 0;
+    for (int i = 0; i < W * H; ++i) {
+        const double m = sum[i] / FRAMES;
+        apart += sqrt(fmax(square[i] / FRAMES - m * m, 0));
+        all += m;
+    }
+    artfFree(frame);
+    artfRendererFree(r);
+    *mean = all / (W * H);
+    return apart / (W * H);
+}
+
+void testHighlightFlicker(void) {
+    static uint32_t bumps[32 * 32];
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) {
+            const float nx = (float)((x * 7 + y * 13) % 5 - 2) * .2f, ny = (float)((x * 11 + y * 3) % 5 - 2) * .2f, nz = sqrtf(1.f - nx * nx - ny * ny);
+            bumps[y * 32 + x] = 0xFF000000u | (uint32_t)((nx * .5f + .5f) * 255.f + .5f) << 16 | (uint32_t)((ny * .5f + .5f) * 255.f + .5f) << 8 | (uint32_t)((nz * .5f + .5f) * 255.f + .5f);
+        }
+    ArtfScene* s = plainScene();
+    artfSceneSetAmbient(s, artfVec3(0, 0, 0), artfVec3(0, 0, 0));
+    artfSceneSetSun(s, artfVec3(0, -.447f, .894f), artfVec3(.03f, .03f, .03f));
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.9f, .9f, .9f);
+    d.metallic = 1;
+    d.roughness = .35f;
+    d.normalMap = artfSceneAddTexture(s, bumps, 32, 32, 0);
+    const ArtfTransform t = artfTransformAt(0, 0, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 8, 32), artfSceneAddMaterial(s, &d), &t);
+    double flicker[2], mean[2];
+    for (int widen = 0; widen < 2; ++widen) {
+        artfWidenHighlights = widen != 0;
+        flicker[widen] = flickerOf(s, &mean[widen]);
+    }
+    /* the truth: eight times as many pixels a side, each a texel or less, not widened */
+    artfWidenHighlights = false;
+    enum { FINE = 8 };
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    o.width = W * FINE;
+    o.height = H * FINE;
+    ArtfRenderer* r = artfRendererNew(&o);
+    uint32_t* frame = artfMalloc((size_t)o.width * o.height * 4);
+    setCamera(s, 0, 2, 4, 0, 0, 0);
+    CHECK(artfRendererDraw(r, s) && artfRendererReadPixels(r, frame));
+    double truth = 0;
+    for (int i = 0; i < o.width * o.height; ++i)
+        for (int c = 0; c < 24; c += 8) truth += artfSrgbDecode((float)(frame[i] >> c & 255) / 255.f) / 3;
+    truth /= (double)o.width * o.height;
+    artfFree(frame);
+    artfRendererFree(r);
+    artfWidenHighlights = true;
+    printf("a fine normal map moved by quarter pixels: it flickers by %.4f, %.4f widened; its light %.4f and %.4f, where %.4f is the truth\n", flicker[0], flicker[1], mean[0], mean[1], truth);
+    CHECK(flicker[1] < flicker[0] * .5);
+    CHECK(mean[1] > truth * .6 && mean[1] < truth * 1.2);
+    artfSceneFree(s);
+}

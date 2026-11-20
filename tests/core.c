@@ -533,8 +533,9 @@ void testPictures(void) {
     ArtfScene* s = layeredScene();
     artfSceneSetBackgroundAlpha(s, 0);
     const uint64_t clear = pictureOf(s, true);
-    /* (since frames are sRGB; reviewed against those of the square root by FLIP: docs/plano-de-correcao.md, phase 2) */
-    const uint64_t want[4] = {0x4313C9C12CF629D9ull, 0x30C3DD405A8E5D1Full, 0x037EB18352FC9412ull, 0xA924824AAF53EEE6ull};
+    /* (since highlights get back the light their lobe loses, and widen where the normal turns over a pixel; reviewed
+     * against the commit before by FLIP: docs/plano-de-correcao.md, phase 2.4) */
+    const uint64_t want[4] = {0x4F420EF73EC7BC08ull, 0xEC797E77232CFFE0ull, 0x73C79609EF4F9431ull, 0xC16A0A9EAACD5FDDull};
     const uint64_t got[4] = {rich, layered, smooth, clear};
     for (int k = 0; k < 4; ++k) {
         if (got[k] != want[k]) printf("picture %d: %016llx, where %016llx was\n", k, (unsigned long long)got[k], (unsigned long long)want[k]);

@@ -6,7 +6,11 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   pixel's depth, up to eight in a pixel, at 96 bytes a pixel on the GPU. A layer shows only its nearest surface. Tracing
   has neither limit.
 - Antialiasing is four samples, or none, and it smooths edges only: what a texture or a highlight does
-  inside a triangle is not sampled again. Upscaling (`renderScale`) needs a frame in floats, and temporal antialiasing to
+  inside a triangle is not sampled again; a highlight is widened by how much the normal turns over a pixel and by a
+  normal map's texels (Toksvig's), which takes some of its light out where the normals turn less widely than GGX's tail
+  (a fine normal map's floor: .0144 where its truth is .0213), and tracing is not widened. Highlights get back the light
+  their lobe loses to a second facet as a white metal's would; the rasterizer's reflection of all around is as it was,
+  which for a white metal gave all of it back already. Upscaling (`renderScale`) needs a frame in floats, and temporal antialiasing to
   be more than reading between pixels; it gathers 16 places within a pixel, so what is very thin flickers below .5.
 - When tracing, a light is a point unless it has a size or a shape (`artfLightSetSize`, `artfLightSetShape`), and those
   past the sixteen are points; glass has no Fresnel of its own, and its color (`attenuation`) is taken from paths, not

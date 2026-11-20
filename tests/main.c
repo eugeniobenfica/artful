@@ -126,6 +126,8 @@ int main(int argc, char** argv) {
     RUN("tracing/traceBothBackends", testTraceBothBackends());
     RUN("tracing/environmentAimed/software", testEnvironmentAimed(ARTF_BACKEND_SOFTWARE));
     RUN("tracing/environmentAimed/vulkan", testEnvironmentAimed(ARTF_BACKEND_VULKAN));
+    RUN("tracing/metalFurnace/software", testMetalFurnace(ARTF_BACKEND_SOFTWARE));
+    RUN("tracing/metalFurnace/vulkan", testMetalFurnace(ARTF_BACKEND_VULKAN));
     RUN("tracing/aimUnbiased", testAimUnbiased());
     RUN("tracing/rayCones", testRayCones());
     RUN("core/handles", testHandles());
@@ -187,6 +189,7 @@ int main(int argc, char** argv) {
     RUN("materials/profiles", testProfiles());
     RUN("materials/moreMaterials", testMoreMaterials());
     RUN("materials/textureRoles", testTextureRoles());
+    RUN("materials/highlightFlicker", testHighlightFlicker());
     RUN("files/gltfMore", testGltfMore());
     RUN("sky/sky", testSky());
     RUN("sky/skyMore", testSkyMore());

@@ -525,7 +525,7 @@ void testPostKernels(void) {
 
 /* ---- temporal quality and speed ---- */
 
-#define TEMPORAL_BYTES 0x64d8687454b2a64dull /* (what testTemporalBytes hashed before these came; made again for sRGB) */
+#define TEMPORAL_BYTES 0x98f3d695e3cc3878ull /* (what testTemporalBytes hashed before these came; made again for sRGB, and for highlights that get back what their lobe loses) */
 
 /* Upscaling: the scene drawn at half the size and made whole by temporal antialiasing is close to it drawn at the
  * frame's size, and without temporal antialiasing too, a little softer; both backends alike. The overlay and what is

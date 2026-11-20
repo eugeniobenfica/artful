@@ -548,7 +548,8 @@ typedef struct Surface {
     bool shiny;
     float rough, open;
     artfShadeLobe lobe; /* its highlight's (shading.inc), drawn out or not */
-    float f0[3], mirror[3]; /* what it reflects head on, and toward the eye */
+    float f0[3], mirror[3]; /* what it reflects head on, and toward the eye (gain in it) */
+    float gain[3];          /* what its lobe is multiplied by, for the light the lobe loses (shading.inc's Gain) */
     float emissive[3];
     /* past glTF's core (ArtfMaterialMore): what it has (ARTF_MORE_); how much coat, its lobe and normal; what the coat
      * leaves of what is under it; the sheen's color and 1 / its alpha, and the color of what comes from under the
@@ -731,8 +732,10 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     out->absorb = more->absorb;
     for (int i = 0; i < 3; ++i) out->f0[i] = artfShadeReflects(.04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f), notMetal, albedo[i], metal);
     if (flags & ARTF_MORE_IRIDESCENCE) artfIridescence(out->f0, ndv, more->iridescence, more->iridescenceIor, more->iridescenceThickness);
+    const float unkept = artfShadeUnkept(ndv, out->rough);
     for (int i = 0; i < 3; ++i) {
-        out->mirror[i] = out->shiny ? artfShadeMirror(out->f0[i], 1.f - out->rough, far, 1.f) : 0.f;
+        out->gain[i] = artfShadeGain(out->f0[i], unkept);
+        out->mirror[i] = out->shiny ? artfShadeMirror(out->f0[i], 1.f - out->rough, far, 1.f) * out->gain[i] : 0.f;
         out->albedo[i] = albedo[i] * notMetal;
     }
     if (flags & ARTF_MORE_ANISOTROPY) {
@@ -812,6 +815,7 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
 
 bool artfTraceAim = true;
 bool artfTraceCones = true;
+bool artfWidenHighlights = true; /* (kernels.inc's, declared with these) */
 
 static inline uint32_t hashOf(uint32_t x) {
     x = (x ^ x >> 16) * 0x7FEB352Du;
@@ -923,7 +927,7 @@ static void lightFrom(const ArtfScene* s, const float* p, const float* view, con
         const ArtfShade3 half = artfShadeHalfway(v, (ArtfShade3){toLight[0], toLight[1], toLight[2]});
         float vdh;
         const float lit = artfShadeHighlight(&m->lobe, false, n, v, half, ndl, m->material->specular, &vdh), far = artfShadeFifthInRow(vdh);
-        for (int k = 0; k < 3; ++k) highlight[k] = artfShadeSchlick(m->f0[k], far) * lit;
+        for (int k = 0; k < 3; ++k) highlight[k] = artfShadeSchlick(m->f0[k], far) * m->gain[k] * lit;
     }
     for (int k = 0; k < 3; ++k) light[k] += path[k] * color[k] * strength * through * (m->albedo[k] * ndl + highlight[k]);
 }
@@ -946,7 +950,7 @@ static void lightFromMore(const ArtfScene* s, const float* p, const float* view,
             const ArtfShade3 half = artfShadeHalfway(v, (ArtfShade3){toLight[0], toLight[1], toLight[2]});
             float vdh;
             const float base = artfShadeHighlight(&m->lobe, m->lobe.drawn, n, v, half, ndl, m->material->specular, &vdh), far = artfShadeFifthInRow(vdh);
-            for (int k = 0; k < 3; ++k) highlight[k] = artfShadeSchlick(m->f0[k], far) * base * m->under;
+            for (int k = 0; k < 3; ++k) highlight[k] = artfShadeSchlick(m->f0[k], far) * m->gain[k] * base * m->under;
             if (m->coat > 0) {
                 /* the coat's own lobe: of no color, F0 .04, by its own normal; its amount comes first here, in that
                  * order (D and Seen are shading.inc's) */

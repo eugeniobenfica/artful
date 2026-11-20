@@ -82,6 +82,33 @@ distribution has no 1 / pi either. Light from all around is the sky and the grou
 by its normal, and a reflecting one by its mirror direction, which is what makes a metal look like one with
 no environment map.
 
+**Light the lobe loses.** The lobe is light that leaves the surface from one facet; what meets a second facet first
+is not in it, and a rough metal was darker than it is: GGX's of roughness 1, Fresnel 1, gives back .31 of light from
+straight on. Each lobe is multiplied by 1 + f0 (1 / E - 1) (Turquin, 2019), E being all it gives back from n . v (its
+albedo), so that a white metal gives back all it gets, and a dielectric, whose f0 is .04, hardly more. E is GGX's with
+Smith's masking, height-correlated, as the paths reflect by; `Unkept` in `shading.inc` is 1 / E - 1 by least squares, in
+x = n . v / (n . v + alpha sin), as masking goes by alpha tan, and in roughness: thirty numbers, off by .8% of what it
+makes whole at most, at any angle, 0 at roughness 0. No table, so the lanes, the scalar tracer and the shaders read the
+same thing. It multiplies the lobes of lights, and in tracing what a highlight reflects (`Surface.mirror`, so a path's
+bounce and its aim at the light from all around). Not the rasterizer's `Mirror` of all around: for a white metal that
+was 1 already. A white metal ball under light the same from everywhere gives back .994 to 1.002 of it, on both backends,
+where it gave back .307 at roughness 1 and .916 at .5 (`tracing/metalFurnace`). A coat's lobe, of f0 .04, is as it was.
+
+**Highlights smaller than a pixel.** Where the normal turns much from one pixel to the next, a highlight narrower than
+that falls between pixels and flickers as things move. The lobe is widened by as much as the normal turns over a pixel
+(Tokuyoshi and Kaplanyan, 2019, 2021): alpha^2 grows by twice the normal's variance there, by at most .18 (`Widened`).
+That variance is a pixel's own, 1/4, times the square of how fast the normal turns from pixel to pixel, across and
+down, plus a normal map's: its texels' mean, read between texels and levels, is shorter than 1 where they differ, and
+Toksvig's (1 - |n|) / |n| is their variance (`MapVariance`, less 1/128 for bytes rounding what was of length 1). The
+GPU takes how the normal turns from `dFdx` and `dFdy`; the CPU, whose pixels are worked out eight at a time in no
+square, by the quotient rule on the normal as the triangle's barycentrics make it (`turnAt`, as `mipAt` does for u and
+v), the vertices' normal before a normal map bends it, on both. Only where it is shiny, and only where something turns:
+a flat triangle with no normal map keeps its roughness to the bit. A floor whose normal map's texels are a third of a
+pixel, moved by a quarter of a pixel at a time, flickers by .0009 where it flickered by .0026 (`materials/highlightFlicker`);
+its light is .0144 where eight times the pixels a side, not widened, show .0213, and the plain frame .0252: GGX's tail is
+longer than that map's texels, which turn no more than so far, and sends some of the light out of the frame. Tracing is
+not widened: its paths are as many as its samples.
+
 **Normal maps** need to know where u and v go on a surface. That is usually kept in each vertex, which would
 take four more bytes from all meshes for the sake of a few. Here it is worked out from what is there: on the
 CPU and in tracing from the triangle, once, and on the GPU from how the position and the coordinates change

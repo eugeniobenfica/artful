@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Highlights get back the light their lobe loses, and widen where the normal turns over a pixel** (the plan's phase
+  2.4). A rough metal was darker than it is: what meets a second facet was not in the lobe. Each lobe is multiplied by
+  1 + f0 (1 / E - 1) (Turquin, 2019), E being GGX's albedo, fitted in `shading.inc` (`Unkept`: thirty numbers, .8% at
+  most, no table), on the CPU's lanes, its paths and the GPU's shaders; in tracing, what a highlight reflects too. A
+  white metal ball under light the same from everywhere gives back .994 to 1.002 of it on both backends, where it gave
+  back .307 at roughness 1 (`tracing/metalFurnace`). And highlights are widened by as much as the normal turns over a
+  pixel (Tokuyoshi and Kaplanyan): alpha^2 grows by twice its variance there, from how it turns from pixel to pixel
+  (the GPU's `dFdx`, the CPU's quotient rule on the barycentrics) and from a normal map's texels (Toksvig's, by how short
+  their mean is), by at most .18; where nothing turns, roughness is as it was, to the bit. A floor with a fine normal map
+  moved by quarter pixels flickers a third as much (`materials/highlightFlicker`, with `artfWidenHighlights` for tests).
+  Frames take as long as they did on both backends. The pictures' hashes made again after FLIP against the commit
+  before: .002 to .007 on average over the test scenes, at most .61 where metal balls under lights get brighter
+  (`surfaces`); traced, the mean light .5% more. Metal's shaders made again.
+
 - **Ray cones, and mipmaps that are means of light** (the plan's phase 2.3, last part). A path carries a cone
   (Akenine-Möller et al., 2021) and reads each texture at the level where a texel is about as wide as it, between two;
   the GPU asks a texture its size and levels (`OpImageQuerySizeLod`), and reads the same as the CPU. One sample of a far

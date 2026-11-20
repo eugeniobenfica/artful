@@ -1035,6 +1035,51 @@ void testEnvironmentAimed(ArtfBackend backend) {
     artfSceneFree(s);
 }
 
+/* The white furnace, for highlights: a ball of white metal under light the same from everywhere gives back all of it,
+ * however rough, as what its lobe leaves out (light that meets a second facet) is put back (shading.inc's Gain). Without
+ * it, a roughness of 1 seen straight on gives back a third. Light at the middle, where the lobe loses most, and toward
+ * the side; to 2% of the truth. */
+static double lightOf(const uint32_t* frame, int x, int y) {
+    double sum = 0;
+    for (int j = -3; j <= 3; ++j)
+        for (int i = -3; i <= 3; ++i)
+            for (int c = 0; c < 24; c += 8) sum += artfSrgbDecode((float)(frame[(size_t)(y + j) * W + x + i] >> c & 255) / 255.f);
+    return sum / (49 * 3);
+}
+
+void testMetalFurnace(ArtfBackend backend) {
+    enum { PW = 64, PH = 32 };
+    static float even[PW * PH * 3];
+    for (int i = 0; i < PW * PH * 3; ++i) even[i] = .8f;
+    const float roughness[2] = {1.f, .5f};
+    for (int k = 0; k < 2; ++k) {
+        ArtfScene* s = plainScene();
+        CHECK(artfSceneSetEnvironment(s, even, PW, PH, 1.f, false));
+        ArtfMaterialDesc d = artfMaterialDefaults();
+        d.baseColor = artfVec3(1, 1, 1);
+        d.metallic = 1;
+        d.roughness = roughness[k];
+        addAt(s, artfSceneAddSphere(s, 1, 48, 64), artfSceneAddMaterial(s, &d), 0, 0, 0, 1);
+        setCamera(s, 0, 0, 4, 0, 0, 0);
+        const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 4, 256, 0, false};
+        artfSceneSetTrace(s, &paths);
+        ArtfRendererOptions o = options(backend, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) {
+            artfSceneFree(s);
+            return;
+        }
+        uint32_t* frame = artfMalloc((size_t)W * H * 4);
+        drawSamples(r, s, 64, frame);
+        const double middle = lightOf(frame, W / 2, H / 2) / .8, side = lightOf(frame, W / 2 + 30, H / 2) / .8;
+        printf("%s, white metal of roughness %.1f under even light: %.3f and %.3f of it back\n", backend == ARTF_BACKEND_VULKAN ? "GPU" : "CPU", roughness[k], middle, side);
+        CHECK(fabs(middle - 1) < .02 && fabs(side - 1) < .02);
+        artfFree(frame);
+        artfRendererFree(r);
+        artfSceneFree(s);
+    }
+}
+
 /* Aiming and bouncing, weighed lobe by lobe, add up to what bouncing alone finds: the same light, with less noise. A
  * shiny ball and a rough one on a floor under a sky with a sun, by the CPU's paths with aiming and without. */
 void testAimUnbiased(void) {

@@ -1220,14 +1220,17 @@ static SpvId depthThroughOf(Spv* s, const Shadows* h, SpvId view, SpvId place, b
 }
 
 /* What a surface reflects, as Reflecting in kernels.inc: its lobe (shading.inc's: drawn out where its flag says), how
- * much (specular), and what head on. */
-typedef struct Reflecting { shaderLobe lobe; SpvId strength, f0; } Reflecting;
+ * much (specular), and what head on; and what the lobe is multiplied by, for the light it loses (shading.inc's Gain3;
+ * 0: nothing, as a coat's). */
+typedef struct Reflecting { shaderLobe lobe; SpvId strength, f0, gain; } Reflecting;
 
 /* The same as addLight in kernels.inc, but for the light's color: shading.inc's highlight, times Schlick's Fresnel. */
 static SpvId lightHighlight(Spv* s, const Reflecting* f, SpvId n, SpvId view, SpvId toLight, SpvId ndl, SpvId strength) {
     SpvId vdh;
     SpvId lit = shaderHighlight(s, &f->lobe, f->lobe.drawn, n, view, shaderHalfway(s, view, toLight), ndl, MUL_F(strength, f->strength), &vdh);
-    return SCALE_V3(shaderSchlick3(s, f->f0, shaderFifth(s, vdh)), lit);
+    SpvId fresnel = shaderSchlick3(s, f->f0, shaderFifth(s, vdh));
+    if (f->gain) fresnel = MUL_V3(fresnel, f->gain);
+    return SCALE_V3(fresnel, lit);
 }
 
 /* Past glTF's core (ArtfMaterialMore), as Extras in kernels.inc: where the coat, sheen and light under the surface add
@@ -1590,6 +1593,9 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     /* where u and v go on it, from how they change between pixels: so vertices need not hold it */
     SpvId dpx = spvOp1(s, 207 /* OpDPdx */, s->vec3, world), dpy = spvOp1(s, 208 /* OpDPdy */, s->vec3, world);
     SpvId dux = spvOp1(s, 207, s->vec2, uv), duy = spvOp1(s, 208, s->vec2, uv);
+    /* how much the normal turns over the pixel, as turnAt on the CPU (shading.inc's Widened) */
+    SpvId dnx = spvOp1(s, 207, s->vec3, n), dny = spvOp1(s, 208, s->vec3, n);
+    SpvId turn = MUL_F(ADD_F(DOT3(dnx, dnx), DOT3(dny, dny)), FLOAT(.25f));
     SpvId tangentRaw = SUB_V3(SCALE_V3(dpx, spvExtract(s, s->floatType, duy, 1)), SCALE_V3(dpy, spvExtract(s, s->floatType, dux, 1)));
     SpvId bitangentRaw = SUB_V3(SCALE_V3(dpy, spvExtract(s, s->floatType, dux, 0)), SCALE_V3(dpx, spvExtract(s, s->floatType, duy, 0)));
     SpvId det = SUB_F(MUL_F(spvExtract(s, s->floatType, dux, 0), spvExtract(s, s->floatType, duy, 1)), MUL_F(spvExtract(s, s->floatType, duy, 0), spvExtract(s, s->floatType, dux, 1)));
@@ -1599,6 +1605,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId bent = NORMALIZE(ADD_V3(ADD_V3(SCALE_V3(tangent, bx), SCALE_V3(bitangent, by)), SCALE_V3(n, bz)));
     SpvId plainN = n;
     n = pick3(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(X(m4)), UINT(0)), bent, n);
+    turn = ADD_F(turn, spvSelect(s, s->floatType, spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(X(m4)), UINT(0)), shaderMapVariance(s, X(bumps), Y(bumps), Z(bumps)), FLOAT(0.f)));
     /* past glTF's core (ArtfMaterialMore), as on the CPU: its rows, and the coat's and sheen's textures (white when none) */
     SpvId e[ARTF_MATERIAL_MORE_ROWS], moreFlags = 0, coatAmount = 0, coatRough = 0, sheenRough = 0, sheenColor = 0, coatN = 0;
     if (coats) {
@@ -1723,11 +1730,13 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         albedo = spvLoad(s, s->vec3, decalAlbedo);
         rough = spvLoad(s, s->floatType, decalRough);
     }
+    /* a highlight as wide as the normal turns over the pixel, where it is shiny */
+    rough = spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, ADD_F(specular, metal), FLOAT(0.f)), shaderWidened(s, rough, turn), rough);
     SpvId a = MUL_F(rough, rough), notMetal = SUB_F(FLOAT(1.f), metal);
     SpvId ndv = MAX_F(DOT3(n, view), FLOAT(1e-4f));
     SpvId dielectric = SCALE_V3(same3(s, .04f), specular);
     SpvId f0 = shaderReflects3(s, dielectric, notMetal, albedo, metal);
-    Reflecting reflecting = {shaderLobeOf(s, rough, ndv), specular, f0};
+    Reflecting reflecting = {shaderLobeOf(s, rough, ndv), specular, f0, 0};
 #define MORE_HAS(bit) spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, moreFlags, UINT(bit)), UINT(0))
     if (coats) {
         /* a dielectric's of a color, and a thin film's colors, as on the CPU */
@@ -1738,6 +1747,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId t = NORMALIZE(SUB_V3(tangent, SCALE_V3(n, DOT3(n, tangent)))), bt = G_CROSS(n, t);
         shaderDraw(s, &reflecting.lobe, MORE_HAS(ARTF_MORE_ANISOTROPY), t, bt, X(e[5]), Y(e[5]), a, shaderDrawnLong(s, a, MUL_F(Z(e[3]), Z(e[3]))));
     }
+    reflecting.gain = shaderGain3(s, reflecting.f0, shaderUnkept(s, ndv, rough));
     SpvId shiny = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, ADD_F(specular, metal), FLOAT(0.f));
 
     SpvId up = ADD_F(MUL_F(spvExtract(s, s->floatType, n, 1), FLOAT(.5f)), FLOAT(.5f));
@@ -3061,10 +3071,11 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     SpvId unlit = NOT_EQ(AND_U(flags, UINT(ARTF_MATERIAL_UNLIT)), UINT(0));
     if (!t->more) {
         /* (no material past glTF's core in the scene: a mirror and a lobe, as trace.c's lightFrom) */
-        SpvId mirror = shaderMirror3(s, f0, SUB_F(FLOAT(1.f), rough), shaderFifth(s, ndv), FLOAT(1.f));
+        SpvId gain = shaderGain3(s, f0, shaderUnkept(s, ndv, rough));
+        SpvId mirror = MUL_V3(shaderMirror3(s, f0, SUB_F(FLOAT(1.f), rough), shaderFifth(s, ndv), FLOAT(1.f)), gain);
         const Met plain = {normal, SCALE_V3(albedo, notMetal), PICK_F(hole, FLOAT(0.f), shown), emission, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(n, d), FLOAT(0.f)), X(m3),
                            shiny, rough, ADD_F(FLOAT(1.f), MUL_F(SUB_F(X(occlusion), FLOAT(1.f)), W(m3))), pick3(s, shiny, mirror, same3(s, 0.f)), f0,
-                           {shaderLobeOf(s, rough, ndv), specular, f0},
+                           {shaderLobeOf(s, rough, ndv), specular, f0, gain},
                            FLOAT(0.f), FLOAT(1.f), same3(s, 0.f), {{0}}, 0, 0, 0, 0, 0, 0};
         return plain;
     }
@@ -3076,7 +3087,8 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
 #define T_HAS(bit) NOT_EQ(AND_U(moreFlags, UINT(bit)), UINT(0))
     f0 = shaderReflects3(s, MUL_V3(dielectric, spvShuffle3(s, e[4])), notMetal, albedo, metal);
     f0 = pick3(s, T_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, W(e[3]), W(e[4]), Z(e[5])), f0);
-    SpvId mirror = pick3(s, shiny, shaderMirror3(s, f0, SUB_F(FLOAT(1.f), rough), shaderFifth(s, ndv), FLOAT(1.f)), same3(s, 0.f));
+    SpvId gain = shaderGain3(s, f0, shaderUnkept(s, ndv, rough));
+    SpvId mirror = pick3(s, shiny, MUL_V3(shaderMirror3(s, f0, SUB_F(FLOAT(1.f), rough), shaderFifth(s, ndv), FLOAT(1.f)), gain), same3(s, 0.f));
     /* highlights drawn out: the way u grows, into the world by toObject's inverse, square to the normal, turned */
     SpvId c12 = G_CROSS(k1, k2), c20 = G_CROSS(k2, k0), c01 = G_CROSS(k0, k1);
     SpvId tw = SCALE_V3(ADD_V3(ADD_V3(SCALE_V3(c12, X(tangent)), SCALE_V3(c20, Y(tangent))), SCALE_V3(c01, Z(tangent))), PICK_F(LESS_F(DOT3(k0, c12), FLOAT(0.f)), FLOAT(-1.f), FLOAT(1.f)));
@@ -3101,7 +3113,7 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     mirror = ADD_V3(SCALE_V3(mirror, under), vec3Of(s, MUL_F(coat, coatMirror), MUL_F(coat, coatMirror), MUL_F(coat, coatMirror)));
     const Met more = {normal, SCALE_V3(albedo, MUL_F(notMetal, under)), PICK_F(hole, FLOAT(0.f), shown), emission, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(n, d), FLOAT(0.f)), X(m3),
                       EITHER(shiny, layered), rough, ADD_F(FLOAT(1.f), MUL_F(SUB_F(X(occlusion), FLOAT(1.f)), W(m3))), mirror, f0,
-                      {lobe, specular, f0},
+                      {lobe, specular, f0, gain},
                       coat, under, SCALE_V3(sheenColor, MUL_F(notMetal, under)),
                       {shaderLobeOf(s, coatRough, coatNv), FLOAT(1.f), same3(s, .04f)},
                       moreFlags, coatNormal, DIV_F(FLOAT(1.f), MUL_F(sheenRough, sheenRough)), pick3(s, unlit, same3(s, 0.f), SCALE_V3(spvShuffle3(s, e[6]), MUL_F(notMetal, under))),

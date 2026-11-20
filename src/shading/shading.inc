@@ -143,6 +143,55 @@ S_DEF S_F S_FN(Highlight)(S_SELF const S_FN(Lobe)* l, S_FLAG drawn, S_V3 n, S_V3
     return S_FN(Specular)(S_PASS distribution, ndl, l->ndv, l->k, scale);
 }
 
+/* ---- light the lobe loses ----
+ *
+ * The lobe is light that leaves the surface from one facet. What meets a second facet first is not in it, and a rough
+ * metal is darker than it is: GGX's of roughness 1, Smith's masking, Fresnel 1, gives back .31 of light from straight
+ * on. Turquin (2019) puts it back, the lobe times 1 + f0 (1 / E - 1), E being all the lobe gives back from n . v (its
+ * albedo): a white metal then gives back all it gets, a dielectric little more, as what the second facet sends on is
+ * reflected as often. */
+
+/* 1 / E - 1, of n . v and roughness: least squares to E of GGX's lobe (Smith's masking, height-correlated: what the
+ * tracer's paths reflect by), in x = n . v / (n . v + alpha sin), as masking goes by alpha tan, and in roughness. Off
+ * by .8% of what it makes whole at most, at any angle; 0 at roughness 0. */
+#define S_ROW_(c1, c2, c3, c4, c5) \
+    S_MUL(S_ADD(S_MUL(S_ADD(S_MUL(S_ADD(S_MUL(S_ADD(S_MUL(S_C(c5), rough), S_C(c4)), rough), S_C(c3)), rough), S_C(c2)), rough), S_C(c1)), rough)
+S_DEF S_F S_FN(Unkept)(S_SELF S_F ndv, S_F rough) {
+    const S_F a = S_MUL(rough, rough), sine = S_SQRT(S_MAX(S_SUB(S_C(1.f), S_MUL(ndv, ndv)), S_C(0.f)));
+    const S_F x = S_DIV(ndv, S_MAX(S_ADD(ndv, S_MUL(a, sine)), S_C(1e-20f)));
+    S_F g = S_ROW_(-36.8876762f, 179.17543f, -259.47818f, 111.392197f, 16.6388912f);
+    g = S_ADD(S_MUL(g, x), S_ROW_(157.066681f, -767.819092f, 1298.90527f, -892.311279f, 179.991226f));
+    g = S_ADD(S_MUL(g, x), S_ROW_(-226.132965f, 1119.03772f, -2049.99438f, 1643.00623f, -470.446014f));
+    g = S_ADD(S_MUL(g, x), S_ROW_(132.335831f, -667.578064f, 1273.3894f, -1086.42896f, 344.982513f));
+    g = S_ADD(S_MUL(g, x), S_ROW_(-28.9286957f, 150.582138f, -289.063629f, 247.651779f, -76.8523941f));
+    g = S_ADD(S_MUL(g, x), S_ROW_(2.54451299f, -13.2217445f, 25.5772476f, -21.719202f, 6.84259319f));
+    return S_MAX(g, S_C(0.f));
+}
+#undef S_ROW_
+/* What the lobe is multiplied by, a channel and three: 1 + f0 Unkept. */
+S_DEF S_F S_FN(Gain)(S_SELF S_F f0, S_F unkept) { return S_ADD(S_C(1.f), S_MUL(f0, unkept)); }
+S_DEF S_V3 S_FN(Gain3)(S_SELF S_V3 f0, S_F unkept) { return S_ADD3(S_SPLAT3(S_C(1.f)), S_SCALE3(f0, unkept)); }
+
+/* ---- highlights smaller than a pixel ----
+ *
+ * Where the normal turns much from one pixel to the next, a highlight narrower than that falls between pixels, and
+ * flickers as things move. Tokuyoshi and Kaplanyan (2019, 2021) widen the lobe by as much as the normal turns over a
+ * pixel: alpha^2 grows by twice the normal's variance there, by at most .18. variance: of the normal over the pixel
+ * (what turns it from pixel to pixel, times a pixel's own variance, 1/4; and that of a normal map's texels, Toksvig's
+ * (1 - |n|) / |n|, as their mean is shorter where they differ). Roughness as it was where nothing turns. */
+S_DEF S_F S_FN(Widened)(S_SELF S_F rough, S_F variance) {
+    const S_F a = S_MUL(rough, rough);
+    const S_F a2 = S_MIN(S_ADD(S_MUL(a, a), S_MIN(S_MUL(variance, S_C(2.f)), S_C(.18f))), S_C(1.f));
+    return S_SELECT(S_GT(variance, S_C(0.f)), S_SQRT(S_SQRT(a2)), rough);
+}
+/* A normal map's texel, as it was read (between texels and levels, each channel from 0 to 1): the variance of what it
+ * is the mean of, by how much shorter than 1 it is; less a little, for bytes round what was of length 1. */
+S_DEF S_F S_FN(MapVariance)(S_SELF S_F x, S_F y, S_F z) {
+    const S_F bx = S_SUB(S_MUL(x, S_C(2.f)), S_C(1.f)), by = S_SUB(S_MUL(y, S_C(2.f)), S_C(1.f)), bz = S_SUB(S_MUL(z, S_C(2.f)), S_C(1.f));
+    const S_F length = S_SQRT(S_ADD(S_ADD(S_MUL(bx, bx), S_MUL(by, by)), S_MUL(bz, bz)));
+    return S_DIV(S_MAX(S_SUB(S_SUB(S_C(1.f), length), S_C(1.f / 128.f)), S_C(0.f)), S_MAX(length, S_C(.1f)));
+}
+
 /* ---- lights with a size ---- */
 
 /* The mirror ray. */

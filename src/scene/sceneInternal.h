@@ -418,6 +418,9 @@ ARTF_INLINE bool artfLightShaped(const ArtfFrameData* f, uint32_t i) { return f-
 extern bool artfTraceAim;
 /* For tests: false makes the CPU's paths read textures at their finest, with no cone (trace.c's texelCone). */
 extern bool artfTraceCones;
+/* For tests: false makes the CPU's rasterizer leave highlights as narrow as their roughness, where the normal turns
+ * over a pixel (kernels.inc's turnAt and shading.inc's Widened). */
+extern bool artfWidenHighlights;
 
 /* (artfLog2Fast, artfExp2Fast and sRGB: core/color.h) */
 /* What fog by height makes of the fog's density at a height: as much as that, times this. */
