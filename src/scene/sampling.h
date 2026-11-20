@@ -65,4 +65,36 @@ static inline void artfSobol4(uint32_t index, uint32_t seed, float out[4]) {
 /* The seed of a pixel's sequence for a group of dimensions: the camera's (group 0), then each bounce's. */
 static inline uint32_t artfPathSeed(uint32_t pixel, uint32_t group) { return artfHash32(artfHash32(pixel) ^ (group + 1u) * 0x85EBCA6Bu); }
 
+/* ---- blue noise between pixels (Georgiev and Fajardo, 2016) ----
+ *
+ * With a sequence of its own, a pixel's error is unlike its neighbours' at random: white noise. So the pixels of a square
+ * of 64 x 64 share one sequence (artfTileSeed), and each turns it (Cranley and Patterson) by its place in a tile of blue
+ * noise (tools/blueNoise.py), a dimension and a group at a time from another place of the tile: with a sample or a few,
+ * neighbours are told apart as blue noise is, and a pixel's samples are still Sobol's, turned. On the GPU, the tile is
+ * in the tracing frame (ArtfTraceFrame.blue), and the same integers make the same turns. */
+#include "scene/blueNoise.inc"
+
+static inline uint32_t artfTileSeed(uint32_t x, uint32_t y, uint32_t group) { return artfPathSeed((y >> 6) * 65536u + (x >> 6), group); }
+
+/* A pixel's turn of a dimension (salt: group x 4 + dimension): the tile's rank at a place the salt moves it to, as the
+ * top 12 bits, and 20 of a hash below. */
+static inline uint32_t artfBlueTurn(uint32_t x, uint32_t y, uint32_t salt) {
+    const uint32_t h = artfHash32(salt * 0x9E3779B9u + 0x632BE5ABu);
+    const uint32_t at = ((y + (h >> 6)) & 63u) * 64u + ((x + h) & 63u);
+    return (uint32_t)artfBlueNoise[at] << 20 | artfHash32(h ^ x * 0x27D4EB2Du ^ y * 0x165667B1u) >> 12;
+}
+
+/* artfSobol4, of the square's sequence, turned for the pixel at (x, y). */
+static inline void artfSobol4Turned(uint32_t index, uint32_t x, uint32_t y, uint32_t group, float out[4]) {
+    index &= (1u << ARTF_SOBOL_BITS) - 1u;
+    const uint32_t seed = artfTileSeed(x, y, group);
+    for (uint32_t d = 0; d < 4; ++d) {
+        uint32_t v = 0;
+        for (uint32_t i = index, k = 0; i; i >>= 1, ++k)
+            if (i & 1u) v ^= artfSobolMatrix[d][k];
+        v = artfOwenScramble(v, artfSobolSeed(seed, d)) + artfBlueTurn(x, y, group * 4u + d);
+        out[d] = (float)(v >> 8) * (1.f / 16777216.f);
+    }
+}
+
 #endif

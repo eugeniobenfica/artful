@@ -2600,9 +2600,11 @@ static void shownLanes(float* const* c, int n, float contrast) {
 
 static void gradeLanes(const ArtfFrameData* f, const float* lut, float* const* c, int n, uint32_t at) {
     const V8F zero = v8fSet(0.f), one = v8fSet(1.f);
-    const bool curves = f->grade2[0][3] > 0;
+    /* (in what is shown only with gradeShown: else it was done in ACEScct, before the curve: artfGradeCct) */
+    const bool shownSpace = f->gradeShown > 0;
+    const bool curves = shownSpace && f->grade2[0][3] > 0;
     const int size = (int)f->grade2[3][3];
-    const bool looked = size >= 2 && lut;
+    const bool looked = shownSpace && size >= 2 && lut;
     const float grain = f->grade2[1][3];
     for (int x = 0; x < n; x += 8) {
         V8F v[3] = {v8fLoad(c[0] + x), v8fLoad(c[1] + x), v8fLoad(c[2] + x)};

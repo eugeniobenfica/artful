@@ -25,14 +25,6 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }}
           cmake --build build
       # (lavapipe has fallen over in post/floats, after its effects: where, by the debugger)
-      - name: what the simplifier does, for the Mac's to be compared
-        if: matrix.cc == 'clang'
-        run: ARTFUL_SIMPLIFY_TRACE=1 build/artful-tests --exact scale/skinLod > simplify-linux.txt || true
-      - uses: actions/upload-artifact@v4
-        if: matrix.cc == 'clang'
-        with:
-          name: simplify-linux
-          path: simplify-linux.txt
       - name: post/floats under gdb
         continue-on-error: true
         run: |
@@ -94,15 +86,12 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DARTFUL_METAL=ON
           cmake --build build
-          ARTFUL_SIMPLIFY_TRACE=1 build/artful-tests --exact scale/skinLod > simplify-macos.txt || true
           build/artful-tests
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: flip-macos
-          path: |
-            flip-macos.csv
-            simplify-macos.txt
+          path: flip-macos.csv
           if-no-files-found: ignore
       # (the SPIRV-Cross of the Vulkan SDK that wrote shaders.inc: another version names its variables otherwise)
       - name: SPIRV-Cross, as in Vulkan SDK 1.4.363

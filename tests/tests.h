@@ -134,6 +134,8 @@ void testUpscaleQuality(void);
 void testProbesHard(void);
 void test2DThreadRule(void);
 void testTextureHandles(void);
+void testFewSamples(void);
+void testLightMis(void);
 void testLayers(ArtfBackend backend);
 void testMaterials(ArtfBackend backend, bool antialias);
 void testSamePixelsOfLayers(void);

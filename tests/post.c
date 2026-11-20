@@ -533,10 +533,31 @@ void testLookMore(void) {
         drawInto(r, s, a);
         float* identity = swapLut(17, false);
         float* swapped = swapLut(17, true);
+        /* (in ACEScct, as tables are by default: nothing changed, to a level, and what is grey stays grey) */
         ArtfPostDesc table = {.look.lut = identity, .look.lutSize = 17};
         artfSceneSetPost(s, &table);
         drawInto(r, s, b);
-        printf("%s, a look-up table that changes nothing: %.4f%% of pixels apart\n", name, differentShare(a, b, 1) * 100);
+        printf("%s, a look-up table in ACEScct that changes nothing: %.4f%% of pixels apart\n", name, differentShare(a, b, 1) * 100);
+        CHECK(differentShare(a, b, 1) == 0);
+        table.look.lut = swapped;
+        artfSceneSetPost(s, &table);
+        drawInto(r, s, b);
+        int greys = 0, stayed = 0;
+        for (int i = 0; i < W * H; ++i) {
+            const int r0 = CHANNEL(a[i], 0), g0 = CHANNEL(a[i], 8), b0 = CHANNEL(a[i], 16);
+            if (abs(r0 - g0) > 1 || abs(g0 - b0) > 1) continue;
+            ++greys;
+            const int r1 = CHANNEL(b[i], 0), g1 = CHANNEL(b[i], 8), b1 = CHANNEL(b[i], 16);
+            stayed += abs(r1 - g1) <= 3 && abs(g1 - b1) <= 3 && abs(g1 - g0) <= 3;
+        }
+        printf("%s, red and blue swapped in ACEScct: %d of %d grey pixels stay grey\n", name, stayed, greys);
+        CHECK(greys > 100 && stayed == greys);
+        /* and as before 1.0, in what a screen shows */
+        table.look.lut = identity;
+        table.look.gradeShown = true;
+        artfSceneSetPost(s, &table);
+        drawInto(r, s, b);
+        printf("%s, a look-up table in what is shown that changes nothing: %.4f%% of pixels apart\n", name, differentShare(a, b, 1) * 100);
         CHECK(differentShare(a, b, 1) == 0);
         table.look.lut = swapped;
         artfSceneSetPost(s, &table);

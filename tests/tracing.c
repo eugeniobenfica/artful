@@ -1370,3 +1370,105 @@ void testRayCones(void) {
     artfFree(settled);
     artfSceneFree(s);
 }
+
+/* A few samples a pixel against many: how far, by FLIP (which sees how the error is spread: blue noise reads as less
+ * than white of the same size) and by the mean of what differs, on both backends; paths, the light that bounced. */
+static void tracedAt(ArtfRenderer* r, int samples, int frames, uint32_t* out) {
+    ArtfScene* s = bleedScene();
+    const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, samples, 0, 4, false, false};
+    artfSceneSetTrace(s, &paths);
+    for (int k = 0; k < frames; ++k) CHECK(artfRendererDraw(r, s));
+    CHECK(artfRendererReadPixels(r, out));
+    artfSceneFree(s);
+}
+void testFewSamples(void) {
+    uint32_t* truth = artfMalloc(W * H * 4);
+    uint32_t* few = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        tracedAt(r, 64, 16, truth);
+        double flip[2], mean[2];
+        for (int k = 0; k < 2; ++k) {
+            tracedAt(r, k ? 4 : 1, 1, few);
+            const FlipStats f = flipFrames(truth, few, W, H, 0, NULL);
+            flip[k] = f.mean;
+            mean[k] = meanApart(truth, few);
+        }
+        printf("%s, paths of 1 and 4 samples against 1,024: FLIP %.4f and %.4f, %.2f and %.2f of 255 apart\n", backend ? "GPU" : "CPU", flip[0], flip[1], mean[0], mean[1]);
+        /* (each pixel with a sequence of its own, white noise: 0.0839 and 0.0454 on the CPU, 0.0858 and 0.0473 on the GPU) */
+        CHECK(flip[0] < (backend ? .0858 : .0839) * .9 && flip[1] < (backend ? .0473 : .0454) * 1.01);
+        artfRendererFree(r);
+    }
+    artfFree(truth);
+    artfFree(few);
+}
+
+/* Lights with a size, both ways (MIS): a shiny floor under a lamp with a size and a sun with one. Aimed at alone, a
+ * sharp highlight of a large light is found by few paths, and those bright: at 16 samples a frame is far from where it
+ * settles. Weighed against the bounce's own way, the same frame is nearer, and where both settle is the same light. */
+static ArtfScene* lampFloorScene(float roughness) {
+    ArtfScene* s = plainScene();
+    artfSceneSetAmbient(s, artfVec3(0, 0, 0), artfVec3(0, 0, 0));
+    artfSceneSetSun(s, artfVec3(-.4f, -1, -.3f), artfVec3(1.2f, 1.1f, 1));
+    artfSceneSetSunSize(s, .15f);
+    setCamera(s, 0, 1.6f, 3.5f, 0, -.6f, 0);
+    ArtfMaterialDesc floor = artfMaterialDefaults();
+    floor.baseColor = artfVec3(.5f, .5f, .5f);
+    floor.roughness = roughness;
+    floor.metallic = 1;
+    const ArtfTransform t = artfTransformAt(0, -1, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 20, 1), artfSceneAddMaterial(s, &floor), &t);
+    const ArtfLight lamp = artfSceneAddLight(s, artfVec3(.3f, -.3f, -1.2f), artfVec3(2, 1.8f, 1.6f), 7);
+    artfLightSetSize(s, lamp, .6f);
+    return s;
+}
+static void lampFloorAt(ArtfRenderer* r, int ways, float roughness, int samples, int frames, uint32_t* out, double* light) {
+    artfTraceLightWays = ways;
+    ArtfScene* s = lampFloorScene(roughness);
+    const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, samples, 0, 3, false, false};
+    artfSceneSetTrace(s, &paths);
+    for (int k = 0; k < frames; ++k) CHECK(artfRendererDraw(r, s));
+    CHECK(artfRendererReadPixels(r, out));
+    double sum = 0;
+    for (int i = 0; i < W * H; ++i) sum += CHANNEL(out[i], 8);
+    *light = sum / (W * H);
+    artfSceneFree(s);
+    artfTraceLightWays = 0;
+}
+void testLightMis(void) {
+    uint32_t* truth = artfMalloc(W * H * 4);
+    uint32_t* few = artfMalloc(W * H * 4);
+    double cpuSettled = 0;
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        double settled, light;
+        lampFloorAt(r, 0, .1f, 64, 32, truth, &settled);
+        lampFloorAt(r, 0, .1f, 16, 1, few, &light);
+        const double apart = meanApart(truth, few);
+        if (!backend) {
+            /* aimed at alone: 16 samples, from where both ways settle */
+            cpuSettled = settled;
+            lampFloorAt(r, 1, .1f, 16, 1, few, &light);
+            const double aimedApart = meanApart(truth, few);
+            /* where each settles, on a floor whose highlight aiming alone settles on in 2,048 samples (on the shinier one
+             * it has not: what is left of its noise, under the tone curve, makes it darker) */
+            double aimedOnly, both;
+            lampFloorAt(r, 1, .3f, 64, 32, few, &aimedOnly);
+            lampFloorAt(r, 0, .3f, 64, 32, few, &both);
+            printf("CPU, a lamp and a sun with a size on a shiny floor: 16 samples %.2f of 255 from 2,048 aimed alone, %.2f both ways; on a rougher one, settled %.2f and %.2f\n",
+                   aimedApart, apart, aimedOnly, both);
+            CHECK(apart < aimedApart * .5 && fabs(both - aimedOnly) < aimedOnly * .01);
+        } else {
+            printf("GPU, the same both ways: 16 samples %.2f of 255 from 2,048; settled %.2f, the CPU's %.2f\n", apart, settled, cpuSettled);
+            CHECK(fabs(settled - cpuSettled) < cpuSettled * .02);
+        }
+        artfRendererFree(r);
+    }
+    artfFree(truth);
+    artfFree(few);
+}

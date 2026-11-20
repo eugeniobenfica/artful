@@ -2717,7 +2717,7 @@ uint32_t* artfShaderBackgroundBackdrop(size_t* size, bool hdr) {
  * 22 what each pixel gathered, 23 ArtfTraceFrame. A shader here has no functions: what is called twice in
  * trace.c is written out twice. */
 
-enum { T_EYE = 0, T_RIGHT = 1, T_UP = 2, T_FORWARD = 3, T_SIZE = 4, T_PATH = 5, T_PREVIOUS = 6, T_ROWS = 10 };
+enum { T_EYE = 0, T_RIGHT = 1, T_UP = 2, T_FORWARD = 3, T_SIZE = 4, T_PATH = 5, T_PREVIOUS = 6, T_BLUE = 10, T_ROWS = 10 + 512 };
 
 typedef struct Loop { SpvId header, test, body, next, done; } Loop;
 
@@ -2761,6 +2761,7 @@ typedef struct Tracer {
     SpvId bestT, bestU, bestV, bestInstance, bestTriangle;
     SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice, diffuseLikely, bounceDir, keptVar, shineVar, towardVar, likelyVar, coneWidth, coneSpread;
     SpvId shadowOrigin, through, limit, shadowStep, lightIndex, ballStep, ball, travelled, keep;
+    SpvId weighsVar; /* (trace.c's lastWeighs: the surface the ray left weighed its lights with a size) */
     GraphVars own;
     const ArtfGraphData* graphs;
     uint32_t graphCount;
@@ -3250,6 +3251,19 @@ static SpvId owenOf(Spv* s, SpvId x, SpvId seed) {
     for (int k = 0; k < 4; ++k) x = XOR_U(x, MUL_U(x, UINT(m[k])));
     return spvOp1(s, 204, s->uintType, x);
 }
+/* sampling.h's artfBlueTurn and artfSobol4Turned, the tile from the tracing frame's rows (two ranks a word) */
+static SpvId blueTurnOf(const Tracer* t, SpvId x, SpvId y, uint32_t saltBase, SpvId group, uint32_t d) {
+    Spv* s = t->s;
+    SpvId salt = ADD_U(MUL_U(group, UINT(4)), UINT(saltBase + d));
+    SpvId h = traceHash(s, ADD_U(MUL_U(salt, UINT(0x9E3779B9u)), UINT(0x632BE5ABu)));
+    SpvId at = ADD_U(MUL_U(AND_U(ADD_U(y, SHR_U(h, 6)), UINT(63)), UINT(64)), AND_U(ADD_U(x, h), UINT(63)));
+    const SpvId idx[3] = {t->r.zero, ADD_U(UINT(T_BLUE), SHR_U(at, 3)), AND_U(SHR_U(at, 1), UINT(3))};
+    SpvId word = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvLoad(s, s->floatType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_Uniform, s->floatType), t->frame, idx, 3)));
+    SpvId rank = AND_U(spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, word, MUL_U(AND_U(at, UINT(1)), UINT(16))), UINT(0xFFFF));
+    SpvId low = SHR_U(traceHash(s, XOR_U(XOR_U(h, MUL_U(x, UINT(0x27D4EB2Du))), MUL_U(y, UINT(0x165667B1u)))), 12);
+    return spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, spvOp2(s, 196 /* OpShiftLeftLogical */, s->uintType, rank, UINT(20)), low);
+}
+static void sobol4TurnedOf(const Tracer* t, SpvId index, SpvId x, SpvId y, SpvId group, SpvId* out);
 static void sobol4Of(Spv* s, SpvId index, SpvId seed, SpvId* out) {
     for (uint32_t d = 0; d < 4; ++d) {
         SpvId x = UINT(0);
@@ -3259,6 +3273,17 @@ static void sobol4Of(Spv* s, SpvId index, SpvId seed, SpvId* out) {
     }
 }
 static SpvId pathSeedOf(Spv* s, SpvId pixel, SpvId group) { return traceHash(s, XOR_U(traceHash(s, pixel), MUL_U(ADD_U(group, UINT(1)), UINT(0x85EBCA6Bu)))); }
+static void sobol4TurnedOf(const Tracer* t, SpvId index, SpvId x, SpvId y, SpvId group, SpvId* out) {
+    Spv* s = t->s;
+    SpvId seed = pathSeedOf(s, ADD_U(MUL_U(SHR_U(y, 6), UINT(65536)), SHR_U(x, 6)), group);
+    for (uint32_t d = 0; d < 4; ++d) {
+        SpvId v = UINT(0);
+        for (int k = 0; k < ARTF_SOBOL_BITS; ++k) v = XOR_U(v, MUL_U(AND_U(SHR_U(index, k), UINT(1)), UINT(artfSobolMatrix[d][k])));
+        SpvId seedHere = traceHash(s, ADD_U(seed, UINT(d * 0x9E3779B9u)));
+        v = ADD_U(owenOf(s, v, seedHere), blueTurnOf(t, x, y, 0, group, d));
+        out[d] = MUL_F(TO_F(SHR_U(v, 8)), FLOAT(1.f / 16777216.f));
+    }
+}
 /* trace.c's ballOf */
 static SpvId directionOfSpv(Spv* s, const SpvId* u) {
     SpvId z = SUB_F(FLOAT(1.f), MUL_F(FLOAT(2.f), u[0]));
@@ -3303,6 +3328,46 @@ static SpvId visibleNormalSpv(Spv* s, SpvId n, SpvId v, SpvId alpha, const SpvId
 static SpvId ballOfSpv(Spv* s, const SpvId* u) {
     SpvId r = exp2Of(s, MUL_F(log2Of(s, u[2]), FLOAT(1.f / 3.f)));
     return SCALE_V3(directionOfSpv(s, u), r);
+}
+
+/* trace.c's ballChord: how likely aiming at a ball (c from here, of radius size) is toward w, a steradian; and, if lit,
+ * what a bounce toward w takes of it before limit, fade^2 t^2 over the chord (reach2: 1 / the light's radius^2). */
+static SpvId ballChordSpv(Spv* s, SpvId c, SpvId size, SpvId w, SpvId limit, SpvId reach2, SpvId* lit) {
+    SpvId b = DOT3(w, c), disc = ADD_F(SUB_F(MUL_F(b, b), DOT3(c, c)), MUL_F(size, size));
+    SpvId root = SQRT_F(MAX_F(disc, FLOAT(0.f)));
+    SpvId t0 = MAX_F(SUB_F(b, root), FLOAT(0.f)), t1 = ADD_F(b, root);
+    SpvId valid = BOTH(BOTH(MORE_F(size, FLOAT(0.f)), MORE_F(disc, FLOAT(0.f))), MORE_F(t1, t0));
+    SpvId volume = MAX_F(MUL_F(MUL_F(MUL_F(FLOAT(4.18879020f), size), size), size), FLOAT(1e-30f));
+    if (lit) {
+        SpvId end = MIN_F(t1, limit);
+        SpvId u1 = PICK_F(MORE_F(reach2, FLOAT(0.f)), MIN_F(end, SQRT_F(DIV_F(FLOAT(1.f), MAX_F(reach2, FLOAT(1e-30f))))), end), u0 = MIN_F(t0, u1);
+        SpvId part[2];
+        const SpvId at[2] = {u1, u0};
+        for (int k = 0; k < 2; ++k) {
+            SpvId x = at[k], x3 = MUL_F(MUL_F(x, x), x), x5 = MUL_F(MUL_F(x3, x), x), x7 = MUL_F(MUL_F(x5, x), x);
+            part[k] = ADD_F(SUB_F(MUL_F(x3, FLOAT(1.f / 3.f)), MUL_F(MUL_F(MUL_F(FLOAT(2.f), reach2), x5), FLOAT(1.f / 5.f))), MUL_F(MUL_F(MUL_F(reach2, reach2), x7), FLOAT(1.f / 7.f)));
+        }
+        *lit = PICK_F(valid, DIV_F(SUB_F(part[0], part[1]), volume), FLOAT(0.f));
+    }
+    return PICK_F(valid, DIV_F(MUL_F(SUB_F(MUL_F(MUL_F(t1, t1), t1), MUL_F(MUL_F(t0, t0), t0)), FLOAT(1.f / 3.f)), volume), FLOAT(0.f));
+}
+
+/* trace.c's bounceLikelyOf and lightFromLobes together: a light toward `to`, as the tracer's own lobes reflect it, each
+ * weighed against its bounce's likelihood of `to` (aim: aiming's). Its strength and how much gets through apart. */
+static SpvId lobesReflectedSpv(Spv* s, const Met* m, SpvId view, SpvId to, SpvId ndl, SpvId alpha, SpvId nv, SpvId most, SpvId chance, SpvId aim) {
+    SpvId h = NORMALIZE(ADD_V3(view, to));
+    SpvId facing = ggxDSpv(s, alpha, MAX_F(DOT3(m->normal, h), FLOAT(0.f)));
+    SpvId lambdaView = ggxLambdaSpv(s, alpha, nv);
+    SpvId likelyDiffuse = MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), MAX_F(ndl, FLOAT(0.f))), FLOAT(1.f / 3.14159265f));
+    SpvId likelyShine = PICK_F(BOTH(MORE_F(chance, FLOAT(0.f)), MORE_F(ndl, FLOAT(0.f))), DIV_F(MUL_F(chance, facing), MUL_F(MUL_F(ADD_F(FLOAT(1.f), lambdaView), FLOAT(4.f)), nv)), FLOAT(0.f));
+    SpvId aim2 = MUL_F(aim, aim);
+    SpvId bothDiffuse = ADD_F(aim2, MUL_F(likelyDiffuse, likelyDiffuse)), bothShine = ADD_F(aim2, MUL_F(likelyShine, likelyShine));
+    SpvId diffuse = PICK_F(MORE_F(bothDiffuse, FLOAT(0.f)), DIV_F(aim2, MAX_F(bothDiffuse, FLOAT(1e-30f))), FLOAT(1.f));
+    SpvId shine = PICK_F(MORE_F(bothShine, FLOAT(0.f)), DIV_F(aim2, MAX_F(bothShine, FLOAT(1e-30f))), FLOAT(1.f));
+    SpvId highlight = MUL_F(DIV_F(MUL_F(FLOAT(3.14159265f), facing), MUL_F(MUL_F(FLOAT(4.f), nv), ADD_F(ADD_F(FLOAT(1.f), lambdaView), ggxLambdaSpv(s, alpha, ndl)))), shine);
+    highlight = PICK_F(m->shiny, highlight, FLOAT(0.f));
+    SpvId spread = MUL_F(MUL_F(MUL_F(m->open, SUB_F(FLOAT(1.f), most)), ndl), diffuse);
+    return ADD_V3(SCALE_V3(m->albedo, spread), SCALE_V3(m->mirror, highlight));
 }
 
 /* What a ray aimed at all around brought (trace.c's): the share given back diffusely and the highlight's, each weighed
@@ -3553,7 +3618,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->origin = VAR(ptrVec3); t->direction = VAR(ptrVec3); t->path = VAR(ptrVec3); t->light = VAR(ptrVec3);
     t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat); t->diffuseLikely = VAR(ptrFloat); t->bounceDir = VAR(ptrVec3); t->keptVar = VAR(ptrFloat); t->shineVar = VAR(ptrFloat); t->towardVar = VAR(ptrVec3); t->likelyVar = VAR(ptrFloat); t->coneWidth = VAR(ptrFloat); t->coneSpread = VAR(ptrFloat);
     t->through = VAR(ptrFloat); t->limit = VAR(ptrFloat); t->travelled = VAR(ptrFloat); t->keep = VAR(ptrFloat);
-    t->shadowStep = VAR(ptrUint); t->lightIndex = VAR(ptrUint); t->ballStep = VAR(ptrUint);
+    t->shadowStep = VAR(ptrUint); t->lightIndex = VAR(ptrUint); t->ballStep = VAR(ptrUint); t->weighsVar = VAR(ptrUint);
     t->graphs = graphs;
     t->graphCount = graphCount;
     t->guideBits = VAR(ptrUint); t->guidePlace = VAR(ptrVec3); t->guideColor = VAR(ptrVec3); t->guideInstance = VAR(ptrUint); t->guideShift = VAR(ptrVec3);
@@ -3588,6 +3653,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     {
         spvStore(s, t->state, traceHash(s, ADD_U(traceHash(s, pixel), ADD_U(done, LOAD_U(t->sampleIndex)))));
         spvStore(s, t->diffuseLikely, FLOAT(0.f));
+        spvStore(s, t->weighsVar, UINT(0));
         {
             /* the ray's cone (trace.c's): a pixel's angle, or in an orthographic view a pixel's width */
             SpvId pixelSize = DIV_F(MUL_F(FLOAT(2.f), spvGlsl1(s, SPV_GLSL_Length, s->floatType, up)), TO_F(height));
@@ -3596,7 +3662,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             spvStore(s, t->coneSpread, PICK_F(flat, FLOAT(0.f), pixelSize));
         }
         SpvId jitter[4];
-        sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, UINT(0)), jitter);
+        sobol4TurnedOf(t, ADD_U(done, LOAD_U(t->sampleIndex)), x, y, UINT(0), jitter);
         SpvId jx = jitter[0], jy = jitter[1];
         SpvId px = SUB_F(MUL_F(DIV_F(ADD_F(TO_F(x), jx), TO_F(width)), FLOAT(2.f)), FLOAT(1.f));
         SpvId py = SUB_F(FLOAT(1.f), MUL_F(DIV_F(ADD_F(TO_F(y), jy), TO_F(height)), FLOAT(2.f)));
@@ -3621,6 +3687,45 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         closest(t, o, d, FLOAT(3e37f), false);
         SpvId missed = IS_EQ(LOAD_U(t->bestInstance), UINT(0xFFFFFFFFu)), merge;
         SpvId environmentLight = W(frameVec(s, &t->r, F_SKY)), aroundOn = MORE_F(environmentLight, FLOAT(0.f)), aroundMerge;
+        {
+            /* lights with a size the bounce went into, before what it met, weighed against aiming's (trace.c's) */
+            SpvId weighed;
+            spvIfBegin(s, BOTH(NOT_EQ(LOAD_U(t->weighsVar), UINT(0)), MORE_F(LOAD_F(t->diffuseLikely), FLOAT(0.f))), &weighed);
+            {
+                SpvId before = LOAD_F(t->diffuseLikely), before2 = MUL_F(before, before);
+                SpvId limitHere = PICK_F(missed, FLOAT(3e37f), LOAD_F(t->bestT));
+                SpvId sunColor = spvShuffle3(s, frameVec(s, &t->r, F_SUNCOLOR));
+                SpvId sunAim = ballChordSpv(s, spvShuffle3(s, frameVec(s, &t->r, F_TOSUN)), Z(look), d, FLOAT(3e37f), FLOAT(0.f), NULL);
+                SpvId sunWeight = DIV_F(before2, ADD_F(before2, MUL_F(sunAim, sunAim)));
+                SpvId sunSeen = BOTH(missed, BOTH(MORE_F(Z(look), FLOAT(0.f)), MORE_F(maxOf3(s, sunColor), FLOAT(0.f))));
+                spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), MUL_V3(LOAD_V3(t->path), SCALE_V3(sunColor, PICK_F(sunSeen, MUL_F(MUL_F(FLOAT(3.14159265f), sunAim), sunWeight), FLOAT(0.f))))));
+                spvStore(s, t->lightIndex, UINT(0));
+                Loop lamps;
+                loopOpen(s, &lamps);
+                loopWhile(s, &lamps, LESS_U(LOAD_U(t->lightIndex), lightCount));
+                {
+                    SpvId li = LOAD_U(t->lightIndex), ci = spvGlsl2(s, SPV_GLSL_UMin, s->uintType, li, UINT(ARTF_FRAME_LIGHTS - 1));
+                    SpvId row = ADD_U(UINT(F_LIGHTS), MUL_U(ci, UINT(F_LIGHT_ROWS)));
+                    SpvId lightA = frameVecAt(s, &t->r, row), lightB = frameVecAt(s, &t->r, ADD_U(row, UINT(1))), lightC = frameVecAt(s, &t->r, ADD_U(row, UINT(2)));
+                    SpvId size = frameFloatAt(s, &t->r, ADD_U(UINT(F_LIGHT_SIZES), SHR_U(ci, 2)), AND_U(ci, UINT(3)));
+                    if (more) {
+                        /* (a light with a shape is aimed at as one: not weighed) */
+                        SpvId shapeAt = ADD_U(UINT(F_SHAPES), MUL_U(ci, UINT(4)));
+                        SpvId shaped = EITHER(MORE_F(W(frameVecAt(s, &t->r, shapeAt)), FLOAT(0.f)), MORE_F(W(frameVecAt(s, &t->r, ADD_U(shapeAt, UINT(2)))), FLOAT(0.f)));
+                        size = PICK_F(shaped, FLOAT(0.f), size);
+                    }
+                    SpvId lit, radius = W(lightA);
+                    SpvId aim = ballChordSpv(s, SUB_V3(spvShuffle3(s, lightA), o), size, d, limitHere, DIV_F(FLOAT(1.f), MAX_F(MUL_F(radius, radius), FLOAT(1e-30f))), &lit);
+                    SpvId spot = MIN_F(MAX_F(MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(d, spvShuffle3(s, lightC))), W(lightC)), W(lightB)), FLOAT(0.f)), FLOAT(1.f));
+                    SpvId weight = DIV_F(before2, ADD_F(before2, MUL_F(aim, aim)));
+                    SpvId amount = PICK_F(MORE_F(aim, FLOAT(0.f)), MUL_F(MUL_F(MUL_F(FLOAT(3.14159265f), spot), lit), weight), FLOAT(0.f));
+                    spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), MUL_V3(LOAD_V3(t->path), SCALE_V3(spvShuffle3(s, lightB), amount))));
+                    spvStore(s, t->lightIndex, ADD_U(li, UINT(1)));
+                }
+                loopClose(s, &lamps);
+            }
+            spvIfEnd(s, weighed);
+        }
         spvIfBegin(s, BOTH(BOTH(missed, NOT_EQ(LOAD_U(t->covered), UINT(0))), NOT(aroundOn)), &merge);
         {
             SpvId share = ADD_F(MUL_F(Y(d), FLOAT(.5f)), FLOAT(.5f));
@@ -3717,7 +3822,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
 
             /* a point even in a ball, and which lobe: this bounce's numbers (trace.c's ballOf) */
             SpvId u[4];
-            sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, ADD_U(LOAD_U(t->bounces), UINT(1))), u);
+            sobol4TurnedOf(t, ADD_U(done, LOAD_U(t->sampleIndex)), x, y, ADD_U(LOAD_U(t->bounces), UINT(1)), u);
             spvStore(s, t->ball, ballOfSpv(s, u));
             spvStore(s, t->choice, u[3]);
             SpvId ballDir = LOAD_V3(t->ball);
@@ -3729,6 +3834,10 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             SpvId most = maxOf3(s, m.mirror);
             SpvId chance = PICK_F(m.shiny, MIN_F(MAX_F(most, FLOAT(.05f)), FLOAT(.95f)), FLOAT(0.f));
             SpvId aims = BOTH(BOTH(paths, aroundOn), spvOp2(s, SPV_OP_ULessThan, s->boolType, LOAD_U(t->bounces), maxBounces));
+            /* (lights with a size weighed against the bounce, lobe by lobe: paths, from a surface of glTF's core) */
+            SpvId weighs = BOTH(paths, spvOp2(s, SPV_OP_ULessThan, s->boolType, LOAD_U(t->bounces), maxBounces));
+            if (more) weighs = BOTH(weighs, IS_EQ(AND_U(m.flags, UINT(ARTF_MORE_DRAWN)), UINT(0)));
+            spvStore(s, t->weighsVar, spvSelect(s, s->uintType, weighs, UINT(1), UINT(0)));
             SpvId lightEnd = ADD_U(lightCount, spvSelect(s, s->uintType, aims, UINT(1), UINT(0)));
             spvStore(s, t->lightIndex, UINT(0));
             Loop lights;
@@ -3743,7 +3852,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                 spvIfBegin(s, isEnv, &aimedMerge);
                 {
                     SpvId e[4], toward;
-                    sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, ADD_U(LOAD_U(t->bounces), UINT(65))), e);
+                    sobol4TurnedOf(t, ADD_U(done, LOAD_U(t->sampleIndex)), x, y, ADD_U(LOAD_U(t->bounces), UINT(65)), e);
                     spvStore(s, t->likelyVar, envAimSpv(s, &t->r, e[0], e[1], &toward));
                     spvStore(s, t->towardVar, toward);
                 }
@@ -3796,6 +3905,10 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                 SpvId color = pick3(s, isEnv, one3, pick3(s, isSun, spvShuffle3(s, frameVec(s, &t->r, F_SUNCOLOR)), spvShuffle3(s, lightB)));
                 SpvId limit = PICK_F(EITHER(isSun, isEnv), FLOAT(3e37f), distance);
                 SpvId ndl = DOT3(m.normal, to);
+                SpvId sizeHere = PICK_F(isSun, Z(look), lightSize);
+                SpvId weighsHere = BOTH(BOTH(weighs, NOT(isEnv)), MORE_F(sizeHere, FLOAT(0.f)));
+                if (more) weighsHere = BOTH(weighsHere, NOT(special));
+                SpvId aimHere = ballChordSpv(s, pick3(s, isSun, spvShuffle3(s, frameVec(s, &t->r, F_TOSUN)), SUB_V3(spvShuffle3(s, lightA), lifted)), sizeHere, to, FLOAT(3e37f), FLOAT(0.f), NULL);
                 SpvId lit;
                 if (!more) {
                     spvIfBegin(s, BOTH(BOTH(MORE_F(ndl, FLOAT(0.f)), MORE_F(strength, FLOAT(0.f))), MORE_F(DOT3(color, color), FLOAT(0.f))), &lit);
@@ -3806,7 +3919,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                         {
                             SpvId highlight = lightHighlight(s, &m.reflecting, m.normal, view, to, ndl, FLOAT(1.f));
                             SpvId amount = MUL_F(strength, LOAD_F(t->through));
-                            SpvId reflected = ADD_V3(SCALE_V3(m.albedo, ndl), highlight);
+                            SpvId reflected = pick3(s, weighsHere, lobesReflectedSpv(s, &m, view, to, ndl, alpha, nv, most, chance, aimHere), ADD_V3(SCALE_V3(m.albedo, ndl), highlight));
                             spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), SCALE_V3(MUL_V3(MUL_V3(LOAD_V3(t->path), color), reflected), amount)));
                         }
                         spvIfEnd(s, lamp);
@@ -3831,6 +3944,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                         highlight = ADD_V3(highlight, SCALE_V3(m.sheen, PICK_F(MORE_F(ndl, FLOAT(0.f)), sheen, FLOAT(0.f))));
                         SpvId wrap = shaderWrap(s, ndl, upon);
                         SpvId reflected = ADD_V3(SCALE_V3(ADD_V3(SCALE_V3(m.albedo, upon), SCALE_V3(m.subsurface, wrap)), share), highlight);
+                        reflected = pick3(s, weighsHere, lobesReflectedSpv(s, &m, view, to, ndl, alpha, nv, most, chance, aimHere), reflected);
                         spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), SCALE_V3(MUL_V3(MUL_V3(LOAD_V3(t->path), color), reflected), MUL_F(strength, LOAD_F(t->through)))));
                         spvIfEnd(s, lamp);
                     }
@@ -4068,8 +4182,8 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     tracerVariables(t);
     SpvId ptrU = spvTypePointer(s, SPV_STORAGE_Function, s->uintType), ptrF = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptr3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3);
     t->state = VAR(ptrU);
-    SpvId chunkVar = VAR(ptrU), jVar = VAR(ptrU), tryVar = VAR(ptrU), acceptedVar = VAR(ptrU), lightIndex = VAR(ptrU), counter = VAR(ptrU);
-    SpvId ballVar = VAR(ptr3), lightVar = VAR(ptr3), sumVar = VAR(ptr3), meanVar = VAR(ptr3), leanVar[3];
+    SpvId chunkVar = VAR(ptrU), jVar = VAR(ptrU), lightIndex = VAR(ptrU), counter = VAR(ptrU);
+    SpvId lightVar = VAR(ptr3), sumVar = VAR(ptr3), meanVar = VAR(ptr3), leanVar[3];
     for (int k = 0; k < 3; ++k) leanVar[k] = VAR(ptr3);
     SpvId weightsVar = VAR(ptrF), reachVar = VAR(ptrF), reach2Var = VAR(ptrF), reachWeightVar = VAR(ptrF), backsVar = VAR(ptrF), backVar = VAR(ptrF);
 
@@ -4121,36 +4235,12 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     {
         SpvId chunk = LOAD_U(chunkVar);
         SpvId here = UMIN(SUB_U(rayCount, chunk), UINT(GROUP)), merge;
-        /* the directions, by one, as randomInBall and normalize3: the CPU's random numbers, in its order */
-        spvIfBegin(s, first, &merge);
+        /* the directions, each its own: Sobol's, scrambled by the probe's seed, as probeJob */
+        spvIfBegin(s, LESS_U(lid, here), &merge);
         {
-            spvStore(s, jVar, UINT(0));
-            Loop each;
-            loopOpen(s, &each);
-            loopWhile(s, &each, LESS_U(LOAD_U(jVar), here));
-            {
-                spvStore(s, acceptedVar, UINT(0));
-                spvStore(s, tryVar, UINT(0));
-                Loop tries;
-                loopOpen(s, &tries);
-                loopWhile(s, &tries, LESS_U(LOAD_U(tryVar), UINT(16)));
-                {
-                    SpvId bx = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f)), by = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f)), bz = SUB_F(MUL_F(traceRandom(t), FLOAT(2.f)), FLOAT(1.f));
-                    SpvId v = vec3Of(s, bx, by, bz);
-                    spvStore(s, ballVar, v);
-                    SpvId inside = spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(v, v), FLOAT(1.f));
-                    spvStore(s, acceptedVar, spvSelect(s, s->uintType, inside, UINT(1), UINT(0)));
-                    breakIf(s, &tries, inside);
-                    spvStore(s, tryVar, ADD_U(LOAD_U(tryVar), UINT(1)));
-                }
-                loopClose(s, &tries);
-                SpvId d = pick3(s, NOT_EQ(LOAD_U(acceptedVar), UINT(0)), LOAD_V3(ballVar), same3(s, 0.f));
-                d = SCALE_V3(d, DIV_F(FLOAT(1.f), SQRT_F(MAX_F(DOT3(d, d), FLOAT(1e-30f)))));
-                SpvId j = LOAD_U(jVar);
-                spvStore(s, spvAccess(s, ptrShared, rayDir, &j, 1), vec4Of(s, d, FLOAT(0.f)));
-                spvStore(s, jVar, ADD_U(j, UINT(1)));
-            }
-            loopClose(s, &each);
+            SpvId u[4];
+            sobol4Of(s, ADD_U(MUL_U(frames, UINT((uint32_t)rays)), ADD_U(chunk, lid)), pathSeedOf(s, index, UINT(ARTF_PROBE_SEQUENCE)), u);
+            spvStore(s, spvAccess(s, ptrShared, rayDir, &lid, 1), vec4Of(s, directionOfSpv(s, u), FLOAT(0.f)));
         }
         spvIfEnd(s, merge);
         groupBarrier(s);

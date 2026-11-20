@@ -1846,6 +1846,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
                                     {highlights.x, highlights.y, highlights.z, p->lens.bloom > 0 ? artfMaxf(p->lens.flare, 0) : 0.f},
                                     {histogram ? low : 0.f, histogram ? high : 0.f, p->exposure.speedDown > 0 ? artfMinf(p->exposure.speedDown, 1) : grade[0][3], histogram ? 1.f : 0.f}};
         memcpy(out->grade2, grade2, sizeof grade2);
+        out->gradeShown = p->look.gradeShown ? 1.f : 0.f;
     }
     if (s->indirect.on && s->indirect.probes) {
         const ArtfIndirect* g = &s->indirect;

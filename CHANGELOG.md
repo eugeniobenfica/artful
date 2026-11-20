@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Phase 2 done; the bytes of traced and graded frames change.** What changed them, each checked against the frame
+  before by FLIP:
+  - *Grading in ACEScct.* Lift, gamma, gain, the color wheels and the look-up table work in ACES's AP1 colors and
+    ACEScct's log, after exposure and before the tone curve, as a colorist's do; a table is one of ACEScct, as
+    Resolve's are. `ArtfLookDesc.gradeShown` keeps them in what a screen shows, as before, for tables made so. A
+    frame with no grading asked is the same bytes as before.
+  - *Blue noise between pixels.* The pixels of a 64 x 64 square share one Sobol scrambling, each turned by its place
+    in a tile of blue noise (`tools/blueNoise.py`): at one sample, FLIP from 1,024 samples 0.0714 where it was 0.0839.
+  - *Probes by Sobol.* Each probe's rays are Sobol's points of a sequence of its own, on both backends, with no
+    rejection.
+  - *Lights with a size both ways (MIS).* Paths aim at a point of a lamp's or the sun's ball and also find it by
+    bouncing, each weighed by the power heuristic, lobe by lobe, with the tracer's own lobes: on a shiny floor 16
+    samples are 0.30 of 255 from where they settle, where aiming alone was 2.37; where both settle is the same light
+    (0.1%), and the GPU's is the CPU's.
+  Of the hashes the tests hold, one changed: `views/orthographic`'s traced frame (2 samples), FLIP 0.028 from the
+  frame before. Iridescence, OpenPBR's layers and subsurface scattering, once listed under 2.4, are left to 5.12. The tests build
+  with `-ffp-contract=off` as the library does: clang on ARM fused the inline arithmetic that made a test's mesh, and
+  `scale/skinLod`'s levels came out otherwise on the Mac.
+
 - **Phase 0.4 done.** `tools/flipCompare.py` measures `artful-flip` against NVIDIA's own FLIP (`flip-evaluator`) on ten
   pairs, LDR, HDR and frames of both backends: 9.9e-6 apart at most, where the plan asked 1e-4. The 40 comparisons of
   the GPU against the CPU in the tests check FLIP's mean too (`FLIP_ALIKE`), beside the share of pixels they checked;

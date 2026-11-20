@@ -255,6 +255,9 @@ typedef struct ArtfLightData {
  * nothing where light is taken from the probes, and it is followed again only every ARTF_PROBE_INSIDE_EVERY steps (each
  * on its own step, by its number), so its rays are not spent. */
 #define ARTF_PROBE_INSIDE_EVERY 8u
+/* The group a probe's rays are of, in sampling.h's sequences: each probe's own, by its number; step k's rays are k x rays
+ * onwards (Sobol's points, scrambled: the plan's 2.2). */
+#define ARTF_PROBE_SEQUENCE 200u
 /* What a probe keeps of what it had, when what its rays bring is far from it: as much less as the change in light (of
  * the larger, and a hundredth) is past a quarter, twice over, at most four fifths less; so a lamp turned on, or a door
  * opened, is followed in fewer steps, and the noise of a still one is not. */
@@ -338,7 +341,7 @@ typedef struct ArtfFrameData {
     float cullScale;
     float moving;       /* 1: something moved since the frame before, and the GPU has how (ArtfMotion); 0: the view alone */
     float view;         /* what the frame shows (ArtfView): 0, the picture */
-    float cullPad;
+    float gradeShown;   /* 1: grading in what a screen shows (ArtfLookDesc.gradeShown); 0: in ACEScct (artfGradeCct) */
     /* More of the look (ArtfPostDesc): lift, and 1 when there is grading (lift, gamma, gain or a wheel); 1 / gamma, the
      * grain; gain, the frame's number (for the grain); the shadows', midtones' and highlights' colors, after them the
      * look-up table's side (0: none), how much of it, and the flare; the histogram's darkest and brightest shares
@@ -433,6 +436,7 @@ ARTF_INLINE bool artfLightShaped(const ArtfFrameData* f, uint32_t i) { return f-
 extern bool artfTraceAim;
 /* For tests: false makes the CPU's paths read textures at their finest, with no cone (trace.c's texelCone). */
 extern bool artfTraceCones;
+extern int artfTraceLightWays; /* (for tests: lights with a size found both ways, weighed (MIS): 0; aimed at alone: 1; bounced into alone: 2) */
 /* For tests: false makes the CPU's rasterizer leave highlights as narrow as their roughness, where the normal turns
  * over a pixel (kernels.inc's turnAt and shading.inc's Widened). */
 extern bool artfWidenHighlights;
@@ -559,6 +563,54 @@ ARTF_INLINE void artfLtcAt(float rough, float ndv, float out[5]) {
         const float a = c00[k] + (c10[k] - c00[k]) * tx, b = c00[k + 5] + (c10[k + 5] - c00[k + 5]) * tx;
         out[k] = a + (b - a) * ty;
     }
+}
+
+/* Grading in ACEScct (the plan's 2.1), of the light before the tone curve, in place: into ACES's AP1 colors (from
+ * linear sRGB, Bradford's D65 to D60), into ACEScct (a log2 with a straight toe), then lift, gamma and gain, the wheels
+ * and the table (ArtfFrameData.grade2), as the shown grading's, and back. The GPU's final pass does the same
+ * (postShaders.inc's gradeCct). lut: the scene's, or NULL. */
+ARTF_INLINE float artfCctOf(float x) { return x <= .0078125f ? 10.5402377f * x + .0729055342f : (artfLog2Fast(x) + 9.72f) * (1.f / 17.52f); }
+ARTF_INLINE float artfCctLinear(float c) { return c <= .155251142f ? (c - .0729055342f) * (1.f / 10.5402377f) : artfExp2Fast(c * 17.52f - 9.72f); }
+ARTF_INLINE void artfGradeCct(const ArtfFrameData* f, const float* lut, float* v) {
+    const bool curves = f->grade2[0][3] > 0;
+    const int size = (int)f->grade2[3][3];
+    if (!curves && !(size >= 2 && lut)) return;
+    const float ap1[3] = {.6130974f * v[0] + .3395231f * v[1] + .0473795f * v[2], .0701937f * v[0] + .9163539f * v[1] + .0134524f * v[2],
+                          .0206156f * v[0] + .1095698f * v[1] + .8698147f * v[2]};
+    float c[3];
+    for (int k = 0; k < 3; ++k) c[k] = artfCctOf(ap1[k]);
+    if (curves) {
+        for (int k = 0; k < 3; ++k) {
+            const float o = f->grade2[2][k] * (c[k] + f->grade2[0][k] * (1.f - c[k]));
+            c[k] = f->grade2[1][k] == 1 ? o : o > 0 ? artfExp2Fast(artfLog2Fast(o) * f->grade2[1][k]) : 0.f;
+        }
+        const float l = artfClampf(.2126f * c[0] + .7152f * c[1] + .0722f * c[2], 0.f, 1.f), rest = 1.f - l;
+        const float dark = rest * rest, middle = 2.f * l * rest, bright = l * l;
+        for (int k = 0; k < 3; ++k) c[k] *= dark * f->grade2[3][k] + middle * f->grade2[4][k] + bright * f->grade2[5][k];
+    }
+    if (size >= 2 && lut) {
+        float t[3];
+        int at[3];
+        for (int k = 0; k < 3; ++k) {
+            const float q = artfClampf(c[k], 0.f, 1.f) * (float)(size - 1);
+            at[k] = artfMini((int)q, size - 2);
+            t[k] = q - (float)at[k];
+        }
+        const float amount = f->grade2[4][3];
+        for (int k = 0; k < 3; ++k) {
+#define LUT_AT(dx, dy, dz) lut[(((size_t)(at[2] + (dz)) * (size_t)size + (size_t)(at[1] + (dy))) * (size_t)size + (size_t)(at[0] + (dx))) * 3 + (size_t)k]
+            const float a = LUT_AT(0, 0, 0) + (LUT_AT(1, 0, 0) - LUT_AT(0, 0, 0)) * t[0], b = LUT_AT(0, 1, 0) + (LUT_AT(1, 1, 0) - LUT_AT(0, 1, 0)) * t[0];
+            const float d = LUT_AT(0, 0, 1) + (LUT_AT(1, 0, 1) - LUT_AT(0, 0, 1)) * t[0], e = LUT_AT(0, 1, 1) + (LUT_AT(1, 1, 1) - LUT_AT(0, 1, 1)) * t[0];
+#undef LUT_AT
+            const float nearer = a + (b - a) * t[1], farther = d + (e - d) * t[1];
+            c[k] += (nearer + (farther - nearer) * t[2] - c[k]) * amount;
+        }
+    }
+    for (int k = 0; k < 3; ++k) c[k] = artfMaxf(artfCctLinear(c[k]), 0.f);
+    v[0] = 1.7048587f * c[0] - .6217160f * c[1] - .0832542f * c[2];
+    v[1] = -.1300768f * c[0] + 1.1407357f * c[1] - .0105536f * c[2];
+    v[2] = -.0239640f * c[0] - .1289755f * c[1] + 1.1530393f * c[2];
+    for (int k = 0; k < 3; ++k) v[k] = v[k] > 0 ? artfMinf(v[k], 65504.f) : 0.f;
 }
 
 /* A light's profile (artfLightSetProfile): vertical angles from 0 to 180 degrees, ends included, in rows by horizontal
@@ -791,6 +843,7 @@ typedef struct ArtfTraceFrame {
     uint32_t width, height, done, samples;     /* done: what is gathered so far */
     uint32_t bounces, paths, pad[2];           /* pad[0], on the GPU: done, with this frame's samples; pad[1]: the first of a filter's frames */
     float previous[16];                        /* the frame before's view and projection, for the filter */
+    uint32_t blue[512][4];                     /* sampling.h's tile of blue noise: two ranks a word, the first low */
 } ArtfTraceFrame;
 
 /* What a pixel's first surface was, for the filter: where, which way it faced (packed) and what color. */

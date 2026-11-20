@@ -980,6 +980,8 @@ POST_INLINE void finalLight(const ArtfSoftPost* p, const FinalRow* r, int x, int
         for (int c = 0; c < 3; ++c) v[c] *= keep;
     }
     for (int c = 0; c < 3; ++c) v[c] = v[c] > 0 ? artfMinf(v[c], 65504.f) : 0.f; /* (and not a number: nothing) */
+    /* grading, in ACEScct (gradeShown: after, in what is shown, by the kernels) */
+    if (!(sf->data.gradeShown > 0)) artfGradeCct(&sf->data, sf->scene->lut, v);
     if (r->exposure > 0) {
         if (r->curve == ARTF_TONE_NEUTRAL) toneNeutral(v);
         for (int c = 0; c < 3; ++c) {
@@ -1040,7 +1042,7 @@ static void finalRow(ArtfSoftPost* p, int y) {
     r.corner = 1.f / (r.cx * r.cx + r.cy * r.cy);
     r.apart = r.chromatic * sqrtf(r.corner);
     r.dy = (float)y + .5f - r.cy;
-    const bool graded = f->grade2[0][3] > 0 || f->grade2[3][3] > 0 || f->grade2[1][3] > 0;
+    const bool graded = (f->gradeShown > 0 && (f->grade2[0][3] > 0 || f->grade2[3][3] > 0)) || f->grade2[1][3] > 0;
     _Alignas(32) float planes[3][FINAL_STRETCH];
     float alphas[FINAL_STRETCH];
     float* const c[3] = {planes[0], planes[1], planes[2]};

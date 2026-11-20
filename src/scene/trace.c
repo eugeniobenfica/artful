@@ -399,6 +399,8 @@ void artfSceneSetTrace(ArtfScene* s, const ArtfTraceDesc* desc) {
 
 void artfSceneTraceFrame(const ArtfScene* s, const ArtfFrameData* frame, int width, int height, uint32_t done, ArtfTraceFrame* out) {
     memset(out, 0, sizeof *out);
+    /* (the tile of blue noise, for the GPU: sampling.h's) */
+    for (uint32_t i = 0; i < 64 * 64; i += 2) out->blue[i >> 3][(i >> 1) & 3u] = (uint32_t)artfBlueNoise[i] | (uint32_t)artfBlueNoise[i + 1] << 16;
     const ArtfCamera* c = &s->camera;
     const ArtfVec3 f = artfVec3Normalize(artfVec3Sub(c->target, c->position));
     const ArtfVec3 r = artfVec3Normalize(artfVec3Cross(f, c->up));
@@ -583,8 +585,7 @@ void artfTexelAtLevel(const ArtfTextureData* t, int level, float u, float v, flo
     }
 }
 
-/* A texel of t by the cone's width (ray cones: Akenine-Möller et al., "Improved Shader and Texture Level of Detail Using
- * Ray Cones", JCGT 2021): the level where a texel is about as wide as the cone, from its first held, between two.
+/* A texel of t by the cone's width (ray cones: Akenine-Möller et al., "Improved Shader and Texture Level of Detail Using\n * Ray Cones", JCGT 2021): the level where a texel is about as wide as the cone, from its first held, between two.
  * lodBase: log2 of the cone's width over a texel of a texture of one texel here (the surface's own; each texture adds
  * half the log2 of its count). As the tracing shader's traceTexture, which asks the GPU for a texture's size. */
 static void texelCone(const ArtfTextureData* t, float lodBase, float u, float v, float* out) {
@@ -815,6 +816,7 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
 
 bool artfTraceAim = true;
 bool artfTraceCones = true;
+int artfTraceLightWays = 0;
 bool artfWidenHighlights = true; /* (kernels.inc's, declared with these) */
 
 static inline uint32_t hashOf(uint32_t x) {
@@ -932,6 +934,70 @@ static void lightFrom(const ArtfScene* s, const float* p, const float* view, con
     for (int k = 0; k < 3; ++k) light[k] += path[k] * color[k] * strength * through * (m->albedo[k] * ndl + highlight[k]);
 }
 
+/* A light toward toLight, as a bounce of this path finds light (the tracer's own lobes, as the light from all around is
+ * weighed): diffuse, albedo times what is open and not reflected, times the cosine; the highlight, GGX's D G2 / 4 n.v
+ * of m.mirror (pi in, as lights here have it out); each by a strength of its own (MIS weighs them apart). */
+static void lightFromLobes(const ArtfScene* s, const float* p, const float* view, const Surface* m, const float* toLight, float limit, float alpha, float nv, float most, float diffuse, float shine,
+                           const float* color, const float* path, float* light) {
+    const float ndl = dot3(m->normal, toLight);
+    if (ndl <= 0 || (diffuse <= 0 && shine <= 0)) return;
+    const float through = lightThrough(s, p, toLight, limit);
+    if (through <= 0) return;
+    float highlight = 0;
+    if (m->shiny && shine > 0) {
+        float h[3] = {view[0] + toLight[0], view[1] + toLight[1], view[2] + toLight[2]};
+        normalize3(h);
+        highlight = 3.14159265f * ggxD(alpha, artfMaxf(dot3(m->normal, h), 0.f)) / (4.f * nv * (1.f + ggxLambda(alpha, nv) + ggxLambda(alpha, ndl))) * shine;
+    }
+    const float spread = m->open * (1.f - most) * ndl * diffuse;
+    for (int k = 0; k < 3; ++k) light[k] += path[k] * color[k] * through * (m->albedo[k] * spread + m->mirror[k] * highlight);
+}
+
+/* ---- lights with a size, both ways (MIS) ----
+ *
+ * A light with a size is a point of a ball each path aims at, as many as there are in it (the sun's is a ball around its
+ * direction, look[2] wide). Toward a way w from p, the points of it are those of the chord of w through the ball, so
+ * how likely the aimed point is toward w, a steradian, is the chord's integral of t^2 over the ball's volume; and what
+ * a path that bounces into the ball takes is the same with each point's fade^2 in it: color fade^2 t^2 over the chord,
+ * which is a polynomial (fade is 1 - t^2 / r^2), integrated exactly. Light found by aiming is weighed against the
+ * bounce's likelihood of it, lobe by lobe, and light found by bouncing against aiming's (the power heuristic). */
+static float ballChord(const float* c, float size, const float* w, float limit, float reach2, float* lit) {
+    const float b = dot3(w, c), disc = b * b - dot3(c, c) + size * size;
+    if (size <= 0 || disc <= 0) return 0;
+    const float root = sqrtf(disc);
+    /* (how likely, of the whole chord: aiming does not know what is in the way; what is lit, to the limit) */
+    const float t0 = artfMaxf(b - root, 0.f), t1 = b + root;
+    if (t1 <= t0) return 0;
+    const float volume = 4.18879020f * size * size * size;
+    if (lit) {
+        /* (fade^2 t^2 = t^2 - 2 t^4 / r^2 + t^6 / r^4, to where fade ends) */
+        const float end = artfMinf(t1, limit), u1 = reach2 > 0 ? artfMinf(end, sqrtf(1.f / reach2)) : end, u0 = artfMinf(t0, u1);
+#define PART(t) ((t) * (t) * (t) * (1.f / 3.f) - 2.f * reach2 * (t) * (t) * (t) * (t) * (t) * (1.f / 5.f) + reach2 * reach2 * (t) * (t) * (t) * (t) * (t) * (t) * (t) * (1.f / 7.f))
+        *lit = (PART(u1) - PART(u0)) / volume;
+#undef PART
+    }
+    return (t1 * t1 * t1 - t0 * t0 * t0) * (1.f / 3.f) / volume;
+}
+/* The power heuristic's weight of one way (1: aiming, 2: bouncing) that found light as likely as `mine`, the other as
+ * `other`; for tests, artfTraceLightWays leaves one way alone. */
+static inline float waysWeight(float mine, float other, int way) {
+    if (artfTraceLightWays) return artfTraceLightWays == way ? 1.f : 0.f;
+    const float both = mine * mine + other * other;
+    return both > 0 ? mine * mine / both : 1.f;
+}
+/* How likely a surface's bounce is toward w, lobe by lobe: diffuse ((1 - chance) cos / pi) and highlight (chance D G1 /
+ * 4 n.v, the visible normals'): as glossyOf and the cosine's bounce. */
+static void bounceLikelyOf(const Surface* m, const float* view, float alpha, float nv, float chance, const float* w, float* diffuse, float* shine) {
+    const float cosine = dot3(m->normal, w);
+    *diffuse = (1.f - chance) * artfMaxf(cosine, 0.f) * (1.f / 3.14159265f);
+    *shine = 0;
+    if (chance > 0 && cosine > 0) {
+        float h[3] = {view[0] + w[0], view[1] + w[1], view[2] + w[2]};
+        normalize3(h);
+        *shine = chance * ggxD(alpha, artfMaxf(dot3(m->normal, h), 0.f)) / ((1.f + ggxLambda(alpha, nv)) * 4.f * nv);
+    }
+}
+
 /* The same with what lies past glTF's core (Surface.flags), and for a light whose diffuse light is this share of
  * its highlight's (a rectangle's, to the side): the coat's lobe, sheen (artfShadeCharlie), highlights drawn out, and
  * light under the surface, as addExtras in kernels.inc. What comes through from behind is found by a ray inside, toward
@@ -1041,11 +1107,12 @@ static void shiftOf(const ArtfScene* s, const Hit* h, float* out) {
 
 void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTraceFrame* c, uint32_t x, uint32_t y, uint32_t sample, float* out, ArtfTraceGuide* guide) {
     /* where in the pixel, which way a bounce goes and which lobe: Sobol's points, this pixel's own scrambling of them
-     * (artfSobol4); what goes through, what ends and points on shaped lights: a hash */
+     * (artfSobol4Turned: the square's, turned by blue noise); what goes through, what ends and points on shaped lights:
+     * a hash */
     const uint32_t pixel = x + y * c->width;
     uint32_t state = hashOf(hashOf(pixel) + sample);
     float jitter[4];
-    artfSobol4(sample, artfPathSeed(pixel, 0), jitter);
+    artfSobol4Turned(sample, x, y, 0, jitter);
     const float px = ((float)x + jitter[0]) / (float)c->width * 2.f - 1.f, py = 1.f - ((float)y + jitter[1]) / (float)c->height * 2.f;
     float o[3], d[3], path[3] = {1, 1, 1}, light[3] = {0, 0, 0}, travelled = 0, keep = 1.f;
     if (c->eye[3] > 0)
@@ -1071,9 +1138,33 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
      * direction was, by the lobe it took; 0 for the eye's ray, whose light is not weighed. */
     const float* aimed = artfTraceAim && c->paths && f->sky[3] > 0 && s->environment ? s->environment : NULL;
     float bounceLikely = 0;
+    bool lastWeighs = false; /* (the surface the ray left weighed its lights with a size: what the ray finds of them counts) */
     for (int step = 0; step < MAX_STEPS; ++step) {
         Hit h;
-        if (!closest(&s->trace, o, d, 3e37f, false, &h)) {
+        const bool hitSomething = closest(&s->trace, o, d, 3e37f, false, &h);
+        if (lastWeighs && bounceLikely > 0) {
+            /* lights with a size the bounce went into, before what it met: their light, weighed against aiming's. (As light
+             * from all around is: pi times what aiming takes a steradian, as lights here have pi taken out) */
+            const float limit = hitSomething ? h.t : 3e37f;
+            if (!hitSomething && f->look[2] > 0 && (f->sunColor[0] > 0 || f->sunColor[1] > 0 || f->sunColor[2] > 0)) {
+                const float aim = ballChord(f->toSun, f->look[2], d, 3e37f, 0, NULL);
+                const float weight = waysWeight(bounceLikely, aim, 2);
+                for (int k = 0; k < 3; ++k) light[k] += path[k] * f->sunColor[k] * (3.14159265f * aim * weight);
+            }
+            for (uint32_t i = 0; i < f->lightCount; ++i) {
+                const ArtfLightData* L = &f->lights[i];
+                const float size = f->lightSizes[i];
+                if (size <= 0 || artfLightShaped(f, i)) continue;
+                const float c[3] = {L->position[0] - o[0], L->position[1] - o[1], L->position[2] - o[2]};
+                float lit;
+                const float aim = ballChord(c, size, d, limit, 1.f / (L->radius * L->radius), &lit);
+                if (aim <= 0) continue;
+                const float spot = artfClampf((-dot3(d, L->direction) - L->spotCut) * L->spotScale, 0, 1);
+                const float weight = waysWeight(bounceLikely, aim, 2);
+                for (int k = 0; k < 3; ++k) light[k] += path[k] * L->color[k] * (3.14159265f * spot * lit * weight);
+            }
+        }
+        if (!hitSomething) {
             /* the sky, for what has met something: what has not leaves the frame's own background */
             if (covered && f->sky[3] > 0 && s->environment) {
                 float around[3];
@@ -1135,15 +1226,25 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             light[k] += path[k] * m.emissive[k];
         }
         float ball[3], u[4];
-        artfSobol4(sample, artfPathSeed(pixel, bounces + 1), u);
+        artfSobol4Turned(sample, x, y, bounces + 1, u);
         ballOf(u, ball);
+        /* (what the bounce will be, for MIS: paths, from a surface of glTF's core) */
+        const float alphaHere = artfMaxf(m.rough * m.rough, 1e-3f), nvHere = artfMaxf(dot3(m.normal, view), 1e-4f);
+        const float mostHere = artfMaxf(m.mirror[0], artfMaxf(m.mirror[1], m.mirror[2]));
+        const float chanceHere = m.shiny ? artfClampf(mostHere, .05f, .95f) : 0.f;
+        const bool weighs = c->paths && !(m.flags & ARTF_MORE_DRAWN) && bounces < c->bounces;
         if (f->sunColor[0] > 0 || f->sunColor[1] > 0 || f->sunColor[2] > 0) {
             /* (a sun with a size: each path sees another point of it, and shadows go soft with distance) */
             float toSun[3];
             for (int k = 0; k < 3; ++k) toSun[k] = f->toSun[k] + ball[k] * f->look[2];
             normalize3(toSun);
             if (m.flags & ARTF_MORE_DRAWN) lightFromMore(s, lifted, view, &m, toSun, 3e37f, 1.f, 1.f, f->sunColor, path, light);
-            else lightFrom(s, lifted, view, &m, toSun, 3e37f, 1.f, f->sunColor, path, light);
+            else if (weighs && f->look[2] > 0) {
+                const float aim = ballChord(f->toSun, f->look[2], toSun, 3e37f, 0, NULL);
+                float pd, ps;
+                bounceLikelyOf(&m, view, alphaHere, nvHere, chanceHere, toSun, &pd, &ps);
+                lightFromLobes(s, lifted, view, &m, toSun, 3e37f, alphaHere, nvHere, mostHere, waysWeight(aim, pd, 1), waysWeight(aim, ps, 1), f->sunColor, path, light);
+            } else lightFrom(s, lifted, view, &m, toSun, 3e37f, 1.f, f->sunColor, path, light);
         }
         for (uint32_t i = 0; i < f->lightCount; ++i) {
             const ArtfLightData* L = &f->lights[i];
@@ -1159,8 +1260,16 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             for (int k = 0; k < 3; ++k) to[k] /= distance;
             const float spot = artfClampf((-dot3(to, L->direction) - L->spotCut) * L->spotScale, 0, 1);
             if (m.flags & ARTF_MORE_DRAWN) lightFromMore(s, lifted, view, &m, to, distance, fade * fade * spot, 1.f, L->color, path, light);
-            else lightFrom(s, lifted, view, &m, to, distance, fade * fade * spot, L->color, path, light);
+            else if (weighs && size > 0) {
+                const float c[3] = {L->position[0] - lifted[0], L->position[1] - lifted[1], L->position[2] - lifted[2]};
+                const float aim = ballChord(c, size, to, 3e37f, 0, NULL);
+                float pd, ps;
+                bounceLikelyOf(&m, view, alphaHere, nvHere, chanceHere, to, &pd, &ps);
+                const float strength = fade * fade * spot;
+                lightFromLobes(s, lifted, view, &m, to, distance, alphaHere, nvHere, mostHere, strength * waysWeight(aim, pd, 1), strength * waysWeight(aim, ps, 1), L->color, path, light);
+            } else lightFrom(s, lifted, view, &m, to, distance, fade * fade * spot, L->color, path, light);
         }
+        lastWeighs = weighs;
         const float dn = dot3(d, m.normal);
         float mirror[3];
         for (int k = 0; k < 3; ++k) mirror[k] = d[k] - 2.f * dn * m.normal[k];
@@ -1196,7 +1305,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                 /* aimed at the picture of all around, for what the surface gives back diffusely: albedo, what of it is
                  * open and what is not reflected, over pi, times the cosine */
                 float e[4], toward[3], around[3];
-                artfSobol4(sample, artfPathSeed(pixel, 64u + bounces + 1u), e);
+                artfSobol4Turned(sample, x, y, 64u + bounces + 1u, e);
                 const float likely = artfEnvAim(aimed, e[0], e[1], toward), cosine = dot3(m.normal, toward);
                 if (likely > 0 && cosine > 0) {
                     const float other = (1.f - chance) * cosine * (1.f / 3.14159265f);
@@ -1445,7 +1554,6 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
     const int rays = resting ? 0 : g->desc.rays > 0 ? g->desc.rays : 64;
     int backs = 0;
     const float* env = f->sky[3] > 0 ? s->environment : NULL;
-    uint32_t state = hashOf(index * 9781u + g->frames * 6271u + 1u);
     float mean[3] = {0, 0, 0}, lean[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
     /* how far it sees, toward each of its map's directions: the mean and the mean of the square, of the rays near each */
     enum { TEXELS = ARTF_PROBE_SIDE * ARTF_PROBE_SIDE };
@@ -1468,9 +1576,10 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
     const float most = sqrtf(g->spacing[0] * g->spacing[0] + g->spacing[1] * g->spacing[1] + g->spacing[2] * g->spacing[2]) * 1.5f;
     const float one[3] = {1, 1, 1};
     for (int r = 0; r < rays; ++r) {
-        float d[3];
-        randomInBall(&state, d);
-        normalize3(d);
+        /* (its way: Sobol's, scrambled by the probe's own seed, each step the next of them; as the GPU's) */
+        float d[3], u[4];
+        artfSobol4((uint32_t)(g->frames * (uint32_t)rays + (uint32_t)r), artfPathSeed(index, ARTF_PROBE_SEQUENCE), u);
+        directionOf(u, d);
         float light[3] = {0, 0, 0};
         Hit h;
         const bool hit = closest(&s->trace, o, d, 3e37f, true, &h);

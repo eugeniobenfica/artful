@@ -244,6 +244,8 @@ int main(int argc, char** argv) {
     RUN("tracing/tracedRefit", testTracedRefit());
     RUN("tracing/probesWalls", testProbesWalls());
     RUN("tracing/probesHard", testProbesHard());
+    RUN("tracing/fewSamples", testFewSamples());
+    RUN("tracing/lightMis", testLightMis());
     RUN("tracing/probesGpu", testProbesGpu());
     RUN("tracing/probesKept", testProbesKept());
     RUN("shadows/extraShadows", testExtraShadows());

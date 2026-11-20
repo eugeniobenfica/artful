@@ -684,7 +684,9 @@ typedef struct ArtfLookDesc {
     float tint;             /* -1 toward green to 1 toward magenta; 0 as it is */
     float saturation;       /* -1 grey, 0 as it is, 1 twice as far from grey */
     float contrast;         /* around the middle of what is shown: -1 flat, 0 as it is, 1 twice as steep */
-    /* Grading, in what a screen shows (after the tone curve and contrast), each channel from 0 to 1: */
+    /* Grading, in ACEScct (the light after exposure, white balance, saturation and vignette, in ACES's AP1 colors and
+     * their log, before the tone curve), each channel as ACEScct has it (0 to about 1.47; the middle grey .41); or,
+     * with gradeShown, in what a screen shows (after the tone curve and contrast), each from 0 to 1, as before 1.0: */
     ArtfVec3 lift;          /* added to the dark, nothing to white: out = gain (in + lift (1 - in)); 0: none */
     ArtfVec3 gamma;         /* then out^(1 / gamma): above 1 the middle is lighter; 0, 0, 0: 1, 1, 1 */
     ArtfVec3 gain;          /* 0, 0, 0: 1, 1, 1 */
@@ -692,11 +694,13 @@ typedef struct ArtfLookDesc {
     ArtfVec3 midtones;      /* a pixel is of it (by its luminance: (1 - l)^2, 2 l (1 - l), l^2); 0, 0, 0: white */
     ArtfVec3 highlights;
     /* A look-up table of colors, as a .cube file has (artfLutDecodeCube): lutSize^3 RGB triples, red the fastest,
-     * applied last, between its points. What it takes is what a screen shows (sRGB, each channel). Copied by
-     * artfSceneSetPost. lutSize from 2 to 65; NULL: none. */
+     * applied after the wheels, between its points. What it takes is ACEScct, 0 to 1 (as Resolve's ACEScct tables);
+     * with gradeShown, what a screen shows (sRGB, each channel). Copied by artfSceneSetPost. lutSize from 2 to 65;
+     * NULL: none. */
     const float* lut;
     int lutSize;
     float lutAmount;        /* how much of it: 0: all */
+    bool gradeShown;        /* grading and the table in what a screen shows, as before 1.0 (for tables made so) */
 } ArtfLookDesc;
 
 /* All of it, by purpose, in the order it is done: {.lens.bloom = .05f, .look.toneMap = ARTF_TONE_NEUTRAL}. */

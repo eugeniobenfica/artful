@@ -933,6 +933,74 @@ POST_MAIN(artfShaderPostUpscale)
     spvStore(s, postPtr(s, p, locks, s->floatType, ADD_U(MUL_U(half, framePixels), i)), locked);
 POST_FINISH()
 
+/* artfGradeCct: grading in ACEScct, of the light before the curve; nothing when shownSpace (and nothing asked). */
+static SpvId postLog2(Spv* s, SpvId x);
+static SpvId postExp2(Spv* s, SpvId x);
+static SpvId postExposureSlot(Spv* s, Post* p);
+static SpvId cctOf(Spv* s, SpvId x) { return PICK_F(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, x, FLOAT(.0078125f)), ADD_F(MUL_F(FLOAT(10.5402377f), x), FLOAT(.0729055342f)), MUL_F(ADD_F(postLog2(s, x), FLOAT(9.72f)), FLOAT(1.f / 17.52f))); }
+static SpvId cctLinear(Spv* s, SpvId c) { return PICK_F(spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, c, FLOAT(.155251142f)), MUL_F(SUB_F(c, FLOAT(.0729055342f)), FLOAT(1.f / 10.5402377f)), postExp2(s, SUB_F(MUL_F(c, FLOAT(17.52f)), FLOAT(9.72f)))); }
+static SpvId gradeCct(Spv* s, Post* p, SpvId v, SpvId shownSpace) {
+    SpvId g0 = frameVec(s, &p->r, F_GRADE2), g1 = frameVec(s, &p->r, F_GRADE2 + 1), g2 = frameVec(s, &p->r, F_GRADE2 + 2);
+    SpvId g3 = frameVec(s, &p->r, F_GRADE2 + 3), g4 = frameVec(s, &p->r, F_GRADE2 + 4), g5 = frameVec(s, &p->r, F_GRADE2 + 5);
+    SpvId curves = P_MORE(W(g0), FLOAT(0.f)), side = W(g3), looked = P_MORE(side, FLOAT(1.5f));
+    SpvId asked = P_AND(P_NOT(shownSpace), P_OR(curves, looked));
+    SpvId before = s->block, merge;
+    spvIfBegin(s, asked, &merge);
+    SpvId x = X(v), y = Y(v), z = Z(v);
+    SpvId a[3] = {ADD_F(ADD_F(MUL_F(FLOAT(.6130974f), x), MUL_F(FLOAT(.3395231f), y)), MUL_F(FLOAT(.0473795f), z)),
+                  ADD_F(ADD_F(MUL_F(FLOAT(.0701937f), x), MUL_F(FLOAT(.9163539f), y)), MUL_F(FLOAT(.0134524f), z)),
+                  ADD_F(ADD_F(MUL_F(FLOAT(.0206156f), x), MUL_F(FLOAT(.1095698f), y)), MUL_F(FLOAT(.8698147f), z))};
+    SpvId c[3];
+    for (uint32_t k = 0; k < 3; ++k) c[k] = cctOf(s, a[k]);
+    SpvId graded[3];
+    for (uint32_t k = 0; k < 3; ++k) {
+        SpvId o = MUL_F(spvExtract(s, s->floatType, g2, k), ADD_F(c[k], MUL_F(spvExtract(s, s->floatType, g0, k), SUB_F(FLOAT(1.f), c[k]))));
+        SpvId inverse = spvExtract(s, s->floatType, g1, k);
+        graded[k] = PICK_F(spvOp2(s, 180 /* OpFOrdEqual */, s->boolType, inverse, FLOAT(1.f)), o, PICK_F(P_MORE(o, FLOAT(0.f)), postExp2(s, MUL_F(postLog2(s, o), inverse)), FLOAT(0.f)));
+    }
+    SpvId l = P_CLAMP(ADD_F(ADD_F(MUL_F(FLOAT(.2126f), graded[0]), MUL_F(FLOAT(.7152f), graded[1])), MUL_F(FLOAT(.0722f), graded[2])), FLOAT(0.f), FLOAT(1.f));
+    SpvId rest = SUB_F(FLOAT(1.f), l);
+    SpvId dark = MUL_F(rest, rest), middle = MUL_F(MUL_F(FLOAT(2.f), l), rest), bright = MUL_F(l, l);
+    for (uint32_t k = 0; k < 3; ++k) {
+        SpvId wheel = ADD_F(ADD_F(MUL_F(dark, spvExtract(s, s->floatType, g3, k)), MUL_F(middle, spvExtract(s, s->floatType, g4, k))), MUL_F(bright, spvExtract(s, s->floatType, g5, k)));
+        c[k] = PICK_F(curves, MUL_F(graded[k], wheel), c[k]);
+    }
+    /* the table, in ACEScct: as the shown one's, from bloom's buffer */
+    {
+        SpvId n = P_TOU(MAX_F(side, FLOAT(2.f))), lutStart = ADD_U(postExposureSlot(s, p), UINT(1));
+        SpvId at[3], t[3];
+        for (uint32_t k = 0; k < 3; ++k) {
+            SpvId qk = MUL_F(P_CLAMP(c[k], FLOAT(0.f), FLOAT(1.f)), SUB_F(MAX_F(side, FLOAT(2.f)), FLOAT(1.f)));
+            at[k] = spvGlsl2(s, SPV_GLSL_UMin, s->uintType, P_TOU(qk), SUB_U(n, UINT(2)));
+            t[k] = SUB_F(qk, TO_F(at[k]));
+        }
+        SpvId base = ADD_U(lutStart, ADD_U(MUL_U(ADD_U(MUL_U(at[2], n), at[1]), n), at[0]));
+        SpvId corners[8];
+        for (uint32_t k = 0; k < 8; ++k) {
+            SpvId i = base;
+            if (k & 1) i = ADD_U(i, UINT(1));
+            if (k & 2) i = ADD_U(i, n);
+            if (k & 4) i = ADD_U(i, MUL_U(n, n));
+            corners[k] = spvShuffle3(s, postVec4(s, p, p->bloom, i));
+        }
+#define LERP3(a, b, f) ADD_V3(a, SCALE_V3(SUB_V3(b, a), f))
+        SpvId a0 = LERP3(corners[0], corners[1], t[0]), b0 = LERP3(corners[2], corners[3], t[0]);
+        SpvId d0 = LERP3(corners[4], corners[5], t[0]), e0 = LERP3(corners[6], corners[7], t[0]);
+        SpvId found = LERP3(LERP3(a0, b0, t[1]), LERP3(d0, e0, t[1]), t[2]);
+#undef LERP3
+        SpvId amount = W(g4);
+        for (uint32_t k = 0; k < 3; ++k) c[k] = PICK_F(looked, ADD_F(c[k], MUL_F(SUB_F(spvExtract(s, s->floatType, found, k), c[k]), amount)), c[k]);
+    }
+    for (uint32_t k = 0; k < 3; ++k) c[k] = MAX_F(cctLinear(s, c[k]), FLOAT(0.f));
+    SpvId back = vec3Of(s, ADD_F(ADD_F(MUL_F(FLOAT(1.7048587f), c[0]), MUL_F(FLOAT(-.6217160f), c[1])), MUL_F(FLOAT(-.0832542f), c[2])),
+                        ADD_F(ADD_F(MUL_F(FLOAT(-.1300768f), c[0]), MUL_F(FLOAT(1.1407357f), c[1])), MUL_F(FLOAT(-.0105536f), c[2])),
+                        ADD_F(ADD_F(MUL_F(FLOAT(-.0239640f), c[0]), MUL_F(FLOAT(-.1289755f), c[1])), MUL_F(FLOAT(1.1530393f), c[2])));
+    back = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, back, same3(s, 0.f)), same3(s, 65504.f));
+    SpvId from = s->block;
+    spvIfEnd(s, merge);
+    return spvPhi(s, s->vec3, back, from, v, before);
+}
+
 /* ---- sharpening: as sharpenRow, into the second light ---- */
 POST_MAIN(artfShaderPostSharpen)
     SpvId main = spvBeginMain(s);
@@ -1319,6 +1387,9 @@ uint32_t* artfShaderPostFinal(size_t* size) {
     SpvId q = ADD_F(FLOAT(1.f), MUL_F(MUL_F(vignette, ADD_F(MUL_F(dx, dx), MUL_F(dy, dy))), corner));
     v = SCALE_V3(v, DIV_F(FLOAT(1.f), MUL_F(q, q)));
     v = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, v, same3(s, 0.f)), same3(s, 65504.f));
+    /* grading in ACEScct (artfGradeCct), unless it is in what is shown */
+    SpvId shownSpace = P_MORE(W(frameVec(s, &p->r, F_CULL)), FLOAT(0.f));
+    v = gradeCct(s, p, v, shownSpace);
     /* the curves: ACES's fit, Khronos's neutral, Reinhard's, none */
     SpvId vc[5];
     const float numbers[5] = {2.51f, .03f, 2.43f, .59f, .14f};
@@ -1362,11 +1433,11 @@ uint32_t* artfShaderPostFinal(size_t* size) {
         SpvId dark = MUL_F(rest, rest), middle = MUL_F(MUL_F(FLOAT(2.f), l), rest), bright = MUL_F(l, l);
         SpvId wheel = ADD_V3(ADD_V3(SCALE_V3(spvShuffle3(s, g3), dark), SCALE_V3(spvShuffle3(s, g4), middle)), SCALE_V3(spvShuffle3(s, g5), bright));
         c = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, MUL_V3(c, wheel), zero), one);
-        shown = pick3(s, P_MORE(W(g0), FLOAT(0.f)), c, shown);
+        shown = pick3(s, P_AND(shownSpace, P_MORE(W(g0), FLOAT(0.f))), c, shown);
         /* the look-up table, past auto exposure's state in bloom's buffer: only when there is one */
         SpvId side = W(g3);
         SpvId lutBefore = s->block, lutMerge;
-        spvIfBegin(s, P_MORE(side, FLOAT(1.5f)), &lutMerge);
+        spvIfBegin(s, P_AND(shownSpace, P_MORE(side, FLOAT(1.5f))), &lutMerge);
         SpvId n = P_TOU(side), lutStart = ADD_U(postExposureSlot(s, p), UINT(1));
         SpvId q = SCALE_V3(spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, shown, zero), one), SUB_F(side, FLOAT(1.f)));
         SpvId at[3], t[3];

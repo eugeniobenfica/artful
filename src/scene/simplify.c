@@ -9,7 +9,6 @@
  * the cut stays closed however far it goes. */
 #include "scene/simplifyInternal.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 
 typedef struct Quadric { double a2, ab, ac, ad, b2, bc, bd, c2, cd, d2, weight; } Quadric;
@@ -360,8 +359,6 @@ uint32_t artfSimplify(const ArtfVertex* vertices, uint32_t vertexCount, const ui
     return artfSimplifySkinned(vertices, vertexCount, indices, indexCount, targets, targetCount, out, NULL, NULL, 0);
 }
 
-static int simplifyTraceAsked = -1;
-#define simplifyTrace (simplifyTraceAsked < 0 ? (simplifyTraceAsked = getenv("ARTFUL_SIMPLIFY_TRACE") != NULL) : simplifyTraceAsked)
 uint32_t artfSimplifySkinned(const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const uint32_t* targets, uint32_t targetCount, ArtfSimplified* out,
                              const ArtfVertexSkin* skin, const float* morphs, uint32_t morphCount) {
     Simplifier sim, *s = &sim;
@@ -453,8 +450,6 @@ uint32_t artfSimplifySkinned(const ArtfVertex* vertices, uint32_t vertexCount, c
         }
         const Candidate c = heapPop(s);
         if (s->vertexDead[c.from] || s->vertexDead[c.to] || s->versions[c.from] != c.fromVersion || s->versions[c.to] != c.toVersion) continue;
-        /* (for CI, where processors have made other levels: each collapse, in its order) */
-        if (simplifyTrace) printf("collapse %u -> %u, cost %a, alive %u, worst %a\n", c.from, c.to, (double)c.cost, alive, worst);
         if (s->locked[c.from]) {
             /* along a cut: both sides, or neither */
             if (!seamEdge(s, c.from, c.to)) continue;

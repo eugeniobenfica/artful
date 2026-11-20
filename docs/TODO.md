@@ -28,14 +28,14 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 
 ## Fase 2 — Mudanças que alteram bytes
 - [x] 2.1 sRGB exato (polinômios) · [x] curvas de tom (Neutral já existia)
-- [ ] 2.1 Gradação em ACEScct 🔒 — muda o sentido de lift/gamma/gain e das LUTs existentes
+- [x] 2.1 Gradação em ACEScct (`gradeShown` mantém a de antes)
 - [x] 2.2 Sobol com Owen
-- [ ] 2.2 Ruído azul entre pixels
-- [ ] 2.2 Probes com Sobol (hoje hash; GPU e CPU juntas)
+- [x] 2.2 Ruído azul entre pixels
+- [x] 2.2 Probes com Sobol (GPU e CPU juntas)
 - [x] 2.3 Ambiente por importância + MIS · [x] VNDF + MIS especular · [x] cones de raio
-- [ ] 2.3 MIS para luzes com tamanho
+- [x] 2.3 MIS para luzes com tamanho
 - [x] 2.4 Compensação de energia (Turquin) · [x] antialiasing especular
-- [ ] 2.4 Iridescência de Belcour-Barla · camadas OpenPBR · SSS (listados também em 5.12)
+- [→] 2.4 Iridescência de Belcour-Barla · camadas OpenPBR · SSS: movidos para 5.12 (a Fase 2 fecha sem eles)
 
 ## Fase 3 — Robustez e prova (fecha a 1.0)
 - [~] 3.1 Fuzzing — 9 alvos (8 leitores + `cook`), 7 defeitos achados e corrigidos; falta pôr na CI e 24 h por alvo

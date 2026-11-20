@@ -317,6 +317,29 @@ shaped lights still take a hash's numbers. Against the hash and rejection there 
 `surfaces` at 480 x 270, FLIP from 1,024 samples is .045 against .060 at four samples, .022 against .037 at sixteen
 (the same on both scenes); a sample takes 11% longer on the CPU (38.5 to 43 ms at 1280 x 720) and the same on the GPU.
 
+**Blue noise between pixels** (Georgiev and Fajardo, 2016). With a scrambling of its own, a pixel's error is unlike its
+neighbours' at random, white noise. So the pixels of a square of 64 x 64 share one scrambling (`artfTileSeed`), and
+each turns the square's points (Cranley and Patterson) by its place in a 64 x 64 tile of blue noise, each dimension
+and each bounce from another place of the tile (`artfBlueTurn`): with a sample or a few, neighbours are told apart as
+blue noise is, and a pixel's samples are still Sobol's, turned. The tile is ranks 0 to 4095 by void and cluster
+(Ulichney, a Gaussian of sigma 1.5, on the torus), made once by `tools/blueNoise.py` into `scene/blueNoise.inc`; the
+GPU reads it from the tracing frame (`ArtfTraceFrame.blue`, two ranks a word) and makes the same turns from the same
+integers. Against 1,024 samples (`tracing/fewSamples`), FLIP at one sample is 0.0714 where it was 0.0839 (GPU 0.0734
+against 0.0858), and at four 0.0445 against 0.0454: what it buys is at a sample or two, where a denoiser starts.
+
+**Lights with a size, both ways (MIS).** A light with a size is a ball each path aims at a point of (the sun's a ball
+around its direction, as wide as its size), and a bounce can go into it too. Toward a direction w the points of the
+ball are those of w's chord through it, so how likely aiming is to go toward w, a steradian, is the chord's integral
+of t^2 over the ball's volume; and what a bounce toward w takes of a lamp is the same with each point's fade^2 in it,
+a polynomial in t integrated exactly, to what the bounce meets first (`ballChord`). Light found by aiming is weighed
+against how likely the bounce was to go there, lobe by lobe (the diffuse lobe's (1 - chance) cos / pi, the
+highlight's chance D G1 / 4 n.v, the visible normals'), and light the bounce finds against aiming's, by the power
+heuristic; both sides use the tracer's own lobes (`lightFromLobes`), as light from all around does, not the
+rasterizer's. Paths only, from surfaces of glTF's core; lights with a shape are aimed at as before. A shiny metal
+floor (alpha 0.01) under a lamp of 60 cm and a sun with a size: 16 samples are 0.30 of 255 from where 2,048 settle,
+against 2.37 aimed alone; on a rougher floor where aiming alone settles too, the two settle 0.1% apart, and the GPU
+where the CPU does (`tracing/lightMis`).
+
 **What was covered.** A path that meets nothing leaves the frame's background: sums hold light for covered
 samples, and how many there were. So alpha comes out as how often something was there, edges are smooth for
 nothing, and what was traced goes over the background or a background pass as a layer does.
@@ -669,8 +692,8 @@ normal, in place of sky and ground or a picture.
 The software backend makes them on its workers (`artfSceneIndirectStep`, which stays the reference); Vulkan makes them
 itself, in a compute pass before the frame (`artfShaderProbes`), with the tracer's code: the same trees, or, on a device
 with ray queries, the hardware's top level, which the frame builds for its own rays anyway (binding 64). A group of 64
-takes a probe: one of them draws the rays' directions from the same random numbers in the same order as `randomInBall`,
-into what the group shares; each follows a ray, as `probeJob` does (the sky or the picture, a surface's own light, the
+takes a probe: each draws its ray's direction, Sobol's point of the probe's sequence (scrambled by its index,
+`ARTF_PROBE_SEQUENCE`) as the CPU's `probeJob` does, into what the group shares; each follows a ray, as `probeJob` does (the sky or the picture, a surface's own light, the
 sun and the sixteen lights with shadow rays, the probes before by `artfIndirectAt`'s arithmetic); then each of the 64
 texels of the map adds up the rays near it, and one adds up their light, both in the CPU's order. A step writes a second
 buffer (70) from the first (62), which is then copied over it for the pixels: the two are the renderer's, not a slot's,
@@ -805,9 +828,13 @@ made in: on the GPU, the 64 invocations of one group each take a column and add 
 the CPU, one thread in turn; the same sums. Then one walks the bins, and the mean of what is left between the shares
 left out is what is aimed at, as Unreal's is. The exposure goes down at a speed of its own.
 
-After the tone curve and contrast, in what a screen shows: lift, gamma (2^x and log2 as above) and gain; three color
-wheels, each as much as a pixel's luminance l makes it shadow, middle or highlight ((1 - l)^2, 2 l (1 - l), l^2); a
-3D look-up table, between its eight nearest points; then grain, a hash of the pixel and the frame's number. On the
+Grading is in ACEScct, as a colorist's is: after exposure, white balance, saturation and the vignette, before the tone
+curve, the light goes to ACES's AP1 colors (from linear sRGB by Bradford's adaptation of D65 to ACES's D60) and to
+ACEScct's log (a line below 0.0078125, (log2 x + 9.72) / 17.52 above it), and there: lift, gamma (2^x and log2 as above)
+and gain; three color wheels, each as much as a pixel's luminance l makes it shadow, middle or highlight ((1 - l)^2,
+2 l (1 - l), l^2); a 3D look-up table, between its eight nearest points, of ACEScct as Resolve's tables are; then back
+to linear sRGB, held from 0 to 65504 (`artfGradeCct`, and `gradeCct` in the post shaders). With `gradeShown`, all
+of it is done after the tone curve and contrast, in what a screen shows, as before 1.0. Last, grain, a hash of the pixel and the frame's number. On the
 GPU the table lives past auto exposure's state in bloom's buffer, copied there from a buffer the CPU writes when it
 is another, so no binding is spent on it. The lens flare reads bloom's last level again at three places mirrored
 across the middle, each its own color, gone at the frame's edges.
