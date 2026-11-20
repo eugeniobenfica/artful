@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Readers fuzzed, and what that found** (the plan's phase 3.1). A libFuzzer target for each reader of what comes from
+  outside (`tools/fuzz/`, CMake's `ARTFUL_FUZZ`, clang; with MinGW, libFuzzer linked by name): glTF and GLB, PNG and
+  JPEG, HDR, KTX2 and its blocks, BC7 and ASTC blocks alone, IES, `.cube`, meshopt's buffers; seeds from
+  `tools/fuzz/seeds.py`, glTF's names in `tools/fuzz/gltf.dict`. Half an hour on all eight found five faults, each
+  fixed and kept as a test (`files/fuzzFindings`): a skinned node whose mesh's primitives were not objects read past
+  what had been prepared (heap overflow); a JPEG's DC predictor could run past an int; a light profile's count of tilt
+  angles was taken as given; a KTX2 file of 64 bytes could have 4 GB allocated for its blocks, before anything asked
+  whether the file held them; and a node that was its own child twice was placed 2^256 times (now each node once, as
+  glTF's nodes are a tree, and a node with two parents is said in the log).
+- **A lost device says why** (3.4): where the driver has `VK_EXT_device_fault`, the device is made with it and, once
+  lost, the driver's words, the places at fault and the vendor's codes go to the log and to `ARTF_EVENT_DEVICE_LOST`.
+- **Probes the scene keeps** (3.5): the GPU's light that bounced goes back to the scene every 30 steps, and a renderer
+  that comes after goes on from it, to the bit (`tracing/probesKept`), as the CPU's does; a Vulkan renderer and the
+  CPU's go on from each other's.
+- **A soak test, and the GPU's memory counted** (3.8): `artful-soak` makes and removes meshes and textures for hours
+  under a budget, and says whether the process's memory or the GPU's grew, and what was left; `ArtfFrameStats.gpuBytes`
+  is what the Vulkan renderer holds of the device's memory. Counting it found that a texture removed kept its image on
+  the GPU until another texture took its place: it goes when it is removed now. A run of four hours was stopped by the
+  machine going to sleep at 73 minutes: 202,000 assets made and removed by then, the process's memory going down 14 MB an
+  hour and the GPU's up .8 (within noise), at most 90 and 32 MB.
+
 - **Highlights get back the light their lobe loses, and widen where the normal turns over a pixel** (the plan's phase
   2.4). A rough metal was darker than it is: what meets a second facet was not in the lobe. Each lobe is multiplied by
   1 + f0 (1 / E - 1) (Turquin, 2019), E being GGX's albedo, fitted in `shading.inc` (`Unkept`: thirty numbers, .8% at

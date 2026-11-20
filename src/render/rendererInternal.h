@@ -23,6 +23,7 @@ struct ArtfRenderer {
     double trialMs[2];
     ArtfView view; /* artfRendererSetView's: each backend reads it as a frame starts */
     bool lostSaid; /* ARTF_EVENT_DEVICE_LOST went out: once */
+    char lostWhy[768]; /* what the driver said of it (VK_EXT_device_fault), for that event; empty: nothing */
 };
 
 /* The passes of a frame and what each took, as the CPU's clock sees them: each mark ends the pass it names, which
@@ -50,6 +51,8 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* options);
 /* For tests. Submits that go through before the device is reported lost, when not below 0; and a swapchain the driver
  * refuses. */
 extern int artfVulkanSubmitsLeft;
+/* For tests: whether the renderer asks the driver what lost its device (VK_EXT_device_fault), and what it said. */
+bool artfVulkanFaultReports(const ArtfRenderer* r);
 extern bool artfVulkanRefuseSwapchain;
 /* For tests: a texture whose image would take more than this many bytes cannot be made, as when the GPU's memory has
  * run out. Below 0: no such limit. */

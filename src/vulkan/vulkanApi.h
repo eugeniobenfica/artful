@@ -182,6 +182,13 @@ enum {
     ST_RAY_QUERY_FEATURES = 1000348013, ST_BUFFER_DEVICE_ADDRESS_INFO = 1000244001, ST_MEMORY_ALLOCATE_FLAGS_INFO = 1000060000, DESCRIPTOR_AS = 1000150000
 };
 typedef struct ExtensionProperties { char name[256]; uint32_t specVersion; } ExtensionProperties;
+/* VK_EXT_device_fault: what the driver says of a device it lost */
+enum { ST_FAULT_FEATURES = 1000341000, ST_FAULT_COUNTS = 1000341001, ST_FAULT_INFO = 1000341002 };
+typedef struct FaultFeatures { int sType; void* pNext; VkBool32 deviceFault, vendorBinary; } FaultFeatures;
+typedef struct FaultCounts { int sType; void* pNext; uint32_t addressCount, vendorCount; VkDeviceSize binarySize; } FaultCounts;
+typedef struct FaultAddress { int type; VkDeviceAddress address; VkDeviceSize precision; } FaultAddress;
+typedef struct FaultVendor { char description[256]; uint64_t code, data; } FaultVendor;
+typedef struct FaultInfo { int sType; void* pNext; char description[256]; FaultAddress* addresses; FaultVendor* vendors; void* binary; } FaultInfo;
 typedef struct AsFeatures { int sType; void* pNext; VkBool32 accelerationStructure, captureReplay, indirectBuild, hostCommands, updateAfterBind; } AsFeatures;
 typedef struct RayQueryFeatures { int sType; void* pNext; VkBool32 rayQuery; } RayQueryFeatures;
 typedef struct MemoryAllocateFlagsInfo { int sType; const void* pNext; VkFlags flags; uint32_t deviceMask; } MemoryAllocateFlagsInfo;
@@ -203,6 +210,7 @@ typedef struct WriteDescriptorSetAs { int sType; const void* pNext; uint32_t cou
     X(vkDestroyDevice, void, (VkDevice, const void*)) \
     X(vkGetDeviceQueue, void, (VkDevice, uint32_t, uint32_t, VkQueue*)) \
     X(vkDeviceWaitIdle, VkResult, (VkDevice)) \
+    X(vkGetDeviceFaultInfoEXT, VkResult, (VkDevice, FaultCounts*, FaultInfo*)) \
     X(vkQueueSubmit, VkResult, (VkQueue, uint32_t, const SubmitInfo*, VkFence)) \
     X(vkQueueWaitIdle, VkResult, (VkQueue)) \
     X(vkCreateSwapchainKHR, VkResult, (VkDevice, const SwapchainCreateInfo*, const void*, VkSwapchainKHR*)) \

@@ -486,8 +486,16 @@ ArtfTexture artfSceneAddTextureKtx2(ArtfScene* s, const void* data, size_t size)
     size_t total = 0;
     uint32_t w = width, h = height;
     for (uint32_t i = 0; i < levels; ++i) {
+        /* (each level is in the file as it says, before anything is made of it: what is made is never more than the
+         * file holds) */
+        const uint64_t offset = read64(d + 80 + (size_t)i * 24), length = read64(d + 88 + (size_t)i * 24);
+        const size_t need = (size_t)((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bytes;
+        if (length != need || offset > size || length > size - offset || total + need > size) {
+            artfLog("artful: a KTX2 file that does not hold what it says");
+            return 0;
+        }
         t.blockOffsets[i] = (uint32_t)total;
-        total += (size_t)((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bytes;
+        total += need;
         w = w > 1 ? w / 2 : 1;
         h = h > 1 ? h / 2 : 1;
     }

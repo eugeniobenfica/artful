@@ -176,6 +176,7 @@ typedef struct ArtfFrameStats {
      * on the CPU, to cpuMs. Only what was done this frame is listed. */
     uint32_t passCount;
     ArtfPassTime passes[ARTF_PASS_TIMES];
+    uint64_t gpuBytes;        /* Vulkan: bytes of the GPU's memory the renderer holds now (all it was given) */
 } ArtfFrameStats;
 
 void artfRendererStats(const ArtfRenderer* r, ArtfFrameStats* out);

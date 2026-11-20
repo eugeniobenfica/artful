@@ -154,6 +154,20 @@ Pode começar durante a Fase 2.
 | 3.8 | **Ensaio de longa duração**: quatro horas de troca contínua de ativos com orçamento fixo, registrando pico e tendência de RAM e VRAM, handles e alocações restantes. | `tools/soak.c` (novo) | Sem tendência de crescimento na última hora; zero alocações ao encerrar. | P |
 | 3.9 | **Linux com GPU e janela; Mac com o backend de CPU.** É o mínimo para as camadas de 1.6 deixarem de dizer "nunca executado" nas plataformas que a 1.0 anunciar. | máquinas | Tabela de 1.6 preenchida com a execução. | P (com acesso) |
 
+### Estado da Fase 3
+
+| Passo | Estado | Notas |
+|---|---|---|
+| 3.1 Fuzzing | **Feito em parte**: alvos, sementes, dicionário e regressões; falta a CI e as 24 h por alvo. | Oito alvos libFuzzer sob ASan e UBSan. No MinGW, o clang não aceita `-fsanitize=fuzzer`; o build pede a cobertura e liga a libFuzzer pelo nome. Três rodadas de 15 min nos oito alvos acharam 5 defeitos, todos corrigidos e mantidos em `files/fuzzFindings` (minimizados pela libFuzzer): estouro de heap em `placeNode` (nó com pele e primitivas que não são objetos); overflow do preditor DC do JPEG; contagem de inclinação do IES sem validação; KTX2 de 64 bytes reservando 4 GB; e um nó filho de si mesmo, posto 2^256 vezes (agora cada nó entra uma vez, com aviso no log). |
+| 3.2 Corpus de conformidade | **Não iniciado.** | Precisa baixar o glTF-Sample-Assets: pedir autorização antes. |
+| 3.3 Pré-rotação no Android | **Não iniciado.** | Precisa do aparelho. |
+| 3.4 `VK_EXT_device_fault` | **Feito.** | Habilitado quando o driver tem `deviceFault`. Na perda, o relatório (descrição, endereços, códigos do fabricante) vai ao log e à mensagem de `ARTF_EVENT_DEVICE_LOST`. A Radeon RX 9060 XT tem a extensão; com a perda injetada, o relatório é lido (vem sem descrição, como esperado). Uma perda real não foi forçada: um TDR nesta máquina afetaria a área de trabalho. |
+| 3.5 Probes persistidas | **Feito.** | A cada 30 passos, a GPU copia as probes para a cena (no próprio quadro; lidas quando a cerca termina). Um renderizador novo parte delas e do passo em que estavam: seu primeiro quadro é idêntico (FLIP 0,0000) ao quadro seguinte do anterior. Do zero, a diferença é 0,086. CPU e Vulkan continuam um do outro. |
+| 3.6 Ritmo e térmica | **Não iniciado.** | O critério exige um telefone sob carga por 30 min. |
+| 3.7 Hardware na CI | **Não iniciado.** | Depende de runner próprio e do Firebase Test Lab. |
+| 3.8 Ensaio longo | **Feito em parte**: ferramenta pronta; a execução de 4 h foi interrompida pela suspensão do Windows aos 73 min. | Nos 73 min (202 mil ativos criados e removidos), nada cresceu: processo −14 MB/h, GPU +0,8 MB/h (limite: 1 MB/h); picos de 90 MB e 32 MB. A conferência final de alocações não chegou a rodar; em execuções curtas, zero alocações restantes. Falta repetir as 4 h com a suspensão desligada. `artful-soak` cria e remove malhas e texturas sob orçamento, a 60 passos/s, e registra RAM, VRAM (`ArtfFrameStats.gpuBytes`, novo), handles e alocações. A contagem de VRAM achou um vazamento limitado: a textura removida ficava na GPU até outra ocupar seu índice. Corrigido. |
+| 3.9 Linux e Mac | **Não iniciado.** | Precisa das máquinas. |
+
 **Saída da 1.0:** fases 0 a 3 fechadas; API congelada com a regra de 1.4; camadas de 1.6 publicadas.
 
 ---

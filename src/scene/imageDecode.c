@@ -603,7 +603,8 @@ static void decodeBlock(Jpeg* j, Comp* c, int* blk) {
     const HT* ac = &j->ht[1][c->ta];
     int t = decodeHuff(j, dc) & 15; /* (a size past 11 is broken data; kept to what the arithmetic takes) */
     int diff = t ? extend(receive(j, t), t) : 0;
-    c->pred += diff;
+    /* (no picture's DC goes past this: broken data would otherwise run it past an int, and then its product) */
+    c->pred = c->pred + diff > 32768 ? 32768 : c->pred + diff < -32768 ? -32768 : c->pred + diff;
     blk[0] = c->pred * j->qt[c->tq][0];
     for (int k = 1; k < 64;) {
         int rs = decodeHuff(j, ac);

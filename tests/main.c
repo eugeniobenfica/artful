@@ -142,6 +142,7 @@ int main(int argc, char** argv) {
     RUN("shadows/shadows/vulkan", testShadows(ARTF_BACKEND_VULKAN));
     RUN("shadows/shadowsBothBackends", testShadowsBothBackends());
     RUN("files/gltf", testGltf());
+    RUN("files/fuzzFindings", testFuzzFindings());
     RUN("motion/clips", testClips());
     RUN("motion/skin/software", testSkin(ARTF_BACKEND_SOFTWARE));
     RUN("motion/skin/vulkan", testSkin(ARTF_BACKEND_VULKAN));
@@ -228,6 +229,7 @@ int main(int argc, char** argv) {
     RUN("tracing/tracedRefit", testTracedRefit());
     RUN("tracing/probesWalls", testProbesWalls());
     RUN("tracing/probesGpu", testProbesGpu());
+    RUN("tracing/probesKept", testProbesKept());
     RUN("shadows/extraShadows", testExtraShadows());
     RUN("post/floatsSamples", testFloatsSamples());
     RUN("layers/decals", testDecals());

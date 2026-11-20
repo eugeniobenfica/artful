@@ -54,6 +54,7 @@ typedef struct GpuBuffer {
     VkBuffer buffer;
     VkDeviceMemory memory;
     VkDeviceSize size;
+    VkDeviceSize held; /* bytes of its memory (size, rounded as the driver wants) */
     void* mapped;
     uint64_t serial; /* which allocation this is: a handle can come back the same for another (see Slot's bound) */
 } GpuBuffer;
@@ -62,6 +63,7 @@ typedef struct GpuImage {
     VkImage image;
     VkDeviceMemory memory;
     VkImageView view;
+    VkDeviceSize held; /* bytes of its memory */
 } GpuImage;
 
 /* What belongs to one frame in flight. */
@@ -77,6 +79,12 @@ typedef struct Slot {
     GpuBuffer extraLights, tileLights; /* lights past the frame's own, and each square's list of them (60, 61) */
     GpuBuffer decals;                  /* the decals that may show (63) */
     GpuBuffer probes;                  /* light that bounced, gathered on the CPU (artfVulkanProbesOnCpu) */
+    /* the GPU's probes on their way back to the scene (PROBES_KEPT_EVERY): copied in this slot's frame, read when its
+     * fence says it is done, if the scene's probes are still those (its id, their serial); and how many steps they had */
+    GpuBuffer probesBack;
+    bool probesBackHeld;
+    uint64_t probesBackScene;
+    uint32_t probesBackSerial, probesBackFrames;
     VkBuffer probesBound, probesNextBound; /* what its set says bindings 62 and 70 are: its probes, or the GPU's */
     /* What rays read of the instances, this slot's, as they move: the trees' top and the table of instances (20, 21);
      * with the hardware, its instances, the top level built from them in the frame's own commands (64), and that
@@ -212,6 +220,8 @@ typedef struct Vulkan {
     VkFlags surfaceTransform;
     uint32_t surfaceWidth, surfaceHeight;
     bool lost;         /* nothing more can be drawn: it can only be freed */
+    bool deviceFault;  /* VK_EXT_device_fault is on: when the device is lost, the driver is asked why */
+    uint64_t deviceBytes; /* of the device's memory, what Artful holds (ArtfFrameStats.gpuBytes) */
     uint64_t shadowKeys[ARTF_SHADOW_VIEWS]; /* what each map holds */
     uint64_t shadowSeen;                    /* the scene's changes these know of */
     /* layers by each pixel's depth */
@@ -451,6 +461,8 @@ static bool bufferNewFor(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usa
         b->buffer = 0;
         return false;
     }
+    b->held = req.size;
+    v->deviceBytes += req.size;
     v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
     b->size = info.size;
     b->serial = ++v->bufferSerial;
@@ -465,6 +477,7 @@ static bool bufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage,
 static void bufferFree(Vulkan* v, GpuBuffer* b) {
     if (b->buffer) v->vkDestroyBuffer(v->device, b->buffer, NULL);
     if (b->memory) v->vkFreeMemory(v->device, b->memory, NULL);
+    v->deviceBytes -= b->held;
     memset(b, 0, sizeof *b);
 }
 
@@ -485,6 +498,8 @@ static bool imageNew(Vulkan* v, GpuImage* g, int format, int width, int height, 
         g->image = 0;
         return false;
     }
+    g->held = req.size;
+    v->deviceBytes += req.size;
     v->vkBindImageMemory(v->device, g->image, g->memory, 0);
     ImageViewCreateInfo view = {ST_IMAGE_VIEW_CREATE_INFO, NULL, 0, g->image, 1 /* 2D */, format, {0, 0, 0, 0}, {aspect, 0, mips, 0, 1}};
     return v->vkCreateImageView(v->device, &view, NULL, &g->view) == VK_OK;
@@ -494,6 +509,7 @@ static void imageFree(Vulkan* v, GpuImage* g) {
     if (g->view) v->vkDestroyImageView(v->device, g->view, NULL);
     if (g->image) v->vkDestroyImage(v->device, g->image, NULL);
     if (g->memory) v->vkFreeMemory(v->device, g->memory, NULL);
+    v->deviceBytes -= g->held;
     memset(g, 0, sizeof *g);
 }
 
@@ -596,6 +612,9 @@ static bool hizMake(Vulkan* v) {
 }
 
 int artfVulkanSubmitsLeft = -1;
+
+
+static void lose(Vulkan* v, VkResult result);
 bool artfVulkanRefuseSwapchain = false;
 
 static void lightDescriptors(Vulkan* v, Slot* s);
@@ -2218,9 +2237,11 @@ static bool syncScene(Vulkan* v, ArtfScene* scene) {
             if (i < v->textures.len && v->textureMarks.items[i] == mark) continue;
             v->vkDeviceWaitIdle(v->device);
             if (t->removed) {
-                /* (white in its place, which every entry of the array must have) */
+                /* (white in its place, which every entry of the array must have; its image goes now, not when another
+                 * texture comes to its place: the device is idle) */
                 if (i >= v->textures.len) continue;
                 textureWhite(v, (uint32_t)i);
+                if (i) imageFree(v, &v->textures.items[i]);
                 v->textureMarks.items[i] = mark;
                 continue;
             }
@@ -2352,6 +2373,8 @@ static bool rtBufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usag
     const MemoryAllocateFlagsInfo flags = {ST_MEMORY_ALLOCATE_FLAGS_INFO, NULL, 2 /* device address */, 0};
     MemoryAllocateInfo alloc = {ST_MEMORY_ALLOCATE_INFO, &flags, req.size, (uint32_t)type};
     if (v->vkAllocateMemory(v->device, &alloc, NULL, &b->memory) != VK_OK) return false;
+    b->held = req.size;
+    v->deviceBytes += req.size;
     v->vkBindBufferMemory(v->device, b->buffer, b->memory, 0);
     b->size = info.size;
     b->serial = ++v->bufferSerial;
@@ -3753,6 +3776,10 @@ static void probeDescriptors(Vulkan* v, Slot* s, VkBuffer now, VkBuffer next) {
 
 bool artfVulkanProbesOnCpu = false;
 
+/* How often the GPU's probes go back to the scene, in their steps: a renderer that comes after this one (when the device
+ * is lost, or a window moves to another GPU) goes on from what it kept, half a second before at sixty frames. */
+#define PROBES_KEPT_EVERY 30
+
 /* Light that bounced. On the GPU: the step's pipeline (artfShaderProbes), made for what the probes are, and the buffers
  * all frames share; *gather says this frame takes a step (with the trees or the hardware's structures, which the caller
  * keeps up to date). Or, for tests, a step on this thread's workers, and what they hold into this slot's buffer. */
@@ -3811,11 +3838,29 @@ static bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameDa
         v->probeGraphScene = scene->id;
     }
     if (v->probeScene != scene->id || v->probeSerial != g->serial) {
-        /* (new probes: they start from nothing, as the CPU's do) */
+        /* (probes new to this renderer: from what the scene kept of them, a renderer's before this one or the CPU's;
+         * from nothing, as the CPU's start, where it kept none) */
         v->probeScene = scene->id;
         v->probeSerial = g->serial;
         v->probeFrames = 0;
         v->probeClear = true;
+        if (g->frames && g->probes) {
+            GpuBuffer up;
+            if (!bufferNew(v, &up, need, BUFFER_TRANSFER_SRC, true)) {
+                bufferFree(v, &up);
+                return false;
+            }
+            memcpy(up.mapped, g->probes, (size_t)need);
+            VkCommandBuffer c = oneShotBegin(v);
+            const BufferCopy all = {0, 0, need};
+            v->vkCmdCopyBuffer(c, up.buffer, v->probesNow.buffer, 1, &all);
+            memoryBarrier(v, c, STAGE_TRANSFER, STAGE_FRAGMENT | STAGE_COMPUTE, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
+            const bool ok = oneShotEnd(v, c);
+            bufferFree(v, &up);
+            if (!ok) return false;
+            v->probeFrames = g->frames;
+            v->probeClear = false;
+        }
     }
     *gather = true;
     return true;
@@ -3823,7 +3868,8 @@ static bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameDa
 
 /* A step of the probes, in the frame's commands: from what they held, which the frames before read, into the next;
  * then that into what this frame's pixels read. */
-static void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfIndirect* g) {
+static void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene* scene) {
+    const ArtfIndirect* g = &scene->indirect;
     const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
     if (v->probeClear) {
         memoryBarrier(v, c, STAGE_FRAGMENT | STAGE_COMPUTE | STAGE_TRANSFER, STAGE_TRANSFER, readWrite | ACCESS_TRANSFER_WRITE, ACCESS_TRANSFER_WRITE);
@@ -3840,6 +3886,22 @@ static void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfIndire
     v->vkCmdCopyBuffer(c, v->probesNext.buffer, v->probesNow.buffer, 1, &all);
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_FRAGMENT | STAGE_COMPUTE, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
     ++v->probeFrames;
+    if (v->probeFrames % PROBES_KEPT_EVERY == 0 && g->probes) {
+        /* (and, now and then, to the scene: see Slot's probesBack) */
+        if (s->probesBack.size < all.size) {
+            bufferFree(v, &s->probesBack);
+            if (!bufferNewFor(v, &s->probesBack, all.size, BUFFER_TRANSFER_DST, BUFFER_READ_BY_CPU)) {
+                bufferFree(v, &s->probesBack);
+                return;
+            }
+        }
+        v->vkCmdCopyBuffer(c, v->probesNow.buffer, s->probesBack.buffer, 1, &all);
+        memoryBarrier(v, c, STAGE_TRANSFER, STAGE_HOST, ACCESS_TRANSFER_WRITE, ACCESS_HOST_READ);
+        s->probesBackHeld = true;
+        s->probesBackScene = scene->id;
+        s->probesBackSerial = g->serial;
+        s->probesBackFrames = v->probeFrames;
+    }
 }
 
 bool artfVulkanProbesRead(ArtfRenderer* r, float* out, size_t floats) {
@@ -4201,6 +4263,17 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     }
     const uint32_t slotIndex = (uint32_t)(v->frameNumber % SLOTS);
     if (v->retired.len) retiredFree(v, false);
+    if (s->probesBackHeld) {
+        /* (the probes this slot's frame copied: the scene keeps them, so that a renderer after this one goes on from
+         * them, or the CPU's) */
+        ArtfIndirect* g = &scene->indirect;
+        s->probesBackHeld = false;
+        if (g->probes && s->probesBackScene == scene->id && s->probesBackSerial == g->serial && s->probesBack.mapped) {
+            memcpy(g->probes, s->probesBack.mapped, (size_t)artfIndirectCount(g) * ARTF_PROBE_FLOATS * 4);
+            g->frames = s->probesBackFrames;
+            ++g->version;
+        }
+    }
     if (s->timed && s->passCount) {
         uint64_t ticks[QUERIES];
         /* (1: 64 bits; the fence says it is done) */
@@ -4220,7 +4293,7 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         if (result == VK_ERR_OUT_OF_DATE) { v->targetsStale = true; return true; }
         if (result != VK_OK && result != VK_SUBOPTIMAL) {
             artfLog("artful: acquiring an image failed: %d", (int)result);
-            v->lost = true;
+            lose(v, result);
             return false;
         }
     }
@@ -4464,7 +4537,7 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     }
     passMark(v, c, s, "cull");
     if (probeStep) {
-        gatherProbes(v, c, s, &scene->indirect);
+        gatherProbes(v, c, s, scene);
         passMark(v, c, s, "probes");
     }
 
@@ -4641,7 +4714,7 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     if (artfVulkanSubmitsLeft > 0) --artfVulkanSubmitsLeft;
     if (result != VK_OK) {
         artfLog("artful: submitting a frame failed: %d", (int)result);
-        v->lost = true;
+        lose(v, result);
         return false;
     }
     ++v->frameNumber;
@@ -4652,7 +4725,7 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         else if (result == VK_ERR_OUT_OF_DATE) v->targetsStale = true;
         else if (result != VK_OK) {
             artfLog("artful: presenting a frame failed: %d", (int)result);
-            v->lost = true;
+            lose(v, result);
             return false;
         }
     }
@@ -4696,6 +4769,7 @@ static void vkStats(const ArtfRenderer* r, ArtfFrameStats* out) {
     out->cpuMs = v->cpuMs;
     out->traceSamples = v->traceDone;
     out->gpuMs = v->gpuMs;
+    out->gpuBytes = v->deviceBytes;
     out->shadowMapsDrawn = v->shadowMapsDrawn;
     out->passCount = v->passTimeCount;
     memcpy(out->passes, v->passTimes, v->passTimeCount * sizeof *out->passes);
@@ -4795,6 +4869,7 @@ static void vkFree(ArtfRenderer* r) {
             bufferFree(v, &s->decals);
             bufferFree(v, &s->tileLights);
             bufferFree(v, &s->probes);
+            bufferFree(v, &s->probesBack);
             bufferFree(v, &s->background);
             bufferFree(v, &s->stream);
             bufferFree(v, &s->instances);
@@ -5002,16 +5077,26 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
         features.pNext = &f12;
         v->vkGetPhysicalDeviceFeatures2(gpus[i], &features);
         /* the ray tracing hardware: both extensions, and what they need (ARTFUL_NO_RAY_QUERY: as a device without) */
-        bool rayQuery = false;
+        bool rayQuery = false, deviceFault = false;
         {
             ExtensionProperties* have = artfMalloc(512 * sizeof *have);
             uint32_t extensionCount = 512;
             int found = 0;
             if (v->vkEnumerateDeviceExtensionProperties && v->vkEnumerateDeviceExtensionProperties(gpus[i], NULL, &extensionCount, have) >= 0)
                 for (uint32_t e = 0; e < extensionCount; ++e)
-                    found |= (!strcmp(have[e].name, "VK_KHR_acceleration_structure") ? 1 : 0) | (!strcmp(have[e].name, "VK_KHR_ray_query") ? 2 : 0) | (!strcmp(have[e].name, "VK_KHR_deferred_host_operations") ? 4 : 0);
+                    found |= (!strcmp(have[e].name, "VK_KHR_acceleration_structure") ? 1 : 0) | (!strcmp(have[e].name, "VK_KHR_ray_query") ? 2 : 0) | (!strcmp(have[e].name, "VK_KHR_deferred_host_operations") ? 4 : 0) |
+                             (!strcmp(have[e].name, "VK_EXT_device_fault") ? 8 : 0);
             artfFree(have);
-            if (found == 7 && !getenv("ARTFUL_NO_RAY_QUERY")) {
+            if (found & 8) {
+                FaultFeatures fault = {ST_FAULT_FEATURES, NULL, 0, 0};
+                PhysicalDeviceFeatures2 all;
+                memset(&all, 0, sizeof all);
+                all.sType = ST_PHYSICAL_DEVICE_FEATURES2;
+                all.pNext = &fault;
+                v->vkGetPhysicalDeviceFeatures2(gpus[i], &all);
+                deviceFault = fault.deviceFault != 0;
+            }
+            if ((found & 7) == 7 && !getenv("ARTFUL_NO_RAY_QUERY")) {
                 RayQueryFeatures query = {ST_RAY_QUERY_FEATURES, NULL, 0};
                 AsFeatures as = {ST_AS_FEATURES, &query, 0, 0, 0, 0, 0};
                 Vulkan12Features more;
@@ -5052,6 +5137,7 @@ static bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             v->drawCounted = v->multiDraw && f12.drawIndirectCount;
             v->fragmentStores = features.features.fragmentStoresAndAtomics;
             v->rayQuery = rayQuery;
+            v->deviceFault = deviceFault;
             v->sampleShading = features.features.sampleRateShading;
             v->independentBlend = features.features.independentBlend;
             v->primitiveIds = features.features.geometryShader && !getenv("ARTFUL_NO_PRIMITIVE_ID"); /* (for the meshlets view) */
@@ -5085,6 +5171,40 @@ static bool chooseFormat(Vulkan* v) {
     return found != 0;
 }
 
+/* The device is lost (result: what said so): nothing more is drawn. Where VK_EXT_device_fault is on, the driver is
+ * asked why, and what it says goes to the log and to ARTF_EVENT_DEVICE_LOST: its words, each place on the GPU that was
+ * at fault (read, written, run) and the vendor's codes. */
+static void lose(Vulkan* v, VkResult result) {
+    v->lost = true;
+    if (result != -4 /* VK_ERROR_DEVICE_LOST */ || !v->deviceFault || !v->vkGetDeviceFaultInfoEXT || v->base.lostWhy[0]) return;
+    FaultCounts counts = {ST_FAULT_COUNTS, NULL, 0, 0, 0};
+    if (v->vkGetDeviceFaultInfoEXT(v->device, &counts, NULL) < 0) return;
+    if (counts.addressCount > 16) counts.addressCount = 16;
+    if (counts.vendorCount > 4) counts.vendorCount = 4;
+    counts.binarySize = 0; /* (not asked for at the device's making) */
+    FaultAddress addresses[16];
+    FaultVendor vendors[4];
+    FaultInfo info;
+    memset(&info, 0, sizeof info);
+    info.sType = ST_FAULT_INFO;
+    info.addresses = addresses;
+    info.vendors = vendors;
+    const VkResult got = v->vkGetDeviceFaultInfoEXT(v->device, &counts, &info);
+    if (got < 0) return;
+    char* out = v->base.lostWhy;
+    const size_t size = sizeof v->base.lostWhy;
+    size_t n = (size_t)snprintf(out, size, "%s", info.description[0] ? info.description : "no words for it");
+    static const char* const kinds[7] = {"none", "a read of", "a write to", "running", "running near", "running, at no place it could", "running, at"};
+    for (uint32_t k = 0; k < counts.addressCount && n < size; ++k)
+        n += (size_t)snprintf(out + n, size - n, "; %s 0x%llx (to %llu bytes)", addresses[k].type >= 0 && addresses[k].type < 7 ? kinds[addresses[k].type] : "?",
+                              (unsigned long long)addresses[k].address, (unsigned long long)addresses[k].precision);
+    for (uint32_t k = 0; k < counts.vendorCount && n < size; ++k)
+        n += (size_t)snprintf(out + n, size - n, "; %s (0x%llx, 0x%llx)", vendors[k].description, (unsigned long long)vendors[k].code, (unsigned long long)vendors[k].data);
+    artfLog("artful: what the driver says of the lost device: %s", out);
+}
+
+bool artfVulkanFaultReports(const ArtfRenderer* r) { return r && r->backend == ARTF_BACKEND_VULKAN && ((const Vulkan*)r)->deviceFault; }
+
 static bool createDevice(Vulkan* v) {
     const float priority = 1.f;
     const DeviceQueueCreateInfo queue = {ST_DEVICE_QUEUE_CREATE_INFO, NULL, 0, v->family, 1, &priority};
@@ -5106,7 +5226,7 @@ static bool createDevice(Vulkan* v) {
     features.features.sampleRateShading = v->sampleShading;
     features.features.independentBlend = v->independentBlend;
     features.features.geometryShader = v->primitiveIds;
-    const char* extensions[5];
+    const char* extensions[6];
     uint32_t extensionCount = 0;
     if (v->surface) extensions[extensionCount++] = "VK_KHR_swapchain";
     if (v->surface && v->native.kind == ARTF_SURFACE_METAL) extensions[extensionCount++] = "VK_KHR_portability_subset";
@@ -5118,6 +5238,11 @@ static bool createDevice(Vulkan* v) {
         extensions[extensionCount++] = "VK_KHR_deferred_host_operations";
         f12.rest[8] = 1; /* bufferDeviceAddress */
         f12.pNext = &as;
+    }
+    FaultFeatures fault = {ST_FAULT_FEATURES, &f12, 1, 0};
+    if (v->deviceFault) {
+        extensions[extensionCount++] = "VK_EXT_device_fault";
+        features.pNext = &fault;
     }
     const DeviceCreateInfo info = {ST_DEVICE_CREATE_INFO, &features, 0, 1, &queue, 0, NULL, extensionCount, extensions, NULL};
     if (v->vkCreateDevice(v->gpu, &info, NULL, &v->device) != VK_OK) return false;

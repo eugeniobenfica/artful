@@ -410,6 +410,23 @@ held, and the CPU, the GPU's culling shader and Metal all read it, so all draw t
 `artfMeshHeld`. A mesh added with a way to read it (`artfSceneAddMeshStreamed`) drops its levels from memory too, and
 reading it again makes them again, the same bytes, so a picture before and after is the same.
 
+A renderer may have to go, and another come for the same scene: a device lost, a window on another GPU. Light that
+bounced does not start again then. The GPU's probes go back to the scene every 30 of their steps (a copy in the frame's
+own commands, read when its fence says it is done, if the scene's probes are still those), into the same array the
+CPU's renderer steps; a renderer that meets probes new to it starts from what the scene holds, and from the step they
+had reached, so that it takes the same rays. Its first frame is the frame after the one they were kept at, to the
+bit (`tracing/probesKept`), where from nothing it was .086 apart by FLIP. A Vulkan renderer goes on from the CPU's
+probes, and the CPU's from the GPU's, the same way.
+
+Where the driver has `VK_EXT_device_fault`, the device is made with it, and when it is lost the driver is asked why:
+its words, the places on the GPU that were read, written or run at fault, and the vendor's codes go to the log and to
+`ARTF_EVENT_DEVICE_LOST`'s message. A lost device injected (`artfVulkanSubmitsLeft`) asks it too: the Radeon here
+answers with no words, as nothing was at fault.
+
+**What the GPU's memory holds.** `ArtfFrameStats.gpuBytes` is all the device memory the Vulkan renderer holds, counted
+where it is allocated and freed. Counting it found a texture removed whose image the GPU kept until another texture
+took its place: it goes when it is removed now.
+
 ## Taking out noise
 
 A traced frame with `denoise` keeps, for each pixel, what its first surface was: where, which way it faced, and its
@@ -442,6 +459,19 @@ index and each byte range is checked before use, and a test runs it on every cut
 each byte broken in turn.
 
 `imageDecode.c` is cascade's decoder for PNG and JPEG, copied, as linking it is what Artful must not do.
+
+**Fuzzing.** Each reader of what comes from outside has a libFuzzer target (`tools/fuzz/fuzz.c`, CMake's
+`ARTFUL_FUZZ`, clang): glTF and GLB, PNG and JPEG, Radiance's HDR, KTX2 with its blocks made pixels, a block alone (BC7,
+ASTC of each footprint), IES, `.cube` and meshopt's buffers. All of Artful is built with coverage under
+AddressSanitizer and UndefinedBehaviorSanitizer; `tools/fuzz/seeds.py` writes valid seeds of each, and
+`tools/fuzz/gltf.dict` glTF's names. With MinGW, clang will not say `-fsanitize=fuzzer`, though it has libFuzzer: the
+build asks for coverage and links libFuzzer by name. The first quarter of an hour on all eight found four faults, and
+the second one more: a skinned node whose mesh's primitives were not objects read past what had been prepared; a JPEG's
+DC predictor ran past an int; a light profile's count of tilt angles could be any number, and the place it gave ran
+past the pointer; a KTX2 file of 64 bytes said its blocks took 4 GB, and they were allocated before the file was asked
+whether it held them (now nothing is made that the file does not hold); a node that was twice its own child was
+placed 2^256 times (a tree places each node once now, and says so of a node with two parents). Each, as libFuzzer made
+it smallest, is a test (`files/fuzzFindings`).
 
 Lights (`KHR_lights_punctual`) and cameras stay with the model, so that they follow their nodes when a clip
 plays or the model moves. A light of the file fades by the square of distance and Artful's end at a radius: the

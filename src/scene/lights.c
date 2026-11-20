@@ -105,7 +105,7 @@ float* artfIesDecode(const void* data, size_t size, int* vertical, int* horizont
     size_t k = 0;
     if (tilted) {
         /* (the lamp's tilt: its geometry, how many angles, the angles and their factors, which are left out) */
-        if (count < 2) goto done;
+        if (count < 2 || !(numbers[1] >= 0 && numbers[1] <= (double)count)) goto done;
         const size_t n = (size_t)numbers[1];
         k = 2 + 2 * n;
     }

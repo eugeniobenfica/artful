@@ -147,6 +147,7 @@ void testGltfMeshopt(void);
 void testGltfMore(void);
 void testGltfTargets(void);
 void testGltf(void);
+void testFuzzFindings(void);
 /* streaming.c: what comes and goes: removing, residency, streaming */
 void testRemoving(ArtfBackend backend);
 void testPrepared(void);
@@ -188,6 +189,7 @@ void testTracedRefit(void);
 void testTracedReflections(void);
 void testProbesWalls(void);
 void testProbesGpu(void);
+void testProbesKept(void);
 void testTrace(ArtfBackend backend);
 void testTraceData(void);
 void testTraceBothBackends(void);

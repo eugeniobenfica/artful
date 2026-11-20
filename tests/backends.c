@@ -92,10 +92,12 @@ void testVulkan(void) {
 /* What events say: each kind, how many, and what of the last. */
 static int eventCounts[8];
 static const void* eventSource;
+static char eventWords[1024];
 static void countEvent(void* user, const ArtfEvent* e) {
     (void)user;
     if ((int)e->kind < 8) ++eventCounts[e->kind];
     eventSource = e->source;
+    snprintf(eventWords, sizeof eventWords, "%s", e->message);
 }
 
 void testLostDevice(void) {
@@ -106,6 +108,31 @@ void testLostDevice(void) {
     uint32_t* b = artfMalloc((size_t)W * H * 4);
     ArtfScene* s = shadowScene();
     drawInto(r, s, a);
+    /* (what the GPU's memory holds for it is counted, and goes when what it holds goes) */
+    ArtfFrameStats stats;
+    artfRendererStats(r, &stats);
+    const uint64_t heldBefore = stats.gpuBytes;
+    uint32_t* big = artfMalloc((size_t)1024 * 1024 * 4);
+    memset(big, 0x80, (size_t)1024 * 1024 * 4);
+    const ArtfTexture texture = artfSceneAddTexture(s, big, 1024, 1024, 0);
+    ArtfMaterialDesc textured = artfMaterialDefaults();
+    textured.texture = texture;
+    const ArtfTransform away = artfTransformAt(0, -50, 0, 1);
+    const ArtfMaterial texturedMaterial = artfSceneAddMaterial(s, &textured);
+    const ArtfInstance shown = artfSceneAddInstance(s, artfSceneAddCube(s, 1), texturedMaterial, &away);
+    CHECK(artfRendererDraw(r, s));
+    artfRendererStats(r, &stats);
+    const uint64_t heldWith = stats.gpuBytes;
+    artfSceneRemoveInstance(s, shown);
+    textured.texture = 0;
+    artfMaterialSet(s, texturedMaterial, &textured);
+    CHECK(artfSceneRemoveTexture(s, texture));
+    for (int k = 0; k < 4; ++k) CHECK(artfRendererDraw(r, s));
+    artfRendererStats(r, &stats);
+    printf("the GPU's memory held: %.1f MB, %.1f with a texture of 4 MB, %.1f once it went\n", heldBefore / 1048576.0, heldWith / 1048576.0, stats.gpuBytes / 1048576.0);
+    CHECK(heldBefore > 0 && heldWith >= heldBefore + 4 * 1048576 && stats.gpuBytes < heldWith);
+    artfFree(big);
+    drawInto(r, s, a);
     memset(eventCounts, 0, sizeof eventCounts);
     artfSetEvents(countEvent, NULL);
     artfVulkanSubmitsLeft = 2;
@@ -113,8 +140,10 @@ void testLostDevice(void) {
     CHECK(!artfRendererDraw(r, s));
     artfVulkanSubmitsLeft = -1;
     CHECK(!artfRendererDraw(r, s));
-    /* (said once, by the renderer that lost it) */
+    /* (said once, by the renderer that lost it; where the driver can say why, VK_EXT_device_fault, it was asked) */
     CHECK(eventCounts[ARTF_EVENT_DEVICE_LOST] == 1 && eventSource == r);
+    printf("lost, %s: %s\n", artfVulkanFaultReports(r) ? "the driver asked why" : "no VK_EXT_device_fault", eventWords);
+    CHECK(!artfVulkanFaultReports(r) || strstr(eventWords, "(the driver: ") != NULL);
     artfSetEvents(NULL, NULL);
     CHECK(!artfRendererReadPixels(r, b));
     artfRendererFree(r);

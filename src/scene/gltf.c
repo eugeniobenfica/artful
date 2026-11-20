@@ -192,6 +192,7 @@ typedef struct Loader {
     ArtfMesh* primitives;   /* of each mesh's primitives, from primitiveStart */
     uint32_t* primitiveStart;
     uint32_t primitiveTotal; /* (those that bend come after: a node may use a mesh without its skin) */
+    uint8_t* placed;          /* of each node, that placeNode has been to it: nodes are a tree, and each is placed once */
     uint32_t instances;
     ModelData* model;
     const Json *root, *accessors, *views, *meshes, *nodes, *textures, *imageList;
@@ -940,6 +941,14 @@ static void cameraOf(Loader* l, const Json* node, uint32_t index) {
 
 static void placeNode(Loader* l, const Json* node, uint32_t index, int depth) {
     if (!node || depth > 256) return;
+    /* (a node with two parents, or that is its own ancestor, is not glTF: placed once, where it was first met, or a few
+     * nodes that name each other could make it be placed more times than there are atoms) */
+    if (l->placed[index]) {
+        if (l->placed[index] == 1) artfLog("artful: glTF: node %u is the child of more than one, or of itself: placed once", index);
+        l->placed[index] = 2;
+        return;
+    }
+    l->placed[index] = 1;
     const int64_t mesh = indexOf(l, node, "mesh");
     const int64_t skin = indexOf(l, node, "skin");
     const bool skinned = skin >= 0 && skin < l->model->skinCount;
@@ -951,7 +960,8 @@ static void placeNode(Loader* l, const Json* node, uint32_t index, int depth) {
         for (uint32_t i = 0; i < count; ++i) {
             const uint32_t slot = l->primitiveStart[mesh] + i + (skinned ? l->primitiveTotal : 0);
             const Json* p = element(l, primitives, i);
-            if (l->primitives[slot] == UINT32_MAX && l->preparedMeshes && l->preparedMeshes[slot]) {
+            /* (only what does not bend was prepared: preparedMeshes holds primitiveTotal) */
+            if (l->primitives[slot] == UINT32_MAX && l->preparedMeshes && slot < l->primitiveTotal && l->preparedMeshes[slot]) {
                 l->primitives[slot] = artfSceneAddPreparedMesh(l->scene, l->preparedMeshes[slot]);
                 l->preparedMeshes[slot] = NULL;
             }
@@ -1418,6 +1428,7 @@ static uint32_t loadJson(Loader* l, const ArtfTransform* transform) {
     const int64_t chosen = indexOf(l, l->root, "scene");
     const Json* scene = element(l, scenes, chosen < 0 ? 0 : (uint32_t)chosen);
     const Json* roots = member(l, scene, "nodes");
+    l->placed = artfCalloc((l->nodes && l->nodes->kind == J_ARRAY ? l->nodes->count : 0) + 1, 1);
     if (roots && roots->kind == J_ARRAY) {
         for (const Json* n = nodeAt(l, roots->first); n; n = nodeAt(l, n->next))
             if (n->kind == J_NUMBER) placeNode(l, element(l, l->nodes, (uint32_t)n->number), (uint32_t)n->number, 0);
@@ -1434,6 +1445,8 @@ static uint32_t loadJson(Loader* l, const ArtfTransform* transform) {
             if (!child[i]) placeNode(l, n, i, 0);
         artfFree(child);
     }
+    artfFree(l->placed);
+    l->placed = NULL;
     applyPose(l->scene, model);
     return l->instances;
 }

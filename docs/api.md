@@ -125,7 +125,7 @@ To be decided before 1.0; as it stands, for the owner to confirm:
 | `artfSceneSetBackgroundPass`, `artfSceneBackgroundPass` | Light behind the scene that the program makes: a frame's parameters, a tile's light on the CPU, a compute shader on Vulkan; then its own bloom and tone curve. |
 | `artfSceneSetBlackHole` | A black hole behind the scene: `artful/blackhole.h`, in the library `artful-blackhole` (`extensions/blackhole`), on the background pass. |
 | `artfRendererSetOverlay` | A picture over the frame. |
-| `artfRendererStats` | What a frame cost, on the CPU and on the GPU, and each of its passes (`passes`, `passCount`). |
+| `artfRendererStats` | What a frame cost, on the CPU and on the GPU, and each of its passes (`passes`, `passCount`); on Vulkan, the GPU's memory it holds (`gpuBytes`). |
 | `artfRendererWarm` | Vulkan makes what a feature turned on mid-run needs while frames go on without it: this waits for that, and the next frame has all it asks for. |
 | `artfRendererSetView`, `artfViewName`, `artfViewFromName` | What the frame shows: the picture, or one thing that went into it (`ArtfView`). |
 

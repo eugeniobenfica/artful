@@ -686,6 +686,49 @@ void testProbesWalls(void) {
     }
 }
 
+/* Probes the scene keeps: the GPU's go back to the scene now and then, so that a renderer that comes after (a device
+ * lost, a window on another GPU) goes on from them. Its first frame is near the last of the one before (FLIP), where
+ * from nothing it had no light that bounced. */
+void testProbesKept(void) {
+#ifdef ARTFUL_VULKAN
+    ArtfScene* s = bleedScene();
+    artfSceneAddLight(s, artfVec3(.5f, 1.5f, 1), artfVec3(2, 1.6f, 1.2f), 6);
+    /* (few rays, kept long: one step from nothing is far from what many make) */
+    const ArtfIndirectDesc d = {{8, 4, 8}, 16, .95f, 1, {-4, -1.5f, -3}, {4, 3, 3}, false};
+    artfSceneSetIndirect(s, &d);
+    const ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    if (!r) {
+        artfSceneFree(s);
+        return;
+    }
+    uint32_t* before = artfMalloc(W * H * 4);
+    uint32_t* first = artfMalloc(W * H * 4);
+    /* the scene keeps them every 30 steps: after 120 frames, those of the 90th; the frame after it is what a renderer
+     * that goes on from them draws first */
+    for (int k = 0; k < 91; ++k) CHECK(artfRendererDraw(r, s));
+    CHECK(artfRendererReadPixels(r, before));
+    for (int k = 91; k < 120; ++k) CHECK(artfRendererDraw(r, s));
+    CHECK(s->indirect.frames == 90);
+    artfRendererFree(r);
+    r = artfRendererNew(&o);
+    CHECK(artfRendererDraw(r, s) && artfRendererReadPixels(r, first));
+    const FlipStats kept = flipFrames(before, first, W, H, 0, NULL);
+    artfRendererFree(r);
+    /* from nothing */
+    artfSceneSetIndirect(s, &d);
+    r = artfRendererNew(&o);
+    CHECK(artfRendererDraw(r, s) && artfRendererReadPixels(r, first));
+    const FlipStats none = flipFrames(before, first, W, H, 0, NULL);
+    artfRendererFree(r);
+    printf("a new renderer's first frame against the frame it goes on from: FLIP %.4f from what the scene kept, %.4f from nothing\n", kept.mean, none.mean);
+    CHECK(kept.mean < .005 && none.mean > .03);
+    artfFree(before);
+    artfFree(first);
+    artfSceneFree(s);
+#endif
+}
+
 /* Light that bounced, gathered by the GPU (artfShaderProbes) against the CPU's step, which is the reference: the same
  * rays the same ways, so the same probes but for roundings and a ray that grazes an edge. A floor, a red wall, a closed
  * box with probes inside it, a lamp and the sun; with walls and through them, through the hardware where there is

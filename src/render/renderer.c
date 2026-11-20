@@ -75,7 +75,8 @@ bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene) {
     if (drawn && artfSceneFeature(scene, ARTF_FEATURE_OCCLUSION_AUTO)) tryOcclusion(r, scene);
     if (!drawn && !r->lostSaid) {
         r->lostSaid = true;
-        artfEventSay(ARTF_EVENT_DEVICE_LOST, r, 0, 0, "artful: the device is lost: free the renderer, and give the scene to a new one");
+        if (r->lostWhy[0]) artfEventSay(ARTF_EVENT_DEVICE_LOST, r, 0, 0, "artful: the device is lost: free the renderer, and give the scene to a new one (the driver: %s)", r->lostWhy);
+        else artfEventSay(ARTF_EVENT_DEVICE_LOST, r, 0, 0, "artful: the device is lost: free the renderer, and give the scene to a new one");
     }
     return drawn;
 }
