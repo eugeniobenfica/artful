@@ -156,7 +156,7 @@ int main(int argc, char** argv) {
     SAVE("shadowFragment", artfShaderShadowFragment(&size, 1024));
     SAVE("traceShow", artfShaderTraceShow(&size, false));
     SAVE("overlayVertex", artfShaderOverlayVertex(&size));
-    SAVE("overlayFragment", artfShaderOverlayFragment(&size));
+    SAVE("overlayFragment", artfShaderOverlayFragment(&size, false));
     SAVE("holeTrace", artfBlackHoleShader(&size)); /* (the extension's: extensions/blackhole) */
     SAVE("bloomFirst", artfShaderBloomDown(&size, true));
     SAVE("bloomNext", artfShaderBloomDown(&size, false));
@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
     SAVE("postFocus", artfShaderPostFocus(&size));
     SAVE("postBloomDown", artfShaderPostBloomDown(&size));
     SAVE("postBloomUp", artfShaderPostBloomUp(&size));
-    SAVE("postFinal", artfShaderPostFinal(&size));
+    SAVE("postFinal", artfShaderPostFinal(&size, false));
     SAVE("postMeter", artfShaderPostMeter(&size));
     SAVE("postMotionBlur", artfShaderPostMotionBlur(&size));
     SAVE("postVelocity", artfShaderPostVelocity(&size));

@@ -2393,7 +2393,32 @@ uint32_t* artfShaderOverlayVertex(size_t* size) {
     return finish(s, size);
 }
 
-uint32_t* artfShaderOverlayFragment(size_t* size) {
+/* Turned (ArtfRendererOptions.preRotate): a fragment's place in the swapchain's image, as the screen stands on its own,
+ * to its place in the frame as it is seen. The push constant at 8 says how: the turn (the swapchain's preTransform:
+ * 0, or 90, 180 or 270 degrees clockwise) in its low two bits, the frame's width in the next 15, its height in the 15
+ * above. The image holds the frame turned clockwise: at 90, the frame's (x, y) is the image's (height - y, x). */
+static SpvId turnPushOf(Spv* s) {
+    SpvId block = spvTypeStruct(s, &s->uintType, 1);
+    spvDecorate(s, block, SPV_DECORATE_Block, -1);
+    spvMemberDecorate(s, block, 0, SPV_DECORATE_Offset, 8);
+    return spvVariable(s, spvTypePointer(s, SPV_STORAGE_PushConstant, block), SPV_STORAGE_PushConstant);
+}
+static void turnedPlace(Spv* s, SpvId push, SpvId coord, SpvId* x, SpvId* y) {
+    SpvId zero = spvConstUint(s, 0);
+    SpvId word = spvLoad(s, s->uintType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_PushConstant, s->uintType), push, &zero, 1));
+    SpvId turn = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, word, spvConstUint(s, 3));
+    SpvId width = spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, word, spvConstUint(s, 2)), spvConstUint(s, 0x7FFF)));
+    SpvId height = spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, word, spvConstUint(s, 17)), spvConstUint(s, 0x7FFF)));
+    SpvId cx = spvExtract(s, s->floatType, coord, 0), cy = spvExtract(s, s->floatType, coord, 1);
+    SpvId flipX = spvOp2(s, SPV_OP_FSub, s->floatType, width, cx), flipY = spvOp2(s, SPV_OP_FSub, s->floatType, height, cy);
+    SpvId acrossY = spvOp2(s, SPV_OP_FSub, s->floatType, width, cy), downX = spvOp2(s, SPV_OP_FSub, s->floatType, height, cx);
+#define TURN_IS(k) spvOp2(s, 170 /* OpIEqual */, s->boolType, turn, spvConstUint(s, k))
+    *x = spvSelect(s, s->floatType, TURN_IS(1), cy, spvSelect(s, s->floatType, TURN_IS(2), flipX, spvSelect(s, s->floatType, TURN_IS(3), acrossY, cx)));
+    *y = spvSelect(s, s->floatType, TURN_IS(1), downX, spvSelect(s, s->floatType, TURN_IS(2), flipY, spvSelect(s, s->floatType, TURN_IS(3), cx, cy)));
+#undef TURN_IS
+}
+
+uint32_t* artfShaderOverlayFragment(size_t* size, bool turns) {
     Spv b, *s = &b;
     spvInit(s);
     SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);
@@ -2405,9 +2430,12 @@ uint32_t* artfShaderOverlayFragment(size_t* size) {
     SpvId ivec2 = spvNewId(s);
     spvEmit(&s->types, 23 /* OpTypeVector */, SPV_WORDS(ivec2, s->intType, 2));
 
+    SpvId push = turns ? turnPushOf(s) : 0;
     SpvId main = spvBeginMain(s);
     SpvId coord = spvLoad(s, s->vec4, fragCoord);
-    const SpvId xy[2] = {spvOp1(s, SPV_OP_ConvertFToS, s->intType, X(coord)), spvOp1(s, SPV_OP_ConvertFToS, s->intType, Y(coord))};
+    SpvId cx = X(coord), cy = Y(coord);
+    if (turns) turnedPlace(s, push, coord, &cx, &cy);
+    const SpvId xy[2] = {spvOp1(s, SPV_OP_ConvertFToS, s->intType, cx), spvOp1(s, SPV_OP_ConvertFToS, s->intType, cy)};
     SpvId texel = spvImageFetch(s, imageType, spvLoad(s, sampled, overlay), spvCompose(s, ivec2, xy, 2));
     spvStore(s, outColor, texel);
     spvEndMain(s);

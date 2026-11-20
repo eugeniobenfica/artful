@@ -14,9 +14,9 @@ the test passed there, not that it returned early). **Stable**: run, its tests p
 | | CPU | Vulkan | Metal | 2D, CPU | 2D, Vulkan |
 | --- | --- | --- | --- | --- | --- |
 | Windows x64 | stable: all tests, GCC, clang, MSVC (CI) | stable: AMD Vega 8, Radeon RX 9060 XT (ray tracing hardware), windows | | stable | stable: read back and in a window |
-| Android arm64 | stable: Galaxy S25 Ultra | best effort: the S25's Adreno 830, a window and going to the background; rotation not seen | | best effort: not yet run | best effort: not yet run |
-| Linux x64 | stable: GCC and clang, sanitizers (CI) | best effort: Mesa's software Vulkan (lavapipe), no window, no GPU | | best effort: not yet through CI | best effort: not yet through CI |
-| macOS | best effort: CI, no window | | experimental: never run | best effort: not yet through CI | |
+| Android arm64 | stable: Galaxy S25 Ultra | best effort: the S25's Adreno 830, a window and going to the background; rotation not seen (nor `preRotate`, checked here only through a test hook) | | best effort: not yet run | best effort: not yet run |
+| Linux x64 | stable: GCC and clang, sanitizers (CI) | best effort: Mesa's software Vulkan (lavapipe), no window, no GPU; light that bounced, gathered on the GPU, crashes lavapipe's compiled shader (reproduced on Windows, not yet isolated) | | best effort: not yet through CI | best effort: not yet through CI |
+| macOS | best effort: all tests pass on Apple silicon (CI, 20 November 2026: 326,689 checks, the GPU's 95 skipped), no window | | experimental: never run; its shaders, ours and SPIRV-Cross's, through Apple's compiler in CI | best effort: not yet through CI | |
 | iOS | experimental: never built with Apple's tools | | experimental | experimental | |
 | Windows on ARM | experimental: built, never run | experimental | | experimental | experimental |
 | Android armv7, x86-64 | experimental: built, never run | experimental | | experimental | experimental |

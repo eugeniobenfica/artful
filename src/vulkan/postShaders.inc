@@ -1313,11 +1313,12 @@ POST_MAIN(artfShaderPostBloomUp)
 POST_FINISH()
 
 /* ---- the frame: as finalRow, a pixel shader drawn over the whole frame ---- */
-uint32_t* artfShaderPostFinal(size_t* size) {
+uint32_t* artfShaderPostFinal(size_t* size, bool turns) {
     Spv b, *s = &b;
     spvInit(s);
     Post post, *p = &post;
     postDeclare(s, p);
+    SpvId turnPush = turns ? turnPushOf(s) : 0;
     SpvId fragCoord = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->vec4), SPV_STORAGE_Input);
     spvDecorate(s, fragCoord, SPV_DECORATE_BuiltIn, SPV_BUILTIN_FragCoord);
     SpvId outColor = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
@@ -1325,7 +1326,9 @@ uint32_t* artfShaderPostFinal(size_t* size) {
     SpvId main = spvBeginMain(s);
     postFrameSizes(s, p);
     SpvId coord = spvLoad(s, s->vec4, fragCoord);
-    SpvId x = P_TOU(FLOOR_F(X(coord))), y = P_TOU(FLOOR_F(Y(coord)));
+    SpvId placeX = X(coord), placeY = Y(coord);
+    if (turns) turnedPlace(s, turnPush, coord, &placeX, &placeY); /* (preRotate: the frame's place, from the image's) */
+    SpvId x = P_TOU(FLOOR_F(placeX)), y = P_TOU(FLOOR_F(placeY));
     SpvId light = postVec4(s, p, p->light, ADD_U(MUL_U(y, p->width), x));
     SpvId alpha = P_CLAMP(W(light), FLOAT(0.f), FLOAT(1.f));
     SpvId postRow = frameVec(s, &p->r, F_POST);

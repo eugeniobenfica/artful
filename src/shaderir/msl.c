@@ -725,6 +725,9 @@ char* irMsl(const IrModule* m, const IrMslOptions* options, char* why, size_t si
             s.expr[id] = format("_%u", id);
             break;
         case 1: {
+            /* (a builtin the code never reads is left out, as SPIRV-Cross does: one a fragment cannot take, as the
+             * post shaders' GlobalInvocationId that only their compute stages read, would not compile) */
+            if (f->builtin != NO_VALUE && !used[id]) break;
             if (f->builtin != NO_VALUE) {
                 const char* metalType;
                 const char* attribute = builtinIn(f->builtin, &metalType);

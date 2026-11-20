@@ -924,3 +924,101 @@ void testFloatsSamples(void) {
     artfFree(a);
     artfFree(b);
 }
+
+/* Pacing: a budget no frame can keep takes the scene down to the least it may be at once; one every frame keeps
+ * takes it back up to renderScale; and the heat a device says it is near makes the same budget too small. */
+void testPacing(void) {
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        o.renderScale = .9f;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        const char* name = backend ? "GPU" : "CPU";
+        ArtfScene* s = bleedScene();
+        CHECK(fabsf(artfRendererRenderScale(r) - .9f) < 1e-6f);
+        for (int i = 0; i < 4; ++i) CHECK(artfRendererDraw(r, s));
+        artfRendererSetPacing(r, .001f, .5f);
+        for (int i = 0; i < 4; ++i) CHECK(artfRendererDraw(r, s));
+        const float down = artfRendererRenderScale(r);
+        artfRendererSetPacing(r, 1e6f, .5f);
+        int frames = 0;
+        while (artfRendererRenderScale(r) < .9f && frames < 400) {
+            CHECK(artfRendererDraw(r, s));
+            ++frames;
+        }
+        const float up = artfRendererRenderScale(r);
+        /* (what a frame takes here, at .9: a budget with half again to spare holds it, unless the device is hot) */
+        artfRendererSetPacing(r, 0, .5f);
+        double took = 0;
+        for (int i = 0; i < 24; ++i) {
+            CHECK(artfRendererDraw(r, s));
+            ArtfFrameStats st;
+            artfRendererStats(r, &st);
+            if (i >= 8) took += (st.gpuMs > st.cpuMs ? st.gpuMs : st.cpuMs) / 16;
+        }
+        artfRendererSetPacing(r, (float)took * 1.5f, .5f);
+        for (int i = 0; i < 40; ++i) CHECK(artfRendererDraw(r, s));
+        const float cool = artfRendererRenderScale(r);
+        artfRendererSetThermalHeadroom(r, 1);
+        for (int i = 0; i < 80; ++i) CHECK(artfRendererDraw(r, s));
+        const float hot = artfRendererRenderScale(r);
+        uint32_t* a = artfMalloc(W * H * 4);
+        CHECK(artfRendererReadPixels(r, a)); /* (the frame keeps its size) */
+        artfFree(a);
+        printf("%s, pacing: at a budget no frame keeps, %.3f of the width at once; back to %.3f in %d frames; %.2f ms a frame "
+               "held at %.3f, and at the same budget near throttling, %.3f\n", name, down, up, frames, took, cool, hot);
+        CHECK(fabsf(down - .5f) < 1e-6f && fabsf(up - .9f) < 1e-6f && frames < 300 && fabsf(cool - .9f) < 1e-6f && hot < .9f);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+}
+
+/* Turned as it is made (ArtfRendererOptions.preRotate): with the swapchain's turn a quarter, a half and three quarters
+ * clockwise, the image is the frame unturned, turned so, to the pixel, the overlay with it. (A test hook stands for a
+ * turned screen: what the device's compositor then does with it is checked on a device.) */
+void testPreRotate(void) {
+#ifdef ARTFUL_VULKAN
+    uint32_t* frames[4];
+    for (int k = 0; k < 4; ++k) frames[k] = artfMalloc(W * H * 4);
+    uint32_t* corner = artfMalloc(W * H * 4);
+    for (int i = 0; i < W * H; ++i) corner[i] = (i % W < 40 && i / W < 20) ? 0xFF2040C0u : 0; /* (a bar at the top left) */
+    const ArtfOverlay overlay = {corner, W, H, 0, false, NULL, 0};
+    bool drawn = true;
+    for (int turn = 0; turn < 4 && drawn; ++turn) {
+        ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+        o.hdr = true;
+        o.preRotate = true;
+        artfVulkanTestTurn = turn;
+        ArtfRenderer* r = artfRendererNew(&o);
+        artfVulkanTestTurn = 0;
+        if (!r) {
+            drawn = false;
+            break;
+        }
+        ArtfScene* s = bleedScene();
+        artfRendererSetOverlay(r, &overlay);
+        CHECK(artfRendererDraw(r, s));
+        CHECK(artfRendererReadPixels(r, frames[turn]));
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    if (drawn) {
+        int apart[4] = {0, 0, 0, 0};
+        for (int turn = 1; turn < 4; ++turn) {
+            const int across = turn & 1 ? H : W; /* (the image's width) */
+            for (int ny = 0; ny < (turn & 1 ? W : H); ++ny)
+                for (int nx = 0; nx < across; ++nx) {
+                    const int x = turn == 1 ? ny : turn == 2 ? W - 1 - nx : W - 1 - ny, y = turn == 1 ? H - 1 - nx : turn == 2 ? H - 1 - ny : nx;
+                    apart[turn] += frames[turn][ny * across + nx] != frames[0][y * W + x];
+                }
+        }
+        printf("turned as made, a quarter, a half, three quarters: %d, %d and %d pixels unlike the frame turned\n", apart[1], apart[2], apart[3]);
+        CHECK(apart[1] == 0 && apart[2] == 0 && apart[3] == 0);
+        /* (and the frame shows the overlay at all) */
+        CHECK(frames[0][5 * W + 5] != frames[0][100 * W + 100]);
+    }
+    for (int k = 0; k < 4; ++k) artfFree(frames[k]);
+    artfFree(corner);
+#endif
+}

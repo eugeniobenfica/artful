@@ -48,6 +48,9 @@ typedef struct Pass {
     Builder shaders[4];
     uint32_t draws, reads; /* what its render pass draws into and reads (attachments), which no shader binds */
 } Pass;
+/* (the last pass as it is without preRotate) */
+static uint32_t* postFinalPlain(size_t* size) { return artfShaderPostFinal(size, false); }
+
 static const Pass passes[] = {
     {"cull", {0}, 0, 0},
     {"probes", {0}, 0, 0},
@@ -71,7 +74,7 @@ static const Pass passes[] = {
     {"motion blur", {artfShaderPostVelocity, artfShaderPostTileMost, artfShaderPostMotionBlur}, 0, 0},
     {"auto exposure", {artfShaderPostMeter}, 0, 0},
     {"bloom", {artfShaderPostBloomDown, artfShaderPostBloomUp}, 0, 0},
-    {"tone map and out", {artfShaderPostFinal}, T(FG_FRAME), 0},
+    {"tone map and out", {postFinalPlain}, T(FG_FRAME), 0},
 };
 enum { PASSES = (int)(sizeof passes / sizeof passes[0]) };
 

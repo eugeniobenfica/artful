@@ -24,6 +24,13 @@ struct ArtfRenderer {
     ArtfView view; /* artfRendererSetView's: each backend reads it as a frame starts */
     bool lostSaid; /* ARTF_EVENT_DEVICE_LOST went out: once */
     char lostWhy[768]; /* what the driver said of it (VK_EXT_device_fault), for that event; empty: nothing */
+    /* pacing (artfRendererSetPacing): the scene's share of the frame's width now, which each backend takes as a frame
+     * starts, and the most it may be (ArtfRendererOptions.renderScale; 1: no pacing); the budget, the least, the
+     * heat; what frames took lately, and the frames before the next change may come */
+    float renderScale, renderScaleMost;
+    float paceMs, paceLeast, headroom;
+    double paceTook;
+    int paceWait;
 };
 
 /* The passes of a frame and what each took, as the CPU's clock sees them: each mark ends the pass it names, which
@@ -54,6 +61,9 @@ extern int artfVulkanSubmitsLeft;
 /* For tests: whether the renderer asks the driver what lost its device (VK_EXT_device_fault), and what it said. */
 bool artfVulkanFaultReports(const ArtfRenderer* r);
 extern bool artfVulkanRefuseSwapchain;
+/* For tests: with preRotate and no surface, the turn the frame is made with (0 to 3: 0, 90, 180, 270 degrees
+ * clockwise), as a turned screen's swapchain would ask; artfRendererReadPixels then gives the image as it is. */
+extern int artfVulkanTestTurn;
 /* For tests: a texture whose image would take more than this many bytes cannot be made, as when the GPU's memory has
  * run out. Below 0: no such limit. */
 extern long long artfVulkanTextureMemoryLimit;

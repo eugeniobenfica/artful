@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Phase 3, what this machine can do of it.**
+  - *Pacing.* `artfRendererSetPacing(r, frameMs, least)` keeps a frame within a budget by drawing the scene smaller,
+    down to `least`, by steps of a thirty-second of the width; `artfRendererSetThermalHeadroom` takes how near the
+    device says it is to throttling (Android's ADPF, asked by the program) and aims lower past .75. Both backends.
+  - *Workers spin less.* After a loop they spun 20,000 times before sleeping: measured at 60 frames a second, that cost
+    0.6 of a core and made frames slower (2.9-3.2 ms against 2.3). Now 2,000, as cheap as sleeping at once and faster.
+  - *Turned as made.* `ArtfRendererOptions.preRotate` (Vulkan, with hdr) makes the swapchain as the screen stands on its
+    own and turns the frame in its last pass, so the compositor does not; checked through a test hook, pixel for pixel,
+    in each turn; off until a device has shown it.
+  - *Fuzzing in CI*: each of the nine readers' targets for ten minutes a push, under ASan and UBSan.
+  - *The Mac*: all tests pass on Apple silicon, and the Metal written from the IR leaves out a builtin its code never
+    reads (the last pass's fragment shader had asked for a compute one, which Apple's compiler refused).
+  - Skipped by the owner's choice: the glTF sample models (3.2) and hardware in CI (3.7). Left: 24 hours a target of
+    fuzzing, the 4-hour soak, a phone for rotation and heat, Linux on a GPU, and lavapipe's crash in the probes' shader.
+
 - **Phase 2 done; the bytes of traced and graded frames change.** What changed them, each checked against the frame
   before by FLIP:
   - *Grading in ACEScct.* Lift, gamma, gain, the color wheels and the look-up table work in ACES's AP1 colors and

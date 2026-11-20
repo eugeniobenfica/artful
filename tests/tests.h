@@ -131,6 +131,8 @@ void testColorData(void);
 void testLightClusters(void);
 void testAreaLights(void);
 void testUpscaleQuality(void);
+void testPacing(void);
+void testPreRotate(void);
 void testProbesHard(void);
 void test2DThreadRule(void);
 void testTextureHandles(void);

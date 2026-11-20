@@ -11,6 +11,8 @@ typedef struct ArtfPool ArtfPool;
 typedef void (*ArtfJobFn)(void* user, uint32_t index, uint32_t worker);
 
 /* threads: 0: as many as the process may use, at most 16. */
+/* How many times a worker spins after a loop before it sleeps (2000); 0: it sleeps at once. For measuring. */
+extern int artfPoolSpins;
 ArtfPool* artfPoolNew(int threads);
 void artfPoolFree(ArtfPool* p);
 int artfPoolSize(const ArtfPool* p);

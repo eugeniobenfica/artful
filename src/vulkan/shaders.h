@@ -58,7 +58,8 @@ uint32_t* artfShaderDenoiseTime(size_t* size);
 uint32_t* artfShaderDenoiseSpace(size_t* size, int pass);
 uint32_t* artfShaderDenoiseEnd(size_t* size);
 uint32_t* artfShaderTraceShow(size_t* size, bool hdr);
-uint32_t* artfShaderOverlayFragment(size_t* size);
+/* turns: what preRotate needs (a push constant at 8 says how the image is turned); false: as before it was there */
+uint32_t* artfShaderOverlayFragment(size_t* size, bool turns);
 /* A background pass: after the program's shader, the bloom's levels going down and coming back, then the frame's
  * background. (Its vertices are the overlay's: one triangle.) */
 uint32_t* artfShaderBloomDown(size_t* size, bool fromLight);
@@ -80,7 +81,7 @@ uint32_t* artfShaderPostTemporal(size_t* size);
 uint32_t* artfShaderPostFocus(size_t* size);
 uint32_t* artfShaderPostBloomDown(size_t* size);
 uint32_t* artfShaderPostBloomUp(size_t* size);
-uint32_t* artfShaderPostFinal(size_t* size);
+uint32_t* artfShaderPostFinal(size_t* size, bool turns);
 uint32_t* artfShaderPostMeter(size_t* size); /* auto exposure, one invocation */
 uint32_t* artfShaderPostMotionBlur(size_t* size);
 uint32_t* artfShaderPostVelocity(size_t* size);  /* motion blur's: each pixel's, */

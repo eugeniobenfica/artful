@@ -38,17 +38,18 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [→] 2.4 Iridescência de Belcour-Barla · camadas OpenPBR · SSS: movidos para 5.12 (a Fase 2 fecha sem eles)
 
 ## Fase 3 — Robustez e prova (fecha a 1.0)
-- [~] 3.1 Fuzzing — 9 alvos (8 leitores + `cook`), 7 defeitos achados e corrigidos; falta pôr na CI e 24 h por alvo
-- [ ] 3.2 Corpus de conformidade glTF 🌐 (glTF-Sample-Assets)
-- [ ] 3.3 Pré-rotação no Android 📱
+- [~] 3.1 Fuzzing — 9 alvos, 7 defeitos corrigidos, job no CI (10 min por alvo a cada push); faltam as 24 h por alvo
+- [-] 3.2 Corpus de conformidade glTF — pulado pelo dono
+- [~] 3.3 Pré-rotação no Android — `preRotate`, verificada por gancho de teste; falta ver num aparelho 📱
 - [x] 3.4 `VK_EXT_device_fault` (perda real não forçada aqui)
 - [x] 3.5 Probes persistidas
-- [ ] 3.6 Ritmo e térmica 📱
-- [ ] 3.7 Hardware real na CI 📱 (runner próprio, Firebase Test Lab)
+- [~] 3.6 Ritmo e térmica — `artfRendererSetPacing`, folga térmica, espera ativa medida (20.000 → 2.000 voltas); faltam 30 min num telefone 📱
+- [-] 3.7 Hardware real na CI — pulado pelo dono
 - [~] 3.8 Ensaio longo — ferramenta feita; repetir as 4 h com a suspensão do Windows desligada
-- [ ] 3.9 Linux com GPU e Mac 📱
-- [ ] CI: segfault no Linux (lavapipe) — esperar o nome do teste da run 44764119231; lavapipe local exige instalar `mesa` 🌐
-- [ ] CI: macOS `scale/skinLod` — 2 níveis no arm64 contra 3 no x86, primeiro de erro 0; investigar no Mac 📱
+- [~] 3.9 Mac com CPU passa inteiro no CI; Linux com GPU e janela sem máquina 📱
+- [ ] CI: segfault no Linux (lavapipe) — reproduzido aqui (Mesa do MSYS2): o shader das probes na GPU; causa não isolada
+- [x] CI: macOS `scale/skinLod` — os testes compilavam sem `-ffp-contract=off`; corrigido, o Mac passa inteiro
+- [x] CI: Metal pelo IR — `postFinal` declarava `thread_position_in_grid` num fragment; entradas não lidas ficam de fora
 
 ## Fase 4 — Arquitetura
 - [~] 4.1 IR de shaders

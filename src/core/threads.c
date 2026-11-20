@@ -55,7 +55,11 @@ typedef pthread_cond_t Cond;
 #endif
 
 #define MAX_THREADS 16
-#define SPINS 20000 /* a few tens of microseconds: longer than the gaps inside a frame */
+/* A few microseconds: longer than most gaps inside a frame. 20,000 (tens of microseconds) cost the process 10 ms of
+ * the CPU a frame more at 60 frames a second (1,280 x 720, 16 threads, a Ryzen 7 9700X: 36.6 ms against 27-28), 0.6
+ * of a core, and made frames slower too (2.9-3.2 ms against 2.3), spinning threads taking from working ones on the
+ * same core; 2,000 cost what sleeping at once does and gave the fastest frames. (For measuring: 0, none.) */
+int artfPoolSpins = 2000;
 
 typedef struct Worker { ArtfPool* pool; uint32_t index; } Worker;
 
@@ -90,7 +94,7 @@ static void workerMain(Worker* w) {
         int spins = 0;
         while (atomic_load_explicit(&p->generation, memory_order_acquire) == seen) {
             if (atomic_load_explicit(&p->quit, memory_order_relaxed)) return;
-            if (++spins < SPINS) { spinPause(); continue; }
+            if (++spins < artfPoolSpins) { spinPause(); continue; }
             mutexLock(&p->mutex);
             atomic_fetch_add(&p->sleeping, 1);
             while (atomic_load(&p->generation) == seen && !atomic_load(&p->quit)) condWait(&p->wake, &p->mutex);

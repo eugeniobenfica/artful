@@ -211,6 +211,8 @@ int main(int argc, char** argv) {
     RUN("motion/motion", testMotion());
     RUN("post/upscale", testUpscale());
     RUN("post/upscaleQuality", testUpscaleQuality());
+    RUN("post/pacing", testPacing());
+    RUN("post/preRotate", testPreRotate());
     RUN("motion/skinnedMotion", testSkinnedMotion());
     RUN("motion/skinScenes", testSkinScenes());
     RUN("motion/blurEdges", testBlurEdges());

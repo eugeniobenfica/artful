@@ -60,6 +60,11 @@ typedef struct ArtfRendererOptions {
      * it the scene is read between its pixels. What comes after (depth of field, motion blur, bloom, the look, the
      * overlay) and the pixels read back are the frame's size. 0 or 1: as large as the frame. */
     float renderScale;
+    /* Vulkan, with hdr: when the screen is turned (Android), the frame is turned as it is made, in its last pass, and
+     * shown as the screen stands on its own (the swapchain's preTransform), so the compositor does not turn it. The
+     * scene and what comes after are drawn as the eye sees them, at the frame's size. Without hdr, or off: the
+     * compositor turns it, as before. */
+    bool preRotate;
 } ArtfRendererOptions;
 
 /* What a renderer takes when nothing else is said: fields set by name on this stay right when the struct
@@ -184,6 +189,19 @@ typedef struct ArtfFrameStats {
 } ArtfFrameStats;
 
 void artfRendererStats(const ArtfRenderer* r, ArtfFrameStats* out);
+
+/* Pacing, with hdr and a renderScale below 1: the scene is drawn as large as keeps a frame within frameMs, from
+ * renderScale (the most) down to least (at least .25), by what the frames before took (the CPU's time in
+ * artfRendererDraw or the GPU's, the longer). A change waits for 30 frames after the one before and moves by
+ * thirty-seconds of the width, as each starts temporal antialiasing's history over; the scene's cost is taken to go
+ * as its pixels. frameMs 0: off, and the scene goes back to renderScale. Both backends. */
+void artfRendererSetPacing(ArtfRenderer* r, float frameMs, float least);
+/* How near the device says it is to slowing itself down for heat, from 0 (cool) to 1 (it does now), as Android's
+ * AThermal_getThermalHeadroom gives it (or anything like it: the program asks the system, Artful does not). Past .75
+ * pacing aims lower, to 60% of frameMs at 1, so that the device cools before it throttles. */
+void artfRendererSetThermalHeadroom(ArtfRenderer* r, float headroom);
+/* The share of the frame's width the scene is drawn at now (1 without renderScale). */
+float artfRendererRenderScale(const ArtfRenderer* r);
 
 #ifdef __cplusplus
 }

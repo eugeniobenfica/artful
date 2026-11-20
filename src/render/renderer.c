@@ -67,12 +67,54 @@ static void tryOcclusion(ArtfRenderer* r, ArtfScene* scene) {
     }
 }
 
+/* ---- pacing ---- */
+
+enum { PACE_WAIT = 30 };
+
+void artfRendererSetPacing(ArtfRenderer* r, float frameMs, float least) {
+    r->paceMs = frameMs > 0 ? frameMs : 0;
+    r->paceLeast = artfClampf(least > 0 ? least : .5f, .25f, 1.f);
+    r->paceTook = 0;
+    r->paceWait = 0;
+    if (r->paceMs <= 0) r->renderScale = r->renderScaleMost;
+}
+void artfRendererSetThermalHeadroom(ArtfRenderer* r, float headroom) { r->headroom = artfClampf(headroom, 0, 2); }
+float artfRendererRenderScale(const ArtfRenderer* r) { return r->renderScale; }
+
+/* After a frame: what it took, into a mean of the last few; and, when it has settled, the size that would take the
+ * budget, as the square root of the time's share (pixels go as the width squared), by steps of 1/32, down at once
+ * and up only with a tenth to spare, so that it does not go back and forth around the budget. */
+static void pace(ArtfRenderer* r) {
+    if (r->paceMs <= 0 || r->renderScaleMost >= 1.f) return;
+    ArtfFrameStats stats;
+    artfRendererStats(r, &stats);
+    const double took = stats.gpuMs > stats.cpuMs ? stats.gpuMs : stats.cpuMs;
+    if (!(took > 0)) return;
+    r->paceTook = r->paceTook > 0 ? r->paceTook * .8 + took * .2 : took;
+    if (r->paceWait > 0) {
+        --r->paceWait;
+        return;
+    }
+    const float least = artfMinf(r->paceLeast, r->renderScaleMost), hot = artfClampf((r->headroom - .75f) / .25f, 0, 1);
+    const double budget = r->paceMs * (1.f - .4f * hot);
+    double want = r->renderScale * sqrt(budget / r->paceTook);
+    if (r->paceTook <= budget && want < r->renderScale * 1.1) return; /* (within it, and not by enough to grow) */
+    if (want > r->renderScale) want = r->renderScale + (want - r->renderScale) * .5; /* (up, half the way) */
+    want = floor(want * 32.) / 32.;
+    const float next = artfClampf((float)want, least, r->renderScaleMost);
+    if (fabsf(next - r->renderScale) < 1.f / 64.f) return;
+    r->renderScale = next;
+    r->paceWait = PACE_WAIT;
+    r->paceTook = 0;
+}
+
 bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene) {
     artfSceneTextureRoles(scene);
     scene->drawingThread = artfThreadId();
     const bool drawn = r->vt->draw(r, scene);
     scene->drawingThread = 0;
     if (drawn && artfSceneFeature(scene, ARTF_FEATURE_OCCLUSION_AUTO)) tryOcclusion(r, scene);
+    if (drawn) pace(r);
     if (!drawn && !r->lostSaid) {
         r->lostSaid = true;
         if (r->lostWhy[0]) artfEventSay(ARTF_EVENT_DEVICE_LOST, r, 0, 0, "artful: the device is lost: free the renderer, and give the scene to a new one (the driver: %s)", r->lostWhy);

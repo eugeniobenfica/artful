@@ -653,6 +653,11 @@ static void addLayers(Software* s, ArtfScene* scene) {
 static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
     Software* s = (Software*)r;
     ArtfSoftFrame* f = &s->f;
+    if (r->renderScale != s->renderScale) {
+        /* (pacing: the scene's size, from the frame's) */
+        s->renderScale = r->renderScale;
+        allocateTargets(s, s->frameW, s->frameH);
+    }
     const double t0 = artfNowMs();
     f->scene = scene;
     artfPassStart(&s->passes);
@@ -925,6 +930,7 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
     f->samples = o->antialias ? 4 : 1;
     f->post = o->hdr;
     s->renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
+    s->base.renderScale = s->base.renderScaleMost = s->renderScale;
     s->post.pool = s->pool;
     s->post.kernels = s->kernels;
     const size_t planes = (size_t)ARTF_TILE_PIXELS * 4 * f->samples;

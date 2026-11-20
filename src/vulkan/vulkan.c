@@ -222,6 +222,10 @@ typedef struct Vulkan {
      * when this changes, not each time (Android says suboptimal for as long as the compositor turns it). */
     VkFlags surfaceTransform;
     uint32_t surfaceWidth, surfaceHeight;
+    /* ArtfRendererOptions.preRotate; how the image the frame goes into is turned (0 to 3, a quarter clockwise each), and
+     * its size: the frame's, or its sides the other way round at a quarter or three */
+    bool preRotate;
+    int turn, imageWidth, imageHeight;
     bool lost;         /* nothing more can be drawn: it can only be freed */
     bool deviceFault;  /* VK_EXT_device_fault is on: when the device is lost, the driver is asked why */
     uint64_t deviceBytes; /* of the device's memory, what Artful holds (ArtfFrameStats.gpuBytes) */
@@ -640,6 +644,7 @@ int artfVulkanSubmitsLeft = -1;
 
 static void lose(Vulkan* v, VkResult result);
 bool artfVulkanRefuseSwapchain = false;
+int artfVulkanTestTurn = 0;
 
 static void lightDescriptors(Vulkan* v, Slot* s);
 static void bindStorage(Vulkan* v, Slot* s, uint32_t binding, const GpuBuffer* b);
@@ -815,6 +820,9 @@ static bool targetsMake(Vulkan* v) {
          * eye sees it, and the compositor turns it: identity, with the sides the other way round. */
         const bool upright = caps.supportedTransforms & 1;
         const bool sideways = upright && caps.currentTransform & (0x2 | 0x8 | 0x20 | 0x80); /* 90, 270, and mirrored */
+        /* (preRotate: a quarter, a half or three quarters the image takes turned, and is shown as it is) */
+        const VkFlags current = caps.currentTransform;
+        v->turn = v->preRotate && v->floats && caps.supportedTransforms & current ? (current == 0x2 ? 1 : current == 0x4 ? 2 : current == 0x8 ? 3 : 0) : 0;
         if (caps.current.width != 0xFFFFFFFFu) {
             v->width = (int)(sideways ? caps.current.height : caps.current.width);
             v->height = (int)(sideways ? caps.current.width : caps.current.height);
@@ -834,7 +842,10 @@ static bool targetsMake(Vulkan* v) {
         if (caps.maxImageCount && images > caps.maxImageCount) images = caps.maxImageCount;
         VkFlags alpha = caps.supportedAlpha & 1 ? 1 : caps.supportedAlpha & (~caps.supportedAlpha + 1);
         VkSwapchainKHR old = v->swapchain;
-        SwapchainCreateInfo info = {ST_SWAPCHAIN_CREATE_INFO, NULL, 0, v->surface, images, v->colorFormat, v->colorSpace, {(uint32_t)v->width, (uint32_t)v->height}, 1, IMAGE_COLOR, 0, 0, NULL, upright ? 1u : caps.currentTransform, alpha, mode, 1, old};
+        v->imageWidth = v->turn & 1 ? v->height : v->width;
+        v->imageHeight = v->turn & 1 ? v->width : v->height;
+        SwapchainCreateInfo info = {ST_SWAPCHAIN_CREATE_INFO, NULL, 0, v->surface, images, v->colorFormat, v->colorSpace, {(uint32_t)v->imageWidth, (uint32_t)v->imageHeight}, 1, IMAGE_COLOR, 0, 0, NULL,
+                                    v->turn ? current : upright ? 1u : caps.currentTransform, alpha, mode, 1, old};
         VkSwapchainKHR made = 0;
         const VkResult result = artfVulkanRefuseSwapchain ? -1000000000 : v->vkCreateSwapchainKHR(v->device, &info, NULL, &made);
         if (old) v->vkDestroySwapchainKHR(v->device, old, NULL);
@@ -855,7 +866,10 @@ static bool targetsMake(Vulkan* v) {
             if (v->vkCreateImageView(v->device, &view, NULL, &v->views[i]) != VK_OK) return false;
         }
     } else {
-        if (!imageNew(v, &v->offscreen, FORMAT_BGRA8, v->width, v->height, 1, 1, IMAGE_COLOR | IMAGE_TRANSFER_SRC, ASPECT_COLOR)) return false;
+        v->turn = v->preRotate && v->floats ? artfVulkanTestTurn & 3 : 0;
+        v->imageWidth = v->turn & 1 ? v->height : v->width;
+        v->imageHeight = v->turn & 1 ? v->width : v->height;
+        if (!imageNew(v, &v->offscreen, FORMAT_BGRA8, v->imageWidth, v->imageHeight, 1, 1, IMAGE_COLOR | IMAGE_TRANSFER_SRC, ASPECT_COLOR)) return false;
         v->imageCount = 1;
         v->images[0] = v->offscreen.image;
         ImageViewCreateInfo view = {ST_IMAGE_VIEW_CREATE_INFO, NULL, 0, v->offscreen.image, 1, FORMAT_BGRA8, {0, 0, 0, 0}, {ASPECT_COLOR, 0, 1, 0, 1}};
@@ -884,7 +898,7 @@ static bool targetsMake(Vulkan* v) {
         FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->renderPass, v->floats ? (many ? 4 : 3) : many ? 3 : 2, v->floats ? (many ? floatsMany : floats) : many ? resolved : one, (uint32_t)v->sceneWidth, (uint32_t)v->sceneHeight, 1};
         if (v->vkCreateFramebuffer(v->device, &info, NULL, &v->framebuffers[i]) != VK_OK) return false;
         if (v->floats) {
-            FramebufferCreateInfo present = {ST_FRAMEBUFFER, NULL, 0, v->presentPass, 1, &v->views[i], (uint32_t)v->width, (uint32_t)v->height, 1};
+            FramebufferCreateInfo present = {ST_FRAMEBUFFER, NULL, 0, v->presentPass, 1, &v->views[i], (uint32_t)v->imageWidth, (uint32_t)v->imageHeight, 1};
             if (v->vkCreateFramebuffer(v->device, &present, NULL, &v->presentFramebuffers[i]) != VK_OK) return false;
         }
     }
@@ -1764,8 +1778,8 @@ static bool pipelinesMake(Vulkan* v) {
     const DescriptorSetLayoutCreateInfo roleLayout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, 3, roles};
     if (v->vkCreateDescriptorSetLayout(v->device, &roleLayout, NULL, &v->roleLayout) != VK_OK) return false;
     const VkDescriptorSetLayout setLayouts[2] = {v->setLayout, v->roleLayout};
-    const PushConstantRange push[2] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}};
-    const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 2, setLayouts, 2, push};
+    const PushConstantRange push[3] = {{SHADER_COMPUTE, 0, 4}, {SHADER_VERTEX, 4, 4}, {SHADER_FRAGMENT, 8, 4}}; /* (8: preRotate's turn) */
+    const PipelineLayoutCreateInfo pipelineLayout = {ST_PIPELINE_LAYOUT, NULL, 0, 2, setLayouts, 3, push};
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
     /* (54 storage bindings of the 64, then 65 to 70) */
@@ -1814,7 +1828,7 @@ static bool pipelinesMake(Vulkan* v) {
     VkShaderModule sceneFragment = shaderModule(v, code, size);
     code = artfShaderOverlayVertex(&size);
     VkShaderModule overlayVertex = shaderModule(v, code, size);
-    code = artfShaderOverlayFragment(&size);
+    code = artfShaderOverlayFragment(&size, v->preRotate && v->floats);
     VkShaderModule overlayFragment = shaderModule(v, code, size);
     code = artfShaderBackgroundBackdrop(&size, v->floats);
     VkShaderModule backdropFragment = shaderModule(v, code, size);
@@ -1916,7 +1930,7 @@ static bool pipelinesMake(Vulkan* v) {
             ok = module && v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &c, NULL, &v->postPipelines[i]) == VK_OK;
             if (module) v->vkDestroyShaderModule(v->device, module, NULL);
         }
-        uint32_t* finalCode = artfShaderPostFinal(&size);
+        uint32_t* finalCode = artfShaderPostFinal(&size, v->preRotate);
         VkShaderModule finalModule = shaderModule(v, finalCode, size);
         const PipelineShaderStage presentStages[2] = {overlayStages[0], {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, finalModule, "main", NULL}};
         const ColorBlendAttachment whole = {0, 0, 0, 0, 0, 0, 0, 15};
@@ -4259,7 +4273,6 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     /* (the scene's size, until it is upscaled; then the frame's) */
     const uint32_t pixels = (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight, framePixels = (uint32_t)v->width * (uint32_t)v->height;
     const bool scaled = pixels != framePixels;
-    const Rect2D area = {{0, 0}, {(uint32_t)v->width, (uint32_t)v->height}};
     const Viewport frameViewport = {0, (float)v->height, (float)v->width, -(float)v->height, 0, 1};
     const Viewport* viewport = &frameViewport;
     if (v->lutPending) {
@@ -4338,10 +4351,17 @@ static void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameDat
     }
     v->postTracking = false;
     memoryBarrier(v, c, STAGE_COMPUTE | STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_SHADER_WRITE | ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ);
-    RenderPassBeginInfo present = {ST_RENDER_PASS_BEGIN, NULL, v->presentPass, v->presentFramebuffers[image], area, 0, NULL};
+    /* (the image's own size and way, turned or not: preRotate) */
+    const Rect2D imageArea = {{0, 0}, {(uint32_t)v->imageWidth, (uint32_t)v->imageHeight}};
+    const Viewport imageViewport = {0, (float)v->imageHeight, (float)v->imageWidth, -(float)v->imageHeight, 0, 1};
+    RenderPassBeginInfo present = {ST_RENDER_PASS_BEGIN, NULL, v->presentPass, v->presentFramebuffers[image], imageArea, 0, NULL};
     v->vkCmdBeginRenderPass(c, &present, 0);
-    v->vkCmdSetViewport(c, 0, 1, viewport);
-    v->vkCmdSetScissor(c, 0, 1, &area);
+    v->vkCmdSetViewport(c, 0, 1, v->turn ? &imageViewport : viewport);
+    v->vkCmdSetScissor(c, 0, 1, &imageArea);
+    if (v->preRotate) {
+        const uint32_t word = (uint32_t)v->turn | (uint32_t)v->width << 2 | (uint32_t)v->height << 17;
+        v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_FRAGMENT, 8, 4, &word);
+    }
     v->vkCmdBindPipeline(c, 0, v->presentPipeline);
     v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
     rolesBind(v, c, 0);
@@ -4469,6 +4489,11 @@ static bool vkDraw(ArtfRenderer* r, ArtfScene* scene) {
 static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const double start = artfNowMs();
     if (v->lost) return false;
+    if (v->base.renderScale != v->renderScale) {
+        /* (pacing: the scene's targets at another size, the frame's as they were) */
+        v->renderScale = v->base.renderScale;
+        v->targetsStale = true;
+    }
     /* what pipelines the scene asks for: where they are being made, this frame is drawn with those there */
     const bool wait = artfVulkanShadersWait || !v->frameNumber || v->warmed;
     v->warmed = false;
@@ -5046,7 +5071,7 @@ static bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
     Vulkan* v = (Vulkan*)r;
     if (v->lost || v->swapchain || !v->frameNumber) return false; /* (what was presented is the window system's) */
     if (v->vkDeviceWaitIdle(v->device) != VK_OK) return false;
-    const size_t bytes = (size_t)v->width * v->height * 4;
+    const size_t bytes = (size_t)v->imageWidth * v->imageHeight * 4;
     if (v->readback.size < bytes) {
         bufferFree(v, &v->readback);
         if (!bufferNewFor(v, &v->readback, bytes, BUFFER_TRANSFER_DST, BUFFER_READ_BY_CPU)) {
@@ -5055,7 +5080,7 @@ static bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
         }
     }
     VkCommandBuffer c = oneShotBegin(v);
-    const BufferImageCopy region = {0, 0, 0, {ASPECT_COLOR, 0, 0, 1}, {0, 0, 0}, {(uint32_t)v->width, (uint32_t)v->height, 1}};
+    const BufferImageCopy region = {0, 0, 0, {ASPECT_COLOR, 0, 0, 1}, {0, 0, 0}, {(uint32_t)v->imageWidth, (uint32_t)v->imageHeight, 1}};
     v->vkCmdCopyImageToBuffer(c, v->offscreen.image, LAYOUT_TRANSFER_SRC, v->readback.buffer, 1, &region);
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_HOST, ACCESS_TRANSFER_WRITE, ACCESS_HOST_READ);
     bool ok = oneShotEnd(v, c);
@@ -5576,6 +5601,8 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     v->samples = o->antialias ? 4 : 1;
     v->floats = o->hdr;
     v->renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
+    v->preRotate = o->preRotate;
+    v->base.renderScale = v->base.renderScaleMost = v->renderScale;
     v->compressTextures = o->compressTextures;
     PhysicalDeviceProperties props;
     if (o->pipelineCache) {

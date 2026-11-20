@@ -76,6 +76,34 @@ jobs:
           build-asan/artful-tests
           ARTFUL_FEATURES=+occlusion build-asan/artful-tests
 
+  # The readers fuzzed (tools/fuzz), each for ten minutes from the seeds, under ASan and UBSan: what is found is kept
+  # as an artifact, to be minimized and put in tests/files.c's fuzzFindings. Ten minutes is not the 24 hours each
+  # target should run (docs/plano-de-correcao.md, 3.1); a push runs it again from the same seeds.
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [gltf, image, hdr, ktx2, blocks, ies, cube, meshopt, cook]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DARTFUL_FUZZ=ON -DARTFUL_BUILD_TESTS=OFF -DARTFUL_VULKAN=OFF
+          cmake --build build --target artful-fuzz-${{ matrix.target }}
+      - name: Fuzz for ten minutes
+        run: |
+          python3 tools/fuzz/seeds.py seeds
+          mkdir -p corpus findings
+          dict=""; if [ "${{ matrix.target }}" = gltf ]; then dict="-dict=tools/fuzz/gltf.dict"; fi
+          seeds="seeds/${{ matrix.target }}"; [ -d "$seeds" ] || seeds=""  # (cook starts from nothing: its first byte says which)
+          build/artful-fuzz-${{ matrix.target }} corpus $seeds $dict -max_total_time=600 -max_len=65536 -timeout=10 -rss_limit_mb=2048 -malloc_limit_mb=1024             -artifact_prefix=findings/ -print_final_stats=1
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: findings
   macos:
     runs-on: macos-latest
     steps:

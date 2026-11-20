@@ -640,9 +640,12 @@ void testFrameGraph(void) {
 
 /* SPIR-V read back into the IR (irFromSpirv): every shader's words, read and written again, the same words; and what
  * a post pass reads and writes, from its words alone. */
+#ifdef ARTFUL_VULKAN
+static uint32_t* postFinalTurned(size_t* size) { return artfShaderPostFinal(size, true); } /* (preRotate's) */
+#endif
 void testSpirvRoundTrip(void) {
 #ifdef ARTFUL_VULKAN
-    uint32_t* (*const shaders[6])(size_t*) = {artfShaderPostTemporal, artfShaderPostBloomDown, artfShaderPostFinal, artfShaderPostMotionBlur, artfShaderShadowVertex, artfShaderSkin};
+    uint32_t* (*const shaders[6])(size_t*) = {artfShaderPostTemporal, artfShaderPostBloomDown, postFinalTurned, artfShaderPostMotionBlur, artfShaderShadowVertex, artfShaderSkin};
     for (int k = 0; k < 6; ++k) {
         size_t size;
         uint32_t* words = shaders[k](&size);
