@@ -2,6 +2,10 @@
  *
  *   artful-render2d [--width w] [--height h] [--threads n] [--frames n] [--no-gi] [--no-shadows] [--gi-scale s]
  *                   [--bloom b] [--time t] [--backend auto|software|vulkan] [--window] [--no-vsync] [--out file.png]
+ *                   [--json file]
+ *
+ * --json: what each frame took, as artful-render --json writes it (tools/bench.py reads both): the time from one frame to
+ * the next, the CPU's and the GPU's p50, p95, p99 and most, the first frame, and the mean of each part of a frame.
  *
  * --window (Windows): the frames shown in a window, through Vulkan's swapchain, as fast as they come with --no-vsync;
  * else each frame is read back, as a program that shows them itself would. Either way, what a frame takes is the time
@@ -332,7 +336,62 @@ static void animate(ArtfScene2D* s, Room* room, float t) {
     }
 }
 
+/* ---- what frames took, as JSON (--json), as artful-render's ---- */
+
+static int byDouble(const void* a, const void* b) {
+    const double x = *(const double*)a, y = *(const double*)b;
+    return (x > y) - (x < y);
+}
+
+static void percentiles(FILE* f, const double* times, int n) {
+    double* sorted = malloc(sizeof(double) * (size_t)n);
+    memcpy(sorted, times, sizeof(double) * (size_t)n);
+    qsort(sorted, (size_t)n, sizeof(double), byDouble);
+    const double p50 = sorted[(n - 1) / 2], p95 = sorted[(int)((n - 1) * .95)], p99 = sorted[(int)((n - 1) * .99)];
+    fprintf(f, "{\"p50\": %.4f, \"p95\": %.4f, \"p99\": %.4f, \"max\": %.4f}", p50, p95, p99, sorted[n - 1]);
+    free(sorted);
+}
+
+static void jsonString(FILE* f, const char* text) {
+    fputc('"', f);
+    for (const char* p = text; *p; ++p) {
+        if (*p == '"' || *p == '\\') fputc('\\', f);
+        if ((unsigned char)*p >= 32) fputc(*p, f);
+    }
+    fputc('"', f);
+}
+
+static bool writeBench(const char* path, int argc, char** argv, const ArtfRenderer2D* r, int width, int height, int frames, double perFrame, double firstMs,
+                       double sinceStartMs, const double* frameTimes, const double* cpuTimes, const double* gpuTimes, const ArtfFrameStats2D* sum) {
+    FILE* f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "{\n  \"tool\": \"artful-render2d\", \"version\": \"%d.%d.%d\",\n  \"arguments\": [", ARTF_VERSION_MAJOR, ARTF_VERSION_MINOR, ARTF_VERSION_PATCH);
+    for (int i = 1; i < argc; ++i) {
+        if (i > 1) fputs(", ", f);
+        jsonString(f, argv[i]);
+    }
+    fputs("],\n  \"scene\": \"room2d\", \"renderer\": ", f);
+    jsonString(f, artfRenderer2DDescription(r));
+    const bool vulkan = artfRenderer2DBackend(r) == ARTF_BACKEND2D_VULKAN;
+    fprintf(f, ", \"backend\": \"%s\", \"width\": %d, \"height\": %d,\n", vulkan ? "vulkan" : "software", width, height);
+    fprintf(f, "  \"frames\": %d, \"msPerFrame\": %.4f, \"firstFrameMs\": %.3f, \"untilLastFrameMs\": %.3f,\n", frames, perFrame, firstMs, sinceStartMs);
+    fputs("  \"frameMs\": ", f);
+    percentiles(f, frameTimes, frames);
+    fputs(",\n  \"cpuMs\": ", f);
+    percentiles(f, cpuTimes, frames);
+    if (vulkan) {
+        fputs(",\n  \"gpuMs\": ", f);
+        percentiles(f, gpuTimes, frames);
+    }
+    const double n = frames;
+    fprintf(f, ",\n  \"passes\": {\"shadows\": %.4f, \"gi\": %.4f, \"tiles\": %.4f, \"after\": %.4f},\n", sum->shadowsMs / n, sum->giMs / n, sum->drawMs / n, sum->postMs / n);
+    fprintf(f, "  \"sprites\": %u, \"lights\": %u, \"shadowMaps\": %u\n}\n", sum->spritesDrawn, sum->lightsDrawn, sum->shadowMaps);
+    return fclose(f) == 0;
+}
+
 int main(int argc, char** argv) {
+    const double started = artfNowMs();
+    const char* json = NULL;
     int width = 1280, height = 720, threads = 0, frames = 1, giScale = 4;
     bool gi = true, shadows = true;
     float bloom = .06f, time = 0;
@@ -350,6 +409,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--bloom") && more) bloom = (float)atof(argv[++i]);
         else if (!strcmp(a, "--time") && more) time = (float)atof(argv[++i]);
         else if (!strcmp(a, "--out") && more) out = argv[++i];
+        else if (!strcmp(a, "--json") && more) json = argv[++i];
         else if (!strcmp(a, "--backend") && more) {
             const char* b = argv[++i];
             backend = !strcmp(b, "vulkan") ? ARTF_BACKEND2D_VULKAN : !strcmp(b, "software") ? ARTF_BACKEND2D_SOFTWARE : ARTF_BACKEND2D_AUTO;
@@ -360,7 +420,7 @@ int main(int argc, char** argv) {
         else {
             fprintf(stderr, "usage: artful-render2d [--width w] [--height h] [--threads n] [--frames n] [--no-gi] [--no-shadows]\n"
                             "                       [--gi-scale s] [--bloom b] [--time t] [--backend auto|software|vulkan] [--window]\n"
-                            "                       [--no-vsync] [--out file.png]\n");
+                            "                       [--no-vsync] [--out file.png] [--json file]\n");
             return 1;
         }
     }
@@ -398,10 +458,14 @@ int main(int argc, char** argv) {
         return 1;
     }
     ArtfFrameStats2D sum = {0};
-    double began = 0;
+    double began = 0, firstMs = 0, last = 0;
+    const int counted = frames > 0 ? frames : 1;
+    double* frameTimes = calloc((size_t)counted, sizeof(double));
+    double* cpuTimes = calloc((size_t)counted, sizeof(double));
+    double* gpuTimes = calloc((size_t)counted, sizeof(double));
     /* (two frames before the ones measured: what bounces needs a frame before it) */
     for (int i = -2; i < frames; ++i) {
-        if (!i) began = artfNowMs();
+        if (!i) began = last = artfNowMs();
 #ifdef _WIN32
         MSG message;
         while (shown && PeekMessageA(&message, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&message);
@@ -409,9 +473,15 @@ int main(int argc, char** argv) {
         animate(s, &room, time + (float)artfMaxi(i, 0) / 60.f);
         artfRenderer2DDraw(r, s);
         if (!window) artfRenderer2DPixels(r); /* (read back, each frame) */
+        if (i == -2) firstMs = artfNowMs() - started;
         if (i < 0) continue;
         ArtfFrameStats2D st;
         artfRenderer2DStats(r, &st);
+        const double now = artfNowMs();
+        frameTimes[i] = now - last;
+        last = now;
+        cpuTimes[i] = st.cpuMs;
+        gpuTimes[i] = st.gpuMs;
         sum.gpuMs += st.gpuMs, sum.cpuMs += st.cpuMs, sum.shadowsMs += st.shadowsMs, sum.giMs += st.giMs, sum.drawMs += st.drawMs, sum.postMs += st.postMs;
         sum.spritesDrawn = st.spritesDrawn, sum.lightsDrawn = st.lightsDrawn, sum.shadowMaps = st.shadowMaps;
     }
@@ -420,6 +490,13 @@ int main(int argc, char** argv) {
            "after %.2f; the GPU %.2f)\n",
            artfRenderer2DDescription(r), window ? ", in a window" : "", width, height, (int)sum.spritesDrawn, sum.lightsDrawn, sum.shadowMaps, each,
            1000. / each, sum.cpuMs / n, sum.shadowsMs / n, sum.giMs / n, sum.drawMs / n, sum.postMs / n, sum.gpuMs / n);
+    if (json && frames > 0 && !writeBench(json, argc, argv, r, width, height, frames, each, firstMs, artfNowMs() - started, frameTimes, cpuTimes, gpuTimes, &sum)) {
+        fprintf(stderr, "could not write %s\n", json);
+        return 1;
+    }
+    free(frameTimes);
+    free(cpuTimes);
+    free(gpuTimes);
     uint32_t* pixels = malloc((size_t)width * height * 4);
     const bool saved = artfRenderer2DReadPixels(r, pixels) && savePng(out, pixels, width, height);
     free(pixels);

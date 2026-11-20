@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """What Artful's frames take, kept to be compared: the baseline of docs/plano-de-correcao.md (0.5).
 
-    python tools/bench.py run  <artful-render> <out-dir> [--backend vulkan|software] [--frames n] [--size w h] [--repeat n]
+    python tools/bench.py run  <artful-render> <out-dir> [--render2d <artful-render2d>] [--backend vulkan|software] [--frames n]
+                               [--size w h] [--repeat n]
     python tools/bench.py compare <before-dir> <after-dir> [--tolerance 0.05]
 
 `run` draws each sequence below with artful-render --json and writes one file a sequence into out-dir. With --repeat,
@@ -17,8 +18,8 @@ import subprocess
 import sys
 
 # The sequences: each a scene of artful-render and what it is drawn with. They are what the plan names: a scene in the
-# open, a city behind a wall, figures that bend, what shows through, many lights. (The 2D room is artful-render2d's,
-# which writes no JSON yet.)
+# open, a city behind a wall, figures that bend, what shows through, many lights; and with --render2d, the 2D room of
+# artful-render2d (room2d), its JSON as artful-render's.
 SEQUENCES = {
     "outdoors": ["--scene", "outdoors", "--hdr", "--temporal", "--shadows", "2048"],
     "city": ["--scene", "city"],
@@ -29,13 +30,17 @@ SEQUENCES = {
     "spheres": ["--scene", "spheres"],
 }
 
-MEASURES = [("cpuMs", "p50"), ("cpuMs", "p95"), ("cpuMs", "p99"), ("gpuMs", "p50"), ("gpuMs", "p95"), ("gpuMs", "p99")]
+MEASURES = [("cpuMs", "p50"), ("cpuMs", "p95"), ("cpuMs", "p99"), ("gpuMs", "p50"), ("gpuMs", "p95"), ("gpuMs", "p99"),
+            ("frameMs", "p50"), ("frameMs", "p95"), ("frameMs", "p99")]  # (frameMs: artful-render2d's, frame to frame)
 
 
 def run(args):
     os.makedirs(args.out, exist_ok=True)
     args.render = os.path.abspath(args.render)
-    for name, extra in SEQUENCES.items():
+    sequences = dict(SEQUENCES)
+    if args.render2d:
+        sequences["room2d"] = ["@2d"]
+    for name, extra in sequences.items():
         env = dict(os.environ)
         argv = [a for a in extra if not a.startswith("+")]
         features = [a[1:] for a in extra if a.startswith("+")]
@@ -44,11 +49,15 @@ def run(args):
         best = None
         for attempt in range(args.repeat):
             path = os.path.join(args.out, f"{name}.{attempt}.json")
-            command = [args.render, *argv, "--backend", args.backend, "--frames", str(args.frames),
-                       "--size", str(args.size[0]), str(args.size[1]), "--json", path]
+            if extra == ["@2d"]:
+                command = [os.path.abspath(args.render2d), "--backend", args.backend, "--frames", str(args.frames), "--width", str(args.size[0]),
+                           "--height", str(args.size[1]), "--out", os.path.join(args.out, "room2d.png"), "--json", path]
+            else:
+                command = [args.render, *argv, "--backend", args.backend, "--frames", str(args.frames),
+                           "--size", str(args.size[0]), str(args.size[1]), "--json", path]
             done = subprocess.run(command, env=env, capture_output=True, text=True)
             if done.returncode != 0:
-                print(f"{name}: artful-render failed ({done.returncode})\n{done.stderr}", file=sys.stderr)
+                print(f"{name}: {os.path.basename(command[0])} failed ({done.returncode})\n{done.stderr}", file=sys.stderr)
                 return 1
             with open(path, encoding="utf-8") as f:
                 result = json.load(f)
@@ -102,6 +111,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("render")
     r.add_argument("out")
+    r.add_argument("--render2d", default=None)
     r.add_argument("--backend", default="vulkan", choices=["vulkan", "software"])
     r.add_argument("--frames", type=int, default=600)
     r.add_argument("--size", type=int, nargs=2, default=[1920, 1080])

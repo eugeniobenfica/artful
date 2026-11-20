@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Phase 0.5 done: the 2D room in the baseline.** `artful-render2d --json` writes what its frames took as
+  `artful-render --json` does (with `frameMs`, frame to frame, and the parts of a frame); `tools/bench.py run --render2d`
+  adds the room to the sequences, and `compare` reads `frameMs` too. On Vulkan two runs are within 0.4%.
+
 - **Phase 5.1, in part: probes inside something, and probes that follow a change sooner.** A probe more than a quarter
   of whose rays meet backs counts for nothing where light is taken from the probes, and is followed every 8 steps;
   what a probe keeps of what it had is less when the light it brings is far from it (`artfProbeKeep`). Both backends,
