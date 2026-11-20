@@ -586,6 +586,12 @@ uint32_t artfSceneBuildHlod(ArtfScene* s, const ArtfHlodDesc* desc);
 ArtfInstance artfSceneAddHlod(ArtfScene* s, const ArtfInstance* instances, uint32_t count, const ArtfHlodDesc* desc);
 /* All merged meshes go, and what they held shows again. */
 void artfSceneClearHlod(ArtfScene* s);
+/* The merged meshes as a file (cooked: artfFree's), and back: what artfSceneBuildHlod made, as it made it (meshlets,
+ * lighter levels), so that reading it is a copy where making it took simplifying. Reading takes a scene with the
+ * instances it was made against, as they were then (their meshes, materials and places), and no merged meshes yet;
+ * anything else is refused (0, and said). A file of an older version is read by a newer Artful. */
+void* artfSceneSaveHlod(const ArtfScene* s, size_t* size);
+uint32_t artfSceneLoadHlod(ArtfScene* s, const void* data, size_t size);
 /* How many merged meshes were drawn in place of theirs at the last frame. */
 uint32_t artfSceneHlodShown(const ArtfScene* s);
 

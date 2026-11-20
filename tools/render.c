@@ -32,12 +32,15 @@
  *                 [--view lit|base-color|normals|roughness|metallic|ambient|emissive|lod|meshlets|instances|overdraw|depth|
  *                 motion|lights]: what the frame shows (ArtfView); [--passes]: with --frames, what each pass of the
  *                 last frame took
- *                 [--scene forest] [--hlod [cell]]: far trees merged by cubes of that side (Unreal's HLOD)
+ *                 [--scene forest] [--hlod [cell]]: far trees merged by cubes of that side (Unreal's HLOD); and
+ *                 [--cook file]: written to a file, which [--cooked file] reads in place of merging (artfSceneSaveHlod)
  *                 [--scene crowd] [--figures n]: figures that bend, each frame, with levels of detail as the lod feature
  *                 says; 2,500 of them, or n
  *                 [--scene surfaces]: a coat, sheen, anisotropy, a thin film, light under the surface, under lights
  *                 with a size, a shape and a profile
  *                 [--particles n]: an emitter of many, n of them at once, stepped each frame
+ *                 [--graph prefix]: Vulkan's last frame as a graph of its passes and what they share (prefix.txt, and
+ *                 Graphviz's prefix.dot): what aliasing its targets would save
  *                 [--stream-meshes [MB]]: meshes' levels held by distance, within that budget
  *                 [--render-scale s]: with --hdr, the scene drawn at s of the size and upscaled (with --temporal, as
  *                 TSR does); [--sharpen x]: after temporal antialiasing or upscaling
@@ -56,6 +59,9 @@
  * With --frames a black hole's time goes on, so that what a frame took includes the fluid's step. */
 #include "artful/artful.h"
 #include "artful/blackhole.h"
+#ifdef ARTFUL_VULKAN
+#include "vulkan/frameGraph.h"
+#endif
 
 #include <math.h>
 #include <stdio.h>
@@ -614,7 +620,7 @@ int main(int argc, char** argv) {
     o.width = 1280;
     o.height = 720;
     o.noVsync = true;
-    const char *out = NULL, *sceneName = "spheres";
+    const char *out = NULL, *sceneName = "spheres", *graph = NULL, *cook = NULL, *cooked = NULL;
     int frames = 0, fieldSide = 100;
     ArtfView view = ARTF_VIEW_LIT;
     bool passes = false;
@@ -715,6 +721,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--bounces") && i + 1 < argc) trace.bounces = atoi(argv[++i]);
         else if (!strcmp(a, "--clear")) pngAlpha = true;
         else if (!strcmp(a, "--out") && i + 1 < argc) out = argv[++i];
+        else if (!strcmp(a, "--graph") && i + 1 < argc) graph = argv[++i];
+        else if (!strcmp(a, "--cook") && i + 1 < argc) cook = argv[++i];
+        else if (!strcmp(a, "--cooked") && i + 1 < argc) cooked = argv[++i];
         else if (!strcmp(a, "--time") && i + 1 < argc) hole.time = (float)atof(argv[++i]);
         else if (!strcmp(a, "--samples") && i + 1 < argc) hole.samples = atoi(argv[++i]);
         else if (!strcmp(a, "--doppler") && i + 1 < argc) hole.doppler = (float)atof(argv[++i]);
@@ -820,13 +829,37 @@ int main(int argc, char** argv) {
         trace.maxSamples = traceSamples;
         artfSceneSetTrace(s, &trace);
     }
-    if (hlodCell > 0) {
+    if (cooked) {
+        /* the merged meshes as a file made them (--cook): read, not made */
+        const double h0 = artfNowMs();
+        FILE* file = fopen(cooked, "rb");
+        if (!file) { fprintf(stderr, "cannot read %s\n", cooked); return 1; }
+        fseek(file, 0, SEEK_END);
+        const long length = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        void* data = malloc(length > 0 ? (size_t)length : 1);
+        const size_t got = fread(data, 1, length > 0 ? (size_t)length : 0, file);
+        fclose(file);
+        const uint32_t made = artfSceneLoadHlod(s, data, got);
+        free(data);
+        printf("%u merged meshes read in %.1f ms\n", made, artfNowMs() - h0);
+        if (!made) return 1;
+    } else if (hlodCell > 0) {
         const double h0 = artfNowMs();
         ArtfHlodDesc hlod;
         memset(&hlod, 0, sizeof hlod);
         hlod.cell = hlodCell;
         const uint32_t made = artfSceneBuildHlod(s, &hlod);
         printf("%u merged meshes in %.1f ms\n", made, artfNowMs() - h0);
+        if (cook) {
+            size_t size = 0;
+            void* data = artfSceneSaveHlod(s, &size);
+            FILE* file = data ? fopen(cook, "wb") : NULL;
+            if (!file || fwrite(data, 1, size, file) != size) { fprintf(stderr, "cannot write %s\n", cook); return 1; }
+            fclose(file);
+            artfFree(data);
+            printf("wrote %s: %.1f MB\n", cook, (double)size / 1048576.0);
+        }
     }
     ArtfEmitter emitter = 0;
     if (particles) {
@@ -971,6 +1004,20 @@ int main(int argc, char** argv) {
         free(pixels);
         printf("wrote %s\n", out);
     }
+#ifdef ARTFUL_VULKAN
+    if (graph) {
+        /* the last frame's passes as a graph: a table and what aliasing would save, and Graphviz (frameGraph.h) */
+        char path[1024];
+        snprintf(path, sizeof path, "%s.txt", graph);
+        FILE* report = fopen(path, "w");
+        snprintf(path, sizeof path, "%s.dot", graph);
+        FILE* dot = fopen(path, "w");
+        artfFrameGraphReport(r, report ? report : stdout, dot);
+        if (report) fclose(report);
+        if (dot) fclose(dot);
+        printf("wrote %s.txt and %s.dot\n", graph, graph);
+    }
+#endif
     artfRendererFree(r);
     artfSceneFree(s);
     return 0;

@@ -1068,6 +1068,24 @@ ArtfPreparedTexture* artfPrepareTextureAs(const uint32_t* pixels, int width, int
  * reads as data (normals, roughness and metal, occlusion, a coat's maps) is data, even when colors use it too (said once).
  * artfRendererDraw calls it before a frame. */
 void artfSceneTextureRoles(ArtfScene* s);
+
+/* ---- what takes long to make, kept in a file (cook.c) ---- */
+typedef struct ArtfCookBytes { uint8_t* items; size_t len, cap; } ArtfCookBytes;
+typedef struct ArtfCookReader { const uint8_t* data; size_t size, at; bool failed; } ArtfCookReader;
+void artfCookPut(ArtfCookBytes* b, const void* data, size_t size);
+void artfCookPut32(ArtfCookBytes* b, uint32_t v);
+void artfCookPutFloat(ArtfCookBytes* b, float v);
+bool artfCookGet(ArtfCookReader* r, void* out, size_t size);
+uint32_t artfCookGet32(ArtfCookReader* r);
+float artfCookGetFloat(ArtfCookReader* r);
+/* A mesh as built (not what bends): its arrays, meshlets and positions included. Reading checks that what refers
+ * into the arrays stays in them; on failure, nothing is held. */
+void artfCookPutMesh(ArtfCookBytes* b, const ArtfMeshData* m);
+bool artfCookGetMesh(ArtfCookReader* r, ArtfMeshData* m);
+/* What the first count instances are, and where: what a file was made against. */
+uint64_t artfCookInstancesPrint(const ArtfScene* s, uint32_t count);
+/* A mesh as built, and its levels, into the scene: what artfSceneAddPreparedMesh does with a prepared one. */
+ArtfMesh artfSceneAddBuiltMesh(ArtfScene* s, const ArtfMeshData* mesh, const ArtfMeshData* levels, const float* errors, uint32_t levelCount);
 void artfTexelAt(const ArtfTextureData* t, float u, float v, float* out);
 void artfTexelAtLevel(const ArtfTextureData* t, int level, float u, float v, float* out);
 void artfGraphRunLanes(const ArtfScene* s, const ArtfGraphData* g, const ArtfMaterialData* m, ArtfGraphLanes* io);

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **The frame as a graph** (phase 4.2, its first step). `src/vulkan/frameGraph.c` describes the GPU's frame, each pass
+  with what it reads and writes, its shaders' part read from their IR (`irUses`, new); `artfFrameGraphReport` and
+  `artful-render --graph prefix` write it as a table and Graphviz with what aliasing would save: at 1080p, 19% of the
+  targets with every effect on, and up to 31% more made for effects that are off. Nothing runs from it yet.
+  `ArtfFrameStats.gpuBytes` and the targets' bytes come from what is allocated.
+- **Merged meshes in a file** (phase 4.3). `artfSceneSaveHlod` and `artfSceneLoadHlod` keep what `artfSceneBuildHlod`
+  made, as built, in a versioned file a newer Artful reads; reading checks it all first and refuses a file of other
+  instances, cut short or broken. `artful-render --cook` and `--cooked`: forest is made in 45 ms where merging took
+  1,166 (3.9%), the same picture to the byte on both backends.
+- **CI's first run on this branch** found what no machine here could, and Vulkan's validation layers (now run here
+  too, as CI runs them, with synchronization) found the rest: on armv7 (32 bits), an assertion of the ray tracing
+  structures' size that holds only where pointers are 8 bytes (now asserted only there); the gather of depth before
+  layers dispatched with the post buffers' set unbound, and after the frame before's last read with no barrier; the
+  probes' copy to the scene read before the copy that made them was done; posing two skins' jobs one after another
+  with no barrier; the fog grid reading the shadow maps across the shadow pass's end with no dependency to compute;
+  with four samples and floats, the resolve framebuffer short of the surface and the scene's pass short of a clear
+  value; sorted layers drawn one at a time with nothing between them (now a by-region dependency in the scene's passes
+  and a barrier between draws); and `VK_EXT_device_fault` asked of a device a test only said was lost. Every test, in
+  every mode CI runs, with ray queries and without, is clean under synchronization validation. Still open: on macOS
+  (arm64), what bends gets two levels where x86 gets three, the first of error 0 (`scale/skinLod`).
+
 - **Metal from the shaders' IR** (the plan's phase 4.1, step 4). `irMsl` (`src/shaderir/msl.c`) writes Metal's shading
   language from any shader's IR, laid out as SPIRV-Cross's (one argument buffer for each set, resources in declaration
   order, `bNSmplr` samplers, `main0`), structured control from the IR's merges, phis as variables. All 94 shaders but

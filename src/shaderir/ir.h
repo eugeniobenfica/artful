@@ -59,6 +59,12 @@ bool irCheck(const IrModule* m, char* why, size_t size);
 /* As text, an instruction a line: %result = Op<number> %type operands... */
 void irPrint(const IrModule* m, FILE* out);
 
+/* What a shader does with each resource it binds (a set and binding): read (a load, a texture's sample or fetch) and
+ * write (a store, an atomic), through any chain of indices; what a frame graph needs to know of a pass. Returns how
+ * many there are (up to max written). */
+typedef struct IrUse { uint32_t set, binding; bool read, write; } IrUse;
+int irUses(const IrModule* m, IrUse* out, int max);
+
 /* SPIR-V 1.3's words (artfFree), the sections in their order. */
 uint32_t* irSpirv(const IrModule* m, size_t* wordCount);
 

@@ -192,6 +192,12 @@ void artfPreparedMeshFree(ArtfPreparedMesh* p) {
     artfFree(p);
 }
 
+ArtfMesh artfSceneAddBuiltMesh(ArtfScene* s, const ArtfMeshData* mesh, const ArtfMeshData* levels, const float* errors, uint32_t levelCount) {
+    const uint32_t index = meshPlace(s, mesh);
+    if (levelCount) takeLevels(s, index, levels, errors, levelCount);
+    return artfMeshHandleOf(s, index);
+}
+
 ArtfMesh artfSceneAddPreparedMesh(ArtfScene* s, ArtfPreparedMesh* p) {
     if (!p) return 0;
     const uint32_t index = meshPlace(s, &p->mesh);

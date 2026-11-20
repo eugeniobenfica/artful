@@ -68,7 +68,7 @@ target_include_directories(artful-core PRIVATE src)
 
 add_library(artful STATIC
   src/scene/scene.c src/scene/blocks.c src/scene/meshBuild.c src/scene/simplify.c src/scene/trace.c src/scene/background.c
-  src/scene/gltf.c src/scene/imageDecode.c src/scene/graph.c src/scene/texture.c src/scene/environment.c src/scene/sky.c src/scene/motion.c src/scene/extras.c src/scene/meshopt.c src/scene/scale.c src/scene/particles.c
+  src/scene/gltf.c src/scene/imageDecode.c src/scene/graph.c src/scene/texture.c src/scene/environment.c src/scene/sky.c src/scene/motion.c src/scene/extras.c src/scene/meshopt.c src/scene/scale.c src/scene/particles.c src/scene/cook.c
   src/scene/lights.c
   src/render/renderer.c src/scene/views.c
   src/software/software.c src/software/post.c src/software/shadows.c src/software/denoise.c src/software/kernelsPortable.c)
@@ -125,7 +125,7 @@ endif()
 if(ARTFUL_VULKAN)
   # (the SPIR-V writer is the core's: the 3D library and the 2D one both build their shaders with it)
   target_sources(artful-core PRIVATE src/vulkan/spirv.c src/shaderir/ir.c src/shaderir/msl.c)
-  target_sources(artful PRIVATE src/vulkan/vulkan.c src/vulkan/shaders.c)
+  target_sources(artful PRIVATE src/vulkan/vulkan.c src/vulkan/shaders.c src/vulkan/frameGraph.c)
   target_compile_definitions(artful PRIVATE ARTFUL_VULKAN)
   target_sources(artful-2d PRIVATE src/2d/vulkan2d.c src/2d/shaders2d.c)
   target_compile_definitions(artful-2d PRIVATE ARTFUL_VULKAN)
@@ -150,6 +150,9 @@ endif()
 
 if(ARTFUL_BUILD_TOOLS)
   add_executable(artful-render tools/render.c)
+  if(ARTFUL_VULKAN)
+    target_compile_definitions(artful-render PRIVATE ARTFUL_VULKAN) # (its --graph reads Vulkan's frame graph)
+  endif()
   target_link_libraries(artful-render PRIVATE artful artful-blackhole)
   target_include_directories(artful-render PRIVATE src)
   if(MINGW)

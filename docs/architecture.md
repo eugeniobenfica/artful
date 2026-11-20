@@ -390,6 +390,47 @@ the device takes, leaving out normal maps. The CPU decodes on first drawing, to 
 a decoder of someone else's, on blocks of noise: 65,536 of BC7 came out alike, and 46,000 legal ones of ASTC within one
 of 255, since that decoder rounds a step sooner. A hash of each keeps them so in the tests.
 
+## The frame as a graph
+
+`src/vulkan/frameGraph.c` describes the GPU's frame: each pass `vulkan.c` records, by the name its timestamps give it,
+in its order, and what it reads and writes of the targets a frame shares, as big as the frame (the scene's light and
+surfaces, depth and its pyramid, the fog grid, the three post buffers whose parts rotate, the copies of depth and
+surfaces, ambient occlusion, bloom with auto exposure's state, motion blur's velocities, the frame). What a pass's
+shaders read and write is not written by hand: it is read from their IR (`irUses`: a load, a sample or fetch is a read;
+a store or an atomic a write, through any chain of indices), so the description cannot drift from the shaders; what a
+render pass draws into, which no shader binds, is said there. Nothing runs from it yet: it describes, and measures.
+
+`artfFrameGraphReport` takes the last frame a renderer drew, its passes as `artfRendererStats` lists them, and writes
+the table, each target's bytes as allocated and its life from the first pass that touches it to the last, and Graphviz
+(`artful-render --graph prefix`). A target no pass writes and nothing keeps holds nothing that frame. Then what aliasing
+would save: the targets that live only within the frame, largest first, each into the first heap none of whose targets
+its life overlaps. At 1920 x 1080 with every effect on (occlusion, reflections, temporal antialiasing, sharpening, depth
+of field, motion blur, auto exposure, bloom), of 212.6 MB of targets, aliasing would save 39.8 MB (19%), and 8 MB are
+made for an effect that is off (the fog grid). With temporal antialiasing and bloom only: 15.9 MB by aliasing (7%), and
+31.8 MB made and not used (15%); with bloom alone, nothing by aliasing, and 63.5 MB (31%) made and not used. So the
+plan's 30% comes from both: targets made only for what is on, and aliasing what lives only within the frame. A test
+(`backends/frameGraph`) draws every effect and some, with occlusion's two halves and without, and every pass the frame
+takes is described, in its order.
+
+## Merged meshes in a file
+
+What takes long to make can be kept in a file and read back as a copy (`src/scene/cook.c`). `artfSceneSaveHlod` writes
+the merged meshes `artfSceneBuildHlod` made, as built: each mesh's arrays, its meshlets, the positions the CPU reads by
+blocks, its lighter levels with their errors, and what it stands for (its members, its distance and error).
+`artfSceneLoadHlod` reads them into a scene with the instances they were made against: their count and a print of what
+they are and where (meshes, materials, transforms) must be the same, and the scene must have no merged meshes yet. All
+of a file is read and checked before anything goes into the scene: every array as long as its counts say, every index
+within its mesh, every meshlet within its arrays, every member an instance; a file that breaks off, or lies, changes
+nothing. A file is "ARTFCOOK", its version and its kind, then records each led by its length, so that a reader skips
+what a newer writer put after what it knows: a newer version's file is read, as far as its records are laid out as
+before. What reading does is what merging did after its simplifying: the same meshes in the same places, the same
+instances in the same order, so the same handles.
+
+`artful-render --scene forest --hlod --cook file` writes forest's 392 merged meshes (87 MB); `--cooked file` reads them:
+the scene is made in 45 ms where merging made it in 1,166 (3.9%), and the picture is the same bytes, on the CPU and on
+the GPU. `scale/hlodCooked` checks the same meshes, to the byte, and the same pictures far and near, and that a file of
+other instances, of the same moved, cut short or with an index past its mesh is refused.
+
 ## What comes and goes
 
 Removing a mesh gives its stretches of the GPU's buffers back to a list of spans (`spanTake`, `spanGive`), and what is

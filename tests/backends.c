@@ -140,10 +140,11 @@ void testLostDevice(void) {
     CHECK(!artfRendererDraw(r, s));
     artfVulkanSubmitsLeft = -1;
     CHECK(!artfRendererDraw(r, s));
-    /* (said once, by the renderer that lost it; where the driver can say why, VK_EXT_device_fault, it was asked) */
+    /* (said once, by the renderer that lost it) */
     CHECK(eventCounts[ARTF_EVENT_DEVICE_LOST] == 1 && eventSource == r);
     printf("lost, %s: %s\n", artfVulkanFaultReports(r) ? "the driver asked why" : "no VK_EXT_device_fault", eventWords);
-    CHECK(!artfVulkanFaultReports(r) || strstr(eventWords, "(the driver: ") != NULL);
+    /* (a loss made up asks the driver nothing: it may be asked only of a device really lost) */
+    CHECK(strstr(eventWords, "(the driver: ") == NULL);
     artfSetEvents(NULL, NULL);
     CHECK(!artfRendererReadPixels(r, b));
     artfRendererFree(r);
@@ -475,5 +476,45 @@ void testShaderIr(void) {
     spvEndMain(s);
     CHECK(!irCheck(&s->ir, why, sizeof why) && strstr(why, "not a type"));
     spvFini(s);
+#endif
+}
+
+#ifdef ARTFUL_VULKAN
+#include "vulkan/frameGraph.h"
+#endif
+
+/* The GPU's frame as a graph (vulkan/frameGraph.h): every pass a frame takes is described, in its order, with what its
+ * shaders read and write as their IR says, whether every effect is on or only some, and with occlusion's two halves;
+ * and what is said of memory adds up. */
+void testFrameGraph(void) {
+#ifdef ARTFUL_VULKAN
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    o.hdr = true;
+    ArtfRenderer* r = artfRendererNew(&o);
+    if (!r) return;
+    ArtfScene* s = shadowScene();
+    const ArtfPostDesc all = {.lens.bloom = .2f, .lens.focus = 6, .lens.aperture = 4, .lens.motionBlur = .5f, .screen.occlusion = 1, .screen.reflections = 1,
+                              .screen.temporal = true, .screen.sharpen = .5f, .exposure.automatic = true};
+    const ArtfPostDesc some = {.lens.bloom = .2f};
+    const ArtfPostDesc* each[2] = {&all, &some};
+    for (int k = 0; k < 4; ++k) {
+        artfSceneSetPost(s, each[k & 1]);
+        artfSceneSetFeature(s, ARTF_FEATURE_OCCLUSION, k >= 2);
+        for (int f = 0; f < 3; ++f) CHECK(artfRendererDraw(r, s));
+        const uint64_t saved = artfFrameGraphReport(r, NULL, NULL);
+        CHECK(artfFrameGraphUndescribed == 0);
+        if (k == 0) {
+            printf("the frame as a graph, every effect on: %.1f MB of its targets could share memory\n", (double)saved / 1048576.0);
+            CHECK(saved > 0);
+        }
+    }
+    uint64_t bytes[FG_TARGETS], sum = 0;
+    artfVulkanTargetBytes(r, bytes);
+    for (int t = 0; t < FG_TARGETS; ++t) sum += bytes[t];
+    ArtfFrameStats stats;
+    artfRendererStats(r, &stats);
+    CHECK(sum > 0 && sum < stats.gpuBytes); /* (what the graph counts is part of what the GPU holds) */
+    artfRendererFree(r);
+    artfSceneFree(s);
 #endif
 }

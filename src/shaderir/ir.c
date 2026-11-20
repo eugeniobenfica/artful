@@ -175,6 +175,45 @@ void irPrint(const IrModule* m, FILE* out) {
     }
 }
 
+int irUses(const IrModule* m, IrUse* out, int max) {
+    const size_t ids = (size_t)m->bound + 1;
+    uint32_t* root = artfCalloc(ids, 4);   /* of a pointer: the variable it is into, + 1 */
+    uint32_t* set = artfCalloc(ids, 4), *binding = artfCalloc(ids, 4);
+    uint8_t* bound = artfCalloc(ids, 1), *how = artfCalloc(ids, 1); /* (how: 1 read, 2 written) */
+    for (size_t k = 0; k < m->insts.len; ++k) {
+        const IrInst* i = &m->insts.items[k];
+        const uint32_t* w = irOperands(m, i);
+        if (i->op != 71 || i->count < 3 || w[0] >= ids) continue;
+        if (w[1] == 33) { binding[w[0]] = w[2]; bound[w[0]] = 1; root[w[0]] = w[0] + 1; }
+        if (w[1] == 34) set[w[0]] = w[2];
+    }
+    for (size_t k = 0; k < m->insts.len; ++k) {
+        const IrInst* i = &m->insts.items[k];
+        const uint32_t* w = irOperands(m, i);
+        if (i->section != IR_CODE || !i->count || w[0] >= ids || !root[w[0]]) continue;
+        const uint32_t variable = root[w[0]] - 1;
+        if (i->op == 65 && i->result < ids) root[i->result] = root[w[0]]; /* (a chain into it) */
+        else if (i->op == 61) how[variable] |= 1;
+        else if (i->op == 62) how[variable] |= 2;
+        else if (i->op >= 227 && i->op <= 242) how[variable] |= 3; /* (atomics) */
+    }
+    int n = 0;
+    for (size_t v = 0; v < ids; ++v) {
+        if (!bound[v] || !how[v]) continue;
+        if (n < max) {
+            const IrUse u = {set[v], binding[v], (how[v] & 1) != 0, (how[v] & 2) != 0};
+            out[n] = u;
+        }
+        ++n;
+    }
+    artfFree(root);
+    artfFree(set);
+    artfFree(binding);
+    artfFree(bound);
+    artfFree(how);
+    return n;
+}
+
 uint32_t* irSpirv(const IrModule* m, size_t* wordCount) {
     size_t total = 5;
     for (size_t k = 0; k < m->insts.len; ++k) {

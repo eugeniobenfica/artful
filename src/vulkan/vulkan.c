@@ -19,6 +19,7 @@
 #include "render/rendererInternal.h"
 #include "scene/sceneInternal.h"
 #include "core/threads.h"
+#include "vulkan/frameGraph.h"
 #include "vulkan/shaders.h"
 #include "vulkan/vulkanApi.h"
 
@@ -787,11 +788,13 @@ static bool targetsMake(Vulkan* v) {
     const bool many = v->samples > 1;
     if (many && !imageNew(v, &v->samples4, v->sceneFormat, v->sceneWidth, v->sceneHeight, 1, v->samples, IMAGE_COLOR, ASPECT_COLOR)) return false;
     if (!imageNew(v, &v->depth, FORMAT_D32, v->sceneWidth, v->sceneHeight, 1, v->samples, IMAGE_DEPTH | IMAGE_SAMPLED, ASPECT_DEPTH)) return false;
+    if (v->floats && !postTargetsMake(v)) return false;
     if (many) {
-        FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->resolvePass, 1, &v->samples4.view, (uint32_t)v->sceneWidth, (uint32_t)v->sceneHeight, 1};
+        /* (the resolve pass has the light, and in floats the surface too: its framebuffer, both) */
+        const VkImageView resolving[2] = {v->samples4.view, v->floatSurface.view};
+        FramebufferCreateInfo info = {ST_FRAMEBUFFER, NULL, 0, v->resolvePass, v->floats ? 2u : 1u, resolving, (uint32_t)v->sceneWidth, (uint32_t)v->sceneHeight, 1};
         if (v->vkCreateFramebuffer(v->device, &info, NULL, &v->resolveFramebuffer) != VK_OK) return false;
     }
-    if (v->floats && !postTargetsMake(v)) return false;
     for (uint32_t i = 0; i < v->imageCount; ++i) {
         const VkImageView one[2] = {v->views[i], v->depth.view}, resolved[3] = {v->samples4.view, v->depth.view, v->views[i]};
         const VkImageView floats[3] = {v->floatColor.view, v->depth.view, v->floatSurface.view};
@@ -876,10 +879,12 @@ static bool renderPassMake(const Vulkan* v, VkRenderPass* out, bool load, bool s
     const VkFlags draw = STAGE_COLOR | STAGE_EARLY_TESTS | STAGE_LATE_TESTS;
     /* what came before with the same images; and, for the pyramid, what comes after. (All passes have both:
      * they must match, dependencies too, to share pipelines and a framebuffer.) */
-    const SubpassDependency dependencies[2] = {
+    /* (and within: a draw after one whose pixels wrote what it writes, layers' lists drawn one at a time; by region) */
+    const SubpassDependency dependencies[3] = {
         {~0u, 0, draw | STAGE_COMPUTE, draw, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE, ACCESS_COLOR_READ | ACCESS_COLOR_WRITE | ACCESS_DEPTH_READ | ACCESS_DEPTH_WRITE, 0},
-        {0, ~0u, draw, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE, ACCESS_SHADER_READ, 0}};
-    const RenderPassCreateInfo pass = {ST_RENDER_PASS, NULL, 0, count, used, 1, &subpass, 2, dependencies};
+        {0, ~0u, draw, STAGE_COMPUTE | STAGE_FRAGMENT, ACCESS_DEPTH_WRITE | ACCESS_COLOR_WRITE, ACCESS_SHADER_READ, 0},
+        {0, 0, STAGE_FRAGMENT, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE, 1 /* by region */}};
+    const RenderPassCreateInfo pass = {ST_RENDER_PASS, NULL, 0, count, used, 1, &subpass, 3, dependencies};
     *out = 0;
     return v->vkCreateRenderPass(v->device, &pass, NULL, out) == VK_OK;
 }
@@ -941,9 +946,10 @@ static bool shadowPassMake(Vulkan* v) {
     const AttachmentReference depth = {0, LAYOUT_DEPTH};
     const SubpassDescription subpass = {0, 0, 0, NULL, 0, NULL, NULL, &depth, 0, NULL};
     const VkFlags tests = STAGE_EARLY_TESTS | STAGE_LATE_TESTS;
+    /* (what reads the maps: the frame's pixels, and the fog grid's compute, before and after) */
     const SubpassDependency dependencies[2] = {
-        {~0u, 0, STAGE_FRAGMENT, tests, ACCESS_SHADER_READ, ACCESS_DEPTH_READ | ACCESS_DEPTH_WRITE, 0},
-        {0, ~0u, tests, STAGE_FRAGMENT, ACCESS_DEPTH_WRITE, ACCESS_SHADER_READ, 0}};
+        {~0u, 0, STAGE_FRAGMENT | STAGE_COMPUTE, tests, ACCESS_SHADER_READ, ACCESS_DEPTH_READ | ACCESS_DEPTH_WRITE, 0},
+        {0, ~0u, tests, STAGE_FRAGMENT | STAGE_COMPUTE, ACCESS_DEPTH_WRITE, ACCESS_SHADER_READ, 0}};
     const RenderPassCreateInfo pass = {ST_RENDER_PASS, NULL, 0, 1, &attachment, 1, &subpass, 2, dependencies};
     return v->vkCreateRenderPass(v->device, &pass, NULL, &v->shadowPass) == VK_OK;
 }
@@ -2878,7 +2884,8 @@ static bool slotTopSync(Vulkan* v, Slot* s, VkCommandBuffer c, const ArtfScene* 
     return true;
 }
 
-_Static_assert(sizeof(AsGeometryTriangles) == 64 && sizeof(AsGeometry) == 96 && sizeof(AsBuildGeometryInfo) == 80 && sizeof(AsInstance) == 64 && sizeof(AsCreateInfo) == 64,
+/* (with pointers of 8 bytes: of 4, as armv7's, the same structures are smaller, Vulkan's as well as these) */
+_Static_assert(sizeof(void*) != 8 || (sizeof(AsGeometryTriangles) == 64 && sizeof(AsGeometry) == 96 && sizeof(AsBuildGeometryInfo) == 80 && sizeof(AsInstance) == 64 && sizeof(AsCreateInfo) == 64),
                "the ray tracing structures are laid out as Vulkan's");
 
 /* The trees rays walk, as tracing holds them (artfSceneTraceSync first): sent up when they changed, waiting for the
@@ -3413,6 +3420,8 @@ static void runBones(Vulkan* v, VkCommandBuffer c, Slot* s) {
     v->vkCmdBindPipeline(c, 1, v->skinPipeline);
     v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
     for (uint32_t i = 0; i < (uint32_t)v->skinJobs.len; ++i) {
+        /* (one after another: two jobs may pose the same vertices, a level and the whole it was made from) */
+        if (i) memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_WRITE, ACCESS_SHADER_WRITE);
         v->vkCmdPushConstants(c, v->pipelineLayout, SHADER_COMPUTE, 0, 4, &i);
         const uint32_t count = v->scratchSkinCounts.items[i];
         v->vkCmdDispatch(c, (count + 63) / 64, 1, 1);
@@ -3895,6 +3904,8 @@ static void gatherProbes(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfScene*
                 return;
             }
         }
+        /* (after the copy that made probesNow what it is) */
+        memoryBarrier(v, c, STAGE_TRANSFER, STAGE_TRANSFER, ACCESS_TRANSFER_WRITE, ACCESS_TRANSFER_READ);
         v->vkCmdCopyBuffer(c, v->probesNow.buffer, s->probesBack.buffer, 1, &all);
         memoryBarrier(v, c, STAGE_TRANSFER, STAGE_HOST, ACCESS_TRANSFER_WRITE, ACCESS_HOST_READ);
         s->probesBackHeld = true;
@@ -4579,7 +4590,8 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         }
     }
 
-    ClearValue clears[3];
+    /* (one for each attachment the scene's pass has: with samples and floats, four; the surface's is 0) */
+    ClearValue clears[4];
     memset(clears, 0, sizeof clears);
     memcpy(clears[0].color, frame.background, sizeof clears[0].color);
     if (v->floats) {
@@ -4596,7 +4608,7 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         v->vkCmdFillBuffer(c, v->layerCounts.buffer, 0, ~(VkDeviceSize)0, 0);
         memoryBarrier(v, c, STAGE_TRANSFER, STAGE_FRAGMENT, ACCESS_TRANSFER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
     }
-    RenderPassBeginInfo pass = {ST_RENDER_PASS_BEGIN, NULL, occlusion || sorted || v->floats ? v->earlyPass : v->renderPass, v->framebuffers[image], area, v->floats ? 3 : 2, clears};
+    RenderPassBeginInfo pass = {ST_RENDER_PASS_BEGIN, NULL, occlusion || sorted || v->floats ? v->earlyPass : v->renderPass, v->framebuffers[image], area, v->floats ? (v->samples > 1 ? 4u : 3u) : 2u, clears};
     v->vkCmdBeginRenderPass(c, &pass, 0);
     v->vkCmdSetViewport(c, 0, 1, &viewport);
     v->vkCmdSetScissor(c, 0, 1, &area);
@@ -4648,6 +4660,10 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         v->vkCmdEndRenderPass(c);
         passMark(v, c, s, occlusion ? "scene, late" : "scene");
         v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+        /* (the gather's shader names set 1 too, the post buffers' parts: bound, though depth alone is written; and the
+         * frame before's last pass read what the post passes write, in another submission: after it) */
+        rolesBind(v, c, 1);
+        memoryBarrier(v, c, STAGE_FRAGMENT, STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
         postStep(v, c, POST_GATHER, 1, (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight);
         passMark(v, c, s, "depth for what follows");
         pass.renderPass = v->latePass;
@@ -4661,7 +4677,12 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         if (v->multiDraw) {
             v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, 0, layerCount, 20);
         } else {
-            for (uint32_t i = 0; i < layerCount; ++i) v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, (VkDeviceSize)i * 20, 1, 20);
+            /* (one at a time: each after the one before wrote its fragments, as the pass's own dependency allows) */
+            const GlobalBarrier after = {ST_MEMORY_BARRIER, NULL, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE};
+            for (uint32_t i = 0; i < layerCount; ++i) {
+                if (i) v->vkCmdPipelineBarrier(c, STAGE_FRAGMENT, STAGE_FRAGMENT, 1 /* by region */, 1, &after, 0, NULL, 0, NULL);
+                v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, (VkDeviceSize)i * 20, 1, 20);
+            }
         }
         v->vkCmdEndRenderPass(c);
         memoryBarrier(v, c, STAGE_FRAGMENT | STAGE_EARLY_TESTS | STAGE_LATE_TESTS, STAGE_FRAGMENT, ACCESS_SHADER_WRITE | ACCESS_DEPTH_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
@@ -4710,11 +4731,14 @@ static bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         submit.signalCount = 1;
         submit.signals = &v->rendered[image];
     }
-    result = artfVulkanSubmitsLeft == 0 ? -4 /* VK_ERROR_DEVICE_LOST */ : v->vkQueueSubmit(v->queue, 1, &submit, s->fence);
+    const bool injected = artfVulkanSubmitsLeft == 0;
+    result = injected ? -4 /* VK_ERROR_DEVICE_LOST */ : v->vkQueueSubmit(v->queue, 1, &submit, s->fence);
     if (artfVulkanSubmitsLeft > 0) --artfVulkanSubmitsLeft;
     if (result != VK_OK) {
         artfLog("artful: submitting a frame failed: %d", (int)result);
-        lose(v, result);
+        /* (a loss a test made up: the device is not lost, and the driver may be asked why only when it is) */
+        if (injected) v->lost = true;
+        else lose(v, result);
         return false;
     }
     ++v->frameNumber;
@@ -5347,4 +5371,24 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
 failed:
     vkFree(&v->base);
     return NULL;
+}
+
+void artfVulkanTargetBytes(const ArtfRenderer* r, uint64_t* bytes) {
+    const Vulkan* v = (const Vulkan*)r;
+    for (int t = 0; t < FG_TARGETS; ++t) bytes[t] = 0;
+    if (!r || r->backend != ARTF_BACKEND_VULKAN) return;
+    bytes[FG_FLOAT_COLOR] = v->floatColor.held;
+    bytes[FG_FLOAT_SURFACE] = v->floatSurface.held;
+    bytes[FG_DEPTH_IMAGE] = v->depth.held;
+    bytes[FG_HIZ] = v->hiz.held;
+    bytes[FG_FOG] = v->postFog.held;
+    bytes[FG_LIGHT] = v->postLight.held;
+    bytes[FG_SECOND] = v->postScratch.held;
+    bytes[FG_HISTORY] = v->postHistory.held;
+    bytes[FG_DEPTH] = v->postDepth.held;
+    bytes[FG_SURFACE] = v->postSurface.held;
+    bytes[FG_OCCLUSION] = v->postOcclusion.held;
+    bytes[FG_BLOOM] = v->postBloom.held;
+    bytes[FG_BLUR] = v->postBlur.held;
+    bytes[FG_FRAME] = v->offscreen.held;
 }

@@ -174,6 +174,28 @@ static void mergeJob(void* user, uint32_t index, uint32_t worker) {
     artfFree(indices);
 }
 
+/* A merged mesh in the scene, in place of what it holds (members: their handles), from a merge or from a file. */
+static ArtfInstance placeHlod(ArtfScene* s, ArtfScale* g, ArtfMesh mesh, ArtfMaterial material, const ArtfInstance* members, uint32_t count, float distance, float error) {
+    Hlod h;
+    memset(&h, 0, sizeof h);
+    h.members = artfMalloc((size_t)count * sizeof *h.members);
+    h.opacities = artfMalloc((size_t)count * sizeof *h.opacities);
+    h.memberCount = count;
+    memcpy(h.members, members, (size_t)count * sizeof *h.members);
+    h.proxy = artfSceneAddInstance(s, mesh, material, NULL);
+    artfInstanceSetOpacity(s, h.proxy, 0);
+    for (uint32_t i = 0; i < count; ++i) hold(g, h.members[i], 1);
+    hold(g, h.proxy, 1);
+    h.mesh = mesh;
+    const ArtfMeshData* merged = &s->meshes.items[artfMeshIndexOf(s, mesh)];
+    memcpy(h.center, merged->center, sizeof h.center);
+    h.radius = merged->radius;
+    h.distance = distance;
+    h.error = error;
+    artfVecPush(&g->hlods, h);
+    return h.proxy;
+}
+
 /* The merged meshes go into the scene, each in place of what it holds. */
 static uint32_t takeMerges(ArtfScene* s, Merge* merges, uint32_t count, const ArtfHlodDesc* desc, ArtfInstance* last) {
     ArtfScale* g = scaleOf(s);
@@ -182,28 +204,143 @@ static uint32_t takeMerges(ArtfScene* s, Merge* merges, uint32_t count, const Ar
         Merge* j = &merges[c];
         const ArtfMesh mesh = artfSceneAddPreparedMesh(s, j->made);
         if (!mesh) continue;
-        const ArtfMaterial material = s->instances.items[j->dense[0]].material;
-        Hlod h;
-        memset(&h, 0, sizeof h);
-        h.members = artfMalloc((size_t)j->count * sizeof *h.members);
-        h.opacities = artfMalloc((size_t)j->count * sizeof *h.opacities);
-        h.memberCount = j->count;
-        for (uint32_t i = 0; i < j->count; ++i) h.members[i] = s->instanceHandles.items[j->dense[i]];
-        h.proxy = artfSceneAddInstance(s, mesh, material, NULL);
-        artfInstanceSetOpacity(s, h.proxy, 0);
-        for (uint32_t i = 0; i < j->count; ++i) hold(g, h.members[i], 1);
-        hold(g, h.proxy, 1);
-        h.mesh = mesh;
-        const ArtfMeshData* merged = &s->meshes.items[artfMeshIndexOf(s, mesh)];
-        memcpy(h.center, merged->center, sizeof h.center);
-        h.radius = merged->radius;
-        h.distance = desc && desc->distance > 0 ? desc->distance : 0.f;
-        h.error = j->error;
-        artfVecPush(&g->hlods, h);
-        if (last) *last = h.proxy;
+        ArtfInstance* members = artfMalloc((size_t)j->count * sizeof *members);
+        for (uint32_t i = 0; i < j->count; ++i) members[i] = s->instanceHandles.items[j->dense[i]];
+        const ArtfInstance proxy = placeHlod(s, g, mesh, s->instances.items[j->dense[0]].material, members, j->count, desc && desc->distance > 0 ? desc->distance : 0.f, j->error);
+        artfFree(members);
+        if (last) *last = proxy;
         ++made;
     }
     return made;
+}
+
+/* ---- the merged meshes as a file (cook.c's): "ARTFCOOK", its version, kind 1; the instances it was made against (how
+ * many, and their print); how many merged meshes; then each as a record of its length: its members, distance, error,
+ * the mesh as built, and its levels, each with its error ---- */
+
+enum { HLOD_FILE_VERSION = 1, HLOD_FILE_KIND = 1 };
+
+void* artfSceneSaveHlod(const ArtfScene* s, size_t* size) {
+    *size = 0;
+    const ArtfScale* g = s->scale;
+    const uint32_t count = g ? (uint32_t)g->hlods.len : 0;
+    if (!count) return NULL;
+    /* (what it was made against: the instances before the merged meshes', which came after them all) */
+    const uint32_t before = (uint32_t)s->instances.len - count;
+    for (uint32_t k = 0; k < count; ++k) {
+        const ArtfInstanceData* d = artfSceneInstance((ArtfScene*)s, g->hlods.items[k].proxy);
+        if (!d || (uint32_t)(d - s->instances.items) < before) {
+            artfLog("artful: merged meshes made among other instances cannot be kept in a file");
+            return NULL;
+        }
+    }
+    ArtfCookBytes b = {0};
+    artfCookPut(&b, "ARTFCOOK", 8);
+    artfCookPut32(&b, HLOD_FILE_VERSION);
+    artfCookPut32(&b, HLOD_FILE_KIND);
+    artfCookPut32(&b, before);
+    const uint64_t print = artfCookInstancesPrint(s, before);
+    artfCookPut32(&b, (uint32_t)print);
+    artfCookPut32(&b, (uint32_t)(print >> 32));
+    artfCookPut32(&b, count);
+    ArtfCookBytes r = {0};
+    for (uint32_t k = 0; k < count; ++k) {
+        const Hlod* h = &g->hlods.items[k];
+        r.len = 0;
+        artfCookPut32(&r, h->memberCount);
+        for (uint32_t i = 0; i < h->memberCount; ++i) artfCookPut32(&r, h->members[i]);
+        artfCookPutFloat(&r, h->distance);
+        artfCookPutFloat(&r, h->error);
+        const ArtfMeshData* m = &s->meshes.items[artfMeshIndexOf(s, h->mesh)];
+        artfCookPutMesh(&r, m);
+        artfCookPut32(&r, m->lodCount);
+        for (uint32_t l = 0; l < m->lodCount; ++l) {
+            artfCookPutFloat(&r, m->lodErrors[l]);
+            artfCookPutMesh(&r, &s->meshes.items[m->lods[l]]);
+        }
+        artfCookPut32(&b, (uint32_t)r.len);
+        artfCookPut(&b, r.items, r.len);
+    }
+    artfFree(r.items);
+    *size = b.len;
+    return b.items;
+}
+
+typedef struct Cooked {
+    ArtfInstance* members;
+    uint32_t memberCount, levelCount;
+    float distance, error, errors[ARTF_MAX_LODS];
+    ArtfMeshData mesh, levels[ARTF_MAX_LODS];
+} Cooked;
+
+static void cookedFree(Cooked* c) {
+    artfFree(c->members);
+    artfMeshFini(&c->mesh);
+    for (uint32_t l = 0; l < c->levelCount; ++l) artfMeshFini(&c->levels[l]);
+}
+
+uint32_t artfSceneLoadHlod(ArtfScene* s, const void* data, size_t size) {
+    ArtfCookReader r = {data, size, 0, false};
+    char magic[8];
+    artfCookGet(&r, magic, 8);
+    const uint32_t version = artfCookGet32(&r), kind = artfCookGet32(&r), before = artfCookGet32(&r);
+    const uint32_t printLow = artfCookGet32(&r), printHigh = artfCookGet32(&r), count = artfCookGet32(&r);
+    if (r.failed || memcmp(magic, "ARTFCOOK", 8) || kind != HLOD_FILE_KIND || version < 1) {
+        artfLog("artful: not a file of merged meshes");
+        return 0;
+    }
+    if (version > HLOD_FILE_VERSION) artfLog("artful: merged meshes of a newer version (%u): what this one knows of them is read", version);
+    if (s->scale && s->scale->hlods.len) {
+        artfLog("artful: the scene has merged meshes already: a file's are not read");
+        return 0;
+    }
+    if (before != s->instances.len || (((uint64_t)printHigh << 32) | printLow) != artfCookInstancesPrint(s, before)) {
+        artfLog("artful: merged meshes made for other instances, or the same moved: not read");
+        return 0;
+    }
+    /* all of it read first: a file that breaks off leaves the scene as it was */
+    Cooked* cooked = artfCalloc((size_t)count + 1, sizeof *cooked);
+    uint32_t read = 0;
+    for (; read < count && !r.failed; ++read) {
+        const uint32_t length = artfCookGet32(&r);
+        if (r.failed || length > r.size - r.at) { r.failed = true; break; }
+        ArtfCookReader record = {r.data + r.at, length, 0, false};
+        r.at += length; /* (past what a newer writer put after what is read here) */
+        Cooked* c = &cooked[read];
+        c->memberCount = artfCookGet32(&record);
+        if (record.failed || !c->memberCount || c->memberCount > (uint32_t)s->instances.len) { r.failed = true; break; }
+        c->members = artfMalloc((size_t)c->memberCount * sizeof *c->members);
+        for (uint32_t i = 0; i < c->memberCount; ++i) {
+            c->members[i] = artfCookGet32(&record);
+            if (!artfSceneInstance(s, c->members[i])) record.failed = true;
+        }
+        c->distance = artfCookGetFloat(&record);
+        c->error = artfCookGetFloat(&record);
+        if (!artfCookGetMesh(&record, &c->mesh)) { r.failed = true; ++read; break; }
+        c->levelCount = artfCookGet32(&record);
+        if (c->levelCount > ARTF_MAX_LODS) { c->levelCount = 0; r.failed = true; ++read; break; }
+        for (uint32_t l = 0; l < c->levelCount; ++l) {
+            c->errors[l] = artfCookGetFloat(&record);
+            if (!artfCookGetMesh(&record, &c->levels[l])) { c->levelCount = l; record.failed = true; break; }
+        }
+        if (record.failed) { r.failed = true; ++read; break; }
+    }
+    if (r.failed) {
+        for (uint32_t k = 0; k < read && k < count; ++k) cookedFree(&cooked[k]);
+        artfFree(cooked);
+        artfLog("artful: a file of merged meshes that does not hold what it says");
+        return 0;
+    }
+    ArtfScale* g = scaleOf(s);
+    for (uint32_t k = 0; k < count; ++k) {
+        Cooked* c = &cooked[k];
+        const ArtfMesh mesh = artfSceneAddBuiltMesh(s, &c->mesh, c->levels, c->errors, c->levelCount);
+        const ArtfInstanceData* first = artfSceneInstance(s, c->members[0]);
+        placeHlod(s, g, mesh, first->material, c->members, c->memberCount, c->distance, c->error);
+        artfFree(c->members); /* (the meshes' arrays are the scene's now) */
+    }
+    artfFree(cooked);
+    return count;
 }
 
 /* Instances by their cube and material. */

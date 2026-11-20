@@ -81,6 +81,7 @@ To be decided before 1.0; as it stands, for the owner to confirm:
 | `artfSceneSetResidency`, `artfTextureSetResidentMip` | Who decides what stays on the GPU: you, you with help, or Artful. |
 | `ArtfResidencyDesc.meshes`, `artfMeshSetResidentLevel`, `artfSceneAddMeshStreamed` | Meshes' levels too, by distance and a budget; a mesh read again when it is wanted. |
 | `artfSceneBuildHlod`, `artfSceneAddHlod`, `artfSceneClearHlod` | Far away, many as one: cubes of instances merged into a lighter mesh each. |
+| `artfSceneSaveHlod`, `artfSceneLoadHlod` | The merged meshes in a versioned file, and back as a copy, for a scene with the same instances: forest in 4% of the time. |
 | `artfSceneAddMaterial`, `artfMaterialSet` | Color, metal, roughness, emission, alpha, two sides, refraction, normal maps, unlit, a clear coat and sheen with their textures, a specular color, highlights drawn out, a thin film, light under the surface, and what glass takes inside, traced. |
 | `artfGraphNew`, `artfExprMul` and the rest, `artfSceneAddGraph`, `artfMaterialSetParam` | Materials written in C. |
 | `artfSceneAddInstance`, `artfSceneRemoveInstance` | A mesh placed in the world. |

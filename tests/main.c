@@ -216,6 +216,7 @@ int main(int argc, char** argv) {
     RUN("scale/particleForces", testParticleForces());
     RUN("scale/terrainLayers", testTerrainLayers());
     RUN("scale/hlod", testHlod());
+    RUN("scale/hlodCooked", testHlodCooked());
     RUN("scale/skinLod", testSkinLod());
     RUN("scale/tracedSkinLod", testTracedSkinLod());
     RUN("scale/swarm", testSwarm());
@@ -243,6 +244,7 @@ int main(int argc, char** argv) {
     RUN("scale/extras", testExtras());
     RUN("backends/lostDevice", testLostDevice());
     RUN("backends/shaderIr", testShaderIr());
+    RUN("backends/frameGraph", testFrameGraph());
     RUN("backends/textureMemory", testTextureMemory());
     RUN("backends/refusedSwapchain", testRefusedSwapchain());
     RUN("files/blocks", testBlocks());

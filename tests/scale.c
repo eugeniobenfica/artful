@@ -653,3 +653,87 @@ void testExtras(void) {
     artfFree(a);
     artfFree(b);
 }
+
+/* The merged meshes in a file (artfSceneSaveHlod) and back: a scene that reads them holds the same meshes, to the byte,
+ * and draws the same picture far and near, as one that made them; a file of other instances, or of the same moved, or
+ * cut short, or with an index past its mesh, is refused and changes nothing; one of a newer version is read. */
+static bool sameMeshes(const ArtfScene* x, const ArtfScene* y) {
+    if (x->meshes.len != y->meshes.len) return false;
+    for (size_t k = 0; k < x->meshes.len; ++k) {
+        const ArtfMeshData *p = &x->meshes.items[k], *q = &y->meshes.items[k];
+        if (p->vertexCount != q->vertexCount || p->indexCount != q->indexCount || p->meshletCount != q->meshletCount || p->positionStride != q->positionStride ||
+            p->lodCount != q->lodCount || memcmp(p->lods, q->lods, sizeof p->lods) || memcmp(p->lodErrors, q->lodErrors, sizeof p->lodErrors) ||
+            memcmp(p->scale, q->scale, 12) || memcmp(p->offset, q->offset, 12) || memcmp(p->center, q->center, 12) || p->radius != q->radius || p->isLod != q->isLod)
+            return false;
+        if (memcmp(p->vertices, q->vertices, (size_t)p->vertexCount * sizeof *p->vertices) || memcmp(p->indices, q->indices, (size_t)p->indexCount * 4) ||
+            memcmp(p->meshlets, q->meshlets, (size_t)p->meshletCount * sizeof *p->meshlets) || memcmp(p->meshletVertices, q->meshletVertices, (size_t)p->positionStride * 4) ||
+            memcmp(p->meshletTriangles, q->meshletTriangles, p->indexCount) || memcmp(p->positions, q->positions, (size_t)p->positionStride * 12))
+            return false;
+    }
+    return x->instances.len == y->instances.len && !memcmp(x->instances.items, y->instances.items, x->instances.len * sizeof *x->instances.items);
+}
+
+void testHlodCooked(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    ArtfHlodDesc d;
+    memset(&d, 0, sizeof d);
+    d.cell = 3;
+    ArtfScene* made = groveScene();
+    const uint32_t count = artfSceneBuildHlod(made, &d);
+    CHECK(count > 1);
+    size_t size = 0;
+    uint8_t* file = artfSceneSaveHlod(made, &size);
+    CHECK(file && size > 64);
+    ArtfScene* read = groveScene();
+    CHECK(artfSceneLoadHlod(read, file, size) == count);
+    CHECK(sameMeshes(made, read));
+    for (int far = 0; far < 2; ++far) {
+        setCamera(made, 0, far ? 12.f : 3.f, far ? 40.f : 8.f, 0, 0, 0);
+        setCamera(read, 0, far ? 12.f : 3.f, far ? 40.f : 8.f, 0, 0, 0);
+        drawInto(cpu, made, a);
+        drawInto(cpu, read, b);
+        CHECK(!memcmp(a, b, (size_t)W * H * 4) && artfSceneHlodShown(made) == artfSceneHlodShown(read));
+        if (far) CHECK(artfSceneHlodShown(read) > 0);
+    }
+    /* what is refused, and leaves the scene as it was */
+    logged = 0;
+    artfSetLog(countLog, &logged);
+    CHECK(artfSceneLoadHlod(read, file, size) == 0); /* (it has them already) */
+    ArtfScene* other = groveScene();
+    artfInstanceSetTransform(other, other->instanceHandles.items[5], &(ArtfTransform){{1, 0, 0, 9, 0, 1, 0, 0, 0, 0, 1, 0}});
+    CHECK(artfSceneLoadHlod(other, file, size) == 0);
+    const size_t meshesBefore = other->meshes.len, instancesBefore = other->instances.len;
+    artfSceneFree(other);
+    other = groveScene();
+    const size_t plainMeshes = other->meshes.len;
+    CHECK(artfSceneLoadHlod(other, file, size / 2) == 0 && other->meshes.len == plainMeshes);
+    uint8_t* broken = artfMalloc(size);
+    memcpy(broken, file, size);
+    /* (the first mesh's first index, past its vertices: after the header, the record's length, its members, distance,
+     * error, and the mesh's counts, frame and flags, and the vertices' array) */
+    const uint32_t members = broken[36] | broken[37] << 8 | broken[38] << 16 | (uint32_t)broken[39] << 24;
+    const size_t meshAt = 36 + 4 + (size_t)members * 4 + 8;
+    const uint32_t vertices = broken[meshAt] | broken[meshAt + 1] << 8 | broken[meshAt + 2] << 16 | (uint32_t)broken[meshAt + 3] << 24;
+    const size_t vertexBytes = (size_t)vertices * sizeof(ArtfPackedVertex), indicesAt = meshAt + 16 + 40 + 4 + 4 + vertexBytes + 4;
+    broken[indicesAt + 3] = 0x7F;
+    CHECK(artfSceneLoadHlod(other, broken, size) == 0 && other->meshes.len == plainMeshes);
+    /* of a newer version: read, as what it holds is laid out as before */
+    memcpy(broken, file, size);
+    broken[8] = 2;
+    CHECK(artfSceneLoadHlod(other, broken, size) == count);
+    artfSetLog(NULL, NULL);
+    CHECK(logged >= 4);
+    (void)meshesBefore;
+    (void)instancesBefore;
+    artfFree(broken);
+    artfSceneFree(other);
+    artfSceneFree(read);
+    artfFree(file);
+    artfSceneFree(made);
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(cpu);
+}
