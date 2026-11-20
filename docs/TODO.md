@@ -7,8 +7,8 @@ o suficiente para se localizar. Atualizar a cada passo fechado.
 Legenda: `[x]` feito · `[~]` em parte (o que falta vem ao lado) · `[ ]` não iniciado · 🔒 depende de decisão do dono ·
 📱 depende de hardware ou máquina que não está aqui · 🌐 depende de baixar algo (pedir antes)
 
-Branch: `unreal-parity`. Última CI conferida: run 44756688958 (Android passa; Linux com segfault ainda sem teste
-identificado; macOS com `scale/skinLod`). Run 44764119231 em andamento, com `ARTFUL_TEST_TRACE` para apontar o teste.
+Branch: `unreal-parity`. Última CI conferida: run 44764119231 (Android e Windows passam; Linux cai em `post/floats`, na GPU,
+num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O último push é anterior à 5.2.
 
 ## Fase 0 — Base reproduzível e instrumentos
 - [x] 0.1 Versionar o trabalho em andamento
@@ -24,7 +24,7 @@ identificado; macOS com `scale/skinLod`). Run 44764119231 em andamento, com `ART
 - [x] 1.4 Política de ABI — compatibilidade de fonte (decisão do dono)
 - [x] 1.5 Contrato de threads — 3D e 2D
 - [x] 1.6 Camadas de suporte publicadas
-- [~] 1.7 Mistura de clipes — feito na CPU; nada a fazer na GPU (pose é calculada na CPU)
+- [x] 1.7 Mistura de clipes — `artfAnimationMix`; a pose é calculada na CPU para os dois backends
 
 ## Fase 2 — Mudanças que alteram bytes
 - [x] 2.1 sRGB exato (polinômios) · [x] curvas de tom (Neutral já existia)
