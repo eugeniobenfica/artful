@@ -1835,6 +1835,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
             SpvId weight = MUL_F(MUL_F(SIDE_OF(cx, X(w)), SIDE_OF(cy, Y(w))), SIDE_OF(cz, Z(w)));
 #undef SIDE_OF
             SpvId index = ADD_U(MUL_U(ADD_U(MUL_U(z, dy), y), dx), x), at = MUL_U(index, UINT(4));
+            weight = MUL_F(weight, W(bufferVec(s, &r, probes, at))); /* (none from one inside something) */
             /* as artfIndirectAt: from the probe to the point, what is behind counts less and what it cannot see hardly at all */
             SpvId cell = vec3Of(s, spvOp1(s, SPV_OP_ConvertUToF, s->floatType, x), spvOp1(s, SPV_OP_ConvertUToF, s->floatType, y), spvOp1(s, SPV_OP_ConvertUToF, s->floatType, z));
             SpvId there = ADD_V3(origin, MUL_V3(cell, spacing));
@@ -3988,6 +3989,7 @@ static SpvId indirectAtSpv(const Tracer* t, SpvId probes, SpvId p, SpvId n, bool
         SpvId weight = MUL_F(MUL_F(SIDE_OF(cx, X(w)), SIDE_OF(cy, Y(w))), SIDE_OF(cz, Z(w)));
 #undef SIDE_OF
         SpvId index = ADD_U(MUL_U(ADD_U(MUL_U(z, dy), y), dx), x), row = MUL_U(index, UINT(4));
+        weight = MUL_F(weight, W(bufferVec(s, r, probes, row))); /* (none from one inside something) */
         if (walls) {
             /* from the probe to the point: one behind the surface counts less, and one that cannot see it hardly at all */
             SpvId there = ADD_V3(origin, MUL_V3(vec3Of(s, TO_F(x), TO_F(y), TO_F(z)), spacing));
@@ -4069,7 +4071,7 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     SpvId chunkVar = VAR(ptrU), jVar = VAR(ptrU), tryVar = VAR(ptrU), acceptedVar = VAR(ptrU), lightIndex = VAR(ptrU), counter = VAR(ptrU);
     SpvId ballVar = VAR(ptr3), lightVar = VAR(ptr3), sumVar = VAR(ptr3), meanVar = VAR(ptr3), leanVar[3];
     for (int k = 0; k < 3; ++k) leanVar[k] = VAR(ptr3);
-    SpvId weightsVar = VAR(ptrF), reachVar = VAR(ptrF), reach2Var = VAR(ptrF), reachWeightVar = VAR(ptrF);
+    SpvId weightsVar = VAR(ptrF), reachVar = VAR(ptrF), reach2Var = VAR(ptrF), reachWeightVar = VAR(ptrF), backsVar = VAR(ptrF), backVar = VAR(ptrF);
 
     SpvId group = spvLoad(s, uvec3, groupVar), lid = spvExtract(s, s->uintType, spvLoad(s, uvec3, localVar), 0);
     SpvId gx = spvExtract(s, s->uintType, group, 0), gy = spvExtract(s, s->uintType, group, 1);
@@ -4080,6 +4082,10 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     /* (the groups: dims[0] x dims[1] across, dims[2] down) */
     SpvId o = ADD_V3(origin, MUL_V3(vec3Of(s, TO_F(spvOp2(s, SPV_OP_UMod, s->uintType, gx, dx)), TO_F(spvOp2(s, SPV_OP_UDiv, s->uintType, gx, dx)), TO_F(gy)), spacing));
     SpvId most = MUL_F(SQRT_F(DOT3(spacing, spacing)), FLOAT(1.5f));
+    /* (one inside something, on the steps it is not followed: no rays, and what it had kept whole, as probeJob) */
+    SpvId resting = BOTH(BOTH(NOT_EQ(frames, UINT(0)), spvOp2(s, 180 /* OpFOrdEqual */, s->boolType, W(bufferVec(s, &r, probes, MUL_U(index, UINT(4)))), FLOAT(0.f))),
+                         NOT_EQ(spvOp2(s, SPV_OP_UMod, s->uintType, ADD_U(frames, index), UINT(ARTF_PROBE_INSIDE_EVERY)), UINT(0)));
+    SpvId rayCount = spvSelect(s, s->uintType, resting, UINT(0), UINT((uint32_t)rays));
     /* this one's texel: the direction at its middle, unfolded */
     SpvId toward;
     {
@@ -4101,6 +4107,7 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     spvStore(s, reachWeightVar, FLOAT(0.f));
     spvStore(s, meanVar, same3(s, 0.f));
     for (int k = 0; k < 3; ++k) spvStore(s, leanVar[k], same3(s, 0.f));
+    spvStore(s, backsVar, FLOAT(0.f));
     spvStore(s, t->state, traceHash(s, ADD_U(ADD_U(MUL_U(index, UINT(9781u)), MUL_U(frames, UINT(6271u))), UINT(1u))));
     SpvId env = MORE_F(W(frameVec(s, &r, F_SKY)), FLOAT(0.f));
     SpvId sunColor = spvShuffle3(s, frameVec(s, &r, F_SUNCOLOR)), toSun = spvShuffle3(s, frameVec(s, &r, F_TOSUN));
@@ -4110,10 +4117,10 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     spvStore(s, chunkVar, UINT(0));
     Loop chunks;
     loopOpen(s, &chunks);
-    loopWhile(s, &chunks, LESS_U(LOAD_U(chunkVar), UINT((uint32_t)rays)));
+    loopWhile(s, &chunks, LESS_U(LOAD_U(chunkVar), rayCount));
     {
         SpvId chunk = LOAD_U(chunkVar);
-        SpvId here = UMIN(SUB_U(UINT((uint32_t)rays), chunk), UINT(GROUP)), merge;
+        SpvId here = UMIN(SUB_U(rayCount, chunk), UINT(GROUP)), merge;
         /* the directions, by one, as randomInBall and normalize3: the CPU's random numbers, in its order */
         spvIfBegin(s, first, &merge);
         {
@@ -4161,10 +4168,12 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
             spvIfBegin(s, BOTH(NOT(hit), env), &met);
             spvStore(s, lightVar, SCALE_V3(envSample(s, &r, UINT(ARTF_ENV_DIFFUSE - 1), d), W(frameVec(s, &r, F_SKY))));
             spvIfEnd(s, met);
+            spvStore(s, backVar, FLOAT(0.f));
             spvIfBegin(s, hit, &met);
             {
                 Met m = surfaceAt(t, o, d, FLOAT(0.f));
                 /* (a probe inside something sees its backs: it takes nothing from them) */
+                spvStore(s, backVar, PICK_F(m.front, FLOAT(0.f), FLOAT(1.f)));
                 SpvId front;
                 spvIfBegin(s, m.front, &front);
                 {
@@ -4198,8 +4207,10 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
             }
             spvIfEnd(s, met);
             SpvId light = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, LOAD_V3(lightVar), same3(s, 64.f)); /* (trace.c's LIGHT_LIMIT) */
+            /* (and whether it met a back) */
+            SpvId back = LOAD_F(backVar);
             spvStore(s, spvAccess(s, ptrShared, rayDir, &lid, 1), vec4Of(s, d, far));
-            spvStore(s, spvAccess(s, ptrShared, rayLight, &lid, 1), vec4Of(s, light, FLOAT(0.f)));
+            spvStore(s, spvAccess(s, ptrShared, rayLight, &lid, 1), vec4Of(s, light, back));
         }
         spvIfEnd(s, merge);
         groupBarrier(s);
@@ -4229,7 +4240,8 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
             {
                 SpvId j = LOAD_U(jVar);
                 SpvId d = spvShuffle3(s, spvLoad(s, s->vec4, spvAccess(s, ptrShared, rayDir, &j, 1)));
-                SpvId light = spvShuffle3(s, spvLoad(s, s->vec4, spvAccess(s, ptrShared, rayLight, &j, 1)));
+                SpvId lightAndBack = spvLoad(s, s->vec4, spvAccess(s, ptrShared, rayLight, &j, 1)), light = spvShuffle3(s, lightAndBack);
+                spvStore(s, backsVar, ADD_F(LOAD_F(backsVar), W(lightAndBack)));
                 spvStore(s, meanVar, ADD_V3(LOAD_V3(meanVar), light));
                 for (uint32_t k = 0; k < 3; ++k) spvStore(s, leanVar[k], ADD_V3(LOAD_V3(leanVar[k]), SCALE_V3(d, spvExtract(s, s->floatType, light, k))));
                 spvStore(s, jVar, ADD_U(j, UINT(1)));
@@ -4242,9 +4254,9 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     }
     loopClose(s, &chunks);
 
-    /* mixed with what the probe had: none of it, the first step */
-    SpvId kept = PICK_F(NOT_EQ(frames, UINT(0)), FLOAT(keep), FLOAT(0.f)), taken = SUB_F(FLOAT(1.f), kept);
-    SpvId each = FLOAT(1.f / (float)rays);
+    /* mixed with what the probe had: none of it, the first step; all of it, resting; its light, by artfProbeKeep */
+    SpvId kept = PICK_F(resting, FLOAT(1.f), PICK_F(NOT_EQ(frames, UINT(0)), FLOAT(keep), FLOAT(0.f))), taken = SUB_F(FLOAT(1.f), kept);
+    SpvId each = PICK_F(resting, FLOAT(0.f), FLOAT(1.f / (float)rays));
 #define NEXT_AT(i) spvAccess(s, r.ptrStorageFloat, next, (const SpvId[2]){r.zero, (i)}, 2)
     SpvId wrote;
     spvIfBegin(s, first, &wrote);
@@ -4252,14 +4264,22 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
         SpvId at = MUL_U(index, UINT(16)), was[4];
         for (uint32_t k = 0; k < 4; ++k) was[k] = bufferVec(s, &r, probes, ADD_U(MUL_U(index, UINT(4)), UINT(k)));
         SpvId mean = LOAD_V3(meanVar);
+        /* (artfProbeKeep, as probeJob: the change in light, of the larger and a hundredth, past a quarter) */
+        SpvId now = MUL_F(ADD_F(ADD_F(MUL_F(FLOAT(.2126f), X(mean)), MUL_F(FLOAT(.7152f), Y(mean))), MUL_F(FLOAT(.0722f), Z(mean))), each);
+        SpvId had = ADD_F(ADD_F(MUL_F(FLOAT(.2126f), X(was[0])), MUL_F(FLOAT(.7152f), Y(was[0]))), MUL_F(FLOAT(.0722f), Z(was[0])));
+        SpvId change = DIV_F(ABS_F(SUB_F(now, had)), ADD_F(MAX_F(now, had), FLOAT(.01f)));
+        SpvId lightKept = PICK_F(BOTH(NOT(resting), NOT_EQ(frames, UINT(0))), MUL_F(kept, SUB_F(FLOAT(1.f), MIN_F(MAX_F(MUL_F(SUB_F(change, FLOAT(.25f)), FLOAT(2.f)), FLOAT(0.f)), FLOAT(.8f)))), kept);
+        SpvId lightTaken = SUB_F(FLOAT(1.f), lightKept);
         for (uint32_t k = 0; k < 3; ++k) {
-            spvStore(s, NEXT_AT(ADD_U(at, UINT(k))), ADD_F(MUL_F(spvExtract(s, s->floatType, was[0], k), kept), MUL_F(MUL_F(spvExtract(s, s->floatType, mean, k), each), taken)));
+            spvStore(s, NEXT_AT(ADD_U(at, UINT(k))), ADD_F(MUL_F(spvExtract(s, s->floatType, was[0], k), lightKept), MUL_F(MUL_F(spvExtract(s, s->floatType, mean, k), each), lightTaken)));
             SpvId lean = LOAD_V3(leanVar[k]);
             for (uint32_t a = 0; a < 3; ++a)
-                spvStore(s, NEXT_AT(ADD_U(at, UINT(4 + 4 * k + a))), ADD_F(MUL_F(spvExtract(s, s->floatType, was[1 + k], a), kept), MUL_F(MUL_F(MUL_F(FLOAT(2.f), spvExtract(s, s->floatType, lean, a)), each), taken)));
+                spvStore(s, NEXT_AT(ADD_U(at, UINT(4 + 4 * k + a))), ADD_F(MUL_F(spvExtract(s, s->floatType, was[1 + k], a), lightKept), MUL_F(MUL_F(MUL_F(FLOAT(2.f), spvExtract(s, s->floatType, lean, a)), each), lightTaken)));
             spvStore(s, NEXT_AT(ADD_U(at, UINT(7 + 4 * k))), FLOAT(0.f));
         }
-        spvStore(s, NEXT_AT(ADD_U(at, UINT(3))), FLOAT(0.f));
+        /* (whether it counts: not inside something, more than a quarter of its rays meeting backs) */
+        SpvId inside = BOTH(NOT(resting), MORE_F(MUL_F(LOAD_F(backsVar), FLOAT(4.f)), TO_F(rayCount)));
+        spvStore(s, NEXT_AT(ADD_U(at, UINT(3))), PICK_F(EITHER(resting, inside), FLOAT(0.f), FLOAT(1.f)));
     }
     spvIfEnd(s, wrote);
     {

@@ -75,9 +75,10 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   view) get them, in maps a quarter as wide as the others; 48 such maps at most, six to a point light.
 - Light that bounced (probes) fills a box set when it is turned on: a scene that grows needs it set again. A wall
   stops it once probes see it, as far as an 8 x 8 map of directions can tell; a wall much thinner than the probes are
-  apart, with probes on both sides near it, can still let some through; `throughWalls` leaves walls out, for less
-  work. What it gives reflections is as rough as the probes are: a mirror shows its color, not what it would see.
-  Every probe takes its rays every frame, on either backend: none is left for a later frame, so the cost grows with the
+  apart can still let some through near a box's edges (an eighth, 20 cm from a wall 10 cm thick, probes 1.7 m apart);
+  a probe inside something counts for nothing, and is followed every 8 steps; none is moved out of a wall;
+  `throughWalls` leaves walls out, for less work. What it gives reflections is as rough as the probes are: a mirror shows its color, not what it would see.
+  Every probe but those inside something takes its rays every frame, on either backend, so the cost grows with the
   grid (on the GPU, a group of 64 a probe). When Vulkan draws, the GPU gathers them, from the frame's own trees or
   the hardware, and the scene's copy on the CPU is not stepped: a renderer made again (a device lost) starts them over.
   A probe that lies on a surface may see it through the ray tracing hardware (a hit at 0) where the trees do not.

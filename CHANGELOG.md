@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Phase 5.1, in part: probes inside something, and probes that follow a change sooner.** A probe more than a quarter
+  of whose rays meet backs counts for nothing where light is taken from the probes, and is followed every 8 steps;
+  what a probe keeps of what it had is less when the light it brings is far from it (`artfProbeKeep`). Both backends,
+  the same probes to 3e-6 of the brightest. At the same rays (`tracing/probesHard`): through a wall 6 cm thick, 0.0004
+  of the light before, none now; a lamp turned on settles in 42 steps where it took 47, a door opened in 6 where it took
+  30. Relocation was tried and left out (it let light through thin walls); volumes that follow the camera are not done.
+  `tracing/probesWalls` is now a hollow box of walls 10 cm thick, which lets an eighth through near its edges, before
+  and after.
+
 - **Phase 5.4: the upscaler holds thin lines and lets go of what went.** What a pixel had is held to its nearest
   sample's neighbours' mean and three quarters of their deviation, within their least and most; a pixel whose nearest
   sample is a ridge locks, and keeps what it had for 24 frames unless a ridge is seen again (the lock follows the pixel;

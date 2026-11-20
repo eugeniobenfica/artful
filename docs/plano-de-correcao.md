@@ -233,6 +233,22 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 | 5.11 | **Céu**: LUT de perspectiva aérea aplicada à cena; nuvens marchadas a um quarto da resolução e compostas contra a profundidade. | Montanhas distantes ganham a cor do ar; uma torre atravessa as nuvens. | M |
 | 5.12 | **Materiais**: texturas das extensões glTF hoje ignoradas; iridescência de Belcour e Barla; camadas no estilo OpenPBR no grafo em C; SSS separável (verificar antes a patente associada à difusão de Burley). | Os modelos de extensão do glTF-Sample-Assets coincidem com o visualizador de referência dentro do limiar. | M a G |
 
+**Estado da 5.1: em parte; o critério foi atingido com estados e histerese adaptativa.**
+- **Estado "dentro de algo":** se mais de 25% dos raios de uma probe batem em faces de trás (Majercik 2021), ela não conta na leitura (o `w` do primeiro vec4 vale 0 e multiplica o peso, nas duas leituras da GPU, na escalar e na vetorial da CPU) e só é refeita a cada 8 passos (orçamento: os raios dela não são gastos).
+- **Histerese adaptativa (`artfProbeKeep`):** a probe guarda menos do que tinha quando a luz que chega se afasta muito da que tinha.
+- **Critério (`tracing/probesHard`, 64 raios por probe como antes):**
+
+  | Medida | Antes | Agora |
+  |---|---|---|
+  | Parede de 6 cm entre dois cômodos, luz no cômodo escuro | 0,0004 do aceso | 0 (cinco casas) |
+  | Lâmpada acesa, passos até 90% | 47 | 42 |
+  | Porta aberta para céu claro, passos até 90% | 30 | 6 |
+
+  GPU e CPU concordam a até 3e-6 do mais claro.
+- **Realocação: testada e descartada.** Numa parede mais fina que o espaçamento, a probe ia para um lado e era lida pelo outro, e o cômodo escuro recebia 8% da luz.
+- **Limite que continua:** numa caixa oca de paredes de 10 cm com probes a 1,7 m, um ponto a 20 cm da parede recebe 0,126 do que há fora, igual a antes. O mapa de 8×8 direções enxerga além das quinas. A afirmação antiga de 0,1% era de um cubo maciço, cujas probes internas agora não contam; o teste foi refeito com a caixa oca.
+- **Não feito:** volumes em cascata seguindo a câmera (a caixa fixa continua) e mapa de 16×16, que exigiria refazer o shader de probes da GPU, hoje com um grupo por texel de 8×8.
+
 **Estado da 5.2: feito.**
 - **GPU:** cada quadrado de 64 x 64 é cortado em 16 fatias de profundidade, em progressão geométrica do plano near (ou da luz mais próxima) até a luz mais distante (`artfSceneLightSlices`, nos campos `slices` do quadro). Uma luz entra nas fatias que sua esfera cobre, com 1/64 de fatia de folga para o arredondamento do `log2` da GPU.
 - **Listas compactas:** cada cluster guarda início e comprimento, sem teto por lista, num buffer que cresce. O teto é de 4M posições no total; o que passar dele é contado em `ArtfFrameStats.lightsOmitted` (novo).

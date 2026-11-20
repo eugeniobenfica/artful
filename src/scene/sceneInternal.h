@@ -241,15 +241,26 @@ typedef struct ArtfLightData {
     float direction[3], spotCut; /* where it goes to; the cosine of the outside */
 } ArtfLightData;
 
-/* Light that bounced (trace.c): a grid of probes. First, of each, four vec4s: the light from all around, then of red,
- * green and blue how it changes with the normal (what a surface facing n takes, over pi, is c0 + (r . n, g . n,
- * b . n)); after all of those, of each, how far it sees, in a map of ARTF_PROBE_SIDE x ARTF_PROBE_SIDE directions
+/* Light that bounced (trace.c): a grid of probes. First, of each, four vec4s: the light from all around and whether the
+ * probe counts (its w: 0 when it is inside something, ARTF_PROBE_INSIDE), then of red, green and blue how it changes
+ * with the normal (what a surface facing n takes, over pi, is c0 + (r . n, g . n, b . n)); after all of those, of each, how far it sees, in a map of ARTF_PROBE_SIDE x ARTF_PROBE_SIDE directions
  * folded onto an octahedron around +z, as artfProbeFold: the mean and the mean of the square of each, two floats a
  * texel, by rows. (Apart, so that what every pixel reads of eight probes stays together.) A point the probe cannot see
  * is told by them (Chebyshev, as Majercik et al.'s probes do), so that light does not go through walls. */
 #define ARTF_PROBE_SIDE 8
 #define ARTF_PROBE_MAP (ARTF_PROBE_SIDE * ARTF_PROBE_SIDE * 2)
 #define ARTF_PROBE_FLOATS (16 + ARTF_PROBE_MAP) /* all of a probe's, in both places */
+/* A probe is inside something when more than a quarter of its rays meet backs (Majercik et al., 2021): it counts for
+ * nothing where light is taken from the probes, and it is followed again only every ARTF_PROBE_INSIDE_EVERY steps (each
+ * on its own step, by its number), so its rays are not spent. */
+#define ARTF_PROBE_INSIDE_EVERY 8u
+/* What a probe keeps of what it had, when what its rays bring is far from it: as much less as the change in light (of
+ * the larger, and a hundredth) is past a quarter, twice over, at most four fifths less; so a lamp turned on, or a door
+ * opened, is followed in fewer steps, and the noise of a still one is not. */
+ARTF_INLINE float artfProbeKeep(float keep, float now, float had) {
+    const float change = fabsf(now - had) / (artfMaxf(now, had) + .01f);
+    return keep * (1.f - artfClampf((change - .25f) * 2.f, 0.f, .8f));
+}
 
 /* A direction of length 1 onto the octahedron around +z: where it falls in the probe's map, from 0 to 1 each way. */
 ARTF_INLINE void artfProbeFold(const float* d, float* u, float* v) {

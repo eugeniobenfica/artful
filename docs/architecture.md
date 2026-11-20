@@ -684,9 +684,28 @@ without (0.03 to 0.06 ms).
 Each probe keeps how far it sees as well: the same rays, into an 8 x 8 map of directions on an octahedron, each
 texel the mean distance and the mean of its square over a narrow lobe (the cosine to the 32nd). A point a probe cannot
 see is told by Chebyshev's inequality on them, as Majercik et al.'s probes do, and takes next to nothing from it; a
-probe behind the surface counts less. Inside a closed box under a bright sky, a point by the wall takes 0.1% of what
-is just outside; with one mean for each of six sides it took 11%. The CPU reads the probes eight pixels at a time,
-with the same arithmetic in the same order as `artfIndirectAt`, so the bytes are the same on every processor.
+probe behind the surface counts less. The CPU reads the probes eight pixels at a time, with the same arithmetic in the
+same order as `artfIndirectAt`, so the bytes are the same on every processor.
+
+A probe inside something (a wall, a solid) sees backs: when more than a quarter of its rays meet them (Majercik et al.,
+2021), it counts for nothing where light is taken from the probes (its first vec4's w is 0, and the weight is multiplied
+by it, on both backends, in the pixels and in the probes' own step), and it is followed again only every 8 steps, each
+on a step of its own by its number, so its rays are not spent; out of the wall, it counts again. Before, such a probe
+counted, and was dark: it took light from the rooms on both sides of the wall it was in, and made the light in a closed
+room settle lower than it should, as a sink. And what a probe keeps of what it had is less when what its rays bring is
+far from it (`artfProbeKeep`: as much less as the change in light, over the larger and a hundredth, is past a quarter,
+twice over, at most four fifths less), so a change is followed sooner, and a still probe's noise is not.
+`tracing/probesHard`, at 64 rays a probe as before: two closed rooms of grey walls with a wall 6 cm thick between them
+and a lamp in one, the other's floor by the wall takes 0.0004 of the lit one's before and nothing to five places now; a
+lamp turned on is nine tenths settled in 42 steps where it took 47, a door opened onto a bright sky in 6 where it took 30.
+
+Moving a probe out of a wall (relocation) was tried and left out: in a wall thinner than the probes are apart, the
+probe went to one side of it and was read for points on the other, and the dark room took 8% of the lit one's light.
+Where walls are thin against how far apart the probes are, light still goes through near a box's edges, where an 8 x 8
+map of directions sees past the edge: inside a closed box of walls 10 cm thick under a bright sky, with probes 1.7 m
+apart, a point 20 cm from a wall takes 0.126 of what is just outside, as it did before (`tracing/probesWalls`; it had
+said 0.1%, of a solid cube, whose inside probes now count for nothing). The probes fill a box, as before: volumes in
+cascades that follow the camera are not there.
 
 The GPU makes its pixel shaders with what the scene uses: probes, their maps, the fog's grid. A branch that is never
 taken still holds registers, and fewer pixels run at once for it: with all of them, `--scene spheres` took 10% longer.

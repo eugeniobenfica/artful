@@ -643,25 +643,40 @@ void testTracedReflections(void) {
     artfFree(marched);
 }
 
-/* Light that bounced does not go through walls: inside a closed box under a bright sky, a point by the wall takes
- * next to nothing, though a probe outside is nearer to it than one inside. */
+/* Light that bounced goes through walls little: inside a closed box of walls 10 cm thick under a bright sky, with probes
+ * 1.7 m apart, a point 20 cm from a wall takes an eighth of what is just outside (0.126, before probes inside something
+ * counted for nothing as after: a probe's map of 8 x 8 directions sees past the box's edges, near them). */
 void testProbesWalls(void) {
     ArtfScene* s = artfSceneNew();
     setCamera(s, 0, 0, 10, 0, 0, 0);
     artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
     artfSceneSetAmbient(s, artfVec3(1, 1, 1), artfVec3(1, 1, 1));
-    artfSceneAddInstance(s, artfSceneAddCube(s, 4), whiteMaterial(s), NULL);
+    /* (a hollow box of grey walls 10 cm thick: inside a solid cube is no room, and its probes count for nothing; and a
+     * closed room of white walls keeps all it is given, however little leaks in) */
+    {
+        const ArtfMesh cube = artfSceneAddCube(s, 1);
+        const ArtfMaterialDesc greyDesc = {artfVec3(.6f, .6f, .6f), 0, 0, 1, artfVec3(0, 0, 0)};
+        const ArtfMaterial white = artfSceneAddMaterial(s, &greyDesc);
+        for (int axis = 0; axis < 3; ++axis)
+            for (int side = -1; side <= 1; side += 2) {
+                float at[3] = {0, 0, 0}, size[3] = {4.2f, 4.2f, 4.2f};
+                at[axis] = 2.05f * (float)side;
+                size[axis] = .1f;
+                const ArtfTransform t = artfTransformTrs(artfVec3(at[0], at[1], at[2]), artfQuatIdentity(), artfVec3(size[0], size[1], size[2]));
+                artfSceneAddInstance(s, cube, white, &t);
+            }
+    }
     const ArtfIndirectDesc probes = {{8, 8, 8}, 128, .5f, 1, {-6, -6, -6}, {6, 6, 6}};
     artfSceneSetIndirect(s, &probes);
     ArtfFrameData frame;
     artfSceneFrame(s, W, H, &frame);
-    for (int k = 0; k < 8; ++k) artfSceneIndirectStep(s, &frame, NULL);
+    for (int k = 0; k < 40; ++k) artfSceneIndirectStep(s, &frame, NULL);
     const float inside[3] = {1.8f, 0, 0}, inward[3] = {-1, 0, 0}, outside[3] = {2.3f, 0, 0}, outward[3] = {1, 0, 0};
     float in[3], out[3];
     artfIndirectAt(&s->indirect, inside, inward, in);
     artfIndirectAt(&s->indirect, outside, outward, out);
     printf("light that bounced, inside a box by its wall: %.3f of what is just outside\n", in[1] / out[1]);
-    CHECK(out[1] > .5f && in[1] < out[1] * .1f);
+    CHECK(out[1] > .5f && in[1] < out[1] * .15f);
     artfSceneFree(s);
     /* the kernels read the probes eight at a time: the same bytes as the portable ones, with walls and without */
     for (int through = 0; through < 2; ++through) {
@@ -684,6 +699,109 @@ void testProbesWalls(void) {
         artfFree(a);
         artfFree(b);
     }
+}
+
+/* Probes where it is hard for them, at the same rays a step (the CPU's, which are the reference):
+ * - two closed rooms side by side, a wall 6 cm thick between them, a lamp in one: what the floor of the other takes by
+ *   the wall, against what the lit one's takes by it (traced, nothing reaches it: the rooms are closed);
+ * - a lamp turned on in a room, and a door opened onto a bright sky: how many steps until the light that bounced is
+ *   nine tenths of where it settles. */
+static ArtfInstance slab(ArtfScene* s, ArtfMesh cube, ArtfMaterial m, float x, float y, float z, float sx, float sy, float sz) {
+    const ArtfTransform t = artfTransformTrs(artfVec3(x, y, z), artfQuatIdentity(), artfVec3(sx, sy, sz));
+    return artfSceneAddInstance(s, cube, m, &t);
+}
+/* A room 6 x 3 x 4 of slabs 10 cm thick; with a wall down its middle (divided), or a door 1 x 2 in its +x wall,
+ * closed by *door. */
+static ArtfScene* roomScene(bool divided, ArtfInstance* door) {
+    ArtfScene* s = artfSceneNew();
+    setCamera(s, 0, 1.5f, 1.8f, 0, 1, 0);
+    artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+    artfSceneSetAmbient(s, artfVec3(divided ? 0.f : 1.f, divided ? 0.f : 1.f, divided ? 0.f : 1.f), artfVec3(0, 0, 0));
+    const ArtfMesh cube = artfSceneAddCube(s, 1);
+    /* (grey: a closed room of white walls keeps all the light it is given, and never settles) */
+    const ArtfMaterialDesc greyDesc = {artfVec3(.6f, .6f, .6f), 0, 0, 1, artfVec3(0, 0, 0)};
+    const ArtfMaterial white = artfSceneAddMaterial(s, &greyDesc);
+    slab(s, cube, white, 0, -.05f, 0, 6.2f, .1f, 4.2f);
+    slab(s, cube, white, 0, 3.05f, 0, 6.2f, .1f, 4.2f);
+    slab(s, cube, white, -3.05f, 1.5f, 0, .1f, 3, 4.2f);
+    slab(s, cube, white, 0, 1.5f, -2.05f, 6.2f, 3, .1f);
+    slab(s, cube, white, 0, 1.5f, 2.05f, 6.2f, 3, .1f);
+    if (door) {
+        /* (the +x wall around a door from z -.5 to .5, y 0 to 2) */
+        slab(s, cube, white, 3.05f, 1.5f, -1.275f, .1f, 3, 1.55f);
+        slab(s, cube, white, 3.05f, 1.5f, 1.275f, .1f, 3, 1.55f);
+        slab(s, cube, white, 3.05f, 2.5f, 0, .1f, 1, 1);
+        *door = slab(s, cube, white, 3.05f, 1, 0, .1f, 2, 1);
+    } else {
+        slab(s, cube, white, 3.05f, 1.5f, 0, .1f, 3, 4.2f);
+    }
+    if (divided) slab(s, cube, white, 0, 1.5f, 0, .06f, 3, 4);
+    /* probes every .75 m: a row of them in the middle wall's plane */
+    const ArtfIndirectDesc probes = {{9, 5, 6}, 64, 0, 1, {-3, 0, -2}, {3, 3, 2}};
+    artfSceneSetIndirect(s, &probes);
+    return s;
+}
+/* What the floor takes at some places, the mean of green. */
+static float floorLight(const ArtfScene* s, float x0, float x1) {
+    float sum = 0;
+    int n = 0;
+    for (int i = 0; i < 4; ++i)
+        for (int k = 0; k < 5; ++k, ++n) {
+            const float p[3] = {x0 + (x1 - x0) * (float)i / 3.f, .001f, -1.5f + .75f * (float)k}, up[3] = {0, 1, 0};
+            float got[3];
+            artfIndirectAt(&s->indirect, p, up, got);
+            sum += got[1];
+        }
+    return sum / (float)n;
+}
+static void stepProbes(ArtfScene* s, int steps) {
+    ArtfFrameData frame;
+    artfSceneFrame(s, W, H, &frame);
+    for (int k = 0; k < steps; ++k) artfSceneIndirectStep(s, &frame, NULL);
+}
+/* After a change: the steps until the light is nine tenths of the way to where it settles (after 240). */
+static int settling(ArtfScene* s, float before) {
+    float seen[240];
+    ArtfFrameData frame;
+    artfSceneFrame(s, W, H, &frame);
+    for (int k = 0; k < 240; ++k) {
+        artfSceneIndirectStep(s, &frame, NULL);
+        seen[k] = floorLight(s, -2.5f, 2.5f);
+    }
+    const float settled = seen[239], aim = before + (settled - before) * .9f;
+    for (int k = 0; k < 240; ++k)
+        if (settled > before ? seen[k] >= aim : seen[k] <= aim) return k + 1;
+    return 240;
+}
+
+void testProbesHard(void) {
+    /* the wall */
+    ArtfScene* s = roomScene(true, NULL);
+    artfSceneAddLight(s, artfVec3(-1.5f, 2, 0), artfVec3(4, 4, 4), 8);
+    stepProbes(s, 120);
+    const float lit = floorLight(s, -.6f, -.1f), dark = floorLight(s, .1f, .6f);
+    artfSceneFree(s);
+    /* the lamp */
+    s = roomScene(false, NULL);
+    artfSceneSetAmbient(s, artfVec3(0, 0, 0), artfVec3(0, 0, 0));
+    stepProbes(s, 20);
+    const float off = floorLight(s, -2.5f, 2.5f);
+    artfSceneAddLight(s, artfVec3(0, 2.5f, 0), artfVec3(3, 3, 3), 8);
+    const int lamp = settling(s, off);
+    artfSceneFree(s);
+    /* the door */
+    ArtfInstance door;
+    s = roomScene(false, &door);
+    stepProbes(s, 60);
+    const float shut = floorLight(s, -2.5f, 2.5f);
+    artfSceneRemoveInstance(s, door);
+    const int opened = settling(s, shut);
+    artfSceneFree(s);
+    printf("probes: by a wall 6 cm thick, the dark room's floor takes %.5f of the lit one's (traced: 0); a lamp turned on settles in %d steps, a door opened in %d\n", dark / lit, lamp,
+           opened);
+    /* (before probes inside something counted for nothing and kept less of what they had when the light changed:
+     * 0.0004, 47 and 30 steps; the plan's mark, no more than twice as many steps) */
+    CHECK(dark / lit < 1e-4f && lamp <= 47 && opened <= 30);
 }
 
 /* Probes the scene keeps: the GPU's go back to the scene now and then, so that a renderer that comes after (a device

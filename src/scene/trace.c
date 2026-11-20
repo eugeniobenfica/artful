@@ -1402,6 +1402,7 @@ void artfIndirectAt(const ArtfIndirect* g, const float* p, const float* n, float
         float weight = (c & 1 ? w[0] : 1.f - w[0]) * (c & 2 ? w[1] : 1.f - w[1]) * (c & 4 ? w[2] : 1.f - w[2]);
         const size_t index = (size_t)(z * g->dims[1] + y) * g->dims[0] + x;
         const float* probe = g->probes + index * 16;
+        weight *= probe[3]; /* (none from one inside something) */
         if (g->desc.throughWalls) {
             weights += weight;
             for (int k = 0; k < 3; ++k) sum[k] += weight * artfMaxf(probe[k] + probe[4 + 4 * k] * n[0] + probe[5 + 4 * k] * n[1] + probe[6 + 4 * k] * n[2], 0);
@@ -1438,7 +1439,11 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
     ArtfIndirect* g = &s->indirect;
     const int x = (int)(index % (uint32_t)g->dims[0]), y = (int)(index / (uint32_t)g->dims[0] % (uint32_t)g->dims[1]), z = (int)(index / (uint32_t)(g->dims[0] * g->dims[1]));
     const float o[3] = {g->origin[0] + (float)x * g->spacing[0], g->origin[1] + (float)y * g->spacing[1], g->origin[2] + (float)z * g->spacing[2]};
-    const int rays = g->desc.rays > 0 ? g->desc.rays : 64;
+    const float* wasProbe = g->probes + (size_t)index * 16;
+    /* (one inside something, on the steps it is not followed: none, and what it had, as it was) */
+    const bool resting = g->frames && wasProbe[3] == 0 && (g->frames + index) % ARTF_PROBE_INSIDE_EVERY != 0;
+    const int rays = resting ? 0 : g->desc.rays > 0 ? g->desc.rays : 64;
+    int backs = 0;
     const float* env = f->sky[3] > 0 ? s->environment : NULL;
     uint32_t state = hashOf(index * 9781u + g->frames * 6271u + 1u);
     float mean[3] = {0, 0, 0}, lean[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
@@ -1496,6 +1501,7 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
             Surface m;
             surfaceAt(s, &h, o, d, 0.f, &m);
             /* (a probe inside something sees its backs: it takes nothing from them) */
+            backs += !m.front;
             if (m.front) {
                 float p[3], lifted[3];
                 const float view[3] = {-d[0], -d[1], -d[2]};
@@ -1529,19 +1535,21 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
     const float* was = g->probes + (size_t)index * 16;
     float* outMap = g->next + (size_t)artfIndirectCount(g) * 16 + (size_t)index * ARTF_PROBE_MAP;
     const float* wasMap = g->probes + (size_t)artfIndirectCount(g) * 16 + (size_t)index * ARTF_PROBE_MAP;
-    const float keep = g->frames ? (g->desc.hysteresis > 0 ? artfClampf(g->desc.hysteresis, 0, .999f) : .9f) : 0.f;
-    const float each = 1.f / (float)rays;
+    const float mapKeep = resting ? 1.f : g->frames ? (g->desc.hysteresis > 0 ? artfClampf(g->desc.hysteresis, 0, .999f) : .9f) : 0.f;
+    const float each = resting ? 0.f : 1.f / (float)rays;
+    /* (the light it had keeps less when what came is far from it: artfProbeKeep) */
+    const float keep = resting || !g->frames ? mapKeep : artfProbeKeep(mapKeep, (.2126f * mean[0] + .7152f * mean[1] + .0722f * mean[2]) * each, .2126f * was[0] + .7152f * was[1] + .0722f * was[2]);
     for (int k = 0; k < 3; ++k) {
         out[k] = was[k] * keep + mean[k] * each * (1.f - keep);
         for (int a = 0; a < 3; ++a) out[4 + 4 * k + a] = was[4 + 4 * k + a] * keep + 2.f * lean[k][a] * each * (1.f - keep);
         out[7 + 4 * k] = 0;
     }
-    out[3] = 0;
+    out[3] = resting || backs * 4 > rays ? 0.f : 1.f;
     for (int k = 0; k < TEXELS; ++k) {
         /* (a direction no ray went near: as far as a probe sees) */
         const float m = reachWeight[k] > 1e-6f ? reach[k] / reachWeight[k] : most, m2 = reachWeight[k] > 1e-6f ? reach2[k] / reachWeight[k] : most * most;
-        outMap[k * 2] = g->frames ? wasMap[k * 2] * keep + m * (1.f - keep) : m;
-        outMap[k * 2 + 1] = g->frames ? wasMap[k * 2 + 1] * keep + m2 * (1.f - keep) : m2;
+        outMap[k * 2] = g->frames ? wasMap[k * 2] * mapKeep + m * (1.f - mapKeep) : m;
+        outMap[k * 2 + 1] = g->frames ? wasMap[k * 2 + 1] * mapKeep + m2 * (1.f - mapKeep) : m2;
     }
 }
 

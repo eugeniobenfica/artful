@@ -870,6 +870,7 @@ static Lanes3 indirectLanes(const ArtfIndirect* g, Lanes3 p, Lanes3 n, const Lan
         const V8I index = v8iAdd(v8iMul(v8iAdd(v8iMul(z, v8iSet(g->dims[1])), y), v8iSet(g->dims[0])), x);
         const V8I base = v8iMul(index, v8iSet(16));
 #define PROBE(j) v8iAsF(v8iGather(bits, v8iAdd(base, v8iSet(j))))
+        weight = v8fMul(weight, PROBE(3)); /* (none from one inside something) */
         if (!g->desc.throughWalls) {
             const V8F there[3] = {v8fAdd(v8fSet(g->origin[0]), v8fMul(v8iToF(x), v8fSet(g->spacing[0]))), v8fAdd(v8fSet(g->origin[1]), v8fMul(v8iToF(y), v8fSet(g->spacing[1]))),
                                   v8fAdd(v8fSet(g->origin[2]), v8fMul(v8iToF(z), v8fSet(g->spacing[2])))};
