@@ -24,6 +24,12 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }}
           cmake --build build
+      # (lavapipe has fallen over in post/floats, after its effects: where, by the debugger)
+      - name: post/floats under gdb
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y gdb
+          gdb -batch -ex run -ex bt -ex "info sharedlibrary" --args build/artful-tests --exact post/floats 2>&1 | tail -80
       - name: Tests, in every mode
         env:
           VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation

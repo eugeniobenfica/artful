@@ -297,6 +297,9 @@ void testSkinLod(void) {
     const ArtfMeshData* source = &s->meshes.items[artfMeshIndexOf(s, tube)];
     CHECK(source->skinLodCount >= 2);
     const float error = source->skinLodErrors[0];
+    /* (each level as this processor made it: arm64's have differed from x86-64's) */
+    for (uint32_t k = 0; k < source->skinLodCount; ++k)
+        printf("a level of what bends: %u triangles, error %.9g\n", s->meshes.items[source->skinLods[k]].indexCount / 3, (double)source->skinLodErrors[k]);
     const ArtfInstance i = addAt(s, tube, whiteMaterial(s), 0, -2, 0, 1);
     const uint32_t home = s->instances.items[0].mesh;
     setCamera(s, 0, 0, 3, 0, 0, 0);
