@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Ray cones, and mipmaps that are means of light** (the plan's phase 2.3, last part). A path carries a cone
+  (Akenine-Möller et al., 2021) and reads each texture at the level where a texel is about as wide as it, between two;
+  the GPU asks a texture its size and levels (`OpImageQuerySizeLod`), and reads the same as the CPU. One sample of a far
+  floor of fine stripes is .054 from 256 where it was .25 (`tracing/rayCones`); a sample of `spheres` costs 15% more on
+  the GPU, nothing on the CPU. Doing so showed that mipmaps were means of bytes: black and white stripes came to a fifth
+  of white's light, not half, as the rasterizer has always drawn far textures. Now **what uses a texture says what it
+  is** (`artfSceneTextureRoles`, before each frame): one only colors use (a material's color or sheen, a material of the
+  program's own, a decal) has mipmaps that are means of light, made again from its largest when that changes; one read
+  as data (normals, roughness, occlusion, a coat's maps) keeps means of bytes, also when a color uses it too, which is
+  said once. KTX2 files' and streamed textures' mipmaps are as given. The glTF loader reads the file's materials and
+  prepares each image's mipmaps as it will be used, on its workers. The traced floor now comes to .465 of the stripes'
+  .5 (it was .31 without cones, reading the finest level between texels as bytes). Tests `materials/textureRoles` and
+  `tracing/rayCones`; the pictures' hashes made again after FLIP against the commit before (.003 at most where
+  textures are made smaller, nothing elsewhere); Metal's shaders made again. A texture is still read between two texels
+  as bytes, on both backends.
+
 - **Highlights bounce by GGX's visible normals, and the aimed ray brings them too** (the plan's phase 2.3): a
   highlight's bounce is around a visible normal (Dupuy and Benyoub's spherical cap), keeping m.mirror less what
   microfacets hide (G2 / G1), in place of the mirror strayed by a point in a ball; the ray aimed at all around brings

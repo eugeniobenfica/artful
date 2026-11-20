@@ -582,7 +582,30 @@ void artfTexelAtLevel(const ArtfTextureData* t, int level, float u, float v, flo
     }
 }
 
-static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, const float* d, Surface* out) {
+/* A texel of t by the cone's width (ray cones: Akenine-Möller et al., "Improved Shader and Texture Level of Detail Using
+ * Ray Cones", JCGT 2021): the level where a texel is about as wide as the cone, from its first held, between two.
+ * lodBase: log2 of the cone's width over a texel of a texture of one texel here (the surface's own; each texture adds
+ * half the log2 of its count). As the tracing shader's traceTexture, which asks the GPU for a texture's size. */
+static void texelCone(const ArtfTextureData* t, float lodBase, float u, float v, float* out) {
+    const int top = artfMini(t->residentMip, t->mipCount - 1);
+    /* (half the log2 of its texels, by their sides' highest bits: as the shader's FindUMsb) */
+    int bits = 0;
+    for (uint32_t w = (uint32_t)artfMaxi(t->width >> top, 1); w > 1; w >>= 1) ++bits;
+    for (uint32_t h = (uint32_t)artfMaxi(t->height >> top, 1); h > 1; h >>= 1) ++bits;
+    const float most = (float)(t->mipCount - 1 - top);
+    const float at = artfClampf(lodBase + .5f * (float)bits, 0.f, most);
+    const int first = (int)at;
+    const float share = at - (float)first;
+    artfTexelAtLevel(t, top + first, u, v, out);
+    if (share > 0) {
+        float next[4];
+        artfTexelAtLevel(t, top + first + 1, u, v, next);
+        for (int c = 0; c < 4; ++c) out[c] += (next[c] - out[c]) * share;
+    }
+}
+
+/* cone: how wide the ray's cone is where it met the surface; 0, a ray (the finest level). */
+static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, const float* d, float cone, Surface* out) {
     const ArtfTrace* t = &s->trace;
     const ArtfTraceInstance* inst = &t->instances.items[h->instance];
     const ArtfTraceTriangle* tri = &t->triangles.items[h->triangle];
@@ -593,12 +616,30 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
 
     const float u = a->u * wa + b->u * wb + c->u * wc, v = a->v * wa + b->v * wb + c->v * wc;
     const ArtfTextureData* textures = s->textures.items;
+    const float* k = inst->toObject;
+    /* how many of a texture's texels the cone covers here: the triangle's share of a texture over its share of the
+     * world (twice each: the world's by the instance, through the inverse's transpose and its determinant), and the
+     * cone over how squarely it meets the triangle */
+    float lodBase = -100.f;
+    if (cone > 0) {
+        float e1[3], e2[3];
+        for (int i = 0; i < 3; ++i) {
+            e1[i] = b->p[i] - a->p[i];
+            e2[i] = c->p[i] - a->p[i];
+        }
+        const float cr[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+        const float w[3] = {k[0] * cr[0] + k[4] * cr[1] + k[8] * cr[2], k[1] * cr[0] + k[5] * cr[1] + k[9] * cr[2], k[2] * cr[0] + k[6] * cr[1] + k[10] * cr[2]};
+        const float det = k[0] * (k[5] * k[10] - k[6] * k[9]) - k[1] * (k[4] * k[10] - k[6] * k[8]) + k[2] * (k[4] * k[9] - k[5] * k[8]);
+        const float wl = sqrtf(dot3(w, w)), world = wl / artfMaxf(fabsf(det), 1e-30f);
+        const float area = fabsf((b->u - a->u) * (c->v - a->v) - (c->u - a->u) * (b->v - a->v));
+        const float facing = artfMaxf(fabsf(dot3(w, d)) / artfMaxf(wl, 1e-30f), 1e-3f);
+        if (area > 0 && world > 0) lodBase = .5f * artfLog2Fast(area / world) + artfLog2Fast(cone / facing);
+    }
     float surface[4] = {1, 1, 1, 1}, occlusion[4] = {1, 1, 1, 1};
-    if (m->surfaceMap) artfTexelAt(&textures[m->surfaceMap], u, v, surface);
-    if (m->occlusionMap) artfTexelAt(&textures[m->occlusionMap], u, v, occlusion);
+    if (m->surfaceMap) texelCone(&textures[m->surfaceMap], lodBase, u, v, surface);
+    if (m->occlusionMap) texelCone(&textures[m->occlusionMap], lodBase, u, v, occlusion);
 
     /* normals go by the inverse's transpose; the same with the color's channels and alpha, by weight */
-    const float* k = inst->toObject;
     float on[3] = {a->n[0] * wa + b->n[0] * wb + c->n[0] * wc, a->n[1] * wa + b->n[1] * wb + c->n[1] * wc, a->n[2] * wa + b->n[2] * wb + c->n[2] * wc};
     const ArtfMaterialMore* more = &s->materialsMore.items[inst->material];
     const float plain[3] = {on[0], on[1], on[2]};
@@ -618,7 +659,7 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     }
     if (m->normalMap) {
         float bumps[4];
-        artfTexelAt(&textures[m->normalMap], u, v, bumps);
+        texelCone(&textures[m->normalMap], lodBase, u, v, bumps);
         const float x = (bumps[2] * 2.f - 1.f) * m->normalScale, y = (1.f - bumps[1] * 2.f) * m->normalScale, z = bumps[0] * 2.f - 1.f;
         for (int i = 0; i < 3; ++i) on[i] = tangent[i] * ts * x + bitangent[i] * bs * y + on[i] * z;
     }
@@ -637,7 +678,7 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         color[ch] = x * wa + y * wb + z * wc;
     }
     float texel[4] = {1, 1, 1, 1};
-    if (m->texture) artfTexelAt(&textures[m->texture], u, v, texel);
+    if (m->texture) texelCone(&textures[m->texture], lodBase, u, v, texel);
     float albedo[3];
     for (int i = 0; i < 3; ++i) albedo[i] = m->baseColor[i] * artfSrgbDecode(texel[2 - i]) * color[i];
     float metal = m->metallic * surface[0];
@@ -728,16 +769,16 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         float coat = more->coat, coatRough = more->coatRoughness, sheenRough = more->sheenRoughness, sheen[3] = {more->sheen[0], more->sheen[1], more->sheen[2]};
         if (flags & ARTF_MORE_MAPS) {
             float texel[4];
-            if (more->coatMap) { artfTexelAt(&textures[more->coatMap], u, v, texel); coat *= texel[2]; }
-            if (more->coatRoughnessMap) { artfTexelAt(&textures[more->coatRoughnessMap], u, v, texel); coatRough = artfMaxf(coatRough * texel[1], .045f); }
+            if (more->coatMap) { texelCone(&textures[more->coatMap], lodBase, u, v, texel); coat *= texel[2]; }
+            if (more->coatRoughnessMap) { texelCone(&textures[more->coatRoughnessMap], lodBase, u, v, texel); coatRough = artfMaxf(coatRough * texel[1], .045f); }
             if (more->sheenMap) {
-                artfTexelAt(&textures[more->sheenMap], u, v, texel);
+                texelCone(&textures[more->sheenMap], lodBase, u, v, texel);
                 for (int i = 0; i < 3; ++i) sheen[i] *= artfSrgbDecode(texel[2 - i]);
             }
-            if (more->sheenRoughnessMap) { artfTexelAt(&textures[more->sheenRoughnessMap], u, v, texel); sheenRough = artfMaxf(sheenRough * texel[3], .07f); }
+            if (more->sheenRoughnessMap) { texelCone(&textures[more->sheenRoughnessMap], lodBase, u, v, texel); sheenRough = artfMaxf(sheenRough * texel[3], .07f); }
             if (more->coatNormalMap) {
                 /* (bent from the surface as it is, not as its own normal map bends it) */
-                artfTexelAt(&textures[more->coatNormalMap], u, v, texel);
+                texelCone(&textures[more->coatNormalMap], lodBase, u, v, texel);
                 const float x = (texel[2] * 2.f - 1.f) * more->coatNormalScale, yy = (1.f - texel[1] * 2.f) * more->coatNormalScale, z = texel[0] * 2.f - 1.f;
                 float co[3];
                 for (int i = 0; i < 3; ++i) co[i] = tangent[i] * ts * x + bitangent[i] * bs * yy + plain[i] * z;
@@ -770,6 +811,7 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
 /* ---- a path ---- */
 
 bool artfTraceAim = true;
+bool artfTraceCones = true;
 
 static inline uint32_t hashOf(uint32_t x) {
     x = (x ^ x >> 16) * 0x7FEB352Du;
@@ -858,7 +900,7 @@ static float lightThrough(const ArtfScene* s, const float* from, const float* to
         Hit h;
         if (!closest(&s->trace, o, to, limit, true, &h)) return through;
         Surface m;
-        surfaceAt(s, &h, o, to, &m);
+        surfaceAt(s, &h, o, to, 0.f, &m);
         through *= 1.f - artfClampf(m.alpha, 0, 1);
         if (through < .01f) return 0;
         const float step = h.t + reachOf(o);
@@ -1015,6 +1057,10 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
     normalize3(d);
     bool covered = false;
     uint32_t bounces = 0;
+    /* the ray's cone (texelCone): as wide as a pixel at the eye's distance, and widening by a pixel's angle; an
+     * orthographic view's, a pixel wide all along. A bounce widens it: by its lobe's width, or wholly when diffuse. */
+    const float pixelSize = 2.f * sqrtf(c->up[0] * c->up[0] + c->up[1] * c->up[1] + c->up[2] * c->up[2]) / (float)c->height;
+    float coneWidth = !artfTraceCones ? 0.f : c->eye[3] > 0 ? pixelSize : 0.f, coneSpread = !artfTraceCones ? 0.f : c->eye[3] > 0 ? 0.f : pixelSize;
     /* Paths aim at the picture of all around as well as bouncing into it (artfEnvAim): each way's light is weighed by
      * how likely each way was to find it (MIS, the power heuristic), lobe by lobe: what a surface gives back diffusely
      * against its diffuse bounce, its highlight against its highlight's. bounceLikely: how likely the last bounce's
@@ -1041,7 +1087,8 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             break;
         }
         Surface m;
-        surfaceAt(s, &h, o, d, &m);
+        coneWidth += coneSpread * h.t;
+        surfaceAt(s, &h, o, d, coneWidth, &m);
         float p[3];
         for (int k = 0; k < 3; ++k) p[k] = o[k] + d[k] * h.t;
         const float reach = reachOf(p);
@@ -1136,6 +1183,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                 path[k] *= m.mirror[k] * kept;
                 d[k] = glossy[k];
             }
+            coneSpread += 2.f * alpha;
         } else {
             if (bounces >= c->bounces) break;
             const float most = artfMaxf(m.mirror[0], artfMaxf(m.mirror[1], m.mirror[2]));
@@ -1175,6 +1223,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                     path[k] *= m.mirror[k] * kept / chance;
                 }
                 bounceLikely = likelyShine;
+                coneSpread += 2.f * alpha;
             } else {
                 /* a point on a sphere over the surface: as many rays as the cosine says, exactly */
                 const float keep = m.open * (1.f - most) / (1.f - chance);
@@ -1186,6 +1235,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                 }
                 normalize3(d);
                 bounceLikely = (1.f - chance) * artfMaxf(dot3(d, m.normal), 0.f) * (1.f / 3.14159265f);
+                coneSpread += 1.f;
             }
         }
         normalize3(d);
@@ -1278,7 +1328,7 @@ bool artfTracedReflection(const ArtfScene* s, const ArtfFrameData* f, const floa
         Hit h;
         if (!closest(&s->trace, o, d, 3e37f, false, &h)) return false;
         Surface m;
-        surfaceAt(s, &h, o, d, &m);
+        surfaceAt(s, &h, o, d, 0.f, &m);
         float q[3];
         for (int k = 0; k < 3; ++k) q[k] = o[k] + d[k] * h.t;
         if (m.alpha < .5f) {
@@ -1440,7 +1490,7 @@ static void probeJob(void* user, uint32_t index, uint32_t worker) {
             }
         } else {
             Surface m;
-            surfaceAt(s, &h, o, d, &m);
+            surfaceAt(s, &h, o, d, 0.f, &m);
             /* (a probe inside something sees its backs: it takes nothing from them) */
             if (m.front) {
                 float p[3], lifted[3];
@@ -1523,7 +1573,7 @@ static bool pickAlong(ArtfScene* s, const float* origin, const float* d, float l
         bool there = handle != 0;
         if (there) {
             Surface m;
-            surfaceAt(s, &h, o, d, &m);
+            surfaceAt(s, &h, o, d, 0.f, &m);
             there = m.alpha >= .5f;
         }
         if (there) {

@@ -1096,3 +1096,65 @@ void testAimUnbiased(void) {
     CHECK(noise[1] < noise[0]);
     artfSceneFree(s);
 }
+
+/* Ray cones: a texture read as wide as the ray's cone where it lands, as the rasterizer reads its mipmaps. A floor of
+ * fine stripes far off is grey where the cone covers many: one sample a pixel is then near what 256 make, where without
+ * cones each sample hits a stripe or the gap between and the pixel is noise. And its light is the stripes' own, half of
+ * white, as their mipmaps are means of light (artfSceneTextureRoles: only a color uses them); without cones the
+ * finest level, read between texels as bytes, is darker. The GPU, which asks the texture its size, reads the same. */
+void testRayCones(void) {
+    static uint32_t stripes[64 * 64];
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x) stripes[y * 64 + x] = (x & 1) ? 0xFFFFFFFFu : 0xFF000000u;
+    ArtfScene* s = plainScene();
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.texture = artfSceneAddTexture(s, stripes, 64, 64, 0);
+    d.specular = 0;
+    const ArtfTransform t = artfTransformAt(0, -1, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 60, 30), artfSceneAddMaterial(s, &d), &t);
+    setCamera(s, 0, .5f, 8, 0, -1, -20);
+    const ArtfTraceDesc rays = {ARTF_TRACE_RAYS, 1, 256, 0, false};
+    artfSceneSetTrace(s, &rays);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    double noise[2], mean[2];
+    uint32_t* first = artfMalloc((size_t)W * H * 4);
+    uint32_t* settled = artfMalloc((size_t)W * H * 4);
+    for (int cones = 0; cones < 2; ++cones) {
+        artfTraceCones = cones != 0;
+        ArtfRenderer* r = artfRendererNew(&o);
+        CHECK(artfRendererDraw(r, s));
+        CHECK(artfRendererReadPixels(r, first));
+        drawSamples(r, s, 255, settled);
+        double apart = 0, sum = 0;
+        int counted = 0;
+        for (int i = W * H / 2; i < W * H; ++i) {
+            const double a = artfSrgbDecode((float)CHANNEL(first[i], 8) / 255.f), b = artfSrgbDecode((float)CHANNEL(settled[i], 8) / 255.f);
+            apart += (a - b) * (a - b);
+            sum += b;
+            ++counted;
+        }
+        noise[cones] = sqrt(apart / counted);
+        mean[cones] = sum / counted;
+        artfRendererFree(r);
+    }
+    artfTraceCones = true;
+    printf("ray cones: one sample is %.4f from 256 with them, %.4f without; the floor's light %.4f and %.4f\n", noise[1], noise[0], mean[1], mean[0]);
+    CHECK(noise[1] < noise[0] * .5);
+    CHECK(fabs(mean[1] - .5) < .05 && fabs(mean[1] - .5) < fabs(mean[0] - .5));
+    o.backend = ARTF_BACKEND_VULKAN;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (gpu) {
+        drawSamples(gpu, s, 64, first);
+        o.backend = ARTF_BACKEND_SOFTWARE;
+        ArtfRenderer* cpu = artfRendererNew(&o);
+        drawSamples(cpu, s, 64, settled);
+        const double far = differentShare(first, settled, 24);
+        printf("ray cones, the GPU against the CPU: %.2f%% of pixels apart\n", far * 100);
+        CHECK(far < .01);
+        artfRendererFree(cpu);
+        artfRendererFree(gpu);
+    }
+    artfFree(first);
+    artfFree(settled);
+    artfSceneFree(s);
+}

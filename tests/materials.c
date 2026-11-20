@@ -750,3 +750,42 @@ void testMoreMaterials(void) {
     artfFree(a);
     artfFree(b);
 }
+
+/* What a texture is, by what uses it (artfSceneTextureRoles): one only colors use has mipmaps that are means of light,
+ * so that black and white stripes come to the grey of half their light; one data use stays means of bytes, as normals and
+ * roughness must; one used both ways is data, and said so once; and what changes its use makes its mipmaps again. */
+void testTextureRoles(void) {
+    static uint32_t stripes[4 * 4];
+    for (int i = 0; i < 16; ++i) stripes[i] = (i & 1) ? 0xFFFFFFFFu : 0xFF000000u;
+    ArtfScene* s = plainScene();
+    const ArtfTexture color = artfSceneAddTexture(s, stripes, 4, 4, 0), data = artfSceneAddTexture(s, stripes, 4, 4, 0);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.texture = color;
+    d.normalMap = data;
+    const ArtfMaterial m = artfSceneAddMaterial(s, &d);
+    artfSceneTextureRoles(s);
+    const ArtfTextureData* c = &s->textures.items[color];
+    const ArtfTextureData* a = &s->textures.items[data];
+    const uint32_t greyOfLight = (uint32_t)shownByte(.5), greyOfBytes = 128;
+    CHECK(c->light && (c->pixels[c->offsets[1]] & 255) == greyOfLight);
+    CHECK(!a->light && (a->pixels[a->offsets[1]] & 255) == greyOfBytes);
+    /* both ways: data's */
+    logged = 0;
+    artfSetLog(countLog, &logged);
+    ArtfMaterialDesc both = artfMaterialDefaults();
+    both.surfaceMap = color;
+    const ArtfMaterial second = artfSceneAddMaterial(s, &both);
+    artfSceneTextureRoles(s);
+    artfSceneTextureRoles(s);
+    CHECK(!s->textures.items[color].light && (s->textures.items[color].pixels[s->textures.items[color].offsets[1]] & 255) == greyOfBytes);
+    CHECK(logged == 1);
+    artfSetLog(NULL, NULL);
+    /* the data use goes: a color again */
+    both.surfaceMap = 0;
+    artfMaterialSet(s, second, &both);
+    const uint32_t generation = s->textures.items[color].generation;
+    artfSceneTextureRoles(s);
+    CHECK(s->textures.items[color].light && s->textures.items[color].generation != generation);
+    (void)m;
+    artfSceneFree(s);
+}

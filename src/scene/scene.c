@@ -70,6 +70,7 @@ void artfSceneFree(ArtfScene* s) {
     artfVecFree(&s->handleGenerations);
     artfVecFree(&s->deforming);
     artfVecFree(&s->freeTextures);
+    artfVecFree(&s->textureRoles);
     for (size_t i = 0; i < s->graphs.len; ++i) artfFree(s->graphs.items[i].nodes);
     artfVecFree(&s->graphs);
     if (s->modelsFree) s->modelsFree(s->models);
@@ -386,6 +387,36 @@ static uint32_t average(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
     return alpha << 24 | rb | g << 8;
 }
 
+/* The same, as light: each channel made light (sRGB), the mean taken, and made a byte again; alpha as a byte. */
+static uint32_t averageLight(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    uint32_t out = ((a >> 24) + (b >> 24) + (c >> 24) + (d >> 24) + 2) >> 2 << 24;
+    for (int k = 0; k < 24; k += 8) {
+        const float light = (artfSrgbDecode((float)(a >> k & 255) * (1.f / 255.f)) + artfSrgbDecode((float)(b >> k & 255) * (1.f / 255.f)) +
+                             artfSrgbDecode((float)(c >> k & 255) * (1.f / 255.f)) + artfSrgbDecode((float)(d >> k & 255) * (1.f / 255.f))) * .25f;
+        out |= (uint32_t)(artfSrgbEncode(light) * 255.f + .5f) << k;
+    }
+    return out;
+}
+
+/* Each mipmap from the one above it, by means of light or of bytes. */
+static void buildMips(ArtfTextureData* t, bool light) {
+    int w = t->width, h = t->height;
+    for (int level = 1; level < t->mipCount; ++level) {
+        const uint32_t* from = t->pixels + t->offsets[level - 1];
+        uint32_t* to = t->pixels + t->offsets[level];
+        const int nw = artfMaxi(w / 2, 1), nh = artfMaxi(h / 2, 1);
+        for (int y = 0; y < nh; ++y)
+            for (int x = 0; x < nw; ++x) {
+                const int x0 = artfMini(x * 2, w - 1), x1 = artfMini(x * 2 + 1, w - 1), y0 = artfMini(y * 2, h - 1), y1 = artfMini(y * 2 + 1, h - 1);
+                const uint32_t p00 = from[(size_t)y0 * w + x0], p10 = from[(size_t)y0 * w + x1], p01 = from[(size_t)y1 * w + x0], p11 = from[(size_t)y1 * w + x1];
+                to[(size_t)y * nw + x] = light ? averageLight(p00, p10, p01, p11) : average(p00, p10, p01, p11);
+            }
+        w = nw;
+        h = nh;
+    }
+    t->light = light;
+}
+
 struct ArtfPreparedTexture { ArtfTextureData texture; };
 
 void artfPreparedTextureFree(ArtfPreparedTexture* p) {
@@ -411,7 +442,9 @@ ArtfTexture artfSceneStoreTexture(ArtfScene* s, const ArtfTextureData* t) {
     return (ArtfTexture)(s->textures.len - 1);
 }
 
-ArtfPreparedTexture* artfPrepareTexture(const uint32_t* pixels, int width, int height, int stride) {
+ArtfPreparedTexture* artfPrepareTexture(const uint32_t* pixels, int width, int height, int stride) { return artfPrepareTextureAs(pixels, width, height, stride, false); }
+
+ArtfPreparedTexture* artfPrepareTextureAs(const uint32_t* pixels, int width, int height, int stride, bool light) {
     if (!pixels || width <= 0 || height <= 0) return NULL;
     if (!stride) stride = width;
     ArtfTextureData t;
@@ -429,22 +462,55 @@ ArtfPreparedTexture* artfPrepareTexture(const uint32_t* pixels, int width, int h
     t.pixels = artfMalloc(total * 4);
     for (int y = 0; y < height; ++y)
         for (int x = 0; x < width; ++x) t.pixels[(size_t)y * width + x] = pixels[(size_t)y * stride + x];
-    int w = width, h = height;
-    for (int level = 1; level < t.mipCount; ++level) {
-        const uint32_t* from = t.pixels + t.offsets[level - 1];
-        uint32_t* to = t.pixels + t.offsets[level];
-        int nw = artfMaxi(w / 2, 1), nh = artfMaxi(h / 2, 1);
-        for (int y = 0; y < nh; ++y)
-            for (int x = 0; x < nw; ++x) {
-                int x0 = artfMini(x * 2, w - 1), x1 = artfMini(x * 2 + 1, w - 1), y0 = artfMini(y * 2, h - 1), y1 = artfMini(y * 2 + 1, h - 1);
-                to[(size_t)y * nw + x] = average(from[(size_t)y0 * w + x0], from[(size_t)y0 * w + x1], from[(size_t)y1 * w + x0], from[(size_t)y1 * w + x1]);
-            }
-        w = nw;
-        h = nh;
-    }
+    buildMips(&t, light);
     ArtfPreparedTexture* p = ARTF_NEW(ArtfPreparedTexture);
     p->texture = t;
     return p;
+}
+
+enum { ROLE_COLOR = 1, ROLE_DATA = 2 };
+
+static void markRole(uint8_t* roles, size_t count, uint32_t texture, uint8_t role) {
+    if (texture && texture < count) roles[texture] |= role;
+}
+
+void artfSceneTextureRoles(ArtfScene* s) {
+    const size_t count = s->textures.len;
+    artfVecReserve(&s->textureRoles, count + 1);
+    uint8_t* roles = s->textureRoles.items;
+    memset(roles, 0, count + 1);
+    for (size_t i = 0; i < s->materials.len; ++i) {
+        const ArtfMaterialData* m = &s->materials.items[i];
+        const ArtfMaterialMore* more = &s->materialsMore.items[i];
+        markRole(roles, count, m->texture, ROLE_COLOR);
+        markRole(roles, count, more->sheenMap, ROLE_COLOR);
+        markRole(roles, count, m->normalMap, ROLE_DATA);
+        markRole(roles, count, m->surfaceMap, ROLE_DATA);
+        markRole(roles, count, m->occlusionMap, ROLE_DATA);
+        markRole(roles, count, more->coatMap, ROLE_DATA);
+        markRole(roles, count, more->coatRoughnessMap, ROLE_DATA);
+        markRole(roles, count, more->coatNormalMap, ROLE_DATA);
+        markRole(roles, count, more->sheenRoughnessMap, ROLE_DATA);
+    }
+    /* (a material of the program's own reads its textures as colors: graph.c and the shaders make them light) */
+    for (size_t g = 0; g < s->graphs.len; ++g)
+        for (uint32_t i = 0; i < s->graphs.items[g].count; ++i)
+            if (s->graphs.items[g].nodes[i].op == ARTF_OP_TEXTURE) markRole(roles, count, s->graphs.items[g].nodes[i].b, ROLE_COLOR);
+    for (int i = 0; i < ARTF_MAX_DECALS; ++i)
+        if (s->decalOn[i]) markRole(roles, count, s->decals[i].texture, ROLE_COLOR);
+    for (size_t i = 1; i < count; ++i) {
+        ArtfTextureData* t = &s->textures.items[i];
+        if (t->removed || !t->pixels || t->read || t->format || roles[i] == 0) continue;
+        if (roles[i] == (ROLE_COLOR | ROLE_DATA) && !t->roleSaid) {
+            t->roleSaid = true;
+            artfLog("artful: texture %u is used as a color and as data: its mipmaps are made as data's", (unsigned)i);
+        }
+        const bool light = roles[i] == ROLE_COLOR;
+        if (light == t->light) continue;
+        buildMips(t, light);
+        ++t->generation; /* (what a GPU holds of it goes up again) */
+        ++s->textureVersion;
+    }
 }
 
 ArtfTexture artfSceneAddPreparedTexture(ArtfScene* s, ArtfPreparedTexture* p) {

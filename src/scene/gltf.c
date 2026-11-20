@@ -1530,7 +1530,42 @@ typedef struct PrepareWork {
     const uint8_t** imageData;
     uint8_t** imageOwned;
     size_t* imageSize;
+    uint8_t* imageRoles; /* 1: a color uses it; 2: data do (artfSceneTextureRoles' rule, read from the materials) */
 } PrepareWork;
+
+/* The image a texture info names, as textureOf finds it; -1: none. */
+static int64_t imageOfInfo(Loader* l, const Json* info) {
+    if (!info) return -1;
+    const Json* texture = element(l, l->textures, (uint32_t)indexOf(l, info, "index"));
+    int64_t image = indexOf(l, texture, "source");
+    if (image < 0) image = indexOf(l, member(l, member(l, texture, "extensions"), "KHR_texture_basisu"), "source");
+    return image >= 0 && image < l->imageCount ? image : -1;
+}
+
+/* What each image is to the materials, so that its mipmaps are made as they will be wanted, on the worker that makes
+ * them (the scene would make them again, on the drawing thread, if they were not). */
+static void imageRoles(Loader* l, uint8_t* roles) {
+    const Json* materials = member(l, l->root, "materials");
+    const uint32_t count = materials && materials->kind == J_ARRAY ? materials->count : 0;
+    for (const Json* m = count ? nodeAt(l, materials->first) : NULL; m; m = nodeAt(l, m->next)) {
+        const Json* pbr = member(l, m, "pbrMetallicRoughness");
+        const Json* extensions = member(l, m, "extensions");
+        const Json* coat = member(l, extensions, "KHR_materials_clearcoat");
+        const Json* sheen = member(l, extensions, "KHR_materials_sheen");
+        const Json* colors[2] = {member(l, pbr, "baseColorTexture"), member(l, sheen, "sheenColorTexture")};
+        const Json* data[7] = {member(l, pbr, "metallicRoughnessTexture"), member(l, m, "normalTexture"), member(l, m, "occlusionTexture"),
+                               member(l, coat, "clearcoatTexture"), member(l, coat, "clearcoatRoughnessTexture"), member(l, coat, "clearcoatNormalTexture"),
+                               member(l, sheen, "sheenRoughnessTexture")};
+        for (int k = 0; k < 2; ++k) {
+            const int64_t image = imageOfInfo(l, colors[k]);
+            if (image >= 0) roles[image] |= 1;
+        }
+        for (int k = 0; k < 7; ++k) {
+            const int64_t image = imageOfInfo(l, data[k]);
+            if (image >= 0) roles[image] |= 2;
+        }
+    }
+}
 
 static void prepareOne(void* user, uint32_t index, uint32_t worker) {
     (void)worker;
@@ -1542,7 +1577,7 @@ static void prepareOne(void* user, uint32_t index, uint32_t worker) {
         if (data && !(size > 12 && !memcmp((const char*)data + 1, "KTX 20", 6))) {
             int width = 0, height = 0;
             uint32_t* pixels = artfImageDecode(data, size, &width, &height);
-            if (pixels) l->preparedImages[index] = artfPrepareTexture(pixels, width, height, 0);
+            if (pixels) l->preparedImages[index] = artfPrepareTextureAs(pixels, width, height, 0, w->imageRoles[index] == 1);
             artfFree(pixels);
         }
         return;
@@ -1564,7 +1599,8 @@ static void prepareAll(Loader* l) {
     l->pendingTriangles = artfCalloc((size_t)l->primitiveTotal + 1, sizeof *l->pendingTriangles);
     l->pendingVertexCount = artfCalloc((size_t)l->primitiveTotal + 1, 4);
     l->pendingIndexCount = artfCalloc((size_t)l->primitiveTotal + 1, 4);
-    PrepareWork w = {l, artfCalloc(l->imageCount + 1, sizeof(uint8_t*)), artfCalloc(l->imageCount + 1, sizeof(uint8_t*)), artfCalloc(l->imageCount + 1, sizeof(size_t))};
+    PrepareWork w = {l, artfCalloc(l->imageCount + 1, sizeof(uint8_t*)), artfCalloc(l->imageCount + 1, sizeof(uint8_t*)), artfCalloc(l->imageCount + 1, sizeof(size_t)), artfCalloc(l->imageCount + 1, 1)};
+    imageRoles(l, w.imageRoles);
     for (uint32_t i = 0; i < l->imageCount; ++i) w.imageData[i] = imageBytes(l, i, &w.imageOwned[i], &w.imageSize[i]);
     const uint32_t nodes = l->nodes && l->nodes->kind == J_ARRAY ? l->nodes->count : 0;
     for (const Json* n = nodes ? nodeAt(l, l->nodes->first) : NULL; n; n = nodeAt(l, n->next)) {
@@ -1588,6 +1624,7 @@ static void prepareAll(Loader* l) {
     artfFree(w.imageData);
     artfFree(w.imageOwned);
     artfFree(w.imageSize);
+    artfFree(w.imageRoles);
     artfFree(l->pendingVertices);
     artfFree(l->pendingTriangles);
     artfFree(l->pendingVertexCount);

@@ -248,6 +248,25 @@ diffusely under light the same from everywhere shows its albedo times that light
 both backends (`tracing/environmentAimed`). A sun so bright that one path's light passes 64 (`LIGHT_LIMIT`) was cut
 there and lost before; aimed at, it no longer is, and such a scene is brighter now, as it should be.
 
+**Ray cones.** A path carries a cone (Akenine-Möller et al., 2021): as wide as a pixel at the eye's distance and
+widening by a pixel's angle (an orthographic view's a pixel wide all along), widened again at each bounce, by twice its
+lobe's alpha or, diffusely, by a radian. Where it meets a surface, the texture is read at the level where a texel is
+about as wide as the cone: half the log2 of the triangle's share of the texture over its share of the world, plus the
+log2 of the cone's width over how squarely it meets the triangle, plus half the log2 of the texture's texels; between
+two levels. The GPU asks a texture its size and levels (`OpImageQuerySizeLod`, `OpImageQueryLevels`), and reads the same
+levels as the CPU. One sample of a far floor of fine stripes is .054 from 256 where it was .25 (`tracing/rayCones`). A
+sample of `spheres` takes 4.9 ms on the GPU where it took 4.3; the same on the CPU.
+
+**What a texture is.** Mipmaps are means: of light for a color, of bytes for data (normals, roughness, occlusion), or
+black and white stripes come to the byte 128, which is a fifth of white's light, not half. A texture does not say which
+it is: what uses it does (`artfSceneTextureRoles`, before each frame). One that only colors use (a material's color or
+sheen, a material of the program's own, a decal) is a color, and its mipmaps are made again as means of light, from its
+largest, which main memory keeps; one that anything reads as data is data, even when a color uses it too, and that is
+said once: wrong normals are worse than a color a little dark. Only mipmaps Artful made itself: not a KTX2 file's, nor
+those a program reads in (`artfSceneAddTextureStreamed`). The glTF loader knows from the file's materials what each
+image is, and prepares its mipmaps that way on its workers, so that the drawing thread does not make them again.
+Between two texels a texture is still read as bytes, on both backends, as before.
+
 Holes need no special case. A surface that is only partly there lets a path through that share of the
 time, and a shadow ray through that share of its light. So glass and fences work with the same code, and
 layers that cut through each other are right, which drawing cannot do. With `ior` a path bends as it goes

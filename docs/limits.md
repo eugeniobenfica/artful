@@ -148,6 +148,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   draws none. The black hole (extensions/blackhole) is one: it bends only its own disc and stars.
   Its gas is painted, as the film's was, and moved by a two-dimensional fluid with no magnetic field; both
   are maps, which show their texels when the eye comes close.
+- A texture is read between two of its texels as bytes, then made light: across a sharp edge between dark and light
+  texels, a little darker than the mean of their light. Its mipmaps are means of light when only colors use it, of bytes
+  otherwise; a KTX2 file's and a streamed texture's are as they were given.
 - A removed mesh gives back GPU memory and its place in the scene; the next mesh takes the place with another
   generation in its handle. A removed texture's place is taken again with the same handle, which then stands for the
   new texture. Residency keeps textures'

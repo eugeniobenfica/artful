@@ -68,6 +68,7 @@ static void tryOcclusion(ArtfRenderer* r, ArtfScene* scene) {
 }
 
 bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene) {
+    artfSceneTextureRoles(scene);
     scene->drawingThread = artfThreadId();
     const bool drawn = r->vt->draw(r, scene);
     scene->drawingThread = 0;

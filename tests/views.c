@@ -252,7 +252,7 @@ void testOrthographic(void) {
     bool drawn = false, gpuDrawn = false;
     /* perspective, as before there was this: the hashes of the frames the commit before it drew (made again when frames
      * became sRGB) */
-    static const uint64_t before[ORTHO_SCENARIOS] = {0xDDD26A5FBCB39FCEull, 0xEF4F899FAB4E5973ull, 0xB63F97DCD7C868ACull, 0xD6004FDB69A0E189ull};
+    static const uint64_t before[ORTHO_SCENARIOS] = {0x0F50BAAC36E7D1CCull, 0xBCB4C36646D9642Aull, 0xBA58BE118903B5CBull, 0xFAE328F3C6A5CE3Bull};
     for (int k = 0; k < ORTHO_SCENARIOS; ++k) {
         orthoFrame(ARTF_BACKEND_SOFTWARE, k, NULL, a, &drawn);
         if (hashOf(a, W * H) != before[k]) printf("perspective %d: %016llx, where %016llx was\n", k, (unsigned long long)hashOf(a, W * H), (unsigned long long)before[k]);

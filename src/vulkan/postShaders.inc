@@ -419,6 +419,7 @@ uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, con
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (hardware) spvCapability(s, 4472 /* RayQueryKHR */);
     spvExtension(s, "SPV_EXT_descriptor_indexing");
     Post post, *p = &post;
@@ -465,7 +466,7 @@ uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, con
             SpvId o = LOAD_V3(t->origin), dir = LOAD_V3(t->direction);
             closest(t, o, dir, FLOAT(3e37f), false);
             breakIf(s, &steps, IS_EQ(LOAD_U(t->bestInstance), UINT(0xFFFFFFFFu)));
-            Met m = surfaceAt(t, o, dir);
+            Met m = surfaceAt(t, o, dir, FLOAT(0.f));
             SpvId q = ADD_V3(o, SCALE_V3(dir, LOAD_F(t->bestT)));
             SpvId through = P_LESS(m.alpha, FLOAT(.5f)), branch;
             spvIfBegin(s, through, &branch);

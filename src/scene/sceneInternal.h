@@ -133,6 +133,10 @@ typedef struct ArtfTextureData {
     uint32_t blockOffsets[16];
     ArtfTextureReadFn read; /* not NULL: pixels holds only what is resident, and offsets are from there */
     void* readUser;
+    /* Its mipmaps are means of light (what a color is), not of bytes (what data are): artfSceneTextureRoles says,
+     * by what uses it. Only the mipmaps Artful made itself: not a KTX2 file's, nor those a program reads. */
+    bool light;
+    bool roleSaid;          /* that it is used both ways was said */
 } ArtfTextureData;
 
 /* The GPU's instance: 64 bytes. */
@@ -412,6 +416,8 @@ ARTF_INLINE bool artfLightShaped(const ArtfFrameData* f, uint32_t i) { return f-
 
 /* For tests: false makes the CPU's paths only bounce into light from all around, not aim at it as well (trace.c). */
 extern bool artfTraceAim;
+/* For tests: false makes the CPU's paths read textures at their finest, with no cone (trace.c's texelCone). */
+extern bool artfTraceCones;
 
 /* (artfLog2Fast, artfExp2Fast and sRGB: core/color.h) */
 /* What fog by height makes of the fog's density at a height: as much as that, times this. */
@@ -818,6 +824,7 @@ struct ArtfScene {
     ArtfTrace trace;
     ArtfPostDesc post;
     ArtfDecalDesc decals[ARTF_MAX_DECALS];
+    ARTF_VEC(uint8_t) textureRoles;         /* artfSceneTextureRoles' scratch: of each texture, how it is used */
     bool decalOn[ARTF_MAX_DECALS];
     void* emitters;                         /* extras.c's, and how to free them */
     void (*emittersFree)(void* emitters);
@@ -1050,6 +1057,14 @@ ArtfTexture artfSceneStoreTexture(ArtfScene* s, const ArtfTextureData* t);
 void artfGraphRun(const ArtfScene* s, const ArtfGraphData* g, const ArtfMaterialData* m, const ArtfGraphInput* in, ArtfGraphResult* out);
 
 /* A texel, bilinear and repeating, in the largest mipmap: channels from 0 to 1, as BGRA. */
+/* A texture's mipmaps, the largest first, as means of light (sRGB's, as colors are) or of bytes (as data are): what
+ * artfPrepareTexture makes with light false. Any thread. */
+ArtfPreparedTexture* artfPrepareTextureAs(const uint32_t* pixels, int width, int height, int stride, bool light);
+/* What each texture is to what uses it, a color or data, and its mipmaps made again where that changed: a texture that
+ * only colors use (a material's color or sheen, a material of the program's own, a decal) is a color, one that anything
+ * reads as data (normals, roughness and metal, occlusion, a coat's maps) is data, even when colors use it too (said once).
+ * artfRendererDraw calls it before a frame. */
+void artfSceneTextureRoles(ArtfScene* s);
 void artfTexelAt(const ArtfTextureData* t, float u, float v, float* out);
 void artfTexelAtLevel(const ArtfTextureData* t, int level, float u, float v, float* out);
 void artfGraphRunLanes(const ArtfScene* s, const ArtfGraphData* g, const ArtfMaterialData* m, ArtfGraphLanes* io);

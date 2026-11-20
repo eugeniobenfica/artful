@@ -1434,6 +1434,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (meshletIds) spvCapability(s, 2); /* Geometry: for PrimitiveId */
     if (rayQuery) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
     spvExtension(s, "SPV_EXT_descriptor_indexing");
@@ -2259,6 +2260,7 @@ uint32_t* artfShaderShadowFragment(size_t* size, uint32_t maxTextures) {
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     spvExtension(s, "SPV_EXT_descriptor_indexing");
     Resources r;
     declare(s, &r, false);
@@ -2707,7 +2709,7 @@ typedef struct Tracer {
     /* variables: all at the top of main, as SPIR-V wants */
     SpvId stack, depth, at, pop, stack2, depth2, at2, pop2, leaf, leaf2;
     SpvId bestT, bestU, bestV, bestInstance, bestTriangle;
-    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice, diffuseLikely, bounceDir, keptVar, shineVar, towardVar, likelyVar;
+    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice, diffuseLikely, bounceDir, keptVar, shineVar, towardVar, likelyVar, coneWidth, coneSpread;
     SpvId shadowOrigin, through, limit, shadowStep, lightIndex, ballStep, ball, travelled, keep;
     GraphVars own;
     const ArtfGraphData* graphs;
@@ -2938,18 +2940,33 @@ typedef struct Met {
 static SpvId maxOf3(Spv* s, SpvId v) { return MAX_F(X(v), MAX_F(Y(v), Z(v))); }
 
 /* A texture of the array, in its largest mipmap. */
-static SpvId traceTexture(const Tracer* t, SpvId index, SpvId uv) {
+/* trace.c's texelCone: the level by the cone (lodBase), from the texture's size as the GPU has it (its first held
+ * level is level 0 here), between two, by the sampler. */
+static SpvId traceTexture(const Tracer* t, SpvId lodBase, SpvId index, SpvId uv) {
     Spv* s = t->s;
     spvDecorate(s, index, SPV_DECORATE_NonUniform, -1);
     SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, t->sampledType), t->textures, &index, 1);
     spvDecorate(s, slot, SPV_DECORATE_NonUniform, -1);
     SpvId image = spvLoad(s, t->sampledType, slot);
     spvDecorate(s, image, SPV_DECORATE_NonUniform, -1);
-    return spvImageSampleLod(s, image, uv, FLOAT(0.f));
+    SpvId imageType;
+    spvTypeSampledImage2D(s, &imageType);
+    SpvId plain = spvOp1(s, 100 /* OpImage */, imageType, image);
+    spvDecorate(s, plain, SPV_DECORATE_NonUniform, -1);
+    SpvId size = spvOp2(s, 103 /* OpImageQuerySizeLod */, spvTypeVector(s, s->intType, 2), plain, spvConstInt(s, 0));
+    SpvId levels = spvOp1(s, 106 /* OpImageQueryLevels */, s->intType, plain);
+    /* (half the log2 of its texels, by their sides' highest bits: trace.c's) */
+    SpvId wideBits = spvGlsl1(s, SPV_GLSL_FindUMsb, s->uintType, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvExtract(s, s->intType, size, 0)));
+    SpvId highBits = spvGlsl1(s, SPV_GLSL_FindUMsb, s->uintType, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvExtract(s, s->intType, size, 1)));
+    SpvId bits = spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_IAdd, s->uintType, wideBits, highBits));
+    SpvId most = SUB_F(spvOp1(s, 111 /* OpConvertSToF */, s->floatType, levels), FLOAT(1.f));
+    SpvId at = MIN_F(MAX_F(ADD_F(lodBase, MUL_F(FLOAT(.5f), bits)), FLOAT(0.f)), most);
+    return spvImageSampleLod(s, image, uv, at);
 }
 
 /* As surfaceAt, for what closest left. */
-static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d) {
+/* cone: how wide the ray's cone is where it met the surface (trace.c's surfaceAt); 0, a ray. */
+static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     Spv* s = t->s;
     SpvId instance = LOAD_U(t->bestInstance), row = MUL_U(instance, UINT(4));
     SpvId k0 = spvShuffle3(s, bufferVec(s, &t->r, t->instances, row)), k1 = spvShuffle3(s, bufferVec(s, &t->r, t->instances, ADD_U(row, UINT(1)))), k2 = spvShuffle3(s, bufferVec(s, &t->r, t->instances, ADD_U(row, UINT(2))));
@@ -2979,7 +2996,20 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d) {
     SpvId m3 = bufferVec(s, &t->r, t->r.materials, ADD_U(material, UINT(3))), m4 = bufferVec(s, &t->r, t->r.materials, ADD_U(material, UINT(4)));
     const SpvId uvParts[2] = {u, v};
     SpvId uv = spvCompose(s, s->vec2, uvParts, 2);
-    SpvId texel = traceTexture(t, AS_UINT(X(m2)), uv), bumps = traceTexture(t, AS_UINT(X(m4)), uv), surface = traceTexture(t, AS_UINT(Y(m4)), uv), occlusion = traceTexture(t, AS_UINT(Z(m4)), uv);
+    /* how many of a texture's texels the cone covers here (trace.c's) */
+    SpvId lodBase;
+    {
+        SpvId e1 = SUB_V3(corner[1], corner[0]), e2 = SUB_V3(corner[2], corner[0]), cr = G_CROSS(e1, e2);
+        SpvId w = ADD_V3(ADD_V3(SCALE_V3(k0, X(cr)), SCALE_V3(k1, Y(cr))), SCALE_V3(k2, Z(cr)));
+        SpvId det = DOT3(k0, G_CROSS(k1, k2));
+        SpvId wl = spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, DOT3(w, w)), world = DIV_F(wl, MAX_F(G_ABS(det), FLOAT(1e-30f)));
+        SpvId area = G_ABS(SUB_F(MUL_F(SUB_F(cornerU[1], cornerU[0]), SUB_F(cornerV[2], cornerV[0])), MUL_F(SUB_F(cornerU[2], cornerU[0]), SUB_F(cornerV[1], cornerV[0]))));
+        SpvId facing = MAX_F(DIV_F(G_ABS(DOT3(w, d)), MAX_F(wl, FLOAT(1e-30f))), FLOAT(1e-3f));
+        SpvId fine = ADD_F(MUL_F(FLOAT(.5f), log2Of(s, DIV_F(area, world))), log2Of(s, DIV_F(cone, facing)));
+        SpvId usable = BOTH(BOTH(MORE_F(cone, FLOAT(0.f)), MORE_F(area, FLOAT(0.f))), MORE_F(world, FLOAT(0.f)));
+        lodBase = PICK_F(usable, fine, FLOAT(-100.f));
+    }
+    SpvId texel = traceTexture(t, lodBase, AS_UINT(X(m2)), uv), bumps = traceTexture(t, lodBase, AS_UINT(X(m4)), uv), surface = traceTexture(t, lodBase, AS_UINT(Y(m4)), uv), occlusion = traceTexture(t, lodBase, AS_UINT(Z(m4)), uv);
     SpvId rgbTexel = spvShuffle3(s, texel);
 
     /* where u and v go on the triangle, in the object: as in trace.c */
@@ -3054,12 +3084,12 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d) {
     shaderLobe lobe = shaderLobeOf(s, rough, ndv);
     shaderDraw(s, &lobe, T_HAS(ARTF_MORE_ANISOTROPY), ta, tb, X(e[5]), Y(e[5]), a, shaderDrawnLong(s, a, MUL_F(Z(e[3]), Z(e[3]))));
     /* the coat and sheen, and their textures (white when none) */
-    SpvId coat = PICK_F(unlit, FLOAT(0.f), MUL_F(X(e[0]), X(traceTexture(t, AS_UINT(X(e[2])), uv))));
-    SpvId coatRough = MAX_F(MUL_F(Y(e[0]), Y(traceTexture(t, AS_UINT(Y(e[2])), uv))), FLOAT(.045f));
-    SpvId sheenRough = MAX_F(MUL_F(Z(e[0]), W(traceTexture(t, AS_UINT(X(e[3])), uv))), FLOAT(.07f));
-    SpvId sheenTexel = spvShuffle3(s, traceTexture(t, AS_UINT(W(e[2])), uv));
+    SpvId coat = PICK_F(unlit, FLOAT(0.f), MUL_F(X(e[0]), X(traceTexture(t, lodBase, AS_UINT(X(e[2])), uv))));
+    SpvId coatRough = MAX_F(MUL_F(Y(e[0]), Y(traceTexture(t, lodBase, AS_UINT(Y(e[2])), uv))), FLOAT(.045f));
+    SpvId sheenRough = MAX_F(MUL_F(Z(e[0]), W(traceTexture(t, lodBase, AS_UINT(X(e[3])), uv))), FLOAT(.07f));
+    SpvId sheenTexel = spvShuffle3(s, traceTexture(t, lodBase, AS_UINT(W(e[2])), uv));
     SpvId sheenColor = pick3(s, unlit, same3(s, 0.f), MUL_V3(spvShuffle3(s, e[1]), srgbDecode3(s, sheenTexel)));
-    SpvId coatBumps = traceTexture(t, AS_UINT(Z(e[2])), uv);
+    SpvId coatBumps = traceTexture(t, lodBase, AS_UINT(Z(e[2])), uv);
     SpvId cx = MUL_F(SUB_F(MUL_F(X(coatBumps), FLOAT(2.f)), FLOAT(1.f)), Y(e[3])), cy = MUL_F(SUB_F(FLOAT(1.f), MUL_F(Y(coatBumps), FLOAT(2.f))), Y(e[3])), cz = SUB_F(MUL_F(Z(coatBumps), FLOAT(2.f)), FLOAT(1.f));
     SpvId co = ADD_V3(ADD_V3(SCALE_V3(tangent, cx), SCALE_V3(bitangent, cy)), SCALE_V3(plainOn, cz));
     SpvId coatWorld = SCALE_V3(NORMALIZE(ADD_V3(ADD_V3(SCALE_V3(k0, X(co)), SCALE_V3(k1, Y(co))), SCALE_V3(k2, Z(co)))), side);
@@ -3274,7 +3304,7 @@ static void lightThrough(const Tracer* t, SpvId from, SpvId to, SpvId limit) {
     SpvId o = LOAD_V3(t->shadowOrigin);
     closest(t, o, to, LOAD_F(t->limit), true);
     breakIf(s, &steps, IS_EQ(LOAD_U(t->bestInstance), UINT(0xFFFFFFFFu)));
-    Met m = surfaceAt(t, o, to);
+    Met m = surfaceAt(t, o, to, FLOAT(0.f));
     SpvId through = MUL_F(LOAD_F(t->through), SUB_F(FLOAT(1.f), MIN_F(MAX_F(m.alpha, FLOAT(0.f)), FLOAT(1.f))));
     spvStore(s, t->through, PICK_F(LESS_F(through, FLOAT(.01f)), FLOAT(0.f), through));
     breakIf(s, &steps, LESS_F(through, FLOAT(.01f)));
@@ -3421,6 +3451,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (hardware) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
     spvExtension(s, "SPV_EXT_descriptor_indexing");
     Tracer tracer, *t = &tracer;
@@ -3468,7 +3499,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->bestInstance = VAR(ptrUint); t->bestTriangle = VAR(ptrUint);
     t->state = VAR(ptrUint); t->covered = VAR(ptrUint); t->bounces = VAR(ptrUint); t->step = VAR(ptrUint); t->sampleIndex = VAR(ptrUint);
     t->origin = VAR(ptrVec3); t->direction = VAR(ptrVec3); t->path = VAR(ptrVec3); t->light = VAR(ptrVec3);
-    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat); t->diffuseLikely = VAR(ptrFloat); t->bounceDir = VAR(ptrVec3); t->keptVar = VAR(ptrFloat); t->shineVar = VAR(ptrFloat); t->towardVar = VAR(ptrVec3); t->likelyVar = VAR(ptrFloat);
+    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat); t->diffuseLikely = VAR(ptrFloat); t->bounceDir = VAR(ptrVec3); t->keptVar = VAR(ptrFloat); t->shineVar = VAR(ptrFloat); t->towardVar = VAR(ptrVec3); t->likelyVar = VAR(ptrFloat); t->coneWidth = VAR(ptrFloat); t->coneSpread = VAR(ptrFloat);
     t->through = VAR(ptrFloat); t->limit = VAR(ptrFloat); t->travelled = VAR(ptrFloat); t->keep = VAR(ptrFloat);
     t->shadowStep = VAR(ptrUint); t->lightIndex = VAR(ptrUint); t->ballStep = VAR(ptrUint);
     t->graphs = graphs;
@@ -3505,6 +3536,13 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     {
         spvStore(s, t->state, traceHash(s, ADD_U(traceHash(s, pixel), ADD_U(done, LOAD_U(t->sampleIndex)))));
         spvStore(s, t->diffuseLikely, FLOAT(0.f));
+        {
+            /* the ray's cone (trace.c's): a pixel's angle, or in an orthographic view a pixel's width */
+            SpvId pixelSize = DIV_F(MUL_F(FLOAT(2.f), spvGlsl1(s, SPV_GLSL_Length, s->floatType, up)), TO_F(height));
+            SpvId flat = MORE_F(W(traceFrameVec(t, T_EYE)), FLOAT(0.f));
+            spvStore(s, t->coneWidth, PICK_F(flat, pixelSize, FLOAT(0.f)));
+            spvStore(s, t->coneSpread, PICK_F(flat, FLOAT(0.f), pixelSize));
+        }
         SpvId jitter[4];
         sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, UINT(0)), jitter);
         SpvId jx = jitter[0], jy = jitter[1];
@@ -3549,7 +3587,8 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         spvIfEnd(s, aroundMerge);
         breakIf(s, &steps, missed);
 
-        Met m = surfaceAt(t, o, d);
+        spvStore(s, t->coneWidth, ADD_F(LOAD_F(t->coneWidth), MUL_F(LOAD_F(t->coneSpread), LOAD_F(t->bestT))));
+        Met m = surfaceAt(t, o, d, LOAD_F(t->coneWidth));
         SpvId p = ADD_V3(o, SCALE_V3(d, LOAD_F(t->bestT)));
         SpvId reach = reachOf(s, p);
         if (more) {
@@ -3809,6 +3848,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             spvIfEnd(s, glossyMerge);
             SpvId next = NORMALIZE(LOAD_V3(t->bounceDir)), kept = LOAD_F(t->keptVar);
             spvStore(s, t->diffuseLikely, PICK_F(isMirror, LOAD_F(t->shineVar), MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), MAX_F(DOT3(next, m.normal), FLOAT(0.f))), FLOAT(1.f / 3.14159265f))));
+            spvStore(s, t->coneSpread, ADD_F(LOAD_F(t->coneSpread), PICK_F(isMirror, MUL_F(FLOAT(2.f), alpha), FLOAT(1.f))));
             SpvId keep = DIV_F(MUL_F(m.open, SUB_F(FLOAT(1.f), most)), SUB_F(FLOAT(1.f), chance));
             SpvId tint = pick3(s, isMirror, pick3(s, paths, SCALE_V3(m.mirror, DIV_F(kept, MAX_F(chance, FLOAT(1e-6f)))), SCALE_V3(m.mirror, kept)), SCALE_V3(m.albedo, keep));
             spvStore(s, t->path, MUL_V3(LOAD_V3(t->path), tint));
@@ -3947,6 +3987,7 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     spvInit(s);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (hardware) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
     spvExtension(s, "SPV_EXT_descriptor_indexing");
     Resources r;
@@ -4071,7 +4112,7 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
             spvIfEnd(s, met);
             spvIfBegin(s, hit, &met);
             {
-                Met m = surfaceAt(t, o, d);
+                Met m = surfaceAt(t, o, d, FLOAT(0.f));
                 /* (a probe inside something sees its backs: it takes nothing from them) */
                 SpvId front;
                 spvIfBegin(s, m.front, &front);

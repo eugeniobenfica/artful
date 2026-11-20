@@ -136,6 +136,7 @@ void testSizedLights(void);
 void testLightShapes(void);
 void testProfiles(void);
 void testMoreMaterials(void);
+void testTextureRoles(void);
 /* files.c: glTF, its extensions and compressed blocks */
 void testBlocks(void);
 void testBlockDecoders(void);
@@ -191,6 +192,7 @@ void testTraceData(void);
 void testTraceBothBackends(void);
 void testEnvironmentAimed(ArtfBackend backend);
 void testAimUnbiased(void);
+void testRayCones(void);
 /* sky.c: the sky, and light from all around from a picture */
 void testEnvironment(void);
 void testSky(void);
