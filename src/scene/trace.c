@@ -769,6 +769,8 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
 
 /* ---- a path ---- */
 
+bool artfTraceAim = true;
+
 static inline uint32_t hashOf(uint32_t x) {
     x = (x ^ x >> 16) * 0x7FEB352Du;
     x = (x ^ x >> 15) * 0x846CA68Bu;
@@ -792,6 +794,50 @@ static void ballOf(const float* u, float* out) {
     directionOf(u, out);
     const float r = artfExp2Fast(artfLog2Fast(u[2]) * (1.f / 3.f));
     for (int k = 0; k < 3; ++k) out[k] *= r;
+}
+
+/* Trowbridge and Reitz's distribution (GGX) of alpha: how much of a surface's microfacets face h (its cosine), and
+ * Smith's Lambda, of which masking is made, for a direction of this cosine. As the tracing shader's. */
+static float ggxD(float alpha, float nh) {
+    const float a2 = alpha * alpha, k = nh * nh * (a2 - 1.f) + 1.f;
+    return a2 / (3.14159265f * k * k);
+}
+static float ggxLambda(float alpha, float c) {
+    const float c2 = artfMaxf(c * c, 1e-8f);
+    return (sqrtf(1.f + alpha * alpha * (1.f - c2) / c2) - 1.f) * .5f;
+}
+
+/* A normal of the microsurface, as the view sees them (GGX's visible normals, by a spherical cap: Dupuy and Benyoub,
+ * 2023), from two numbers: what a highlight reflects is around it. n and v unit; v toward the eye. */
+static void visibleNormalOf(const float* n, const float* v, float alpha, const float* u, float* out) {
+    /* (a frame around n, with no branch: Duff et al., 2017) */
+    const float sign = n[2] >= 0 ? 1.f : -1.f, a = -1.f / (sign + n[2]), b = n[0] * n[1] * a;
+    const float t[3] = {1.f + sign * n[0] * n[0] * a, sign * b, -sign * n[0]}, bt[3] = {b, sign + n[1] * n[1] * a, -n[1]};
+    float sx = dot3(v, t) * alpha, sy = dot3(v, bt) * alpha, sz = artfMaxf(dot3(v, n), 1e-4f);
+    const float inverse = 1.f / sqrtf(sx * sx + sy * sy + sz * sz);
+    sx *= inverse;
+    sy *= inverse;
+    sz *= inverse;
+    const float turn = 6.28318531f * u[0], z = (1.f - u[1]) * (1.f + sz) - sz, across = sqrtf(artfClampf(1.f - z * z, 0.f, 1.f));
+    float cx = (across * artfCosFast(turn) + sx) * alpha, cy = (across * artfCosFast(turn - 1.57079633f) + sy) * alpha, cz = z + sz;
+    const float back = 1.f / sqrtf(cx * cx + cy * cy + cz * cz);
+    cx *= back;
+    cy *= back;
+    cz *= back;
+    for (int k = 0; k < 3; ++k) out[k] = t[k] * cx + bt[k] * cy + n[k] * cz;
+}
+
+/* What a highlight reflects (visibleNormalOf): the way it goes, how much of m.mirror it keeps (G2 / G1, of the way it
+ * goes and the way it is seen; 0 below the surface), and how likely it was, if the highlight is taken with this chance.
+ * Worked out only where a highlight is taken: it is most of what a bounce costs. */
+static void glossyOf(const Surface* m, const float* d, const float* view, float alpha, float nv, const float* u, float chance, float* out, float* kept, float* likely) {
+    float facet[3];
+    visibleNormalOf(m->normal, view, alpha, u, facet);
+    const float df = dot3(d, facet);
+    for (int k = 0; k < 3; ++k) out[k] = d[k] - 2.f * df * facet[k];
+    const float lambdaView = ggxLambda(alpha, nv), cosine = dot3(m->normal, out);
+    *kept = cosine > 0 ? (1.f + lambdaView) / (1.f + lambdaView + ggxLambda(alpha, cosine)) : 0.f;
+    *likely = chance * ggxD(alpha, artfMaxf(dot3(m->normal, facet), 0.f)) / ((1.f + lambdaView) * 4.f * nv);
 }
 
 /* A direction, even in a ball, by rejection: for the probes, whose rays the GPU draws in the same order. */
@@ -970,11 +1016,11 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
     bool covered = false;
     uint32_t bounces = 0;
     /* Paths aim at the picture of all around as well as bouncing into it (artfEnvAim): each way's light is weighed by
-     * how likely each way was to find it (MIS, the power heuristic), for what a surface gives back diffusely, which is
-     * what the aiming adds. diffuseLikely: how likely the last bounce's direction was, diffusely; 0 when it was not a
-     * diffuse bounce, and what it then finds is not weighed. */
-    const float* aimed = c->paths && f->sky[3] > 0 && s->environment ? s->environment : NULL;
-    float diffuseLikely = 0;
+     * how likely each way was to find it (MIS, the power heuristic), lobe by lobe: what a surface gives back diffusely
+     * against its diffuse bounce, its highlight against its highlight's. bounceLikely: how likely the last bounce's
+     * direction was, by the lobe it took; 0 for the eye's ray, whose light is not weighed. */
+    const float* aimed = artfTraceAim && c->paths && f->sky[3] > 0 && s->environment ? s->environment : NULL;
+    float bounceLikely = 0;
     for (int step = 0; step < MAX_STEPS; ++step) {
         Hit h;
         if (!closest(&s->trace, o, d, 3e37f, false, &h)) {
@@ -983,9 +1029,9 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                 float around[3];
                 artfEnvSample(s->environment, 0, d[0], d[1], d[2], around);
                 float weight = 1.f;
-                if (aimed && diffuseLikely > 0) {
+                if (aimed && bounceLikely > 0) {
                     const float other = artfEnvAimDensity(aimed, d);
-                    weight = diffuseLikely * diffuseLikely / (diffuseLikely * diffuseLikely + other * other);
+                    weight = bounceLikely * bounceLikely / (bounceLikely * bounceLikely + other * other);
                 }
                 for (int k = 0; k < 3; ++k) light[k] += path[k] * around[k] * f->sky[3] * weight;
             } else if (covered) {
@@ -1067,8 +1113,10 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         const float dn = dot3(d, m.normal);
         float mirror[3];
         for (int k = 0; k < 3; ++k) mirror[k] = d[k] - 2.f * dn * m.normal[k];
-        /* (how rough it is, as how far a mirror's ray strays) */
-        const float stray = m.rough * m.rough;
+        /* what a highlight reflects: around a visible normal of GGX's of its alpha (glossyOf). It reflects m.mirror of
+         * all around, less what its microfacets hide of each other */
+        const float alpha = artfMaxf(m.rough * m.rough, 1e-3f), nv = artfMaxf(dot3(m.normal, view), 1e-4f);
+        float glossy[3], kept, likelyShine;
         if (!c->paths) {
             /* rays: light from all around as the rasterizer has it, and a mirror for what reflects */
             const float* env = f->sky[3] > 0 ? s->environment : NULL;
@@ -1083,9 +1131,10 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                 for (int k = 0; k < 3; ++k) light[k] += path[k] * m.mirror[k] * m.open * (env ? around[k] * f->sky[3] : artfShadeSkyGround(f->ground[k], f->sky[k] - f->ground[k], reflectedUp));
                 break;
             }
+            glossyOf(&m, d, view, alpha, nv, u, 1.f, glossy, &kept, &likelyShine);
             for (int k = 0; k < 3; ++k) {
-                path[k] *= m.mirror[k];
-                d[k] = mirror[k] + ball[k] * stray;
+                path[k] *= m.mirror[k] * kept;
+                d[k] = glossy[k];
             }
         } else {
             if (bounces >= c->bounces) break;
@@ -1104,16 +1153,28 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                         artfEnvSample(aimed, 0, toward[0], toward[1], toward[2], around);
                         const float weight = likely * likely / (likely * likely + other * other);
                         const float share = m.open * (1.f - most) * (1.f / 3.14159265f) * cosine * through * (weight / likely) * f->sky[3];
-                        for (int k = 0; k < 3; ++k) light[k] += path[k] * m.albedo[k] * around[k] * share;
+                        /* and the highlight: GGX's, D G2 / (4 n.v) of m.mirror, against its own bounce's likelihood */
+                        float highlight = 0;
+                        if (chance > 0) {
+                            float h[3] = {view[0] + toward[0], view[1] + toward[1], view[2] + toward[2]};
+                            normalize3(h);
+                            const float facing = ggxD(alpha, artfMaxf(dot3(m.normal, h), 0.f));
+                            const float lambdaView = ggxLambda(alpha, nv);
+                            const float otherShine = chance * facing / ((1.f + lambdaView) * 4.f * nv);
+                            const float shineWeight = likely * likely / (likely * likely + otherShine * otherShine);
+                            highlight = facing / (4.f * nv * (1.f + lambdaView + ggxLambda(alpha, cosine))) * through * (shineWeight / likely) * f->sky[3];
+                        }
+                        for (int k = 0; k < 3; ++k) light[k] += path[k] * (m.albedo[k] * share + m.mirror[k] * highlight) * around[k];
                     }
                 }
             }
             if (u[3] < chance) {
+                glossyOf(&m, d, view, alpha, nv, u, chance, glossy, &kept, &likelyShine);
                 for (int k = 0; k < 3; ++k) {
-                    d[k] = mirror[k] + ball[k] * stray;
-                    path[k] *= m.mirror[k] / chance;
+                    d[k] = glossy[k];
+                    path[k] *= m.mirror[k] * kept / chance;
                 }
-                diffuseLikely = 0;
+                bounceLikely = likelyShine;
             } else {
                 /* a point on a sphere over the surface: as many rays as the cosine says, exactly */
                 const float keep = m.open * (1.f - most) / (1.f - chance);
@@ -1124,7 +1185,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
                     path[k] *= m.albedo[k] * keep;
                 }
                 normalize3(d);
-                diffuseLikely = (1.f - chance) * artfMaxf(dot3(d, m.normal), 0.f) * (1.f / 3.14159265f);
+                bounceLikely = (1.f - chance) * artfMaxf(dot3(d, m.normal), 0.f) * (1.f / 3.14159265f);
             }
         }
         normalize3(d);

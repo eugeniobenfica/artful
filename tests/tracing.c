@@ -1034,3 +1034,65 @@ void testEnvironmentAimed(ArtfBackend backend) {
     artfRendererFree(r);
     artfSceneFree(s);
 }
+
+/* Aiming and bouncing, weighed lobe by lobe, add up to what bouncing alone finds: the same light, with less noise. A
+ * shiny ball and a rough one on a floor under a sky with a sun, by the CPU's paths with aiming and without. */
+void testAimUnbiased(void) {
+    enum { PW = 64, PH = 32 };
+    static float sky[PW * PH * 3];
+    for (int y = 0; y < PH; ++y)
+        for (int x = 0; x < PW; ++x)
+            for (int c = 0; c < 3; ++c) sky[(y * PW + x) * 3 + c] = y < PH / 2 ? .3f + .2f * (float)c : .05f;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int c = 0; c < 3; ++c) sky[((6 + dy) * PW + 20 + dx) * 3 + c] = 40.f;
+    ArtfScene* s = plainScene();
+    CHECK(artfSceneSetEnvironment(s, sky, PW, PH, 1.f, false));
+    ArtfMaterialDesc shiny = artfMaterialDefaults(), rough = artfMaterialDefaults(), floor_ = artfMaterialDefaults();
+    shiny.baseColor = artfVec3(.9f, .7f, .4f);
+    shiny.metallic = 1;
+    shiny.roughness = .35f;
+    rough.baseColor = artfVec3(.3f, .5f, .7f);
+    rough.roughness = .6f;
+    floor_.baseColor = artfVec3(.6f, .6f, .6f);
+    const ArtfMesh ball = artfSceneAddSphere(s, .8f, 32, 48);
+    addAt(s, ball, artfSceneAddMaterial(s, &shiny), -1, 0, 0, 1);
+    addAt(s, ball, artfSceneAddMaterial(s, &rough), 1, 0, 0, 1);
+    const ArtfTransform t = artfTransformAt(0, -.8f, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 10, 1), artfSceneAddMaterial(s, &floor_), &t);
+    setCamera(s, 0, 1.2f, 4.5f, 0, 0, 0);
+    const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 768, 3, false};
+    artfSceneSetTrace(s, &paths);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    o.width = W / 4;
+    o.height = H / 4;
+    double means[2], noise[2];
+    for (int aim = 0; aim < 2; ++aim) {
+        artfTraceAim = aim != 0;
+        ArtfRenderer* r = artfRendererNew(&o);
+        uint32_t* early = artfMalloc((size_t)o.width * o.height * 4);
+        uint32_t* frame = artfMalloc((size_t)o.width * o.height * 4);
+        for (int i = 0; i < 768; ++i) {
+            CHECK(artfRendererDraw(r, s));
+            if (i == 15) CHECK(artfRendererReadPixels(r, early));
+        }
+        CHECK(artfRendererReadPixels(r, frame));
+        double sum = 0, apart = 0;
+        for (int i = 0; i < o.width * o.height; ++i)
+            for (int c = 0; c < 24; c += 8) {
+                const double light = artfSrgbDecode((float)(frame[i] >> c & 255) / 255.f), first = artfSrgbDecode((float)(early[i] >> c & 255) / 255.f);
+                sum += light;
+                apart += (first - light) * (first - light);
+            }
+        means[aim] = sum / (o.width * o.height * 3);
+        noise[aim] = sqrt(apart / (o.width * o.height * 3));
+        artfFree(early);
+        artfFree(frame);
+        artfRendererFree(r);
+    }
+    artfTraceAim = true;
+    printf("bouncing alone %.4f, aiming too %.4f (%.2f%% apart); at sixteen samples %.4f and %.4f from their own end\n", means[0], means[1], (means[1] / means[0] - 1) * 100, noise[0], noise[1]);
+    CHECK(fabs(means[1] / means[0] - 1) < .01);
+    CHECK(noise[1] < noise[0]);
+    artfSceneFree(s);
+}

@@ -410,6 +410,9 @@ bool artfSceneShapedLights(const ArtfScene* s);
 ARTF_INLINE bool artfLightShaped(const ArtfFrameData* f, uint32_t i) { return f->lightShapes[i][0][3] > 0 || f->lightShapes[i][2][3] > 0; }
 
 
+/* For tests: false makes the CPU's paths only bounce into light from all around, not aim at it as well (trace.c). */
+extern bool artfTraceAim;
+
 /* (artfLog2Fast, artfExp2Fast and sRGB: core/color.h) */
 /* What fog by height makes of the fog's density at a height: as much as that, times this. */
 ARTF_INLINE float artfFogHeight(const ArtfFrameData* f, float y) {

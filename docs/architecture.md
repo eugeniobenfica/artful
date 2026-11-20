@@ -234,8 +234,15 @@ octahedron, `(|x| + |y| + |z|)^3` of its direction): two searches of nine halvin
 surface gives back diffusely, and the path's own diffuse bounce, when it leaves the scene, brings its share too: each
 weighed by how likely the other way was to find the same light (MIS, the power heuristic), so that neither is counted
 twice. A diffuse bounce is a point on a sphere over the surface, which is the cosine exactly, so that how likely it is
-is known (before, a point in the ball, which is not, and drew rough surfaces half a percent bright). What a surface
-reflects is found by bouncing alone, unweighed. Under a picture with a small sun of 40, at sixteen samples, the error
+is known (before, a point in the ball, which is not, and drew rough surfaces half a percent bright). A highlight's
+bounce is around a normal of the microsurface as the view sees them (GGX's visible normals, by a spherical cap: Dupuy
+and Benyoub, 2023), and keeps m.mirror less what microfacets hide of each other (G2 / G1); the ray aimed at all around
+brings the highlight's share too, D G2 / (4 n.v) of m.mirror. Each lobe is weighed against its own bounce, as each
+bounce estimates its own lobe. On the GPU that ray is one more turn of the lights' loop, so that the shader walks the
+trees for it where it walks them for lights. Aiming and bouncing alone come to the same light, within .12% over 768
+samples, and at sixteen samples aiming is six times less noisy (`tracing/aimUnbiased`). A sample of `spheres`, with no
+picture of all around, takes 4.3 ms on the GPU where it took 2.9: 0.9 of that is the cosine's bounces, which go further
+into the scene than the ball's did. Under a picture with a small sun of 40, at sixteen samples, the error
 from 4,096 is .020 where it was .041, and pixels far off the truth went from 169 to 1; a ball that gives light back
 diffusely under light the same from everywhere shows its albedo times that light to within half a step of a byte, on
 both backends (`tracing/environmentAimed`). A sun so bright that one path's light passes 64 (`LIGHT_LIMIT`) was cut

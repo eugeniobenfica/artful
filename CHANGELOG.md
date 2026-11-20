@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Highlights bounce by GGX's visible normals, and the aimed ray brings them too** (the plan's phase 2.3): a
+  highlight's bounce is around a visible normal (Dupuy and Benyoub's spherical cap), keeping m.mirror less what
+  microfacets hide (G2 / G1), in place of the mirror strayed by a point in a ball; the ray aimed at all around brings
+  the highlight's share as well as the diffuse one, each lobe weighed against its own bounce. Worked out only where a
+  highlight is taken. Aiming and bouncing alone agree within .12% over 768 samples, and aiming is six times less noisy
+  at sixteen (`tracing/aimUnbiased`, by `artfTraceAim`, a switch for tests); the CPU and the GPU under a sky with a sun,
+  shiny and rough: .0006 apart. On the GPU the aimed ray is one more turn of the lights' loop. A path tracer's sample
+  of `spheres` takes 4.3 ms on the GPU where it took 2.9 two commits ago, most of it the diffuse bounce's cosine, whose
+  paths go further. The traced orthographic hash and Metal's shaders made again.
+
 - **Paths aim at light from all around** (the plan's phase 2.3, first part): with a picture of all around, each surface
   of a path also sends a ray toward it, chosen by its texels' light times the share of all around each covers
   (`artfEnvAim`; tables kept past the maps, which the GPU reads from the same buffer), for what the surface gives back

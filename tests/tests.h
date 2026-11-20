@@ -190,6 +190,7 @@ void testTrace(ArtfBackend backend);
 void testTraceData(void);
 void testTraceBothBackends(void);
 void testEnvironmentAimed(ArtfBackend backend);
+void testAimUnbiased(void);
 /* sky.c: the sky, and light from all around from a picture */
 void testEnvironment(void);
 void testSky(void);

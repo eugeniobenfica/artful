@@ -2707,7 +2707,7 @@ typedef struct Tracer {
     /* variables: all at the top of main, as SPIR-V wants */
     SpvId stack, depth, at, pop, stack2, depth2, at2, pop2, leaf, leaf2;
     SpvId bestT, bestU, bestV, bestInstance, bestTriangle;
-    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice, diffuseLikely;
+    SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice, diffuseLikely, bounceDir, keptVar, shineVar, towardVar, likelyVar;
     SpvId shadowOrigin, through, limit, shadowStep, lightIndex, ballStep, ball, travelled, keep;
     GraphVars own;
     const ArtfGraphData* graphs;
@@ -3184,9 +3184,69 @@ static SpvId directionOfSpv(Spv* s, const SpvId* u) {
     SpvId turn = MUL_F(FLOAT(6.28318531f), u[1]);
     return vec3Of(s, MUL_F(across, cosOf(s, turn)), MUL_F(across, cosOf(s, SUB_F(turn, FLOAT(1.57079633f)))), z);
 }
+/* trace.c's ggxD, ggxLambda and visibleNormalOf */
+static SpvId ggxDSpv(Spv* s, SpvId alpha, SpvId nh) {
+    SpvId a2 = MUL_F(alpha, alpha), k = ADD_F(MUL_F(MUL_F(nh, nh), SUB_F(a2, FLOAT(1.f))), FLOAT(1.f));
+    return DIV_F(a2, MUL_F(MUL_F(FLOAT(3.14159265f), k), k));
+}
+static SpvId ggxLambdaSpv(Spv* s, SpvId alpha, SpvId c) {
+    SpvId c2 = MAX_F(MUL_F(c, c), FLOAT(1e-8f));
+    SpvId inside = ADD_F(FLOAT(1.f), DIV_F(MUL_F(MUL_F(alpha, alpha), SUB_F(FLOAT(1.f), c2)), c2));
+    return MUL_F(SUB_F(spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, inside), FLOAT(1.f)), FLOAT(.5f));
+}
+static SpvId visibleNormalSpv(Spv* s, SpvId n, SpvId v, SpvId alpha, const SpvId* u) {
+    SpvId nx = X(n), ny = Y(n), nz = Z(n);
+    SpvId sign = G_PICK(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, nz, FLOAT(0.f)), FLOAT(1.f), FLOAT(-1.f));
+    SpvId a = DIV_F(FLOAT(-1.f), ADD_F(sign, nz)), b = MUL_F(MUL_F(nx, ny), a);
+    SpvId t = vec3Of(s, ADD_F(FLOAT(1.f), MUL_F(MUL_F(MUL_F(sign, nx), nx), a)), MUL_F(sign, b), MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, sign), nx));
+    SpvId bt = vec3Of(s, b, ADD_F(sign, MUL_F(MUL_F(ny, ny), a)), spvOp1(s, SPV_OP_FNegate, s->floatType, ny));
+    SpvId sx = MUL_F(DOT3(v, t), alpha), sy = MUL_F(DOT3(v, bt), alpha), sz = MAX_F(DOT3(v, n), FLOAT(1e-4f));
+    SpvId inverse = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, ADD_F(ADD_F(MUL_F(sx, sx), MUL_F(sy, sy)), MUL_F(sz, sz))));
+    sx = MUL_F(sx, inverse);
+    sy = MUL_F(sy, inverse);
+    sz = MUL_F(sz, inverse);
+    SpvId turn = MUL_F(FLOAT(6.28318531f), u[0]);
+    SpvId z = SUB_F(MUL_F(SUB_F(FLOAT(1.f), u[1]), ADD_F(FLOAT(1.f), sz)), sz);
+    SpvId across = spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, MIN_F(MAX_F(SUB_F(FLOAT(1.f), MUL_F(z, z)), FLOAT(0.f)), FLOAT(1.f)));
+    SpvId cx = MUL_F(ADD_F(MUL_F(across, cosOf(s, turn)), sx), alpha);
+    SpvId cy = MUL_F(ADD_F(MUL_F(across, cosOf(s, SUB_F(turn, FLOAT(1.57079633f)))), sy), alpha);
+    SpvId cz = ADD_F(z, sz);
+    SpvId back = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, ADD_F(ADD_F(MUL_F(cx, cx), MUL_F(cy, cy)), MUL_F(cz, cz))));
+    cx = MUL_F(cx, back);
+    cy = MUL_F(cy, back);
+    cz = MUL_F(cz, back);
+    return ADD_V3(ADD_V3(SCALE_V3(t, cx), SCALE_V3(bt, cy)), SCALE_V3(n, cz));
+}
+
 static SpvId ballOfSpv(Spv* s, const SpvId* u) {
     SpvId r = exp2Of(s, MUL_F(log2Of(s, u[2]), FLOAT(1.f / 3.f)));
     return SCALE_V3(directionOfSpv(s, u), r);
+}
+
+/* What a ray aimed at all around brought (trace.c's): the share given back diffusely and the highlight's, each weighed
+ * against its own bounce; in the lights' loop, after its walk (t->through), where the walk is the lights' own. */
+static void aimedLightSpv(const Tracer* t, const Met* m, SpvId isEnv, SpvId view, SpvId toward, SpvId alpha, SpvId nv, SpvId most, SpvId chance, SpvId environmentLight) {
+    Spv* s = t->s;
+    SpvId merge;
+    spvIfBegin(s, isEnv, &merge);
+    {
+        SpvId likely = LOAD_F(t->likelyVar), cosine = DOT3(m->normal, toward);
+        SpvId other = MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), cosine), FLOAT(1.f / 3.14159265f));
+        SpvId through = LOAD_F(t->through);
+        SpvId around = envSample(s, &t->r, UINT(0), toward);
+        SpvId weight = DIV_F(MUL_F(likely, likely), ADD_F(MUL_F(likely, likely), MUL_F(other, other)));
+        SpvId share = MUL_F(MUL_F(MUL_F(MUL_F(MUL_F(MUL_F(m->open, SUB_F(FLOAT(1.f), most)), FLOAT(1.f / 3.14159265f)), cosine), through), DIV_F(weight, likely)), environmentLight);
+        SpvId h = NORMALIZE(ADD_V3(view, toward));
+        SpvId facing = ggxDSpv(s, alpha, MAX_F(DOT3(m->normal, h), FLOAT(0.f)));
+        SpvId lambdaView = ggxLambdaSpv(s, alpha, nv);
+        SpvId otherShine = DIV_F(MUL_F(chance, facing), MUL_F(MUL_F(ADD_F(FLOAT(1.f), lambdaView), FLOAT(4.f)), nv));
+        SpvId shineWeight = DIV_F(MUL_F(likely, likely), ADD_F(MUL_F(likely, likely), MUL_F(otherShine, otherShine)));
+        SpvId highlight = MUL_F(MUL_F(MUL_F(DIV_F(facing, MUL_F(MUL_F(FLOAT(4.f), nv), ADD_F(ADD_F(FLOAT(1.f), lambdaView), ggxLambdaSpv(s, alpha, cosine)))), through), DIV_F(shineWeight, likely)), environmentLight);
+        highlight = PICK_F(MORE_F(chance, FLOAT(0.f)), highlight, FLOAT(0.f));
+        SpvId gained = MUL_V3(ADD_V3(SCALE_V3(m->albedo, share), SCALE_V3(m->mirror, highlight)), around);
+        spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), MUL_V3(LOAD_V3(t->path), gained)));
+    }
+    spvIfEnd(s, merge);
 }
 
 static SpvId traceRandom(const Tracer* t) {
@@ -3408,7 +3468,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->bestInstance = VAR(ptrUint); t->bestTriangle = VAR(ptrUint);
     t->state = VAR(ptrUint); t->covered = VAR(ptrUint); t->bounces = VAR(ptrUint); t->step = VAR(ptrUint); t->sampleIndex = VAR(ptrUint);
     t->origin = VAR(ptrVec3); t->direction = VAR(ptrVec3); t->path = VAR(ptrVec3); t->light = VAR(ptrVec3);
-    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat); t->diffuseLikely = VAR(ptrFloat);
+    t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat); t->diffuseLikely = VAR(ptrFloat); t->bounceDir = VAR(ptrVec3); t->keptVar = VAR(ptrFloat); t->shineVar = VAR(ptrFloat); t->towardVar = VAR(ptrVec3); t->likelyVar = VAR(ptrFloat);
     t->through = VAR(ptrFloat); t->limit = VAR(ptrFloat); t->travelled = VAR(ptrFloat); t->keep = VAR(ptrFloat);
     t->shadowStep = VAR(ptrUint); t->lightIndex = VAR(ptrUint); t->ballStep = VAR(ptrUint);
     t->graphs = graphs;
@@ -3572,14 +3632,31 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             SpvId ballDir = LOAD_V3(t->ball);
             SpvId toSun = NORMALIZE(ADD_V3(spvShuffle3(s, frameVec(s, &t->r, F_TOSUN)), SCALE_V3(ballDir, Z(look))));
 
-            /* the lights, and last the sun */
+            /* the lights, the sun, and last, on a path under a picture of all around, a ray aimed at it (trace.c's; in
+             * the lights' loop, so that the trees are walked for it where they are walked for lights) */
+            SpvId alpha = MAX_F(MUL_F(m.rough, m.rough), FLOAT(1e-3f)), nv = MAX_F(DOT3(m.normal, view), FLOAT(1e-4f));
+            SpvId most = maxOf3(s, m.mirror);
+            SpvId chance = PICK_F(m.shiny, MIN_F(MAX_F(most, FLOAT(.05f)), FLOAT(.95f)), FLOAT(0.f));
+            SpvId aims = BOTH(BOTH(paths, aroundOn), spvOp2(s, SPV_OP_ULessThan, s->boolType, LOAD_U(t->bounces), maxBounces));
+            SpvId lightEnd = ADD_U(lightCount, spvSelect(s, s->uintType, aims, UINT(1), UINT(0)));
             spvStore(s, t->lightIndex, UINT(0));
             Loop lights;
             loopOpen(s, &lights);
-            loopWhile(s, &lights, spvOp2(s, 178 /* OpULessThanEqual */, s->boolType, LOAD_U(t->lightIndex), lightCount));
+            loopWhile(s, &lights, spvOp2(s, 178 /* OpULessThanEqual */, s->boolType, LOAD_U(t->lightIndex), lightEnd));
             {
                 SpvId li = LOAD_U(t->lightIndex);
-                SpvId isSun = IS_EQ(li, lightCount);
+                SpvId isSun = IS_EQ(li, lightCount), isEnv = IS_EQ(li, ADD_U(lightCount, UINT(1)));
+                spvStore(s, t->towardVar, zero3);
+                spvStore(s, t->likelyVar, FLOAT(0.f));
+                SpvId aimedMerge;
+                spvIfBegin(s, isEnv, &aimedMerge);
+                {
+                    SpvId e[4], toward;
+                    sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, ADD_U(LOAD_U(t->bounces), UINT(65))), e);
+                    spvStore(s, t->likelyVar, envAimSpv(s, &t->r, e[0], e[1], &toward));
+                    spvStore(s, t->towardVar, toward);
+                }
+                spvIfEnd(s, aimedMerge);
                 SpvId row = ADD_U(UINT(F_LIGHTS), MUL_U(spvGlsl2(s, SPV_GLSL_UMin, s->uintType, li, UINT(ARTF_FRAME_LIGHTS - 1)), UINT(F_LIGHT_ROWS)));
                 SpvId lightA = frameVecAt(s, &t->r, row), lightB = frameVecAt(s, &t->r, ADD_U(row, UINT(1))), lightC = frameVecAt(s, &t->r, ADD_U(row, UINT(2)));
                 /* (a light with a size: each path sees another point of it) */
@@ -3593,8 +3670,8 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                     SpvId shapeA = frameVecAt(s, &t->r, shapeAt), shapeB = frameVecAt(s, &t->r, ADD_U(shapeAt, UINT(1)));
                     shapeC = frameVecAt(s, &t->r, ADD_U(shapeAt, UINT(2)));
                     shapeD = frameVecAt(s, &t->r, ADD_U(shapeAt, UINT(3)));
-                    SpvId shaped = BOTH(NOT(isSun), MORE_F(W(shapeA), FLOAT(0.f))), rect = BOTH(shaped, MORE_F(W(shapeB), FLOAT(0.f)));
-                    special = BOTH(NOT(isSun), EITHER(MORE_F(W(shapeA), FLOAT(0.f)), MORE_F(W(shapeC), FLOAT(0.f))));
+                    SpvId shaped = BOTH(NOT(EITHER(isSun, isEnv)), MORE_F(W(shapeA), FLOAT(0.f))), rect = BOTH(shaped, MORE_F(W(shapeB), FLOAT(0.f)));
+                    special = BOTH(NOT(EITHER(isSun, isEnv)), EITHER(MORE_F(W(shapeA), FLOAT(0.f)), MORE_F(W(shapeC), FLOAT(0.f))));
                     spvStore(s, t->alongVar, FLOAT(0.f));
                     spvStore(s, t->acrossVar, FLOAT(0.f));
                     SpvId shapedMerge, rectMerge;
@@ -3613,7 +3690,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                 SpvId radius = W(lightA);
                 SpvId fade = MAX_F(SUB_F(FLOAT(1.f), DIV_F(d2, MUL_F(radius, radius))), FLOAT(0.f));
                 SpvId toLamp = SCALE_V3(toPoint, DIV_F(FLOAT(1.f), distance));
-                SpvId to = pick3(s, isSun, toSun, toLamp);
+                SpvId to = pick3(s, isEnv, LOAD_V3(t->towardVar), pick3(s, isSun, toSun, toLamp));
                 SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(toLamp, spvShuffle3(s, lightC))), W(lightC)), W(lightB));
                 if (more) {
                     /* (a shape's cone and profile from its middle) */
@@ -3624,19 +3701,25 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                 } else {
                     spot = MIN_F(MAX_F(spot, FLOAT(0.f)), FLOAT(1.f));
                 }
-                SpvId strength = PICK_F(isSun, FLOAT(1.f), MUL_F(MUL_F(fade, fade), spot));
-                SpvId color = pick3(s, isSun, spvShuffle3(s, frameVec(s, &t->r, F_SUNCOLOR)), spvShuffle3(s, lightB));
-                SpvId limit = PICK_F(isSun, FLOAT(3e37f), distance);
+                SpvId strength = PICK_F(isEnv, PICK_F(MORE_F(LOAD_F(t->likelyVar), FLOAT(0.f)), FLOAT(1.f), FLOAT(0.f)), PICK_F(isSun, FLOAT(1.f), MUL_F(MUL_F(fade, fade), spot)));
+                SpvId color = pick3(s, isEnv, one3, pick3(s, isSun, spvShuffle3(s, frameVec(s, &t->r, F_SUNCOLOR)), spvShuffle3(s, lightB)));
+                SpvId limit = PICK_F(EITHER(isSun, isEnv), FLOAT(3e37f), distance);
                 SpvId ndl = DOT3(m.normal, to);
                 SpvId lit;
                 if (!more) {
                     spvIfBegin(s, BOTH(BOTH(MORE_F(ndl, FLOAT(0.f)), MORE_F(strength, FLOAT(0.f))), MORE_F(DOT3(color, color), FLOAT(0.f))), &lit);
                     {
                         lightThrough(t, lifted, to, limit);
-                        SpvId highlight = lightHighlight(s, &m.reflecting, m.normal, view, to, ndl, FLOAT(1.f));
-                        SpvId amount = MUL_F(strength, LOAD_F(t->through));
-                        SpvId reflected = ADD_V3(SCALE_V3(m.albedo, ndl), highlight);
-                        spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), SCALE_V3(MUL_V3(MUL_V3(LOAD_V3(t->path), color), reflected), amount)));
+                        SpvId lamp;
+                        spvIfBegin(s, NOT(isEnv), &lamp);
+                        {
+                            SpvId highlight = lightHighlight(s, &m.reflecting, m.normal, view, to, ndl, FLOAT(1.f));
+                            SpvId amount = MUL_F(strength, LOAD_F(t->through));
+                            SpvId reflected = ADD_V3(SCALE_V3(m.albedo, ndl), highlight);
+                            spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), SCALE_V3(MUL_V3(MUL_V3(LOAD_V3(t->path), color), reflected), amount)));
+                        }
+                        spvIfEnd(s, lamp);
+                        aimedLightSpv(t, &m, isEnv, view, to, alpha, nv, most, chance, environmentLight);
                     }
                     spvIfEnd(s, lit);
                 } else {
@@ -3646,6 +3729,9 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                     spvIfBegin(s, BOTH(shining, MORE_F(ndl, FLOAT(0.f))), &lit);
                     {
                         lightThrough(t, lifted, to, limit);
+                        aimedLightSpv(t, &m, isEnv, view, to, alpha, nv, most, chance, environmentLight);
+                        SpvId lamp;
+                        spvIfBegin(s, NOT(isEnv), &lamp);
                         SpvId upon = MAX_F(ndl, FLOAT(0.f));
                         SpvId highlight = SCALE_V3(lightHighlight(s, &m.reflecting, m.normal, view, to, upon, FLOAT(1.f)), m.under);
                         SpvId coatNdl = MAX_F(DOT3(m.coatNormal, to), FLOAT(0.f));
@@ -3655,10 +3741,11 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                         SpvId wrap = shaderWrap(s, ndl, upon);
                         SpvId reflected = ADD_V3(SCALE_V3(ADD_V3(SCALE_V3(m.albedo, upon), SCALE_V3(m.subsurface, wrap)), share), highlight);
                         spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), SCALE_V3(MUL_V3(MUL_V3(LOAD_V3(t->path), color), reflected), MUL_F(strength, LOAD_F(t->through)))));
+                        spvIfEnd(s, lamp);
                     }
                     spvIfEnd(s, lit);
                     SpvId behind;
-                    spvIfBegin(s, BOTH(BOTH(shining, under), LESS_F(ndl, FLOAT(0.f))), &behind);
+                    spvIfBegin(s, BOTH(BOTH(BOTH(shining, under), NOT(isEnv)), LESS_F(ndl, FLOAT(0.f))), &behind);
                     {
                         /* from just under the surface, toward the light: what is inside, then what is past it */
                         SpvId close = reachOf(s, lifted);
@@ -3676,7 +3763,6 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             loopClose(s, &lights);
 
             SpvId mirror = SUB_V3(d, SCALE_V3(m.normal, MUL_F(FLOAT(2.f), DOT3(d, m.normal))));
-            SpvId glossy = ADD_V3(mirror, SCALE_V3(ballDir, MUL_F(m.rough, m.rough)));
             SpvId last = spvOp2(s, SPV_OP_ULessThan, s->boolType, LOAD_U(t->bounces), maxBounces);
             last = NOT(last);
 
@@ -3703,37 +3789,28 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             }
             spvIfEnd(s, rayAround);
             breakIf(s, &steps, EITHER(last, BOTH(NOT(paths), NOT(m.shiny))));
-            SpvId most = maxOf3(s, m.mirror);
-            SpvId chance = PICK_F(m.shiny, MIN_F(MAX_F(most, FLOAT(.05f)), FLOAT(.95f)), FLOAT(0.f));
-            /* aimed at the picture of all around, for what the surface gives back diffusely (trace.c's) */
-            SpvId aimMerge;
-            spvIfBegin(s, BOTH(paths, aroundOn), &aimMerge);
-            {
-                SpvId e[4], toward;
-                sobol4Of(s, ADD_U(done, LOAD_U(t->sampleIndex)), pathSeedOf(s, pixel, ADD_U(LOAD_U(t->bounces), UINT(65))), e);
-                SpvId likely = envAimSpv(s, &t->r, e[0], e[1], &toward), cosine = DOT3(m.normal, toward);
-                SpvId goMerge;
-                spvIfBegin(s, BOTH(MORE_F(likely, FLOAT(0.f)), MORE_F(cosine, FLOAT(0.f))), &goMerge);
-                {
-                    SpvId other = MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), cosine), FLOAT(1.f / 3.14159265f));
-                    lightThrough(t, lifted, toward, FLOAT(3e37f));
-                    SpvId through = LOAD_F(t->through);
-                    SpvId around = envSample(s, &t->r, UINT(0), toward);
-                    SpvId weight = DIV_F(MUL_F(likely, likely), ADD_F(MUL_F(likely, likely), MUL_F(other, other)));
-                    SpvId share = MUL_F(MUL_F(MUL_F(MUL_F(MUL_F(MUL_F(m.open, SUB_F(FLOAT(1.f), most)), FLOAT(1.f / 3.14159265f)), cosine), through), DIV_F(weight, likely)), environmentLight);
-                    SpvId gained = SCALE_V3(MUL_V3(m.albedo, around), share);
-                    spvStore(s, t->light, ADD_V3(LOAD_V3(t->light), MUL_V3(LOAD_V3(t->path), gained)));
-                }
-                spvIfEnd(s, goMerge);
-            }
-            spvIfEnd(s, aimMerge);
             SpvId isMirror = EITHER(NOT(paths), LESS_F(LOAD_F(t->choice), chance));
             /* (a point on a sphere over the surface: as many rays as the cosine says, exactly) */
             SpvId diffuse = ADD_V3(SCALE_V3(m.normal, FLOAT(1.0001f)), directionOfSpv(s, u));
-            SpvId next = NORMALIZE(pick3(s, isMirror, glossy, diffuse));
-            spvStore(s, t->diffuseLikely, PICK_F(isMirror, FLOAT(0.f), MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), MAX_F(DOT3(next, m.normal), FLOAT(0.f))), FLOAT(1.f / 3.14159265f))));
+            spvStore(s, t->bounceDir, diffuse);
+            spvStore(s, t->keptVar, FLOAT(0.f));
+            spvStore(s, t->shineVar, FLOAT(0.f));
+            SpvId glossyMerge;
+            spvIfBegin(s, isMirror, &glossyMerge);
+            {
+                SpvId lambdaView = ggxLambdaSpv(s, alpha, nv);
+                SpvId facet = visibleNormalSpv(s, m.normal, view, alpha, u);
+                SpvId glossy = SUB_V3(d, SCALE_V3(facet, MUL_F(FLOAT(2.f), DOT3(d, facet))));
+                SpvId glossyCos = DOT3(m.normal, glossy);
+                spvStore(s, t->bounceDir, glossy);
+                spvStore(s, t->keptVar, PICK_F(MORE_F(glossyCos, FLOAT(0.f)), DIV_F(ADD_F(FLOAT(1.f), lambdaView), ADD_F(ADD_F(FLOAT(1.f), lambdaView), ggxLambdaSpv(s, alpha, glossyCos))), FLOAT(0.f)));
+                spvStore(s, t->shineVar, DIV_F(MUL_F(chance, ggxDSpv(s, alpha, MAX_F(DOT3(m.normal, facet), FLOAT(0.f)))), MUL_F(MUL_F(ADD_F(FLOAT(1.f), lambdaView), FLOAT(4.f)), nv)));
+            }
+            spvIfEnd(s, glossyMerge);
+            SpvId next = NORMALIZE(LOAD_V3(t->bounceDir)), kept = LOAD_F(t->keptVar);
+            spvStore(s, t->diffuseLikely, PICK_F(isMirror, LOAD_F(t->shineVar), MUL_F(MUL_F(SUB_F(FLOAT(1.f), chance), MAX_F(DOT3(next, m.normal), FLOAT(0.f))), FLOAT(1.f / 3.14159265f))));
             SpvId keep = DIV_F(MUL_F(m.open, SUB_F(FLOAT(1.f), most)), SUB_F(FLOAT(1.f), chance));
-            SpvId tint = pick3(s, isMirror, pick3(s, paths, SCALE_V3(m.mirror, DIV_F(FLOAT(1.f), MAX_F(chance, FLOAT(1e-6f)))), m.mirror), SCALE_V3(m.albedo, keep));
+            SpvId tint = pick3(s, isMirror, pick3(s, paths, SCALE_V3(m.mirror, DIV_F(kept, MAX_F(chance, FLOAT(1e-6f)))), SCALE_V3(m.mirror, kept)), SCALE_V3(m.albedo, keep));
             spvStore(s, t->path, MUL_V3(LOAD_V3(t->path), tint));
             spvStore(s, t->direction, next);
             breakIf(s, &steps, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(next, m.normal), FLOAT(0.f)));
