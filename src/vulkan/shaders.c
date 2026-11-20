@@ -24,7 +24,8 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_GRADE2 = 104, F_ORTHO = 111, F_TRACED = 112, F_SHAPES = 113, F_OUTPUT = 177, F_SIZE = 178 };
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_GRADE2 = 104, F_ORTHO = 111, F_TRACED = 112, F_SHAPES = 113, F_OUTPUT = 177, F_AERIAL = 178, F_SIZE = 182 };
+_Static_assert(sizeof(ArtfFrameData) == F_SIZE * 16 && offsetof(ArtfFrameData, aerial) == F_AERIAL * 16 && offsetof(ArtfFrameData, output) == F_OUTPUT * 16, "the frame's rows");
 
 typedef struct Resources {
     SpvId frame, instances, visible, meshes, materials, indirect, hiz, flags, environment;
@@ -188,6 +189,41 @@ static SpvId pick3(Spv* s, SpvId condition, SpvId a, SpvId b) {
 static SpvId orthoOn(Spv* s, const Resources* r) { return spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Z(frameVec(s, r, F_ORTHO)), spvConstFloat(s, 0.f)); }
 /* Where the eye is for a point of the world: as artfEyeOf, the camera, or in an orthographic view the place on its
  * plane behind the point. */
+/* sceneInternal.h's artfAerialOf: what the air keeps of each color, and what it adds, toward a point distance away whose
+ * cosine to the sun is mu. The same arithmetic, in the same order. */
+static void aerialSpv(Spv* s, const Resources* r, SpvId distance, SpvId mu, SpvId* keep, SpvId* add) {
+    SpvId e[4];
+    for (int k = 0; k < 4; ++k) e[k] = frameVec(s, r, F_AERIAL + k);
+    SpvId g = spvExtract(s, s->floatType, e[1], 3), one = spvConstFloat(s, 1.f);
+    SpvId k = spvOp2(s, SPV_OP_FSub, s->floatType, spvOp2(s, SPV_OP_FAdd, s->floatType, one, spvOp2(s, SPV_OP_FMul, s->floatType, g, g)),
+                     spvOp2(s, SPV_OP_FMul, s->floatType, spvOp2(s, SPV_OP_FMul, s->floatType, spvConstFloat(s, 2.f), g), mu));
+    SpvId mie = spvOp2(s, SPV_OP_FDiv, s->floatType, one, spvOp2(s, SPV_OP_FMul, s->floatType, k, spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, k)));
+    SpvId mu2 = spvOp2(s, SPV_OP_FAdd, s->floatType, one, spvOp2(s, SPV_OP_FMul, s->floatType, mu, mu));
+    SpvId kept[3], added[3];
+    for (uint32_t c = 0; c < 3; ++c) {
+        SpvId taken = spvOp2(s, SPV_OP_FMul, s->floatType, spvExtract(s, s->floatType, e[0], c), distance);
+        kept[c] = spvExp2Fast(s, spvOp2(s, SPV_OP_FMul, s->floatType, spvOp1(s, SPV_OP_FNegate, s->floatType, taken), spvConstFloat(s, 1.44269504f)));
+        SpvId color = spvOp2(s, SPV_OP_FAdd, s->floatType,
+                             spvOp2(s, SPV_OP_FMul, s->floatType, mu2,
+                                    spvOp2(s, SPV_OP_FAdd, s->floatType, spvExtract(s, s->floatType, e[1], c), spvOp2(s, SPV_OP_FMul, s->floatType, spvExtract(s, s->floatType, e[2], c), mie))),
+                             spvExtract(s, s->floatType, e[3], c));
+        added[c] = spvOp2(s, SPV_OP_FMul, s->floatType, color, spvOp2(s, SPV_OP_FSub, s->floatType, one, kept[c]));
+    }
+    *keep = vec3Of(s, kept[0], kept[1], kept[2]);
+    *add = vec3Of(s, added[0], added[1], added[2]);
+}
+/* The same, from the eye to world: mu from the way there (0 at the eye). */
+static void aerialToward(Spv* s, const Resources* r, SpvId fromEye, SpvId* keep, SpvId* add) {
+    SpvId d = spvGlsl1(s, SPV_GLSL_Length, s->floatType, fromEye);
+    SpvId sun = spvShuffle3(s, frameVec(s, r, F_TOSUN));
+    SpvId x = spvExtract(s, s->floatType, fromEye, 0), y = spvExtract(s, s->floatType, fromEye, 1), z = spvExtract(s, s->floatType, fromEye, 2);
+    SpvId dot = spvOp2(s, SPV_OP_FAdd, s->floatType,
+                       spvOp2(s, SPV_OP_FAdd, s->floatType, spvOp2(s, SPV_OP_FMul, s->floatType, x, spvExtract(s, s->floatType, sun, 0)), spvOp2(s, SPV_OP_FMul, s->floatType, y, spvExtract(s, s->floatType, sun, 1))),
+                       spvOp2(s, SPV_OP_FMul, s->floatType, z, spvExtract(s, s->floatType, sun, 2)));
+    SpvId mu = spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, d, spvConstFloat(s, 0.f)), spvOp2(s, SPV_OP_FDiv, s->floatType, dot, d), spvConstFloat(s, 0.f));
+    aerialSpv(s, r, d, mu, keep, add);
+}
+
 static SpvId eyeOf(Spv* s, const Resources* r, SpvId world) {
     SpvId camera = spvShuffle3(s, frameVec(s, r, F_CAMERA)), ahead = spvShuffle3(s, frameVec(s, r, F_EYE + 2));
     SpvId onPlane = SUB_V3(world, SCALE_V3(ahead, DOT3(SUB_V3(world, camera), ahead)));
@@ -1354,6 +1390,15 @@ static SpvId textureLodAt(Spv* s, SpvId textures, SpvId sampled, SpvId index, Sp
     return spvImageSampleLod(s, image, uv, lod);
 }
 
+/* KHR_materials_specular's textures, as kernels.inc's: the color's (decoded, as a base color's) times how much (alpha);
+ * 1 where a material has neither (rows 6 and 7 of ArtfMaterialMore, their w) */
+static SpvId specularTint(Spv* s, const SpvId* e, SpvId colorTexel, SpvId strengthTexel) {
+    SpvId hasColor = spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(W(e[7])), UINT(0));
+    SpvId hasStrength = spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(W(e[6])), UINT(0));
+    SpvId tint = pick3(s, hasColor, srgbDecode3(s, spvShuffle3(s, colorTexel)), same3(s, 1.f));
+    return pick3(s, hasStrength, SCALE_V3(tint, W(strengthTexel)), tint);
+}
+
 static SpvId textureAt(Spv* s, SpvId textures, SpvId sampled, SpvId index, SpvId uv) {
     spvDecorate(s, index, SPV_DECORATE_NonUniform, -1);
     SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, sampled), textures, &index, 1);
@@ -1828,7 +1873,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
 #define MORE_HAS(bit) spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, moreFlags, UINT(bit)), UINT(0))
     if (coats) {
         /* a dielectric's of a color, and a thin film's colors, as on the CPU */
-        f0 = shaderReflects3(s, MUL_V3(dielectric, spvShuffle3(s, e[4])), notMetal, albedo, metal);
+        f0 = shaderReflects3(s, MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, textureAt(s, textures, sampled, AS_UINT(W(e[7])), uv), textureAt(s, textures, sampled, AS_UINT(W(e[6])), uv))), notMetal, albedo, metal);
         f0 = pick3(s, MORE_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, W(e[3]), W(e[4]), Z(e[5])), f0);
         reflecting.f0 = f0;
         /* highlights drawn out: the way u grows, square to the normal, turned as asked */
@@ -2240,6 +2285,16 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         const ViewInputs in = {albedo, n, rough, metal, aroundLit, emission, world, instance, meshWord, meshlet, spvLoad(s, s->floatType, lightsSeen)};
         lit = viewLightSpv(s, &r, &in, lit);
     }
+    {
+        /* aerial perspective (ArtfSkyDesc.aerial), where the frame has it, as on the CPU */
+        SpvId before = s->block, merge;
+        spvIfBegin(s, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, W(frameVec(s, &r, F_AERIAL + 3)), FLOAT(0.f)), &merge);
+        SpvId keep, add;
+        aerialToward(s, &r, SUB_V3(world, eyeOf(s, &r, world)), &keep, &add);
+        SpvId aired = ADD_V3(MUL_V3(lit, keep), add), after = s->block;
+        spvIfEnd(s, merge);
+        lit = spvPhi(s, s->vec3, aired, after, lit, before);
+    }
     /* air, then film, as on the CPU */
     SpvId look = frameVec(s, &r, F_LOOK), fog = spvShuffle3(s, frameVec(s, &r, F_FOG));
     SpvId keep = shaderFogKeep(s, MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(world, eyeOf(s, &r, world))), Y(look)));
@@ -2517,7 +2572,27 @@ static void turnedPlace(Spv* s, SpvId push, SpvId coord, SpvId* x, SpvId* y) {
 #undef TURN_IS
 }
 
-uint32_t* artfShaderOverlayFragment(size_t* size, bool turns) {
+/* color.h's artfPq and artfDisplayEncode: the same arithmetic, in the same order. */
+static SpvId pqSpv(Spv* s, SpvId y) {
+    SpvId p = spvExp2Fast(s, MUL_F(spvLog2Fast(s, spvGlsl2(s, SPV_GLSL_FMin, s->floatType, y, FLOAT(1.f))), FLOAT(.1593017578125f)));
+    SpvId e = spvExp2Fast(s, MUL_F(spvLog2Fast(s, DIV_F(ADD_F(FLOAT(.8359375f), MUL_F(FLOAT(18.8515625f), p)), ADD_F(FLOAT(1.f), MUL_F(FLOAT(18.6875f), p)))), FLOAT(78.84375f)));
+    return spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, y, FLOAT(0.f)), e, FLOAT(0.f));
+}
+static SpvId displaySpv(Spv* s, int kind, float peak, SpvId light) {
+    static const float p3[3][3] = {{.82246197f, .17753803f, 0.f}, {.03319420f, .96680580f, 0.f}, {.01708263f, .07239744f, .91051993f}};
+    static const float bt2020[3][3] = {{.62740390f, .32928304f, .04331307f}, {.06909729f, .91954040f, .01136232f}, {.01639144f, .08801331f, .89559525f}};
+    const float(*m)[3] = kind == ARTF_DISPLAY_HDR10 ? bt2020 : p3;
+    SpvId out[3];
+    for (int c = 0; c < 3; ++c) {
+        SpvId v = ADD_F(ADD_F(MUL_F(FLOAT(m[c][0]), X(light)), MUL_F(FLOAT(m[c][1]), Y(light))), MUL_F(FLOAT(m[c][2]), Z(light)));
+        out[c] = kind == ARTF_DISPLAY_HDR10 ? pqSpv(s, MUL_F(spvGlsl2(s, SPV_GLSL_FMax, s->floatType, v, FLOAT(0.f)), FLOAT(peak)))
+                                            : spvSrgbEncode(s, spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, v, FLOAT(0.f)), FLOAT(1.f)));
+    }
+    return vec3Of(s, out[0], out[1], out[2]);
+}
+
+uint32_t* artfShaderOverlayFragment(size_t* size, bool turns) { return artfShaderOverlayFragmentFor(size, turns, NULL); }
+uint32_t* artfShaderOverlayFragmentFor(size_t* size, bool turns, const ArtfShaderDisplay* display) {
     Spv b, *s = &b;
     spvInit(s);
     SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);
@@ -2536,6 +2611,14 @@ uint32_t* artfShaderOverlayFragment(size_t* size, bool turns) {
     if (turns) turnedPlace(s, push, coord, &cx, &cy);
     const SpvId xy[2] = {spvOp1(s, SPV_OP_ConvertFToS, s->intType, cx), spvOp1(s, SPV_OP_ConvertFToS, s->intType, cy)};
     SpvId texel = spvImageFetch(s, imageType, spvLoad(s, sampled, overlay), spvCompose(s, ivec2, xy, 2));
+    if (display && display->kind != ARTF_DISPLAY_SRGB) {
+        /* (made for another screen, as post.c's finalOut makes it: its white at paper white) */
+        SpvId over = W(texel);
+        SpvId unmade = spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, over, FLOAT(0.f)), DIV_F(FLOAT(1.f), over), FLOAT(0.f));
+        SpvId c = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, SCALE_V3(spvShuffle3(s, texel), unmade), same3(s, 1.f));
+        SpvId e = displaySpv(s, display->kind, display->peak * display->inverse, srgbDecode3(s, c));
+        texel = vec4Of(s, SCALE_V3(e, over), over);
+    }
     spvStore(s, outColor, texel);
     spvEndMain(s);
 
@@ -2887,7 +2970,7 @@ typedef struct Tracer {
     SpvId stack, depth, at, pop, stack2, depth2, at2, pop2, leaf, leaf2;
     SpvId bestT, bestU, bestV, bestInstance, bestTriangle;
     SpvId state, origin, direction, path, light, covered, bounces, step, sampleIndex, choice, diffuseLikely, bounceDir, keptVar, shineVar, towardVar, likelyVar, coneWidth, coneSpread;
-    SpvId shadowOrigin, through, limit, shadowStep, lightIndex, ballStep, ball, travelled, keep;
+    SpvId shadowOrigin, through, limit, shadowStep, lightIndex, ballStep, ball, travelled, keep, aerialKeep, aerialAdd;
     SpvId weighsVar; /* (trace.c's lastWeighs: the surface the ray left weighed its lights with a size) */
     GraphVars own;
     const ArtfGraphData* graphs;
@@ -3253,7 +3336,7 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     for (uint32_t k = 0; k < ARTF_MATERIAL_MORE_ROWS; ++k) e[k] = bufferVec(s, &t->r, t->r.materials, ADD_U(at, UINT(k)));
     SpvId moreFlags = spvSelect(s, s->uintType, unlit, AND_U(AS_UINT(W(e[0])), UINT(ARTF_MORE_VOLUME)), AS_UINT(W(e[0])));
 #define T_HAS(bit) NOT_EQ(AND_U(moreFlags, UINT(bit)), UINT(0))
-    f0 = shaderReflects3(s, MUL_V3(dielectric, spvShuffle3(s, e[4])), notMetal, albedo, metal);
+    f0 = shaderReflects3(s, MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, traceTexture(t, lodBase, AS_UINT(W(e[7])), uv), traceTexture(t, lodBase, AS_UINT(W(e[6])), uv))), notMetal, albedo, metal);
     f0 = pick3(s, T_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, W(e[3]), W(e[4]), Z(e[5])), f0);
     SpvId gain = shaderGain3(s, f0, shaderUnkept(s, ndv, rough));
     SpvId mirror = pick3(s, shiny, MUL_V3(shaderMirror3(s, f0, SUB_F(FLOAT(1.f), rough), shaderFifth(s, ndv), FLOAT(1.f)), gain), same3(s, 0.f));
@@ -3745,6 +3828,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->origin = VAR(ptrVec3); t->direction = VAR(ptrVec3); t->path = VAR(ptrVec3); t->light = VAR(ptrVec3);
     t->shadowOrigin = VAR(ptrVec3); t->ball = VAR(ptrVec3); t->choice = VAR(ptrFloat); t->diffuseLikely = VAR(ptrFloat); t->bounceDir = VAR(ptrVec3); t->keptVar = VAR(ptrFloat); t->shineVar = VAR(ptrFloat); t->towardVar = VAR(ptrVec3); t->likelyVar = VAR(ptrFloat); t->coneWidth = VAR(ptrFloat); t->coneSpread = VAR(ptrFloat);
     t->through = VAR(ptrFloat); t->limit = VAR(ptrFloat); t->travelled = VAR(ptrFloat); t->keep = VAR(ptrFloat);
+    t->aerialKeep = VAR(ptrVec3); t->aerialAdd = VAR(ptrVec3);
     t->shadowStep = VAR(ptrUint); t->lightIndex = VAR(ptrUint); t->ballStep = VAR(ptrUint); t->weighsVar = VAR(ptrUint);
     t->graphs = graphs;
     t->graphCount = graphCount;
@@ -3805,6 +3889,8 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         spvStore(s, t->step, UINT(0));
         spvStore(s, t->travelled, FLOAT(0.f));
         spvStore(s, t->keep, FLOAT(1.f));
+        spvStore(s, t->aerialKeep, same3(s, 1.f));
+        spvStore(s, t->aerialAdd, same3(s, 0.f));
 
         Loop steps;
         loopOpen(s, &steps);
@@ -3940,6 +4026,15 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                     spvIfEnd(s, firstSample);
                 }
                 spvStore(s, t->keep, shaderFogKeep(s, MUL_F(travelled, Y(look))));
+                {
+                    /* aerial perspective to the first surface, as trace.c has it (only where the frame has it) */
+                    SpvId sun = spvShuffle3(s, frameVec(s, &t->r, F_TOSUN)), aerialOn = MORE_F(W(frameVec(s, &t->r, F_AERIAL + 3)), FLOAT(0.f));
+                    SpvId mu = ADD_F(ADD_F(MUL_F(X(d), X(sun)), MUL_F(Y(d), Y(sun))), MUL_F(Z(d), Z(sun)));
+                    SpvId aerialKeep, aerialAdd;
+                    aerialSpv(s, &t->r, travelled, mu, &aerialKeep, &aerialAdd);
+                    spvStore(s, t->aerialKeep, pick3(s, aerialOn, aerialKeep, same3(s, 1.f)));
+                    spvStore(s, t->aerialAdd, pick3(s, aerialOn, aerialAdd, same3(s, 0.f)));
+                }
             }
             spvIfEnd(s, first);
             spvStore(s, t->covered, UINT(1));
@@ -4169,6 +4264,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         {
             SpvId limit = vec3Of(s, FLOAT(64.f), FLOAT(64.f), FLOAT(64.f));
             SpvId gathered = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, LOAD_V3(t->light), limit);
+            gathered = ADD_V3(MUL_V3(gathered, LOAD_V3(t->aerialKeep)), LOAD_V3(t->aerialAdd));
             gathered = ADD_V3(fog, SCALE_V3(SUB_V3(gathered, fog), LOAD_F(t->keep)));
             const SpvId idx[2] = {t->r.zero, pixel};
             SpvId slot = spvAccess(s, t->r.ptrStorageVec4, t->sum, idx, 2);

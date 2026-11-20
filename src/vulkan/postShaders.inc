@@ -207,6 +207,52 @@ static SpvId postTap(Spv* s, Post* p, SpvId buffer, SpvId start, SpvId w, SpvId 
     return ADD_V4(top, SCALE_V4(SUB_V4(bottom, top), fy));
 }
 
+/* post.c's tapSharp: the history at (x, y) by Catmull-Rom's cubic over the 4 x 4 around it, the sides held; never
+ * below 0. The same arithmetic, in the same order. */
+static SpvId postTapSharp(Spv* s, Post* p, SpvId buffer, SpvId w, SpvId h, SpvId x, SpvId y) {
+    SpvId wf = TO_F(w), hf = TO_F(h);
+    x = P_CLAMP(x, FLOAT(0.f), SUB_F(wf, FLOAT(1.f)));
+    y = P_CLAMP(y, FLOAT(0.f), SUB_F(hf, FLOAT(1.f)));
+    SpvId x0 = P_TOU(x), y0 = P_TOU(y);
+    SpvId wx[4], wy[4];
+    for (int axis = 0; axis < 2; ++axis) {
+        SpvId t = axis ? SUB_F(y, TO_F(y0)) : SUB_F(x, TO_F(x0)), t2 = MUL_F(t, t), t3 = MUL_F(t2, t);
+        SpvId* out = axis ? wy : wx;
+        out[0] = MUL_F(FLOAT(.5f), SUB_F(SUB_F(MUL_F(FLOAT(2.f), t2), t3), t));
+        out[1] = MUL_F(FLOAT(.5f), ADD_F(SUB_F(MUL_F(FLOAT(3.f), t3), MUL_F(FLOAT(5.f), t2)), FLOAT(2.f)));
+        out[2] = MUL_F(FLOAT(.5f), ADD_F(SUB_F(MUL_F(FLOAT(4.f), t2), MUL_F(FLOAT(3.f), t3)), t));
+        out[3] = MUL_F(FLOAT(.5f), SUB_F(t3, t2));
+    }
+    SpvId cols[4];
+    for (int i = 0; i < 4; ++i) {
+        /* (x0 - 1 + i, held within 0 and w - 1, as signed) */
+        SpvId c = spvOp2(s, SPV_OP_IAdd, s->intType, spvOp1(s, SPV_OP_Bitcast, s->intType, x0), spvConstInt(s, i - 1));
+        cols[i] = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvGlsl2(s, 39 /* SMin */, s->intType, spvGlsl2(s, 42 /* SMax */, s->intType, c, spvConstInt(s, 0)), spvOp1(s, SPV_OP_Bitcast, s->intType, SUB_U(w, UINT(1)))));
+    }
+    SpvId total = 0;
+    for (int j = 0; j < 4; ++j) {
+        SpvId r = spvOp2(s, SPV_OP_IAdd, s->intType, spvOp1(s, SPV_OP_Bitcast, s->intType, y0), spvConstInt(s, j - 1));
+        r = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvGlsl2(s, 39, s->intType, spvGlsl2(s, 42, s->intType, r, spvConstInt(s, 0)), spvOp1(s, SPV_OP_Bitcast, s->intType, SUB_U(h, UINT(1)))));
+        SpvId at = MUL_U(r, w);
+        SpvId across = ADD_V4(ADD_V4(ADD_V4(SCALE_V4(postVec4(s, p, buffer, ADD_U(at, cols[0])), wx[0]), SCALE_V4(postVec4(s, p, buffer, ADD_U(at, cols[1])), wx[1])),
+                                     SCALE_V4(postVec4(s, p, buffer, ADD_U(at, cols[2])), wx[2])),
+                              SCALE_V4(postVec4(s, p, buffer, ADD_U(at, cols[3])), wx[3]));
+        total = j ? ADD_V4(total, SCALE_V4(across, wy[j])) : SCALE_V4(across, wy[j]);
+    }
+    return spvGlsl2(s, SPV_GLSL_FMax, s->vec4, total, vec4Of(s, same3(s, 0.f), FLOAT(0.f)));
+}
+/* The history where a pixel was: bilinear (postTap), or with ArtfScreenDesc.sharpHistory (the frame's temporal row, 2)
+ * by postTapSharp, read only then. */
+static SpvId postHistoryTap(Spv* s, Post* p, SpvId x, SpvId y) {
+    SpvId plain = postTap(s, p, p->history, UINT(0), p->width, p->height, x, y);
+    SpvId before = s->block, merge;
+    spvIfBegin(s, P_MORE(W(frameVec(s, &p->r, F_POST + 1)), FLOAT(1.5f)), &merge);
+    SpvId sharp = postTapSharp(s, p, p->history, p->width, p->height, x, y);
+    SpvId read = s->block;
+    spvIfEnd(s, merge);
+    return spvPhi(s, s->vec4, sharp, read, plain, before);
+}
+
 static SpvId postNormal(Spv* s, SpvId word) {
 #define PN_F(v) spvConstFloat(s, v)
     SpvId a = SUB_F(MUL_F(DIV_F(TO_F(spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, word, UINT(511))), PN_F(511.f)), PN_F(2.f)), PN_F(1.f));
@@ -859,7 +905,7 @@ POST_MAIN(artfShaderPostTemporal)
     /* (the push constant is 1 when there is a frame before to follow) */
     valid = P_AND(valid, spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0)));
     SpvId now = postVec4(s, p, p->light, i);
-    SpvId was = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, postTap(s, p, p->history, UINT(0), p->width, p->height, sx, sy)), lo), hi);
+    SpvId was = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, postHistoryTap(s, p, sx, sy)), lo), hi);
     SpvId share = PICK_F(valid, FLOAT(.1f), FLOAT(1.f));
     postLightStore(s, p, p->scratch, i, vec4Of(s, P_MIX3(was, spvShuffle3(s, now), share), W(now)));
 POST_FINISH()
@@ -935,7 +981,7 @@ POST_MAIN(artfShaderPostUpscale)
     SpvId lockAt = ADD_U(MUL_U(P_TOU(FLOOR_F(ADD_F(sy, FLOAT(.5f)))), p->width), P_TOU(FLOOR_F(ADD_F(sx, FLOAT(.5f)))));
     SpvId lockWas = postFloat(s, p, locks, ADD_U(MUL_U(SUB_U(UINT(1), half), framePixels), spvGlsl2(s, 38 /* UMin */, s->uintType, lockAt, SUB_U(framePixels, UINT(1)))));
     SpvId lock = PICK_F(ridge, FLOAT(1.f), MAX_F(SUB_F(lockWas, FLOAT(1.f / 24.f)), FLOAT(0.f)));
-    SpvId had = spvShuffle3(s, postTap(s, p, p->history, UINT(0), p->width, p->height, sx, sy));
+    SpvId had = spvShuffle3(s, postHistoryTap(s, p, sx, sy));
     SpvId kept = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, had, lo), hi);
     SpvId was = ADD_V3(kept, SCALE_V3(SUB_V3(had, kept), lock));
     SpvId fresher = SCALE_V3(fresh, each);
@@ -1330,7 +1376,9 @@ POST_MAIN(artfShaderPostBloomUp)
 POST_FINISH()
 
 /* ---- the frame: as finalRow, a pixel shader drawn over the whole frame ---- */
-uint32_t* artfShaderPostFinal(size_t* size, bool turns) {
+uint32_t* artfShaderPostFinal(size_t* size, bool turns) { return artfShaderPostFinalFor(size, turns, NULL); }
+uint32_t* artfShaderPostFinalFor(size_t* size, bool turns, const ArtfShaderDisplay* display) {
+    const int kind = display ? display->kind : ARTF_DISPLAY_SRGB;
     Spv b, *s = &b;
     spvInit(s);
     Post post, *p = &post;
@@ -1410,6 +1458,8 @@ uint32_t* artfShaderPostFinal(size_t* size, bool turns) {
     /* grading in ACEScct (artfGradeCct), unless it is in what is shown */
     SpvId shownSpace = P_MORE(W(frameVec(s, &p->r, F_CULL)), FLOAT(0.f));
     v = gradeCct(s, p, v, shownSpace);
+    /* (HDR10: the curve's white at peak over paper white, as post.c's finalLight) */
+    if (kind == ARTF_DISPLAY_HDR10) v = SCALE_V3(v, FLOAT(display->inverse));
     /* the curves: ACES's fit, Khronos's neutral, Reinhard's, none */
     SpvId vc[5];
     const float numbers[5] = {2.51f, .03f, 2.43f, .59f, .14f};
@@ -1496,6 +1546,8 @@ uint32_t* artfShaderPostFinal(size_t* size, bool turns) {
         grained = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, grained, zero), one);
         shown = pick3(s, P_MORE(grain, FLOAT(0.f)), grained, shown);
     }
+    /* made for another screen, as post.c's finalOut (ArtfRendererOptions.output) */
+    if (kind != ARTF_DISPLAY_SRGB) shown = displaySpv(s, kind, display->peak, srgbDecode3(s, shown));
     spvStore(s, outColor, vec4Of(s, SCALE_V3(shown, alpha), alpha));
     spvEndMain(s);
     const SpvId io[2] = {fragCoord, outColor};

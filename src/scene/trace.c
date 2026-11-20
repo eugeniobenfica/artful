@@ -731,7 +731,20 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     const uint32_t flags = m->flags & ARTF_MATERIAL_UNLIT ? more->flags & ARTF_MORE_VOLUME : more->flags;
     out->flags = flags;
     out->absorb = more->absorb;
-    for (int i = 0; i < 3; ++i) out->f0[i] = artfShadeReflects(.04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f), notMetal, albedo[i], metal);
+    /* (KHR_materials_specular: of a color, and its textures': how much, and of what color, as kernels.inc has it) */
+    float specularTint[3] = {1.f, 1.f, 1.f};
+    if ((flags & ARTF_MORE_SPECULAR) && ARTF_MORE_SPECULAR_MAPS(more)) {
+        float texel[4];
+        if (more->specularColorMap) {
+            texelCone(&textures[more->specularColorMap], lodBase, u, v, texel);
+            for (int i = 0; i < 3; ++i) specularTint[i] = artfSrgbDecode(texel[2 - i]);
+        }
+        if (more->specularMap) {
+            texelCone(&textures[more->specularMap], lodBase, u, v, texel);
+            for (int i = 0; i < 3; ++i) specularTint[i] *= texel[3];
+        }
+    }
+    for (int i = 0; i < 3; ++i) out->f0[i] = artfShadeReflects(.04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f) * specularTint[i], notMetal, albedo[i], metal);
     if (flags & ARTF_MORE_IRIDESCENCE) artfIridescence(out->f0, ndv, more->iridescence, more->iridescenceIor, more->iridescenceThickness);
     const float unkept = artfShadeUnkept(ndv, out->rough);
     for (int i = 0; i < 3; ++i) {
@@ -1115,6 +1128,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
     artfSobol4Turned(sample, x, y, 0, jitter);
     const float px = ((float)x + jitter[0]) / (float)c->width * 2.f - 1.f, py = 1.f - ((float)y + jitter[1]) / (float)c->height * 2.f;
     float o[3], d[3], path[3] = {1, 1, 1}, light[3] = {0, 0, 0}, travelled = 0, keep = 1.f;
+    float aerialKeep[3] = {1.f, 1.f, 1.f}, aerialAdd[3] = {0, 0, 0}; /* (ArtfSkyDesc.aerial, to the first surface) */
     if (c->eye[3] > 0)
         for (int k = 0; k < 3; ++k) {
             o[k] = c->eye[k] + c->right[k] * px + c->up[k] * py;
@@ -1217,6 +1231,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
             /* (as the rasterizer's fog: what the first surface shows goes through this much air) */
             const float air = travelled * f->look[1];
             keep = 1.f / (1.f + air + .5f * air * air);
+            if (f->aerial[3][3] > 0) artfAerialOf(f, travelled, (d[0] * f->toSun[0] + d[1] * f->toSun[1]) + d[2] * f->toSun[2], aerialKeep, aerialAdd);
         }
         covered = true;
         const float view[3] = {-d[0], -d[1], -d[2]};
@@ -1364,7 +1379,7 @@ void artfTraceSample(const ArtfScene* s, const ArtfFrameData* f, const ArtfTrace
         }
     }
     for (int k = 0; k < 3; ++k) {
-        const float seen = f->fog[k] + (artfMinf(light[k], LIGHT_LIMIT) - f->fog[k]) * keep;
+        const float seen = f->fog[k] + ((artfMinf(light[k], LIGHT_LIMIT) * aerialKeep[k] + aerialAdd[k]) - f->fog[k]) * keep;
         out[k] += covered ? seen : 0.f;
     }
     out[3] += covered ? 1.f : 0.f;

@@ -295,8 +295,25 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
   | Objeto em movimento, contra o quadro sem histórico | 1,48 / 1,22 | 1,06 / 0,78 |
 
   A GPU fica a 0,07% dos pixels da CPU, e as variantes vetoriais da CPU dão os mesmos bytes.
-- **Não feito:** máscaras reativa e de composição por material (a caixa por desvio cobre o caso medido), reprojeção Lanczos (o histórico continua bilinear) e um detector de cintilação separado (as travas fazem esse papel).
+- **Histórico cúbico (20/11/2026):** `ArtfScreenDesc.sharpHistory` lê o histórico por Catmull-Rom sobre 4×4 (nunca abaixo de 0, e ainda preso à caixa), no TAA e no upscaler, com a mesma conta na CPU (pixel a pixel e em pistas) e na GPU. **Teste (`post/sharpHistory`):** um xadrez fino que anda 0,0137 por quadro, 24 quadros, contra a média 4×4 de um quadro 4× maior: erro da CPU 7,80 → 6,12 (escala 1) e 7,67 → 5,06 (escala 0,5); GPU 7,72 → 6,02 e 7,65 → 5,04; GPU a 0,09% dos pixels da CPU; AVX2, 128 bits e portátil dão os mesmos bytes. É opcional: o padrão segue bilinear. Custo não medido.
+- **Não feito:** máscaras reativa e de composição por material (a caixa por desvio cobre o caso medido), Lanczos (o cúbico de Catmull-Rom ficou no lugar) e um detector de cintilação separado (as travas fazem esse papel).
 - **Custo:** as travas ocupam 8 bytes por pixel do quadro (16,6 MB a 1080p).
+
+**Estado da 5.9: em parte.**
+- **API:** `ArtfRendererOptions.output` (`ARTF_OUTPUT_SRGB`, `_DISPLAY_P3`, `_HDR10`), com `peakNits` (padrão 1000) e `paperWhiteNits` (padrão 203); `artfRendererOutput` diz o que de fato saiu. Exige `hdr`; sem ele, sRGB.
+- **Como:** a imagem mantém o aspecto que teria numa tela sRGB. A passagem final decodifica o sRGB e converte: Display-P3 (primárias P3, curva sRGB, 8 bits) ou HDR10 (primárias Rec. 2020, PQ, 10 bits, A2R10G10B10 na leitura). Em HDR10 a curva de tom é esticada até pico/branco de papel, então o que a curva não comprime fica com o brilho do papel. A sobreposição é convertida do mesmo jeito (o branco dela vira o branco de papel) e composta no espaço da saída, como a sRGB é composta em sRGB. A conta é a mesma na CPU (`artfDisplayEncode`) e na GPU (`displaySpv`).
+- **Vulkan:** sem superfície, o alvo é A2B10G10R10 (lido de volta como A2R10G10B10). Com superfície, ativa `VK_EXT_swapchain_colorspace` quando a instância tem e escolhe o formato com `HDR10_ST2084` ou `DISPLAY_P3_NONLINEAR`; se a superfície não oferecer, cai para sRGB e registra no log. Metal: sRGB.
+- **Teste (`post/displayOutput`):** o vermelho sRGB em P3 sai 234 51 35 nos dois backends. Em HDR10, o branco sai 594 (CPU) e 593 (GPU), contra 594 do PQ calculado em double para 203 nits; o vermelho sai 544 334 225, contra 545 335 225; o branco da sobreposição sobre vermelho sai branco de papel.
+- **Não feito:** metadados HDR (`VK_EXT_hdr_metadata`), scRGB em float, e o teste num monitor HDR e no Android (sem aparelho aqui). A troca de formato da swapchain não foi exercitada, porque os testes não têm janela.
+
+**Estado da 5.11: perspectiva aérea feita; nuvens a 1/4 não.**
+- **Como:** `ArtfSkyDesc.aerial` (metros por unidade da cena; 0 desliga). O ar entre o olho e a superfície tira luz e soma a luz do sol e do céu que ele espalha em direção ao olho, com o Rayleigh, a névoa e o ozônio do próprio céu, na densidade da altitude do olho. É uma forma fechada, sem LUT: transmitância por cor, fase de Rayleigh e de Cornette-Shanks, e a média da imagem do céu como luz que vem de todo lado. Na CPU (pistas, uma a uma, e traçador) e na GPU (pixel shader e traçador), a conta é a mesma (`artfAerialOf`, `aerialSpv`).
+- **Teste (`sky/aerial`):** um bloco escuro a 500 m muda até 0,013; a 30 km vai de 0,44 0,41 0,38 para 0,54 0,62 0,71, perto do céu acima dele (0,59 0,64 0,71). O traçado dá o mesmo (0,54 0,62 0,71). GPU contra CPU: 0,000% dos pixels, desenhado e traçado; as pistas de cada largura dão os mesmos bytes.
+- **Limites:** a densidade não diminui com a altura ao longo do raio (para montanhas altas e distantes, o ar fica um pouco denso demais), e as nuvens não entram na perspectiva. Metal não tem.
+
+**Estado da 5.12: texturas do KHR_materials_specular feitas; o resto não.**
+- `specularTexture` (alfa: quanto) e `specularColorTexture` (cor, como a cor base) são lidas do glTF e aplicadas na CPU (pistas e traçador) e na GPU (pixel shader e traçador), na mesma ordem. As texturas de iridescência, anisotropia e espessura continuam de fora, com o aviso no log.
+- **Teste (`materials/specularMaps`):** texturas de uma cor dão a mesma imagem que o fator equivalente: 0,000% dos pixels desenhado; 0,16% traçado (acima de 24/255), porque um arredondamento no último bit muda escolhas de caminhos. Um xadrez de intensidade muda 6,8% dos pixels. GPU contra CPU: até 0,011%. `files/gltfMore` confere a leitura.
 
 **Ordem sugerida dentro da fase:** 5.1, 5.2 e 5.4 primeiro (baratos, atacam limites documentados); depois 5.5 e 5.6 (dependem de 4.3); depois 5.7 (depende de 2.2 e se beneficia de 5.6). 5.8 a 5.12 são independentes e entram por demanda de consumidor.
 

@@ -231,6 +231,8 @@ typedef struct ArtfMaterialDesc {
      * (its bytes, as a base color texture's) and roughness (alpha). 0: none */
     ArtfTexture clearcoatMap, clearcoatRoughnessMap, clearcoatNormalMap, sheenMap, sheenRoughnessMap;
     ArtfVec3 specularColor;    /* what it reflects head on, if not metal, against white (KHR_materials_specular); 0: white */
+    /* Its textures, as glTF's: how much of that (alpha) and its color (its bytes, as a base color texture's). 0: none */
+    ArtfTexture specularMap, specularColorMap;
     /* Highlights drawn out along a direction, as on brushed metal (KHR_materials_anisotropy): 0 to 1, and that
      * direction, in radians from the way u grows on the surface. */
     float anisotropy, anisotropyRotation;
@@ -387,6 +389,12 @@ typedef struct ArtfSkyDesc {
      * light it gives is still the scene's sun's. 0: not drawn. */
     float sunDisc;
     ArtfCloudDesc clouds;
+    /* Aerial perspective: the air between the eye and what the scene draws takes some of its light and adds the sun's
+     * and the sky's that it scatters toward the eye, as the sky's own air does (its Rayleigh, haze and ozone, as dense
+     * as at the eye's altitude all the way: a closed form, no table), so far hills take the air's color, bluer away from
+     * the sun and paler toward it. This many meters to a unit of the scene; 0: none. Drawn and traced, on both
+     * backends. */
+    float aerial;
 } ArtfSkyDesc;
 bool artfSceneSetSky(ArtfScene* s, const ArtfSkyDesc* desc);
 /* Decodes a Radiance .hdr (RGBE) into linear RGB, three floats a pixel, for artfSceneSetEnvironment. The caller owns
@@ -637,6 +645,10 @@ typedef struct ArtfScreenDesc {
     float scattering;       /* where that fog sends light: 0 all ways, toward .9 mostly onward (Henyey-Greenstein's g) */
     bool temporal;          /* temporal antialiasing: the eye moves within a pixel from frame to frame, and frames are
                              * mixed, as far as each pixel's history can be followed */
+    /* With temporal antialiasing or upscaling: the history read where a pixel was by Catmull-Rom's cubic over 4 x 4
+     * pixels, in place of between the nearest four: what moves stays sharper; never below 0, and held to what is
+     * around the pixel now, as before. */
+    bool sharpHistory;
     /* After temporal antialiasing or upscaling (ArtfRendererOptions.renderScale): edges brought back, 0 to 1, each
      * pixel away from its neighbours, never past them. */
     float sharpen;

@@ -184,8 +184,10 @@ typedef struct ArtfMaterialMore {
     float coatNormalScale, anisotropy, iridescence;
     float specularColor[3], iridescenceIor;  /* specularColor: 1 when it has none */
     float anisotropyDirection[2], iridescenceThickness, pad0; /* the direction: its cosine and sine */
-    float subsurface[3], pad1;
-    float absorb[3], pad2;              /* traced, through its inside: kept is 2^-(absorb x distance) */
+    float subsurface[3];
+    uint32_t specularMap;               /* KHR_materials_specular's: how much (alpha) */
+    float absorb[3];                    /* traced, through its inside: kept is 2^-(absorb x distance) */
+    uint32_t specularColorMap;          /* and of what color (as a base color's) */
 } ArtfMaterialMore;
 #define ARTF_MATERIAL_MORE_ROWS 8
 enum {
@@ -194,6 +196,7 @@ enum {
     ARTF_MORE_DRAWN = 127 /* what drawing reads: all but the volume, which is traced */
 };
 /* It needs where u and v go: a coat's normal map, or highlights drawn out. */
+#define ARTF_MORE_SPECULAR_MAPS(m) ((m)->specularMap || (m)->specularColorMap)
 #define ARTF_MORE_TANGENT(m) ((m)->coatNormalMap || ((m)->flags & ARTF_MORE_ANISOTROPY))
 ARTF_INLINE bool artfMaterialLayered(const ArtfMaterialMore* m) { return (m->flags & ARTF_MORE_DRAWN) != 0; }
 
@@ -426,7 +429,23 @@ typedef struct ArtfFrameData {
      * scene's own when it is not), how much to sharpen it (ArtfPostDesc.screen.sharpen), and the number of this frame, for
      * patterns that turn from one frame to the next (soft shadows, with temporal antialiasing). */
     float output[4];
+    /* Aerial perspective (ArtfSkyDesc.aerial): what the air takes of each color, a unit of the scene; what it adds
+     * toward the eye, over what it takes: Rayleigh's part, times 1 + mu^2, and its haze's g; haze's, times that over
+     * Cornette and Shanks's (1 + g^2 - 2 g mu)^1.5; the sky's, the same all ways, and 1 when it is on (0: none). */
+    float aerial[4][4];
 } ArtfFrameData;
+
+/* What the air between the eye and a point this far away (in the scene's units), toward which mu is the cosine to the
+ * sun, does to its light: keeps keep of each color and adds add (ArtfFrameData.aerial). The same arithmetic in the
+ * lanes, lane by lane, and on the GPU (shaders.c's aerialSpv). */
+ARTF_INLINE void artfAerialOf(const ArtfFrameData* f, float distance, float mu, float* keep, float* add) {
+    const float g = f->aerial[1][3];
+    const float k = (1.f + g * g) - 2.f * g * mu, mie = 1.f / (k * sqrtf(k)), mu2 = 1.f + mu * mu;
+    for (int c = 0; c < 3; ++c) {
+        keep[c] = artfExp2Fast(-(f->aerial[0][c] * distance) * 1.44269504f);
+        add[c] = (mu2 * (f->aerial[1][c] + f->aerial[2][c] * mie) + f->aerial[3][c]) * (1.f - keep[c]);
+    }
+}
 
 /* What a view other than the lit one does to a frame, on both backends: nothing after the frame (no bloom, exposure,
  * fog, grading or what follows motion), and black behind the scene. */
@@ -1003,6 +1022,7 @@ struct ArtfScene {
     uint64_t profileVersion;              /* a profile changed */
     float backgroundAlpha, exposure, fogDensity, sunSize;
     float fogBase, fogFalloff; /* fog by height */
+    float aerial[4][4];        /* ArtfFrameData.aerial's, from artfSceneSetSky (0: none) */
     float cullSize;            /* artfSceneSetCullSize's pixels */
     ArtfCamera camera;
     bool features[ARTF_FEATURE_COUNT];

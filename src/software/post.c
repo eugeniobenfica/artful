@@ -133,6 +133,36 @@ static inline float tap(const float* plane, int w, int h, float x, float y) {
     return top + (bottom - top) * fy;
 }
 
+/* Catmull-Rom's weights at t (0 to 1) of the four samples around it (ArtfScreenDesc.sharpHistory): the same arithmetic
+ * in the lanes (kernels.inc's sharpLanes) and on the GPU (postShaders.inc's postTapSharp). */
+static inline void cubicWeights(float t, float* w) {
+    const float t2 = t * t, t3 = t2 * t;
+    w[0] = .5f * ((2.f * t2 - t3) - t);
+    w[1] = .5f * ((3.f * t3 - 5.f * t2) + 2.f);
+    w[2] = .5f * ((4.f * t2 - 3.f * t3) + t);
+    w[3] = .5f * (t3 - t2);
+}
+/* The history at (x, y) by Catmull-Rom's cubic over the 4 x 4 around it, the sides held; never below 0. */
+static inline float tapSharp(const float* plane, int w, int h, float x, float y) {
+    x = artfClampf(x, 0, (float)(w - 1));
+    y = artfClampf(y, 0, (float)(h - 1));
+    const int x0 = (int)x, y0 = (int)y;
+    float wx[4], wy[4];
+    cubicWeights(x - (float)x0, wx);
+    cubicWeights(y - (float)y0, wy);
+    int cols[4];
+    for (int i = 0; i < 4; ++i) cols[i] = artfClampi(x0 - 1 + i, 0, w - 1);
+    float total = 0;
+    for (int j = 0; j < 4; ++j) {
+        const float* row = plane + (size_t)artfClampi(y0 - 1 + j, 0, h - 1) * w;
+        const float across = ((wx[0] * row[cols[0]] + wx[1] * row[cols[1]]) + wx[2] * row[cols[2]]) + wx[3] * row[cols[3]];
+        total = j ? total + wy[j] * across : wy[j] * across;
+    }
+    return artfMaxf(total, 0.f);
+}
+/* The history where a pixel was: bilinear, or by tapSharp. */
+static inline float tapHistory(const float* plane, int w, int h, float x, float y, bool sharp) { return sharp ? tapSharp(plane, w, h, x, y) : tap(plane, w, h, x, y); }
+
 /* ---- ambient occlusion ---- */
 
 /* Eight directions in a hemisphere around +z, spread out and closer toward the center: a fixed kernel, turned at each
@@ -478,7 +508,7 @@ POST_INLINE void temporalPixel(ArtfSoftPost* p, int x, int y) {
         if (!p->historyValid || !wasAt(p, x, y, &sx, &sy) || sx < 0 || sy < 0 || sx > p->width - 1 || sy > p->height - 1) share = 1.f;
         for (int c = 0; c < 3; ++c) {
             const float now = p->f->postLight[c][i];
-            const float was = share < 1.f ? artfClampf(tap(p->history[c], p->width, p->height, sx, sy), lo[c], hi[c]) : now;
+            const float was = share < 1.f ? artfClampf(tapHistory(p->history[c], p->width, p->height, sx, sy, p->f->data.post[1][3] > 1.5f), lo[c], hi[c]) : now;
             p->scratch[c][i] = was + (now - was) * share;
         }
     }
@@ -574,7 +604,7 @@ static void upscaleRow(ArtfSoftPost* p, int y) {
         p->lock[p->lockAt][i] = lock;
         float was[3], now[3];
         for (int c = 0; c < 3; ++c) {
-            const float had = tap(p->history[c], p->width, p->height, sx, sy), kept = artfClampf(had, p->box[c][nearest], p->box[3 + c][nearest]);
+            const float had = tapHistory(p->history[c], p->width, p->height, sx, sy, p->f->data.post[1][3] > 1.5f), kept = artfClampf(had, p->box[c][nearest], p->box[3 + c][nearest]);
             was[c] = kept + (had - kept) * lock;
             now[c] = (light[c][q[0]] * near[0] + light[c][q[1]] * near[1] + light[c][q[2]] * near[2] + light[c][q[3]] * near[3]) * each;
         }
@@ -982,6 +1012,9 @@ POST_INLINE void finalLight(const ArtfSoftPost* p, const FinalRow* r, int x, int
     for (int c = 0; c < 3; ++c) v[c] = v[c] > 0 ? artfMinf(v[c], 65504.f) : 0.f; /* (and not a number: nothing) */
     /* grading, in ACEScct (gradeShown: after, in what is shown, by the kernels) */
     if (!(sf->data.gradeShown > 0)) artfGradeCct(&sf->data, sf->scene->lut, v);
+    /* (HDR10: the curve's white at peak over paper white; light is made that much brighter again at the end) */
+    if (p->display == ARTF_DISPLAY_HDR10)
+        for (int c = 0; c < 3; ++c) v[c] *= p->displayInverse;
     if (r->exposure > 0) {
         if (r->curve == ARTF_TONE_NEUTRAL) toneNeutral(v);
         for (int c = 0; c < 3; ++c) {
@@ -995,6 +1028,36 @@ POST_INLINE void finalLight(const ArtfSoftPost* p, const FinalRow* r, int x, int
 
 /* A pixel out to the frame, with the overlay over it. */
 POST_INLINE void finalOut(const ArtfSoftPost* p, int x, int y, const float* shown, float alpha) {
+    if (p->display != ARTF_DISPLAY_SRGB) {
+        /* another screen's (ArtfRendererOptions.output): light again, then what that screen takes; the overlay made
+         * the same, and laid over in what it takes, as sRGB's is in sRGB (shaders.c's overlay and final passes too) */
+        float light[3], e[3];
+        for (int c = 0; c < 3; ++c) light[c] = artfSrgbDecode(shown[c]);
+        artfDisplayEncode(p->display, p->displayPeak, light, e);
+        float a = alpha;
+        for (int c = 0; c < 3; ++c) e[c] *= alpha;
+        if (p->overlay && x < p->overlayWidth && y < p->overlayHeight) {
+            const uint32_t s = p->overlay[(size_t)y * p->overlayStride + x];
+            if (s) {
+                const float over = (float)(s >> 24) * (1.f / 255.f), unmade = over > 0 ? 1.f / over : 0.f;
+                float o[3], oe[3];
+                for (int c = 0; c < 3; ++c) o[c] = artfSrgbDecode(artfMinf((float)((s >> (16 - 8 * c)) & 255) * (1.f / 255.f) * unmade, 1.f));
+                artfDisplayEncode(p->display, p->displayPeak * p->displayInverse, o, oe);
+                for (int c = 0; c < 3; ++c) e[c] = oe[c] * over + e[c] * (1.f - over);
+                a = over + a * (1.f - over);
+            }
+        }
+        uint32_t out;
+        if (p->display == ARTF_DISPLAY_HDR10) {
+            out = (uint32_t)(artfClampf(a, 0, 1) * 3.f + .5f) << 30;
+            for (int c = 0; c < 3; ++c) out |= (uint32_t)(artfClampf(e[c], 0, 1) * 1023.f + .5f) << (20 - 10 * c);
+        } else {
+            out = (uint32_t)(artfClampf(a, 0, 1) * 255.f + .5f) << 24;
+            for (int c = 0; c < 3; ++c) out |= (uint32_t)(artfClampf(e[c], 0, 1) * 255.f + .5f) << (16 - 8 * c);
+        }
+        p->pixels[(size_t)y * p->width + x] = out;
+        return;
+    }
     uint32_t out = (uint32_t)(alpha * 255.f + .5f) << 24;
     for (int c = 0; c < 3; ++c) out |= (uint32_t)(shown[c] * alpha * 255.f + .5f) << (16 - 8 * c);
     if (p->overlay && x < p->overlayWidth && y < p->overlayHeight) {

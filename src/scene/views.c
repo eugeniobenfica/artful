@@ -13,6 +13,7 @@ void artfFrameForView(ArtfFrameData* f, int view) {
     f->motionBlur = 0;
     f->output[2] = 0; /* (no sharpening: drawn smaller, a view is read between its pixels) */
     f->fogFalloff = 0;
+    memset(f->aerial, 0, sizeof f->aerial);
     /* and black behind it, with no picture of all around and no light from a black hole's backdrop */
     const float black[4] = {0, 0, 0, 1};
     memcpy(f->background, black, sizeof black);

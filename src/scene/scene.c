@@ -527,6 +527,8 @@ void artfSceneTextureRoles(ArtfScene* s) {
         const ArtfMaterialMore* more = &s->materialsMore.items[i];
         markRole(roles, count, m->texture, ROLE_COLOR);
         markRole(roles, count, more->sheenMap, ROLE_COLOR);
+        markRole(roles, count, more->specularColorMap, ROLE_COLOR);
+        markRole(roles, count, more->specularMap, ROLE_DATA);
         markRole(roles, count, m->normalMap, ROLE_DATA);
         markRole(roles, count, m->surfaceMap, ROLE_DATA);
         markRole(roles, count, m->occlusionMap, ROLE_DATA);
@@ -796,6 +798,8 @@ static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc*
     m.coatNormalMap = MAP(d->clearcoatNormalMap);
     m.sheenMap = MAP(d->sheenMap);
     m.sheenRoughnessMap = MAP(d->sheenRoughnessMap);
+    m.specularMap = MAP(d->specularMap);
+    m.specularColorMap = MAP(d->specularColorMap);
 #undef MAP
     m.coatNormalScale = 1.f;
     m.flags = (m.coat > 0 ? ARTF_MORE_COAT : 0u) | (m.sheen[0] > 0 || m.sheen[1] > 0 || m.sheen[2] > 0 ? ARTF_MORE_SHEEN : 0u);
@@ -804,7 +808,7 @@ static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc*
     m.specularColor[0] = tinted ? artfClampf(d->specularColor.x, 0, 25) : 1.f;
     m.specularColor[1] = tinted ? artfClampf(d->specularColor.y, 0, 25) : 1.f;
     m.specularColor[2] = tinted ? artfClampf(d->specularColor.z, 0, 25) : 1.f;
-    if (tinted && (m.specularColor[0] != 1.f || m.specularColor[1] != 1.f || m.specularColor[2] != 1.f)) m.flags |= ARTF_MORE_SPECULAR;
+    if ((tinted && (m.specularColor[0] != 1.f || m.specularColor[1] != 1.f || m.specularColor[2] != 1.f)) || ARTF_MORE_SPECULAR_MAPS(&m)) m.flags |= ARTF_MORE_SPECULAR;
     m.anisotropy = artfClampf(d->anisotropy, 0, 1);
     m.anisotropyDirection[0] = artfCosFast(d->anisotropyRotation);
     m.anisotropyDirection[1] = artfSinFast(d->anisotropyRotation);
@@ -1806,6 +1810,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->look[0] = s->exposure;
     out->look[1] = s->fogDensity;
     out->look[2] = s->sunSize;
+    memcpy(out->aerial, s->aerial, sizeof out->aerial);
 #undef SET3
     out->instanceCount = (uint32_t)s->instances.len;
     out->focalY = proj.m[5];
@@ -1845,7 +1850,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     const float wide = 1.f / artfMaxf(proj.m[0], 1e-6f), tall = 1.f / artfMaxf(proj.m[5], 1e-6f);
     const ArtfPostDesc* p = &s->post;
     const float post[3][4] = {{p->lens.bloom, p->lens.bloomThreshold > 0 ? p->lens.bloomThreshold : 1.f, p->screen.occlusion, p->screen.occlusionRadius > 0 ? p->screen.occlusionRadius : .5f},
-                              {p->screen.reflections, p->screen.volumetric, artfClampf(p->screen.scattering, -.95f, .95f), p->screen.temporal ? 1.f : 0.f},
+                              {p->screen.reflections, p->screen.volumetric, artfClampf(p->screen.scattering, -.95f, .95f), p->screen.temporal ? (p->screen.sharpHistory ? 2.f : 1.f) : 0.f},
                               {p->lens.focus, p->lens.aperture, 0, 0}};
     memcpy(out->post, post, sizeof post);
     {

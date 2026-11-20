@@ -1100,6 +1100,23 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         sheenColor.y = v8fSet(more->sheen[1]);
         sheenColor.z = v8fSet(more->sheen[2]);
     }
+    /* (KHR_materials_specular's textures: how much, and of what color; white when none) */
+    Lanes3 specularTint = {one, one, one};
+    if ((extraFlags & ARTF_MORE_SPECULAR) && ARTF_MORE_SPECULAR_MAPS(more)) {
+        if (more->specularColorMap) {
+            const Lanes3 t = SAMPLE(&textures[more->specularColorMap], NULL);
+            specularTint.x = srgbDecodeLanes(t.x);
+            specularTint.y = srgbDecodeLanes(t.y);
+            specularTint.z = srgbDecodeLanes(t.z);
+        }
+        if (more->specularMap) {
+            V8F texel = one;
+            SAMPLE(&textures[more->specularMap], &texel);
+            specularTint.x = v8fMul(specularTint.x, texel);
+            specularTint.y = v8fMul(specularTint.y, texel);
+            specularTint.z = v8fMul(specularTint.z, texel);
+        }
+    }
     if (extraFlags & ARTF_MORE_MAPS) {
         if (more->coatMap) coatAmount = v8fMul(coatAmount, SAMPLE(&textures[more->coatMap], NULL).x);
         if (more->coatRoughnessMap) coatRough = v8fMax(v8fMul(coatRough, SAMPLE(&textures[more->coatRoughnessMap], NULL).y), v8fSet(.045f));
@@ -1242,9 +1259,9 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         reflecting.f0.z = lanesReflects(dielectric, notMetal, albedo.z, metal);
         if (extraFlags & ARTF_MORE_SPECULAR) {
             /* (a dielectric's of a color: KHR_materials_specular) */
-            reflecting.f0.x = lanesReflects(v8fMul(dielectric, v8fSet(more->specularColor[0])), notMetal, albedo.x, metal);
-            reflecting.f0.y = lanesReflects(v8fMul(dielectric, v8fSet(more->specularColor[1])), notMetal, albedo.y, metal);
-            reflecting.f0.z = lanesReflects(v8fMul(dielectric, v8fSet(more->specularColor[2])), notMetal, albedo.z, metal);
+            reflecting.f0.x = lanesReflects(v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[0])), specularTint.x), notMetal, albedo.x, metal);
+            reflecting.f0.y = lanesReflects(v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[1])), specularTint.y), notMetal, albedo.y, metal);
+            reflecting.f0.z = lanesReflects(v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[2])), specularTint.z), notMetal, albedo.z, metal);
         }
         if (extraFlags & ARTF_MORE_IRIDESCENCE) {
             /* a thin film's colors, as it is seen: in place of what it reflects head on */
@@ -1439,6 +1456,21 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
     }
     /* (in a view, what it shows: the frame for one has no fog or exposure) */
     if (viewed && f->view) lit = viewLanes(f, frame, &baseColor, n, rough, metal, &aroundLit, &own, world, who, lightsHere);
+    if (frame->aerial[3][3] > 0) {
+        /* aerial perspective (ArtfSkyDesc.aerial): lane by lane, as artfAerialOf has it */
+        const Lanes3 eye = eyeLanes(frame, world);
+        _Alignas(32) float from[3][8], l[3][8];
+        v8fStore(from[0], v8fSub(world.x, eye.x)); v8fStore(from[1], v8fSub(world.y, eye.y)); v8fStore(from[2], v8fSub(world.z, eye.z));
+        v8fStore(l[0], lit.x); v8fStore(l[1], lit.y); v8fStore(l[2], lit.z);
+        for (int i = 0; i < 8; ++i) {
+            const float x = from[0][i], y = from[1][i], z = from[2][i], d = sqrtf((x * x + y * y) + z * z);
+            const float mu = d > 0 ? ((x * frame->toSun[0] + y * frame->toSun[1]) + z * frame->toSun[2]) / d : 0.f;
+            float keep[3], add[3];
+            artfAerialOf(frame, d, mu, keep, add);
+            for (int c = 0; c < 3; ++c) l[c][i] = l[c][i] * keep[c] + add[c];
+        }
+        lit.x = v8fLoad(l[0]); lit.y = v8fLoad(l[1]); lit.z = v8fLoad(l[2]);
+    }
     if (frame->look[1] > 0 && !f->postFog) {
         const Lanes3 eye = eyeLanes(frame, world);
         Lanes3 fromEye = {v8fSub(world.x, eye.x), v8fSub(world.y, eye.y), v8fSub(world.z, eye.z)};
@@ -1639,7 +1671,7 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
     s->originX = ox;
     s->originY = oy;
     s->texture = material->texture ? &f->scene->textures.items[material->texture] : NULL;
-    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || f->shadows || frame->tracedCasts || material->graph || f->decalCount || f->postFog || f->view;
+    s->needWorld = material->specular > 0 || material->metallic > 0 || frame->lightCount || f->extraCount || frame->indirect[0][3] > 0 || frame->look[1] > 0 || frame->aerial[3][3] > 0 || f->shadows || frame->tracedCasts || material->graph || f->decalCount || f->postFog || f->view;
     s->bumpy = material->normalMap != 0 || ARTF_MORE_TANGENT(&f->scene->materialsMore.items[v->instance->material]);
     s->turning = false; /* (when its normals are known, below) */
     const ArtfTextureData* textures = f->scene->textures.items;
@@ -1647,7 +1679,8 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
     if (!s->sizing) {
         /* (or the first of a coat's or sheen's) */
         const ArtfMaterialMore* more = &f->scene->materialsMore.items[v->instance->material];
-        const uint32_t map = more->sheenMap ? more->sheenMap : more->coatMap ? more->coatMap : more->coatRoughnessMap ? more->coatRoughnessMap : more->coatNormalMap ? more->coatNormalMap : more->sheenRoughnessMap;
+        const uint32_t map = more->sheenMap ? more->sheenMap : more->coatMap ? more->coatMap : more->coatRoughnessMap ? more->coatRoughnessMap : more->coatNormalMap ? more->coatNormalMap : more->sheenRoughnessMap ? more->sheenRoughnessMap
+                           : more->specularColorMap ? more->specularColorMap : more->specularMap;
         s->sizing = map ? &textures[map] : NULL;
     }
     s->colored = mesh->colors != NULL;
@@ -2722,6 +2755,39 @@ V8_INLINE V8F gatherF(const float* plane, V8I index) { return v8iAsF(v8iGather((
  * wasAt (perspective, at the scene's size), tap and the blend, each ternary a select. A group of eight is done here
  * only when it is away from the frame's sides and none of its pixels went by its vertices (ARTF_MOTION_VECTOR); done[g]
  * says so of group g (from from + 8 g), and post.c does the others a pixel at a time. */
+/* post.c's tapSharp, eight at a time: tx and ty already within the plane. */
+static V8F sharpLanes(const float* plane, int w, int h, V8F tx, V8F ty) {
+    const V8I x0 = v8fToI(tx), y0 = v8fToI(ty);
+    V8F wx[4], wy[4];
+    const V8F half = v8fSet(.5f), two = v8fSet(2.f), three = v8fSet(3.f), four = v8fSet(4.f), five = v8fSet(5.f);
+    for (int axis = 0; axis < 2; ++axis) {
+        const V8F t = axis ? v8fSub(ty, v8iToF(y0)) : v8fSub(tx, v8iToF(x0)), t2 = v8fMul(t, t), t3 = v8fMul(t2, t);
+        V8F* out = axis ? wy : wx;
+        out[0] = v8fMul(half, v8fSub(v8fSub(v8fMul(two, t2), t3), t));
+        out[1] = v8fMul(half, v8fAdd(v8fSub(v8fMul(three, t3), v8fMul(five, t2)), two));
+        out[2] = v8fMul(half, v8fAdd(v8fSub(v8fMul(four, t2), v8fMul(three, t3)), t));
+        out[3] = v8fMul(half, v8fSub(t3, t2));
+    }
+    V8I cols[4];
+    for (int i = 0; i < 4; ++i) {
+        V8I c = v8iAdd(x0, v8iSet(i - 1));
+        c = v8iSelect(v8iGt(v8iSet(0), c), c, v8iSet(0));
+        cols[i] = v8iSelect(v8iGt(c, v8iSet(w - 1)), c, v8iSet(w - 1));
+    }
+    V8F total = v8fSet(0.f);
+    for (int j = 0; j < 4; ++j) {
+        V8I r = v8iAdd(y0, v8iSet(j - 1));
+        r = v8iSelect(v8iGt(v8iSet(0), r), r, v8iSet(0));
+        r = v8iSelect(v8iGt(r, v8iSet(h - 1)), r, v8iSet(h - 1));
+        const V8I at = v8iMul(r, v8iSet(w));
+        const V8F across = v8fAdd(v8fAdd(v8fAdd(v8fMul(wx[0], gatherF(plane, v8iAdd(at, cols[0]))), v8fMul(wx[1], gatherF(plane, v8iAdd(at, cols[1])))),
+                                          v8fMul(wx[2], gatherF(plane, v8iAdd(at, cols[2])))),
+                                  v8fMul(wx[3], gatherF(plane, v8iAdd(at, cols[3]))));
+        total = j ? v8fAdd(total, v8fMul(wy[j], across)) : v8fMul(wy[j], across);
+    }
+    return v8fMax(total, v8fSet(0.f));
+}
+
 static void temporalLanes(ArtfSoftPost* p, int y, int from, int to, uint8_t* done) {
     const ArtfSoftFrame* sf = p->f;
     const ArtfFrameData* f = &sf->data;
@@ -2797,7 +2863,7 @@ static void temporalLanes(ArtfSoftPost* p, int y, int from, int to, uint8_t* don
             const float* plane = p->history[c];
             const V8F a = gatherF(plane, i00), b = gatherF(plane, i01), cc = gatherF(plane, i10), e = gatherF(plane, i11);
             const V8F top = v8fAdd(a, v8fMul(v8fSub(b, a), fx)), bottom = v8fAdd(cc, v8fMul(v8fSub(e, cc), fx));
-            const V8F tapped = v8fAdd(top, v8fMul(v8fSub(bottom, top), fy));
+            const V8F tapped = p->f->data.post[1][3] > 1.5f ? sharpLanes(plane, w, h, tx, ty) : v8fAdd(top, v8fMul(v8fSub(bottom, top), fy));
             const V8F now = loadU(sf->postLight[c] + i);
             const V8F was = v8fSelect(fresh, gradeClamp(tapped, lo, hi), now);
             v8iStoreU(p->scratch[c] + i, v8fAsI(v8fAdd(was, v8fMul(v8fSub(now, was), share))));
@@ -2957,7 +3023,7 @@ static void upscaleLanes(ArtfSoftPost* p, int y, int from, int to, uint8_t* done
             const float* plane = p->history[c];
             const V8F a = gatherF(plane, i00), b = gatherF(plane, i01), cc = gatherF(plane, i10), e = gatherF(plane, i11);
             const V8F top = v8fAdd(a, v8fMul(v8fSub(b, a), hfx)), bottom = v8fAdd(cc, v8fMul(v8fSub(e, cc), hfx));
-            const V8F had = v8fAdd(top, v8fMul(v8fSub(bottom, top), hfy)), kept = gradeClamp(had, lo, hi);
+            const V8F had = p->f->data.post[1][3] > 1.5f ? sharpLanes(plane, w, h, tx, ty) : v8fAdd(top, v8fMul(v8fSub(bottom, top), hfy)), kept = gradeClamp(had, lo, hi);
             was[c] = v8fAdd(kept, v8fMul(v8fSub(had, kept), lock));
             now[c] = v8fMul(v8fAdd(v8fAdd(v8fAdd(v8fMul(l0, near[0]), v8fMul(l1, near[1])), v8fMul(l2, near[2])), v8fMul(l3, near[3])), each);
         }

@@ -34,6 +34,15 @@ typedef enum ArtfSimd {
     ARTF_SIMD_256       /* AVX2 */
 } ArtfSimd;
 
+/* What a frame is made for (ArtfRendererOptions.output). */
+typedef enum ArtfOutput {
+    ARTF_OUTPUT_SRGB,       /* sRGB, 8 bits a color: as ever */
+    ARTF_OUTPUT_DISPLAY_P3, /* Display-P3: its wider primaries, with sRGB's curve; 8 bits a color */
+    /* Rec. 2020's primaries and PQ (SMPTE ST 2084), 10 bits a color: a pixel read back is then A2 R10 G10 B10, alpha in
+     * its top 2 bits and blue in its lowest 10 (Vulkan's A2R10G10B10) */
+    ARTF_OUTPUT_HDR10
+} ArtfOutput;
+
 typedef struct ArtfRendererOptions {
     ArtfBackend backend; /* Auto: Vulkan where it works, then software */
     ArtfSurface surface; /* the software backend does not use it */
@@ -65,6 +74,15 @@ typedef struct ArtfRendererOptions {
      * scene and what comes after are drawn as the eye sees them, at the frame's size. Without hdr, or off: the
      * compositor turns it, as before. */
     bool preRotate;
+    /* With hdr: what the frame is made for (ArtfOutput); without hdr it is sRGB. The picture keeps its look: what an
+     * sRGB screen would show, in the screen's own colors, and the overlay over it as on an sRGB screen (in HDR10, its
+     * white at paper white). Vulkan with a surface makes it where the surface offers it (VK_EXT_swapchain_colorspace),
+     * else sRGB, and so does Metal: artfRendererOutput says which. No HDR metadata is sent to the screen yet. */
+    ArtfOutput output;
+    /* HDR10: the brightest the screen shows, in nits (0: 1000), and white paper's light, which the overlay's white and
+     * light of 1 under no tone curve are (0: 203). The tone curve is stretched to peak / paper white, so that light
+     * the curve leaves alone stays as bright as on paper. */
+    float peakNits, paperWhiteNits;
 } ArtfRendererOptions;
 
 /* What a renderer takes when nothing else is said: fields set by name on this stay right when the struct
@@ -76,6 +94,8 @@ typedef struct ArtfRenderer ArtfRenderer;
 /* NULL only when a backend was asked for by name and cannot run here. */
 ArtfRenderer* artfRendererNew(const ArtfRendererOptions* options);
 void artfRendererFree(ArtfRenderer* r);
+/* What its frames are made for: options.output, or sRGB where that cannot be (see ArtfRendererOptions.output). */
+ArtfOutput artfRendererOutput(const ArtfRenderer* r);
 
 ArtfBackend artfRendererBackend(const ArtfRenderer* r);
 /* What draws: "AMD Radeon(TM) Vega 8 Graphics", "software, AVX2, 4 threads". Borrowed. */

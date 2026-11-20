@@ -38,6 +38,8 @@ ArtfRendererOptions artfRendererDefaults(int width, int height) {
 }
 
 void artfRendererFree(ArtfRenderer* r) { if (r) r->vt->destroy(r); }
+ArtfOutput artfRendererOutput(const ArtfRenderer* r) { return r->output; }
+_Static_assert((int)ARTF_OUTPUT_DISPLAY_P3 == ARTF_DISPLAY_P3 && (int)ARTF_OUTPUT_HDR10 == ARTF_DISPLAY_HDR10, "the outputs' numbers");
 ArtfBackend artfRendererBackend(const ArtfRenderer* r) { return r->backend; }
 const char* artfRendererDescription(const ArtfRenderer* r) { return r->vt->description(r); }
 void artfRendererResize(ArtfRenderer* r, int width, int height) { r->vt->resize(r, width, height); }

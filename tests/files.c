@@ -509,7 +509,8 @@ void testGltfMore(void) {
         "\"textures\":[{\"source\":0}],"
         "\"materials\":[{\"extensions\":{\"KHR_materials_clearcoat\":{\"clearcoatFactor\":1,\"clearcoatTexture\":{\"index\":0},\"clearcoatRoughnessTexture\":{\"index\":0},"
         "\"clearcoatNormalTexture\":{\"index\":0}},\"KHR_materials_sheen\":{\"sheenColorFactor\":[1,1,1],\"sheenRoughnessFactor\":0.5,\"sheenColorTexture\":{\"index\":0},"
-        "\"sheenRoughnessTexture\":{\"index\":0}},\"KHR_materials_specular\":{\"specularFactor\":0.5,\"specularColorFactor\":[1,0.5,0.25]},"
+        "\"sheenRoughnessTexture\":{\"index\":0}},\"KHR_materials_specular\":{\"specularFactor\":0.5,\"specularColorFactor\":[1,0.5,0.25],"
+        "\"specularTexture\":{\"index\":0},\"specularColorTexture\":{\"index\":0}},"
         "\"KHR_materials_volume\":{\"attenuationColor\":[0.5,1,0.25],\"attenuationDistance\":2},\"KHR_materials_iridescence\":{\"iridescenceFactor\":0.75,"
         "\"iridescenceIor\":1.4,\"iridescenceThicknessMaximum\":500},\"KHR_materials_anisotropy\":{\"anisotropyStrength\":0.6,\"anisotropyRotation\":1.5707963}}}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0}]}],\"nodes\":[{\"mesh\":0}],\"scenes\":[{\"nodes\":[0]}]}";
@@ -517,6 +518,7 @@ void testGltfMore(void) {
     CHECK(artfSceneLoadModelMemory(s, file, sizeof file - 1, NULL, NULL) != 0);
     const ArtfMaterialMore* m = &s->materialsMore.items[s->materialsMore.len - 1];
     CHECK(m->coatMap && m->coatMap == m->coatRoughnessMap && m->coatMap == m->coatNormalMap && m->coatMap == m->sheenMap && m->coatMap == m->sheenRoughnessMap);
+    CHECK(m->specularMap == m->coatMap && m->specularColorMap == m->coatMap);
     CHECK(m->sheenRoughness == .5f && m->specularColor[0] == .5f && m->specularColor[1] == .25f && m->specularColor[2] == .125f);
     CHECK(m->iridescence == .75f && fabsf(m->iridescenceIor - 1.4f) < 1e-6f && m->iridescenceThickness == 500.f && fabsf(m->anisotropy - .6f) < 1e-6f);
     CHECK(fabsf(m->anisotropyDirection[0]) < 1e-3f && fabsf(m->anisotropyDirection[1] - 1.f) < 1e-3f);

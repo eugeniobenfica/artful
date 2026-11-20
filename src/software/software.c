@@ -933,6 +933,9 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
     s->base.renderScale = s->base.renderScaleMost = s->renderScale;
     s->post.pool = s->pool;
     s->post.kernels = s->kernels;
+    s->base.output = o->hdr && o->output >= ARTF_OUTPUT_SRGB && o->output <= ARTF_OUTPUT_HDR10 ? o->output : ARTF_OUTPUT_SRGB;
+    s->post.display = (int)s->base.output;
+    artfDisplayNumbers(o, s->base.output, &s->post.displayInverse, &s->post.displayPeak);
     const size_t planes = (size_t)ARTF_TILE_PIXELS * 4 * f->samples;
     /* (with a frame in floats, each color has its alpha and surface after it: see storeLit) */
     const size_t colors = f->post ? (size_t)ARTF_TILE_PIXELS * 4 * 12 : planes;

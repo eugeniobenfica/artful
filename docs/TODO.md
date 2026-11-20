@@ -68,15 +68,15 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [x] 5.1 Probes escaláveis — estados e histerese adaptativa (critério atingido); volumes que seguem a câmera (`follow`), em cascata (`cascades`, até 4); realocação descartada
 - [x] 5.2 Luzes em clusters — 0 omitidas no corredor (antes 1.846), 0,09 ms a 1080p
 - [x] 5.3 LTC para retângulos e tubos — retângulo 54–58% → 4–9% do traçado, tubo 22% → 0,5%
-- [~] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); faltam máscaras reativa/composição e Lanczos
+- [~] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); histórico cúbico (`sharpHistory`); faltam máscaras reativa/composição
 - [ ] 5.5 DAG de clusters
 - [ ] 5.6 Raios contra o corte grosso; BVH largo
 - [ ] 5.7 Luzes estocásticas, denoiser de sombra, A-SVGF
 - [ ] 5.8 Transparência por transmitância em froxels
-- [ ] 5.9 Saída HDR e gama larga
+- [~] 5.9 Saída HDR e gama larga — `output` P3/HDR10 nos dois backends, swapchain por `VK_EXT_swapchain_colorspace`; faltam metadados HDR, scRGB e teste em tela HDR
 - [ ] 5.10 Basis Universal e Zstandard
-- [ ] 5.11 Perspectiva aérea e nuvens a 1/4
-- [ ] 5.12 Materiais (texturas das extensões, iridescência, OpenPBR, SSS)
+- [~] 5.11 Perspectiva aérea (`ArtfSkyDesc.aerial`, forma fechada, os dois backends, desenhado e traçado); faltam nuvens a 1/4
+- [~] 5.12 Materiais — texturas do KHR_materials_specular feitas; faltam as de iridescência/anisotropia/espessura, Belcour-Barla, OpenPBR, SSS
 
 ## Fase 6 — Alcance de plataforma
 - [ ] 6.1 Metal executado 📱 (depende de 4.1 passo 4 provado)

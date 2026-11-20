@@ -22,7 +22,7 @@
 #endif
 
 enum {
-    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_R32G32_UINT = 101, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
+    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_A2B10G10R10 = 64, FORMAT_A2R10G10B10 = 58, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_R32G32_UINT = 101, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
     LAYOUT_UNDEFINED = 0, LAYOUT_COLOR = 2, LAYOUT_DEPTH = 3, LAYOUT_DEPTH_READ = 4, LAYOUT_SHADER_READ = 5, LAYOUT_TRANSFER_SRC = 6, LAYOUT_TRANSFER_DST = 7, LAYOUT_PRESENT = 1000001002,
     IMAGE_TRANSFER_SRC = 1, IMAGE_TRANSFER_DST = 2, IMAGE_SAMPLED = 4, IMAGE_COLOR = 0x10, IMAGE_DEPTH = 0x20,
     BUFFER_TRANSFER_SRC = 1, BUFFER_TRANSFER_DST = 2, BUFFER_UNIFORM = 0x10, BUFFER_STORAGE = 0x20, BUFFER_INDEX = 0x40, BUFFER_VERTEX = 0x80, BUFFER_INDIRECT = 0x100,
@@ -200,6 +200,11 @@ typedef struct Vulkan {
     ArtfSurface native;
     VkSurfaceKHR surface;
     int colorFormat, colorSpace; /* what the frame is drawn in: what the surface offers */
+    /* ArtfRendererOptions.output: as asked (sRGB without floats), and as made (ARTF_DISPLAY_), with its numbers
+     * (artfDisplayNumbers); whether the instance has VK_EXT_swapchain_colorspace */
+    int displayWanted, display;
+    float displayInverse, displayPeak;
+    bool colorspaces;
     VkSwapchainKHR swapchain;
     uint32_t imageCount;
     VkImage images[MAX_SWAPCHAIN_IMAGES];

@@ -158,6 +158,8 @@ typedef struct ArtfSoftPost {
     int sceneW, sceneH, frameW, frameH, halfW, halfH;
     bool mapped;
     float ratioX, ratioY; /* the scene's size over the frame's */
+    int display;          /* ArtfRendererOptions.output (ARTF_DISPLAY_), and its numbers (artfDisplayNumbers) */
+    float displayInverse, displayPeak;
     float viewBack[16];   /* where a pixel of the frame was, by the view alone (post.c's viewBackOf) */
     float* scratch[4];
     float* box[6];       /* upscaling: of each of the scene's pixels, the least and most of each color the history may

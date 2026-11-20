@@ -266,3 +266,109 @@ void testSkyMore(void) {
     artfFree(first);
     artfSceneFree(s);
 }
+
+/* A grey block straight ahead, distance units away and as large on the screen at any distance, under a sky by day;
+ * a unit is 100 m when aerial. */
+static ArtfScene* aerialScene(float distance, bool aerial, bool traced) {
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetSun(s, artfVec3(.3f, -.6f, -1), artfVec3(3, 3, 3));
+    ArtfSkyDesc day = {{3, 3, 3}, 0, 0, {0, 0, 0}, 128, false, false};
+    day.aerial = aerial ? 100.f : 0.f;
+    CHECK(artfSceneSetSky(s, &day));
+    ArtfMaterialDesc grey = artfMaterialDefaults();
+    grey.baseColor = artfVec3(.03f, .03f, .03f);
+    addAt(s, artfSceneAddCube(s, 1), artfSceneAddMaterial(s, &grey), 0, 0, -distance, distance * .4f);
+    setCamera(s, 0, 0, 0, 0, 0, -1);
+    if (traced) {
+        const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 16, 2, true};
+        artfSceneSetTrace(s, &paths);
+    }
+    return s;
+}
+
+/* The mean of each color over the 32 x 32 pixels in the middle, 0 to 1. */
+static void middleOf(const uint32_t* frame, float* out) {
+    double sum[3] = {0, 0, 0};
+    for (int y = H / 2 - 16; y < H / 2 + 16; ++y)
+        for (int x = W / 2 - 16; x < W / 2 + 16; ++x)
+            for (int c = 0; c < 3; ++c) sum[c] += (frame[y * W + x] >> (16 - 8 * c)) & 255;
+    for (int c = 0; c < 3; ++c) out[c] = (float)(sum[c] / (32.0 * 32.0 * 255.0));
+}
+
+/* Aerial perspective (ArtfSkyDesc.aerial): near, a surface is as it was; 30 km away, it has taken the color of the air
+ * toward the horizon, bluer than it was; both backends alike, drawn and traced, and the CPU's lanes of each width. */
+void testAerial(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* cpu[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        float near_[2][3], far_[2][3], horizon[3];
+        for (int aerial = 0; aerial < 2; ++aerial) {
+            ArtfScene* s = aerialScene(5, aerial, false);
+            drawInto(r, s, a);
+            middleOf(a, near_[aerial]);
+            artfSceneFree(s);
+            s = aerialScene(300, aerial, false);
+            drawInto(r, s, a);
+            middleOf(a, far_[aerial]);
+            if (aerial) {
+                /* (the sky just above the block: the air toward the horizon, far off) */
+                const uint32_t p = a[(H / 2 - (int)(H * .2f)) * W + W / 2];
+                for (int c = 0; c < 3; ++c) horizon[c] = (float)((p >> (16 - 8 * c)) & 255) / 255.f;
+                if (!backend) memcpy(cpu[0], a, W * H * 4);
+                else {
+                    const double apart = differentShare(cpu[0], a, 8);
+                    printf("aerial perspective, the GPU against the CPU: %.3f%% of pixels apart\n", apart * 100);
+                    CHECK(apart < .01);
+                }
+            }
+            artfSceneFree(s);
+        }
+        float nearMoved = 0, wasOff = 0, isOff = 0;
+        for (int c = 0; c < 3; ++c) {
+            nearMoved = fmaxf(nearMoved, fabsf(near_[1][c] - near_[0][c]));
+            wasOff += fabsf(far_[0][c] - horizon[c]);
+            isOff += fabsf(far_[1][c] - horizon[c]);
+        }
+        printf("%s: 500 m away %.3f %.3f %.3f, %.3f with air; 30 km away %.3f %.3f %.3f, with air %.3f %.3f %.3f; the sky above it %.3f %.3f %.3f\n", backend ? "GPU" : "CPU",
+               near_[0][0], near_[0][1], near_[0][2], nearMoved, far_[0][0], far_[0][1], far_[0][2], far_[1][0], far_[1][1], far_[1][2], horizon[0], horizon[1], horizon[2]);
+        CHECK(nearMoved < .08f && isOff < wasOff * .5f);
+        CHECK(far_[1][2] / fmaxf(far_[1][0], 1e-3f) > far_[0][2] / fmaxf(far_[0][0], 1e-3f) * 1.2f);
+        /* traced */
+        ArtfScene* s = aerialScene(300, true, true);
+        drawFrames(r, s, 16, a);
+        float traced[3];
+        middleOf(a, traced);
+        float tracedOff = 0;
+        for (int c = 0; c < 3; ++c) tracedOff += fabsf(traced[c] - far_[1][c]);
+        printf("%s traced: 30 km away with air %.3f %.3f %.3f\n", backend ? "GPU" : "CPU", traced[0], traced[1], traced[2]);
+        CHECK(tracedOff < .1f);
+        if (!backend) memcpy(cpu[1], a, W * H * 4);
+        else {
+            const double apart = differentShare(cpu[1], a, 16);
+            printf("aerial perspective traced, the GPU against the CPU: %.3f%% of pixels apart\n", apart * 100);
+            CHECK(apart < .02);
+        }
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    /* (the CPU's lanes of each instruction set, and a pixel at a time) */
+    static const ArtfSimd sets[3] = {ARTF_SIMD_AUTO, ARTF_SIMD_128, ARTF_SIMD_PORTABLE};
+    uint64_t hashes[3];
+    for (int k = 0; k < 3; ++k) {
+        ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, k == 2 ? 1 : 0, false);
+        o.simd = sets[k];
+        ArtfRenderer* r = artfRendererNew(&o);
+        ArtfScene* s = aerialScene(300, true, false);
+        drawInto(r, s, a);
+        hashes[k] = hashOf(a, (size_t)W * H);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    CHECK(hashes[0] == hashes[1] && hashes[1] == hashes[2]);
+    artfFree(a);
+    artfFree(cpu[0]);
+    artfFree(cpu[1]);
+}

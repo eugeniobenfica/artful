@@ -135,6 +135,8 @@ void testUpscaleQuality(void);
 void testPacing(void);
 void testPreRotate(void);
 void testPostAliasing(void);
+void testSharpHistory(void);
+void testDisplayOutput(void);
 void testProbesHard(void);
 void test2DThreadRule(void);
 void testTextureHandles(void);
@@ -157,6 +159,7 @@ void testSizedLights(void);
 void testLightShapes(void);
 void testProfiles(void);
 void testMoreMaterials(void);
+void testSpecularMaps(void);
 void testTextureRoles(void);
 void testHighlightFlicker(void);
 /* files.c: glTF, its extensions and compressed blocks */
@@ -224,6 +227,7 @@ void testRayCones(void);
 void testEnvironment(void);
 void testSky(void);
 void testSkyMore(void);
+void testAerial(void);
 /* motion.c: what bends and moves: bones, targets, clips, motion followed, motion blur */
 void testMotion(void);
 void testSkinnedMotion(void);

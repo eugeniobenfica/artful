@@ -1057,3 +1057,186 @@ void testPostAliasing(void) {
     artfFree(b);
 #endif
 }
+
+/* A board of fine squares, a few pixels each, filling the view: what reading the history between pixels blurs. */
+static ArtfScene* fineBoardScene(ArtfInstance* board) {
+    ArtfScene* s = plainScene();
+    static uint32_t squares[64 * 64];
+    for (int i = 0; i < 64 * 64; ++i) squares[i] = ((i % 64) + (i / 64)) & 1 ? 0xFFFFFFFFu : 0xFF202020u;
+    ArtfMaterialDesc d = {artfVec3(1, 1, 1), artfSceneAddTexture(s, squares, 64, 64, 0), 1, 0, artfVec3(0, 0, 0)};
+    *board = addAt(s, addSquare(s, 0, 0, 0, 0), artfSceneAddMaterial(s, &d), 0, 0, -.5f, 2.5f);
+    return s;
+}
+
+/* The history by Catmull-Rom's cubic (ArtfScreenDesc.sharpHistory): with temporal antialiasing at the frame's size and
+ * upscaled from half, a board of fine squares going across is nearer the truth (it still, drawn at 4 x 4 and taken
+ * down) than when its history is read between the nearest four; the same on both backends; and on the CPU, its lanes
+ * and a pixel at a time make the same bytes. */
+void testSharpHistory(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* last[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    double moving[2][2][2] = {{{0}}};
+    bool drawn[2] = {false, false};
+    for (int backend = 0; backend < 2; ++backend)
+        for (int scaled = 0; scaled < 2; ++scaled)
+            for (int sharp = 0; sharp < 2; ++sharp) {
+                ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+                o.hdr = true;
+                o.renderScale = scaled ? .5f : 0;
+                ArtfRenderer* r = artfRendererNew(&o);
+                ArtfRenderer* plain = artfRendererNew(&o);
+                if (!r || !plain) {
+                    artfRendererFree(r);
+                    artfRendererFree(plain);
+                    continue;
+                }
+                const ArtfPostDesc post = {.screen.temporal = true, .screen.sharpHistory = sharp != 0};
+                ArtfInstance board;
+                ArtfScene* s = fineBoardScene(&board);
+                artfSceneSetPost(s, &post);
+                for (int k = 0; k < 24; ++k) {
+                    const ArtfTransform at = artfTransformAt(-.3f + .0137f * (float)k, 0, -.5f, 2.5f);
+                    artfInstanceSetTransform(s, board, &at);
+                    drawFrames(r, s, 1, a);
+                }
+                /* (against the truth: it still where it ended, drawn at 4 x 4 the size, each 4 x 4 a pixel by its mean in
+                 * light, the sRGB of what its sixteen show) */
+                {
+                    ArtfRendererOptions big = options(ARTF_BACKEND_SOFTWARE, 0, false);
+                    big.width = W * 4;
+                    big.height = H * 4;
+                    big.hdr = true;
+                    ArtfRenderer* fine = artfRendererNew(&big);
+                    uint32_t* many = artfMalloc((size_t)W * H * 16 * 4);
+                    artfSceneSetPost(s, NULL);
+                    CHECK(artfRendererDraw(fine, s));
+                    CHECK(artfRendererReadPixels(fine, many));
+                    for (int y = 0; y < H; ++y)
+                        for (int x = 0; x < W; ++x) {
+                            float sum[3] = {0, 0, 0};
+                            for (int j = 0; j < 4; ++j)
+                                for (int i = 0; i < 4; ++i)
+                                    for (int c = 0; c < 3; ++c) sum[c] += artfSrgbDecode((float)CHANNEL(many[(size_t)(y * 4 + j) * W * 4 + x * 4 + i], 8 * c) / 255.f);
+                            uint32_t px = 0xFF000000u;
+                            for (int c = 0; c < 3; ++c) px |= (uint32_t)(artfSrgbEncode(sum[c] / 16.f) * 255.f + .5f) << (8 * c);
+                            b[y * W + x] = px;
+                        }
+                    artfFree(many);
+                    artfRendererFree(fine);
+                }
+                moving[backend][scaled][sharp] = meanApart(a, b);
+                if (sharp && !scaled) memcpy(last[backend], a, W * H * 4);
+                drawn[backend] = true;
+                artfSceneFree(s);
+                artfRendererFree(r);
+                artfRendererFree(plain);
+            }
+    for (int backend = 0; backend < 2; ++backend) {
+        if (!drawn[backend]) continue;
+        printf("%s, a fine board going across, from the truth (drawn at 4 x 4): %.2f bilinear, %.2f cubic; upscaled from half, %.2f and %.2f\n", backend ? "GPU" : "CPU", moving[backend][0][0],
+               moving[backend][0][1], moving[backend][1][0], moving[backend][1][1]);
+        CHECK(moving[backend][0][1] < moving[backend][0][0] && moving[backend][1][1] < moving[backend][1][0]);
+    }
+    if (drawn[1]) {
+        const double apart = differentShare(last[0], last[1], 16);
+        printf("the cubic history, the GPU against the CPU: %.2f%% of pixels apart\n", apart * 100);
+        CHECK(apart < .01);
+    }
+    /* (the CPU's lanes of each instruction set, and a pixel at a time) */
+    static const ArtfSimd sets[3] = {ARTF_SIMD_AUTO, ARTF_SIMD_128, ARTF_SIMD_PORTABLE};
+    for (int scaled = 0; scaled < 2; ++scaled) {
+        uint64_t hashes[3];
+        for (int k = 0; k < 3; ++k) {
+            ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, k == 2 ? 1 : 0, false);
+            o.hdr = true;
+            o.simd = sets[k];
+            o.renderScale = scaled ? .5f : 0;
+            ArtfRenderer* r = artfRendererNew(&o);
+            const ArtfPostDesc post = {.screen.temporal = true, .screen.sharpHistory = true};
+            ArtfInstance board;
+            ArtfScene* s = fineBoardScene(&board);
+            artfSceneSetPost(s, &post);
+            for (int f = 0; f < 6; ++f) {
+                const ArtfTransform at = artfTransformAt(-.3f + .0137f * (float)f, 0, -.5f, 2.5f);
+                artfInstanceSetTransform(s, board, &at);
+                drawFrames(r, s, 1, a);
+            }
+            hashes[k] = hashOf(a, (size_t)W * H);
+            artfSceneFree(s);
+            artfRendererFree(r);
+        }
+        CHECK(hashes[0] == hashes[1] && hashes[1] == hashes[2]);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(last[0]);
+    artfFree(last[1]);
+}
+
+/* PQ (SMPTE ST 2084) of nits, by the standard's own arithmetic in doubles, as a 10-bit code. */
+static int pqCode(double nits) {
+    const double y = pow(nits / 10000.0, .1593017578125);
+    return (int)(pow((.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 78.84375) * 1023.0 + .5);
+}
+
+/* Frames made for other screens (ArtfRendererOptions.output): sRGB's red in Display-P3 is 234 51 35; in HDR10 white is
+ * paper white (203 nits) and red Rec. 2020's share of it; an overlay's white is paper white over it; both backends. */
+void testDisplayOutput(void) {
+    uint32_t* frame = artfMalloc(W * H * 4);
+    uint32_t* overlay = artfMalloc(W * H * 4);
+    for (int i = 0; i < W * H; ++i) overlay[i] = i % W >= W / 2 ? 0xFFFFFFFFu : 0;
+    /* what HDR10 should give: red is (.6274, .0691, .0164) of white in Rec. 2020 */
+    const int white = pqCode(203.0), red[3] = {pqCode(203.0 * .6274039), pqCode(203.0 * .0690973), pqCode(203.0 * .0163914)};
+    uint32_t got[2][4]; /* (of each backend: P3's red, HDR10's red, white, the overlay) */
+    for (int backend = 0; backend < 2; ++backend) {
+        for (int output = 1; output < 3; ++output) {
+            ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+            o.hdr = true;
+            o.output = (ArtfOutput)output;
+            ArtfRenderer* r = artfRendererNew(&o);
+            if (!r) break;
+            CHECK(artfRendererOutput(r) == (ArtfOutput)output);
+            ArtfScene* s = artfSceneNew();
+            setCamera(s, 0, 0, 3, 0, 0, 0);
+            artfSceneSetBackground(s, artfVec3(1, 0, 0));
+            drawInto(r, s, frame);
+            const uint32_t p = frame[(H / 2) * W + W / 4];
+            if (output == 1) {
+                got[backend][0] = p;
+                printf("%s, Display-P3: sRGB's red is %u %u %u\n", backend ? "GPU" : "CPU", p >> 16 & 255, p >> 8 & 255, p & 255);
+                CHECK(abs((int)(p >> 16 & 255) - 234) <= 1 && abs((int)(p >> 8 & 255) - 51) <= 1 && abs((int)(p & 255) - 35) <= 1 && p >> 24 == 255);
+            } else {
+                got[backend][1] = p;
+                const int codes[3] = {(int)(p >> 20 & 1023), (int)(p >> 10 & 1023), (int)(p & 1023)};
+                artfSceneSetBackground(s, artfVec3(1, 1, 1));
+                drawInto(r, s, frame);
+                const uint32_t w = got[backend][2] = frame[(H / 2) * W + W / 4];
+                const ArtfOverlay over = {overlay, W, H, 0, false, NULL, 0};
+                artfSceneSetBackground(s, artfVec3(1, 0, 0));
+                artfRendererSetOverlay(r, &over);
+                drawInto(r, s, frame);
+                artfRendererSetOverlay(r, NULL);
+                const uint32_t q = got[backend][3] = frame[(H / 2) * W + W * 3 / 4];
+                printf("%s, HDR10: red %d %d %d (%d %d %d expected), white %u (%d), the overlay's white over red %u %u %u\n", backend ? "GPU" : "CPU", codes[0], codes[1], codes[2],
+                       red[0], red[1], red[2], w & 1023, white, q >> 20 & 1023, q >> 10 & 1023, q & 1023);
+                for (int c = 0; c < 3; ++c) CHECK(abs(codes[c] - red[c]) <= 2);
+                CHECK(abs((int)(w & 1023) - white) <= 2 && abs((int)(w >> 10 & 1023) - white) <= 2 && abs((int)(w >> 20 & 1023) - white) <= 2 && w >> 30 == 3);
+                CHECK(abs((int)(q & 1023) - white) <= 2 && abs((int)(q >> 20 & 1023) - white) <= 2 && q >> 30 == 3);
+                CHECK((frame[(H / 2) * W + W / 4] & 0x3FFFFFFFu) == (p & 0x3FFFFFFFu));
+            }
+            artfSceneFree(s);
+            artfRendererFree(r);
+        }
+    }
+    {
+        /* without hdr, sRGB all the same */
+        ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+        o.output = ARTF_OUTPUT_HDR10;
+        ArtfRenderer* r = artfRendererNew(&o);
+        CHECK(artfRendererOutput(r) == ARTF_OUTPUT_SRGB);
+        artfRendererFree(r);
+    }
+    artfFree(frame);
+    artfFree(overlay);
+}

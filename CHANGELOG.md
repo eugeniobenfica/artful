@@ -11,6 +11,18 @@
   from the next, so light bounces far from the camera too. A point 9 m away by a red wall takes 0.023 of red where one
   volume gave it 0.004; both backends place and fill the volumes alike (2.7e-6). With probes, the GPU's pixel shader
   takes up to 3% longer for the loop over volumes.
+- **A sharper history** (`ArtfScreenDesc.sharpHistory`, phase 5.4): temporal antialiasing and upscaling read the
+  history by Catmull-Rom's cubic over 4 x 4 pixels, in place of bilinear: a fine checker that moves is 22% to 34%
+  closer to a supersampled frame. Both backends, the same arithmetic; off by default.
+- **KHR_materials_specular's textures** (phase 5.12): `specularTexture` and `specularColorTexture` are read from glTF
+  (`ArtfMaterialDesc.specularMap`, `specularColorMap`) and drawn and traced on both backends.
+- **Aerial perspective** (`ArtfSkyDesc.aerial`, phase 5.11): the air between the eye and what is drawn takes light and
+  adds the sun's and sky's, as the sky's own air does: far hills take the air's color. A closed form at the eye's
+  altitude, drawn and traced, the same on both backends.
+- **Frames for other screens** (`ArtfRendererOptions.output`, phase 5.9): Display-P3, or HDR10 (Rec. 2020, PQ, 10 bits,
+  with `peakNits` and `paperWhiteNits`), with hdr, on both backends; the overlay is made the same. Vulkan picks a
+  surface's HDR10 or Display-P3 format through `VK_EXT_swapchain_colorspace`, or stays sRGB; `artfRendererOutput` says
+  which. No HDR metadata yet.
 
 - **Phase 4.2 done.** The scene's passes take their barriers from what each says it does (`trackUse`): one where
   three were before the scene, the same where they were needed, and synchronization validation clean, also with

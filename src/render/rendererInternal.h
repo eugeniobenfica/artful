@@ -31,7 +31,16 @@ struct ArtfRenderer {
     float paceMs, paceLeast, headroom;
     double paceTook;
     int paceWait;
+    ArtfOutput output; /* what its frames are made for (artfRendererOutput) */
 };
+
+/* ArtfRendererOptions.output's numbers: light is divided by inverse's inverse (peak over paper white) before the tone
+ * curve, and peak is in PQ's units (nits / 10000). */
+ARTF_INLINE void artfDisplayNumbers(const ArtfRendererOptions* o, ArtfOutput output, float* inverse, float* peak) {
+    const float most = o->peakNits > 0 ? o->peakNits : 1000.f, paper = o->paperWhiteNits > 0 ? o->paperWhiteNits : 203.f;
+    *inverse = output == ARTF_OUTPUT_HDR10 ? paper / artfMaxf(most, paper) : 1.f;
+    *peak = output == ARTF_OUTPUT_HDR10 ? artfMaxf(most, paper) * 1e-4f : 1.f;
+}
 
 /* The passes of a frame and what each took, as the CPU's clock sees them: each mark ends the pass it names, which
  * started where the one before ended. */

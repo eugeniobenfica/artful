@@ -531,10 +531,10 @@ bool targetsMake(Vulkan* v) {
         v->turn = v->preRotate && v->floats ? artfVulkanTestTurn & 3 : 0;
         v->imageWidth = v->turn & 1 ? v->height : v->width;
         v->imageHeight = v->turn & 1 ? v->width : v->height;
-        if (!imageNew(v, &v->offscreen, FORMAT_BGRA8, v->imageWidth, v->imageHeight, 1, 1, IMAGE_COLOR | IMAGE_TRANSFER_SRC, ASPECT_COLOR)) return false;
+        if (!imageNew(v, &v->offscreen, v->colorFormat, v->imageWidth, v->imageHeight, 1, 1, IMAGE_COLOR | IMAGE_TRANSFER_SRC, ASPECT_COLOR)) return false;
         v->imageCount = 1;
         v->images[0] = v->offscreen.image;
-        ImageViewCreateInfo view = {ST_IMAGE_VIEW_CREATE_INFO, NULL, 0, v->offscreen.image, 1, FORMAT_BGRA8, {0, 0, 0, 0}, {ASPECT_COLOR, 0, 1, 0, 1}};
+        ImageViewCreateInfo view = {ST_IMAGE_VIEW_CREATE_INFO, NULL, 0, v->offscreen.image, 1, v->colorFormat, {0, 0, 0, 0}, {ASPECT_COLOR, 0, 1, 0, 1}};
         if (v->vkCreateImageView(v->device, &view, NULL, &v->views[0]) != VK_OK) return false;
     }
     v->sceneWidth = v->width;
@@ -1455,7 +1455,8 @@ bool pipelinesMake(Vulkan* v) {
     VkShaderModule sceneFragment = shaderModule(v, code, size);
     code = artfShaderOverlayVertex(&size);
     VkShaderModule overlayVertex = shaderModule(v, code, size);
-    code = artfShaderOverlayFragment(&size, v->preRotate && v->floats);
+    const ArtfShaderDisplay display = {v->display, v->displayInverse, v->displayPeak};
+    code = artfShaderOverlayFragmentFor(&size, v->preRotate && v->floats, &display);
     VkShaderModule overlayFragment = shaderModule(v, code, size);
     code = artfShaderBackgroundBackdrop(&size, v->floats);
     VkShaderModule backdropFragment = shaderModule(v, code, size);
@@ -1557,7 +1558,7 @@ bool pipelinesMake(Vulkan* v) {
             ok = module && v->vkCreateComputePipelines(v->device, v->pipelineCache, 1, &c, NULL, &v->postPipelines[i]) == VK_OK;
             if (module) v->vkDestroyShaderModule(v->device, module, NULL);
         }
-        uint32_t* finalCode = artfShaderPostFinal(&size, v->preRotate);
+        uint32_t* finalCode = artfShaderPostFinalFor(&size, v->preRotate, &display);
         VkShaderModule finalModule = shaderModule(v, finalCode, size);
         const PipelineShaderStage presentStages[2] = {overlayStages[0], {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, finalModule, "main", NULL}};
         const ColorBlendAttachment whole = {0, 0, 0, 0, 0, 0, 0, 15};
@@ -3895,6 +3896,9 @@ bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_HOST, ACCESS_TRANSFER_WRITE, ACCESS_HOST_READ);
     bool ok = oneShotEnd(v, c);
     if (ok) memcpy(dst, v->readback.mapped, bytes);
+    if (ok && v->colorFormat == FORMAT_A2B10G10R10)
+        /* (red and blue change places: A2R10G10B10, as the CPU's) */
+        for (size_t i = 0; i < bytes / 4; ++i) dst[i] = (dst[i] & 0xC00FFC00u) | (dst[i] & 0x3FFu) << 20 | (dst[i] >> 20 & 0x3FFu);
     return ok;
 }
 
@@ -4175,9 +4179,20 @@ bool createSurface(Vulkan* v) {
 bool createInstance(Vulkan* v) {
     *(void**)&v->vkCreateInstance = v->getInstanceProcAddr(NULL, "vkCreateInstance");
     if (!v->vkCreateInstance) return false;
-    const char* extensions[3];
+    const char* extensions[4];
     uint32_t count = 0;
     VkFlags flags = 0;
+    if (v->native.kind != ARTF_SURFACE_NONE && v->displayWanted != ARTF_DISPLAY_SRGB) {
+        /* (another screen's colors, where the instance has them) */
+        VkResult(VKAPI * enumerate)(const char*, uint32_t*, ExtensionProperties*);
+        *(void**)&enumerate = v->getInstanceProcAddr(NULL, "vkEnumerateInstanceExtensionProperties");
+        ExtensionProperties have[128];
+        uint32_t n = 128;
+        if (enumerate && enumerate(NULL, &n, have) >= 0)
+            for (uint32_t e = 0; e < n; ++e)
+                if (!strcmp(have[e].name, "VK_EXT_swapchain_colorspace")) v->colorspaces = true;
+        if (v->colorspaces) extensions[count++] = "VK_EXT_swapchain_colorspace";
+    }
     if (v->native.kind != ARTF_SURFACE_NONE) {
         extensions[count++] = "VK_KHR_surface";
         switch (v->native.kind) {
@@ -4304,13 +4319,40 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
 
 /* BGRA, as the frames in memory are; or else RGBA, as Android offers. Shaders write colors, not bytes,
  * so nothing else changes. */
+/* Another screen's (ArtfRendererOptions.output): HDR10 in 10 bits (A2B10G10R10, read back as A2R10G10B10), Display-P3 in
+ * 8; on a surface, where it offers that color space (VK_EXT_swapchain_colorspace), else sRGB. */
+static void chooseDisplay(Vulkan* v, const SurfaceFormat* formats, uint32_t count) {
+    v->display = ARTF_DISPLAY_SRGB;
+    if (v->displayWanted == ARTF_DISPLAY_SRGB) return;
+    if (!v->surface) {
+        v->display = v->displayWanted;
+        if (v->display == ARTF_DISPLAY_HDR10) v->colorFormat = FORMAT_A2B10G10R10;
+        return;
+    }
+    const int space = v->displayWanted == ARTF_DISPLAY_HDR10 ? 1000104008 /* HDR10_ST2084 */ : 1000104001 /* DISPLAY_P3_NONLINEAR */;
+    for (uint32_t i = 0; v->colorspaces && i < count; ++i) {
+        const int f = formats[i].format;
+        const bool fits = v->displayWanted == ARTF_DISPLAY_HDR10 ? f == FORMAT_A2B10G10R10 || f == FORMAT_A2R10G10B10 : f == FORMAT_BGRA8 || f == FORMAT_RGBA8;
+        if (fits && formats[i].colorSpace == space) {
+            v->colorFormat = f;
+            v->colorSpace = space;
+            v->display = v->displayWanted;
+            return;
+        }
+    }
+    artfLog("artful: the surface does not show %s: sRGB", v->displayWanted == ARTF_DISPLAY_HDR10 ? "HDR10" : "Display-P3");
+}
+
 bool chooseFormat(Vulkan* v) {
     v->colorFormat = FORMAT_BGRA8;
     v->colorSpace = 0;
-    if (!v->surface) return true;
     SurfaceFormat formats[64];
     uint32_t count = 64;
-    if (v->vkGetPhysicalDeviceSurfaceFormatsKHR(v->gpu, v->surface, &count, formats) < 0) return false;
+    if (v->surface && v->vkGetPhysicalDeviceSurfaceFormatsKHR(v->gpu, v->surface, &count, formats) < 0) return false;
+    chooseDisplay(v, formats, v->surface ? count : 0);
+    v->base.output = (ArtfOutput)v->display;
+    if (v->display == ARTF_DISPLAY_SRGB) v->displayInverse = v->displayPeak = 1.f;
+    if (!v->surface || v->display != ARTF_DISPLAY_SRGB) return true;
     int found = 0;
     for (uint32_t i = 0; i < count; ++i) {
         if (formats[i].format == FORMAT_BGRA8) { v->colorSpace = formats[i].colorSpace; return true; }
@@ -4418,6 +4460,8 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     v->noVsync = o->noVsync;
     v->samples = o->antialias ? 4 : 1;
     v->floats = o->hdr;
+    v->displayWanted = o->hdr && o->output >= ARTF_OUTPUT_SRGB && o->output <= ARTF_OUTPUT_HDR10 ? (int)o->output : ARTF_DISPLAY_SRGB;
+    artfDisplayNumbers(o, (ArtfOutput)v->displayWanted, &v->displayInverse, &v->displayPeak);
     v->renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
     v->preRotate = o->preRotate;
     v->base.renderScale = v->base.renderScaleMost = v->renderScale;

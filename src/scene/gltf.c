@@ -602,6 +602,8 @@ static ArtfMaterial materialOf(Loader* l, const Json* m) {
         readNumbers(l, member(l, specular, "specularColorFactor"), tint, 3);
         const float factor = (float)numberOf(l, specular, "specularFactor", 1);
         d.specularColor = artfVec3(artfMaxf(tint[0] * factor, 1e-6f), artfMaxf(tint[1] * factor, 1e-6f), artfMaxf(tint[2] * factor, 1e-6f));
+        d.specularMap = textureOf(l, member(l, specular, "specularTexture"));
+        d.specularColorMap = textureOf(l, member(l, specular, "specularColorTexture"));
     }
     /* what its inside takes, traced */
     const Json* volume = member(l, extensions, "KHR_materials_volume");
@@ -617,9 +619,8 @@ static ArtfMaterial materialOf(Loader* l, const Json* m) {
     const Json* drawn = member(l, extensions, "KHR_materials_anisotropy");
     d.anisotropy = (float)numberOf(l, drawn, "anisotropyStrength", 0);
     d.anisotropyRotation = (float)numberOf(l, drawn, "anisotropyRotation", 0);
-    if (member(l, specular, "specularTexture") || member(l, specular, "specularColorTexture") || member(l, film, "iridescenceTexture") ||
-        member(l, film, "iridescenceThicknessTexture") || member(l, drawn, "anisotropyTexture") || member(l, volume, "thicknessTexture"))
-        artfLog("artful: glTF: textures of specular, iridescence, anisotropy or volume are left out: their factors are kept");
+    if (member(l, film, "iridescenceTexture") || member(l, film, "iridescenceThicknessTexture") || member(l, drawn, "anisotropyTexture") || member(l, volume, "thicknessTexture"))
+        artfLog("artful: glTF: textures of iridescence, anisotropy or volume are left out: their factors are kept");
     return artfSceneAddMaterial(l->scene, &d);
 }
 

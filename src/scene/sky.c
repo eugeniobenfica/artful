@@ -632,6 +632,37 @@ bool artfSceneSetSky(ArtfScene* s, const ArtfSkyDesc* desc) {
     }
     artfPoolRun(pool, skyRow, &k, (uint32_t)k.height);
     artfPoolFree(pool);
+    /* aerial perspective: the air at the eye's altitude, the sun as it reaches the eye (before clouds), and the mean
+     * of the picture all around (the sky's light, scattered the same all ways) */
+    memset(s->aerial, 0, sizeof s->aerial);
+    if (desc->aerial > 0) {
+        float dens[3], eyeSun[3], mean[3] = {0, 0, 0}, weight = 0;
+        densities(k.eye[1] - EARTH, dens);
+        if (k.tables) memcpy(eyeSun, k.eyeSun, 12);
+        else {
+            sunThrough(&k, k.eye, eyeSun);
+            for (int c = 0; c < 3; ++c) eyeSun[c] *= k.sun[c];
+        }
+        for (int y = 0; y < k.height; ++y) {
+            const float w = sineOf(((float)y + .5f) / (float)k.height * 3.14159265f);
+            float row[3] = {0, 0, 0};
+            for (int x = 0; x < k.width; ++x)
+                for (int c = 0; c < 3; ++c) row[c] += k.rgb[((size_t)y * k.width + x) * 3 + c];
+            for (int c = 0; c < 3; ++c) mean[c] += row[c] * w;
+            weight += w * (float)k.width;
+        }
+        const float g = k.g, mieScale = .11936621f * (1.f - g * g) / (2.f + g * g);
+        const float mie = k.mie * dens[1], unit = desc->aerial * .001f; /* (the tables are in kilometres) */
+        for (int c = 0; c < 3; ++c) {
+            const float rayleigh = k.rayleigh[c] * dens[0], taken = rayleigh + k.mieTaken * dens[1] + k.ozone[c] * dens[2];
+            s->aerial[0][c] = taken * unit;
+            s->aerial[1][c] = eyeSun[c] * 3.14159265f * rayleigh * .059683104f / taken;
+            s->aerial[2][c] = eyeSun[c] * 3.14159265f * mie * mieScale / taken;
+            s->aerial[3][c] = mean[c] / weight * (rayleigh + mie) / taken;
+        }
+        s->aerial[1][3] = g;
+        s->aerial[3][3] = 1.f;
+    }
     /* the sun as it reaches the eye: reddened through the air, and gone below the horizon; under clouds, dimmer */
     if (!desc->keepSun) {
         if (!k.tables) sunThrough(&k, k.eye, through);

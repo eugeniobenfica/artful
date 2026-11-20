@@ -60,6 +60,10 @@ uint32_t* artfShaderDenoiseEnd(size_t* size);
 uint32_t* artfShaderTraceShow(size_t* size, bool hdr);
 /* turns: what preRotate needs (a push constant at 8 says how the image is turned); false: as before it was there */
 uint32_t* artfShaderOverlayFragment(size_t* size, bool turns);
+/* What the frame is made for (ArtfRendererOptions.output): ARTF_DISPLAY_, and artfDisplayNumbers' inverse and peak. */
+typedef struct ArtfShaderDisplay { int kind; float inverse, peak; } ArtfShaderDisplay;
+/* The same, laid over a frame made for that (NULL: sRGB, as above). */
+uint32_t* artfShaderOverlayFragmentFor(size_t* size, bool turns, const ArtfShaderDisplay* display);
 /* A background pass: after the program's shader, the bloom's levels going down and coming back, then the frame's
  * background. (Its vertices are the overlay's: one triangle.) */
 uint32_t* artfShaderBloomDown(size_t* size, bool fromLight);
@@ -82,6 +86,7 @@ uint32_t* artfShaderPostFocus(size_t* size);
 uint32_t* artfShaderPostBloomDown(size_t* size);
 uint32_t* artfShaderPostBloomUp(size_t* size);
 uint32_t* artfShaderPostFinal(size_t* size, bool turns);
+uint32_t* artfShaderPostFinalFor(size_t* size, bool turns, const ArtfShaderDisplay* display);
 uint32_t* artfShaderPostMeter(size_t* size); /* auto exposure, one invocation */
 uint32_t* artfShaderPostMotionBlur(size_t* size);
 uint32_t* artfShaderPostVelocity(size_t* size);  /* motion blur's: each pixel's, */

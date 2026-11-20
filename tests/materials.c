@@ -664,6 +664,79 @@ static ArtfScene* moreScene(int kind, ArtfMaterial* made) {
     return s;
 }
 
+/* coatScene's sphere with highlights of KHR_materials_specular, strong to be seen: kind 0 by its factor alone, as the
+ * textures of kind 1 would make it; 1 by a color texture (bytes FF 80 40) and a strength texture (alpha 128), each of
+ * one color; 2 a strength texture of checks, 0 and all. */
+static ArtfScene* specularScene(int kind) {
+    ArtfScene* s = coatScene(0, 0);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.5f, .05f, .05f);
+    d.roughness = .35f;
+    d.specularColor = artfVec3(3, 3, 3);
+    static uint32_t tinted[4 * 4], half[4 * 4], checks[16 * 16];
+    for (int i = 0; i < 16; ++i) {
+        tinted[i] = 0xFFFF8040u;
+        half[i] = 0x80FFFFFFu;
+    }
+    for (int i = 0; i < 16 * 16; ++i) checks[i] = (i / 16 / 4 + i % 16 / 4) & 1 ? 0xFFFFFFFFu : 0x00FFFFFFu;
+    if (kind == 0) {
+        const float strength = 128.f / 255.f;
+        d.specularColor = artfVec3(3 * artfSrgbDecode(1.f) * strength, 3 * artfSrgbDecode(128.f / 255.f) * strength, 3 * artfSrgbDecode(64.f / 255.f) * strength);
+    }
+    if (kind == 1) {
+        d.specularColorMap = artfSceneAddTexture(s, tinted, 4, 4, 0);
+        d.specularMap = artfSceneAddTexture(s, half, 4, 4, 0);
+    }
+    if (kind == 2) d.specularMap = artfSceneAddTexture(s, checks, 16, 16, 0);
+    artfInstanceSetMaterial(s, s->instanceHandles.items[0], artfSceneAddMaterial(s, &d));
+    return s;
+}
+
+/* KHR_materials_specular's textures: one of a color and strength draws as the factor that says as much, drawn and
+ * traced, on both backends alike; checks of strength show. */
+void testSpecularMaps(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* cpuMapped[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        for (int traced = 0; traced < 2; ++traced) {
+            ArtfScene* factor = specularScene(0);
+            ArtfScene* mapped = specularScene(1);
+            ArtfScene* checked = specularScene(2);
+            const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 16, 0, true};
+            if (traced) {
+                artfSceneSetTrace(factor, &paths);
+                artfSceneSetTrace(mapped, &paths);
+                artfSceneSetTrace(checked, &paths);
+            }
+            const int frames = traced ? 16 : 1;
+            for (int k = 0; k < frames; ++k) drawInto(r, factor, a);
+            for (int k = 0; k < frames; ++k) drawInto(r, mapped, b);
+            const double same = differentShare(a, b, traced ? 24 : 4);
+            for (int k = 0; k < frames; ++k) drawInto(r, checked, a);
+            const double checkered = differentShare(a, b, 8);
+            double across = 0;
+            if (!backend) memcpy(cpuMapped[traced], b, W * H * 4);
+            else across = differentShare(cpuMapped[traced], b, 8);
+            printf("%s%s: textures against the factor %.3f%% of pixels apart; checks of strength change %.2f%%; the GPU against the CPU %.3f%%\n", backend ? "GPU" : "CPU",
+                   traced ? ", traced" : "", same * 100, checkered * 100, across * 100);
+            CHECK(same < .002 && checkered > .01);
+            if (backend) CHECK(across < .01);
+            artfSceneFree(factor);
+            artfSceneFree(mapped);
+            artfSceneFree(checked);
+        }
+        artfRendererFree(r);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(cpuMapped[0]);
+    artfFree(cpuMapped[1]);
+}
+
 void testMoreMaterials(void) {
     uint32_t* a = artfMalloc(W * H * 4);
     uint32_t* b = artfMalloc(W * H * 4);

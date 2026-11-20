@@ -220,11 +220,13 @@ int main(int argc, char** argv) {
     RUN("materials/areaLights", testAreaLights());
     RUN("materials/profiles", testProfiles());
     RUN("materials/moreMaterials", testMoreMaterials());
+    RUN("materials/specularMaps", testSpecularMaps());
     RUN("materials/textureRoles", testTextureRoles());
     RUN("materials/highlightFlicker", testHighlightFlicker());
     RUN("files/gltfMore", testGltfMore());
     RUN("sky/sky", testSky());
     RUN("sky/skyMore", testSkyMore());
+    RUN("sky/aerial", testAerial());
     RUN("post/lookMore", testLookMore());
     RUN("materials/sizedLights", testSizedLights());
     RUN("motion/motion", testMotion());
@@ -233,6 +235,8 @@ int main(int argc, char** argv) {
     RUN("post/pacing", testPacing());
     RUN("post/preRotate", testPreRotate());
     RUN("post/aliasing", testPostAliasing());
+    RUN("post/sharpHistory", testSharpHistory());
+    RUN("post/displayOutput", testDisplayOutput());
     RUN("motion/skinnedMotion", testSkinnedMotion());
     RUN("motion/skinScenes", testSkinScenes());
     RUN("motion/blurEdges", testBlurEdges());
