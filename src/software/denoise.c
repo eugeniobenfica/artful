@@ -10,7 +10,11 @@
  *           with a short history, from those around it), then five passes of a wavelet filter (Dammertz et al., 2010),
  *           each reading twice as far, five taps a side, over what faces the same way at the same distance and has
  *           light near its own, near by as many deviations as it varies: where it is still noisy it is smoothed more,
- *           where it has settled, hardly */
+ *           where it has settled, hardly
+ *   change  A-SVGF's temporal gradients (Schied et al., 2018): where the eye stood still, a pixel of each 3 x 3 traced
+ *           again with the frame before's first sample says whether the light there changed, in its own noise's
+ *           deviations; where it surely did, what was gathered goes toward this frame's light around
+ *           (artfDenoiserGradients) */
 #include "software/denoise.h"
 #include "core/threads.h"
 
