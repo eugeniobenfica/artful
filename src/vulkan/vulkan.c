@@ -242,8 +242,8 @@ void targetsFree(Vulkan* v) {
     }
     imageFree(v, &v->floatColor);
     imageFree(v, &v->floatSurface);
-    GpuBuffer* const post[11] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom, &v->postBlur, &v->postLocks, &v->postNone};
-    for (int i = 0; i < 11; ++i) bufferFree(v, post[i]);
+    GpuBuffer* const post[12] = {&v->postLight, &v->postDepth, &v->postSurface, &v->postScratch, &v->postHistory, &v->postOcclusion, &v->postFog, &v->postBloom, &v->postBlur, &v->postLocks, &v->postGathered, &v->postNone};
+    for (int i = 0; i < 12; ++i) bufferFree(v, post[i]);
     v->historyValid = false;
     v->hasPrevious = false;
     imageFree(v, &v->depth);
@@ -321,6 +321,7 @@ void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* 
             else if (uses[k].set == 0 && uses[k].binding >= 50 && uses[k].binding <= 59) bit = 1u << (3 + uses[k].binding - 50);
             else if (uses[k].set == 0 && uses[k].binding == 69) bit = 1u << (3 + 55 - 50);
             else if (uses[k].set == 0 && uses[k].binding == 71) bit = 1u << 13;
+            else if (uses[k].set == 0 && uses[k].binding == 72) bit = 1u << 14;
             if (uses[k].read) *reads |= bit;
             if (uses[k].write) *writes |= bit;
         }
@@ -339,6 +340,7 @@ uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f) {
     if (f->post[1][1] > 0 && f->look[1] > 0) n |= NEED_FOG;
     if (scaled || temporal) n |= NEED_SECOND | NEED_HISTORY;
     if (f->post[2][1] > 0 && f->post[2][0] > 0) n |= NEED_SECOND;
+    if (f->more[3] > 0 && temporal) n |= NEED_GATHERED;
     return n;
 }
 
@@ -363,6 +365,10 @@ bool postBuffersMake(Vulkan* v) {
     for (int i = 0; i < 8; ++i) bufferFree(v, buffers[i]);
     bufferFree(v, &v->postBlur);
     bufferFree(v, &v->postLocks);
+    bufferFree(v, &v->postGathered);
+    v->gatheredValid = false;
+    /* (lights sampled: what they gave, gathered over frames, at the scene's size) */
+    if (v->postNeeds & NEED_GATHERED && !bufferNew(v, &v->postGathered, pixels * 64, BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false)) return false;
     /* (upscaling's locks, with a history and the scene drawn smaller) */
     if (v->postNeeds & NEED_HISTORY && (v->sceneWidth != v->width || v->sceneHeight != v->height) &&
         !bufferNew(v, &v->postLocks, framePixels * 8, BUFFER_STORAGE | BUFFER_TRANSFER_DST | BUFFER_TRANSFER_SRC, false))
@@ -399,6 +405,7 @@ bool postBuffersMake(Vulkan* v) {
         v->vkUpdateDescriptorSets(v->device, 10, writes, 0, NULL);
         bindStorage(v, &v->slots[k], 69, blur ? &v->postOcclusion : &v->postNone);
         bindStorage(v, &v->slots[k], 71, v->postLocks.buffer ? &v->postLocks : &v->postNone);
+        bindStorage(v, &v->slots[k], 72, v->postGathered.buffer ? &v->postGathered : &v->postNone);
     }
     const GpuBuffer* const three[3] = {&v->postLight, OR_NONE(&v->postScratch), OR_NONE(&v->postHistory)};
 #undef OR_NONE
@@ -1373,16 +1380,18 @@ bool pipelinesMake(Vulkan* v) {
     /* (and with the ray tracing hardware, the top level) */
     /* (64 bindings, 54 without floats; then what moves (68, 69) with them, the top level (64), the meshlets view's table
      * (65) and emitters of many (66, 67)) */
-    DescriptorSetLayoutBinding all[72];
+    DescriptorSetLayoutBinding all[96]; /* (room past what is listed: one more binding must not run past it) */
     uint32_t bindingCount = v->floats ? 64 : 54;
     memcpy(all, bindings, bindingCount * sizeof *all);
     if (v->floats) {
         /* (what the vertices were a frame ago; motion blur's velocities) */
         const DescriptorSetLayoutBinding past = {68, DESCRIPTOR_STORAGE, 1, SHADER_VERTEX, NULL}, blur = {69, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL};
         const DescriptorSetLayoutBinding locks = {71, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}; /* (upscaling's locks) */
+        const DescriptorSetLayoutBinding gathered = {72, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}; /* (lights sampled, gathered) */
         all[bindingCount++] = past;
         all[bindingCount++] = blur;
         all[bindingCount++] = locks;
+        all[bindingCount++] = gathered;
     }
     if (v->rayQuery) {
         const DescriptorSetLayoutBinding top = {64, DESCRIPTOR_AS, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL};
@@ -1398,6 +1407,7 @@ bool pipelinesMake(Vulkan* v) {
     /* (what a step of the probes makes: artfShaderProbes) */
     const DescriptorSetLayoutBinding probesNext = {70, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL};
     all[bindingCount++] = probesNext;
+    if (bindingCount > sizeof all / sizeof all[0]) return false; /* (as a check: all must hold them) */
     const DescriptorSetLayoutCreateInfo layout = {ST_DESCRIPTOR_SET_LAYOUT, NULL, 0, bindingCount, all};
     if (v->vkCreateDescriptorSetLayout(v->device, &layout, NULL, &v->setLayout) != VK_OK) return false;
     /* (set 1: light, the second light and the history, by the part each plays: see roleSets) */
@@ -1410,7 +1420,7 @@ bool pipelinesMake(Vulkan* v) {
     if (v->vkCreatePipelineLayout(v->device, &pipelineLayout, NULL, &v->pipelineLayout) != VK_OK) return false;
 
     /* (54 storage bindings of the 64, then 65 to 70) */
-    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 64}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
+    const DescriptorPoolSize sizes[4] = {{DESCRIPTOR_UNIFORM, SLOTS * 4}, {DESCRIPTOR_STORAGE, SLOTS * 80}, {DESCRIPTOR_COMBINED, SLOTS * (v->maxTextures + 5)}, {DESCRIPTOR_AS, SLOTS}};
     const DescriptorPoolCreateInfo pool = {ST_DESCRIPTOR_POOL, NULL, 0, SLOTS, v->rayQuery ? 4u : 3u, sizes};
     if (v->vkCreateDescriptorPool(v->device, &pool, NULL, &v->descriptorPool) != VK_OK) return false;
     for (int i = 0; i < SLOTS; ++i) {
@@ -1546,11 +1556,11 @@ bool pipelinesMake(Vulkan* v) {
     v->environmentPipeline = made[6];
     if (ok && v->floats) {
         /* what comes after: postShaders.inc */
-        uint32_t* (*const makers[16])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
-                                                  artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply,
-                                                  artfShaderPostMeter, artfShaderPostMotionBlur, artfShaderPostVelocity, artfShaderPostTileMost, artfShaderPostUpscale,
-                                                  artfShaderPostSharpen};
-        for (int i = 0; i < 16 && ok; ++i) {
+        uint32_t* (*const makers[POST_KINDS])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
+                                                          artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply,
+                                                          artfShaderPostMeter, artfShaderPostMotionBlur, artfShaderPostVelocity, artfShaderPostTileMost, artfShaderPostUpscale,
+                                                          artfShaderPostSharpen, artfShaderPostSampled, artfShaderPostSampledSpace};
+        for (int i = 0; i < POST_KINDS && ok; ++i) {
             uint32_t* postCode = i == 0 ? artfShaderPostGather(&size, v->samples) : makers[i](&size);
             postAccessOf(postCode, size, &v->postReads[i], &v->postWrites[i]);
             VkShaderModule module = shaderModule(v, postCode, size);
@@ -4013,7 +4023,7 @@ void vkFree(ArtfRenderer* r) {
         bufferFree(v, &v->environment);
         bufferFree(v, &v->lutStaging);
         if (v->environmentPipeline) v->vkDestroyPipeline(v->device, v->environmentPipeline, NULL);
-        for (int i = 0; i < 16; ++i)
+        for (int i = 0; i < POST_KINDS; ++i)
             if (v->postPipelines[i]) v->vkDestroyPipeline(v->device, v->postPipelines[i], NULL);
         bufferFree(v, &v->pastVertices);
         artfMotionFree(&v->motion);
@@ -4596,6 +4606,7 @@ void artfVulkanTargetBytes(const ArtfRenderer* r, uint64_t* bytes) {
     bytes[FG_BLOOM] = v->postBloom.held;
     bytes[FG_BLUR] = 0; /* (they share ambient occlusion's buffer) */
     bytes[FG_LOCKS] = v->postLocks.held;
+    bytes[FG_GATHERED] = v->postGathered.held;
     bytes[FG_FRAME] = v->offscreen.held;
 }
 

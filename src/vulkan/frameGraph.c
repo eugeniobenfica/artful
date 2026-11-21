@@ -9,9 +9,10 @@
 
 static const char* const targetNames[FG_TARGETS] = {
     "scene's light (image)", "scene's surfaces (image)", "depth (image)", "depth pyramid", "fog grid", "light", "second light",
-    "history", "depth (copy)", "surfaces (copy)", "ambient occlusion", "bloom and exposure", "velocities", "upscaling's locks", "the frame"};
+    "history", "depth (copy)", "surfaces (copy)", "ambient occlusion", "bloom and exposure", "velocities", "upscaling's locks", "the frame",
+    "sampled light, gathered"};
 /* What the next frame reads, or what is kept: no other may have its memory. */
-static const bool persists[FG_TARGETS] = {[FG_HIZ] = true, [FG_HISTORY] = true, [FG_BLOOM] = true, [FG_LOCKS] = true, [FG_FRAME] = true};
+static const bool persists[FG_TARGETS] = {[FG_HIZ] = true, [FG_HISTORY] = true, [FG_BLOOM] = true, [FG_LOCKS] = true, [FG_FRAME] = true, [FG_GATHERED] = true};
 
 /* A shader's binding, as a target: set 0's, then set 1's (the three parts the post buffers play). */
 static int targetOf(uint32_t set, uint32_t binding) {
@@ -28,6 +29,7 @@ static int targetOf(uint32_t set, uint32_t binding) {
     case 59: return FG_FLOAT_SURFACE;
     case 69: return FG_BLUR;
     case 71: return FG_LOCKS;
+    case 72: return FG_GATHERED;
     default: return -1;
     }
 }
@@ -67,6 +69,7 @@ static const Pass passes[] = {
     {"gather", {gather}, 0, 0},
     {"ambient occlusion", {artfShaderPostOcclusion, artfShaderPostOcclusionBlur}, 0, 0},
     {"reflections", {artfShaderPostReflection, artfShaderPostReflectionApply}, 0, 0},
+    {"sampled light gathered", {artfShaderPostSampled, artfShaderPostSampledSpace}, 0, 0},
     {"upscaling", {artfShaderPostUpscale}, 0, 0},
     {"temporal antialiasing", {artfShaderPostTemporal}, 0, 0},
     {"sharpening", {artfShaderPostSharpen}, 0, 0},

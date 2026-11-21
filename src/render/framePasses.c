@@ -57,6 +57,7 @@ static const FramePass graph[] = {
     /* both: what comes after the frame (post.c's order, and postShaders.inc's) */
     {"ambient occlusion", R(R_POST), R(R_POST)},
     {"reflections", R(R_POST), R(R_POST)},
+    {"sampled light gathered", R(R_POST), R(R_POST)},
     {"upscaling", R(R_POST), R(R_POST)},
     {"temporal antialiasing", R(R_POST), R(R_POST)},
     {"sharpening", R(R_POST), R(R_POST)},

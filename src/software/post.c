@@ -525,6 +525,82 @@ static float reactiveAt(const ArtfSoftPost* p, size_t plane) {
     return p->f->scene->materialsMore.items[p->f->scene->instances.items[who - 1].material].reactive;
 }
 
+/* ---- lights sampled (ArtfShadowDesc.sampled): a frame's light is one light of many a pixel, noisy, but right on
+ * average. So it is gathered: where the pixel was in the frame before (wasAt), at about the same distance (within 2%),
+ * this frame's is mixed into what was gathered there as one of its frames, up to 64; elsewhere it starts over. No box
+ * holds what was gathered to what is around the pixel now, as temporal antialiasing's does: that box is the noise
+ * itself. The same on the GPU (postShaders.inc's artfShaderPostSampled). ---- */
+#define GATHERED_MOST 64.f
+static void sampledRow(ArtfSoftPost* p, int y) {
+    const ArtfFrameData* f = &p->f->data;
+    float* const* now = p->f->postLight;
+    float* const* mine = p->gathered[p->gatheredAt];
+    float* const* before = p->gathered[p->gatheredAt ^ 1];
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        const float depth = p->f->postDepth[i], along = depth > 0 ? artfDepthAlong(f, depth) : 0.f;
+        float frames = 1.f, was[3] = {0, 0, 0};
+        float sx, sy;
+        if (p->gatheredValid && along > 0 && wasAt(p, x, y, &sx, &sy) && sx > -.5f && sy > -.5f && sx < (float)p->width - .5f && sy < (float)p->height - .5f) {
+            const size_t j = (size_t)(int)(sy + .5f) * p->width + (size_t)(int)(sx + .5f);
+            const float had = before[3][j], there = before[4][j];
+            if (had > 0 && fabsf(there - along) <= .02f * along) {
+                frames = artfMinf(had + 1.f, GATHERED_MOST);
+                for (int c = 0; c < 3; ++c) was[c] = before[c][j];
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            const float gathered = frames > 1.f ? was[c] + (now[c][i] - was[c]) / frames : now[c][i];
+            mine[c][i] = gathered;
+            p->scratch[c][i] = gathered;
+        }
+        mine[3][i] = frames;
+        mine[4][i] = along;
+    }
+}
+
+/* Then what was gathered, across its neighbours: 5 x 5 by denoise.c's kernel, each as much as it faces the same way
+ * (its normal's cosine to the fourth) and lies at the same distance (within 2%, softly); what is behind nothing stays.
+ * Not into what is gathered: the frames after start from what each pixel had. */
+static void sampledSpaceRow(ArtfSoftPost* p, int y) {
+    static const float kernel[3] = {.375f, .25f, .0625f};
+    const ArtfFrameData* f = &p->f->data;
+    float* const* light = p->f->postLight;
+    const int w = p->width, h = p->height;
+    for (int x = 0; x < w; ++x) {
+        const size_t i = (size_t)y * w + x;
+        const float depth = p->f->postDepth[i];
+        if (!(depth > 0)) {
+            for (int c = 0; c < 3; ++c) p->scratch[c][i] = light[c][i];
+            continue;
+        }
+        const float along = artfDepthAlong(f, depth), reach = along * .02f + 1e-3f;
+        float n[3];
+        normalOf(p->f->postSurface[i], n);
+        float sum[3] = {0, 0, 0}, total = 0;
+        for (int dy = -2; dy <= 2; ++dy) {
+            const int qy = y + dy;
+            if (qy < 0 || qy >= h) continue;
+            for (int dx = -2; dx <= 2; ++dx) {
+                const int qx = x + dx;
+                if (qx < 0 || qx >= w) continue;
+                const size_t j = (size_t)qy * w + qx;
+                const float qd = p->f->postDepth[j];
+                if (!(qd > 0)) continue;
+                float qn[3];
+                normalOf(p->f->postSurface[j], qn);
+                const float apart = (artfDepthAlong(f, qd) - along) / reach;
+                const float facing = artfMaxf((n[0] * qn[0] + n[1] * qn[1]) + n[2] * qn[2], 0.f), f2 = facing * facing;
+                const float weight = kernel[abs(dx)] * kernel[abs(dy)] * (f2 * f2) / (1.f + apart * apart);
+                for (int c = 0; c < 3; ++c) sum[c] += light[c][j] * weight;
+                total += weight;
+            }
+        }
+        const float inverse = total > 0 ? 1.f / total : 0.f;
+        for (int c = 0; c < 3; ++c) p->scratch[c][i] = total > 0 ? sum[c] * inverse : light[c][i];
+    }
+}
+
 static void temporalRow(ArtfSoftPost* p, int y) {
     enum { STRETCH = 2048 };
     uint8_t done[STRETCH / 8];
@@ -1246,6 +1322,10 @@ void artfSoftPostFree(ArtfSoftPost* p) {
     p->ridge = NULL;
     for (int k = 0; k < 2; ++k) {
         artfFree(p->lock[k]);
+        for (int c = 0; c < 5; ++c) {
+            artfFree(p->gathered[k][c]);
+            p->gathered[k][c] = NULL;
+        }
         p->lock[k] = NULL;
     }
     for (int c = 0; c < 2; ++c) {
@@ -1282,6 +1362,27 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
         rows(p, p->height, reflectionApplyRow);
         if (log) artfPassMark(log, "reflections");
     }
+    if (d->more[3] > 0 && d->post[1][3] > 0) {
+        /* lights sampled: gathered over frames, before temporal antialiasing (or upscaling) */
+        const size_t pixels = (size_t)p->width * p->height;
+        if (p->gatheredW != p->width || p->gatheredH != p->height || !p->gathered[0][0]) {
+            for (int k = 0; k < 2; ++k)
+                for (int c = 0; c < 5; ++c) {
+                    artfFree(p->gathered[k][c]);
+                    p->gathered[k][c] = artfCalloc(pixels, 4);
+                }
+            p->gatheredW = p->width;
+            p->gatheredH = p->height;
+            p->gatheredValid = false;
+        }
+        rows(p, p->height, sampledRow);
+        copyScratch(p, 3);
+        rows(p, p->height, sampledSpaceRow);
+        copyScratch(p, 3);
+        p->gatheredAt ^= 1;
+        p->gatheredValid = true;
+        if (log) artfPassMark(log, "sampled light gathered");
+    } else p->gatheredValid = false;
     const bool scaled = p->sceneW != p->frameW || p->sceneH != p->frameH;
     if (scaled) {
         /* from here on, the frame's size */

@@ -176,6 +176,12 @@ typedef struct ArtfSoftPost {
     float* history[3];
     float* spare[3];     /* during a frame, what the history was before it took the light's place */
     bool historyValid;
+    /* Lights sampled (ArtfShadowDesc.sampled): their light gathered over frames (post.c's sampledRow), of the scene's
+     * pixels: red, green, blue, how many frames, how far along the view; the frame before's and this one's. Made when
+     * first wanted. */
+    float* gathered[2][5];
+    int gatheredAt, gatheredW, gatheredH;
+    bool gatheredValid;
     float* velocity[2];  /* motion blur: of each pixel, and the largest of each tile, and of its neighbours */
     float* tileMost[2];
     float* nearMost[2];

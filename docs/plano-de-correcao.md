@@ -320,7 +320,7 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 - **Um incidente:** um inicializador posicional de `ArtfTraceRange` desalinhou quando a estrutura cresceu, e o RT por hardware passou a ler fora dos buffers. Em poucos minutos a GPU foi perdida dezenas de vezes (LiveKernelEvent 141/117 no Windows), até a tela não voltar. Foi corrigido com campos nomeados, e entraram proteções: depois de 3 perdas reais no processo, `artfVulkanNew` recusa a GPU (`ARTFUL_KEEP_GPU` desliga isso); o percurso de uma árvore para depois de 65.536 passos; os intervalos são conferidos antes de montar as estruturas de RT; e os testes ligam `robustBufferAccess` (`ARTFUL_ROBUST`) e avisam quando a GPU foi perdida.
 - **Não feito:** medir numa GPU integrada; o topo (instâncias) continua binário; as reflexões traçadas depois do quadro ainda usam o 1/1000.
 
-**Estado da 5.7: em parte** (sombras por raio para todas as luzes e amostragem com custo constante feitas; o denoiser e a A-SVGF não).
+**Estado da 5.7: em grande parte** (sombras por raio para todas as luzes, amostragem com custo constante e o denoiser dela feitos; o reuso ReSTIR e a A-SVGF não).
 - **A, sombras por raio além das 16:** com `ArtfShadowDesc.traced`, as luzes depois das 16 do quadro que projetam sombra vêm primeiro na lista (a contagem vai em `more[2]`) e recebem um raio cada, como as 16, nos dois backends, com o deslocamento pelo nível desenhado. Nesse modo elas não usam mapas. **Teste (`tracing/extraTraced`):** um abajur como 21ª luz projeta a mesma sombra que projetaria sendo uma das 16 (0,91% do quadro), com CPU e GPU idênticas.
 - **B, luzes amostradas (`ArtfShadowDesc.sampled`):** cada pixel sorteia 8 das luzes que podem alcançá-lo (as do quadro e a lista do seu cluster, a mesma da GPU, que a CPU agora também monta) e fica com uma por amostragem ponderada em reservatório, pelo que ela daria sem sombra (luminância × fade² × spot × n·l). Só essa luz é avaliada, pelo caminho normal (tamanho, forma, perfil e raio de sombra), com peso `n × Σ / (8 × a dela)`, para que na média dê todas. Assim acaba a distinção entre as 16 e as demais. O sorteio é um hash da posição do pixel e do número do quadro, igual nos dois backends. Na CPU as 8 pistas são agrupadas pela luz escolhida, com peso zero nas outras; na GPU os laços vão só da escolhida até ela mesma.
 - **Medidas (`tracing/sampledLights`, salão com pilares):**
@@ -331,8 +331,18 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
   | 200 | 21,5 ms | 2,3 ms | 0,45 ms | 0,12 ms |
   | 800 | 85,8 ms | 2,5 ms | 1,60 ms | 0,13 ms |
 
-  O custo fica constante, que é a primeira metade do critério. A segunda (dentro do limiar FLIP da referência com todas as luzes) **não** está cumprida: depois de 36 quadros de TAA, 24% a 43% dos pixels ainda diferem da referência por mais de 24/255, porque o TAA sozinho não junta amostras suficientes.
-- **Falta:** o denoiser da luz amostrada (acúmulo temporal longo com reprojeção, mais filtro espacial guiado por profundidade e normal), o reuso temporal e espacial dos reservatórios (ReSTIR) e a A-SVGF no denoiser do traçador.
+  O custo fica constante, que é a primeira metade do critério.
+- **C, o denoiser da luz amostrada:** antes do TAA (ou do upscale), na resolução da cena, a luz de cada pixel é acumulada com o que o pixel tinha onde estava no quadro anterior (`wasAt`, o mesmo do TAA), se a distância bate em 2%, até 64 quadros, sem a caixa de vizinhança do TAA, que nesse caso é o próprio ruído. Depois, um 5×5 com o núcleo do denoiser do traçador, que pesa a normal (cosseno à quarta) e a distância (2%, suave), só na saída, sem voltar ao histórico. Na CPU são `sampledRow` e `sampledSpaceRow` (`post.c`); na GPU, `artfShaderPostSampled` e `artfShaderPostSampledSpace`, com o histórico num buffer próprio (binding 72, duas metades alternadas, 64 bytes por pixel da cena, alocado só quando a amostragem e o TAA estão ligados). O grafo de passes dos dois backends ganhou o passo "sampled light gathered".
+- **Medidas, depois de 36 quadros:**
+
+  | Luzes que projetam sombra | Só TAA: pixels fora / FLIP | Com o denoiser: pixels fora / FLIP |
+  |---|---|---|
+  | 50 | 23,6% / 0,154 | 0,18% / 0,058 |
+  | 200 | 33,4% / 0,178 | 0,18% / 0,075 |
+  | 800 | 43,1% / 0,223 | 0,39% / 0,094 |
+
+  A GPU fica a 0,09–0,23% dos pixels da CPU. Com 124 quadros o FLIP desce para 0,042/0,055/0,069: o que sobra é ruído que diminui, sem viés. O denoiser custa por volta de 1,3 ms na CPU e 0,02–0,04 ms na GPU, fixos. O critério "dentro do limiar FLIP" foi fixado no teste como o medido + 0,01, como os outros limiares por FLIP do projeto.
+- **Falta:** o reuso temporal e espacial dos reservatórios (ReSTIR), que tiraria ruído já na amostragem; a A-SVGF no denoiser do traçador; e um teste com a câmera em movimento (quando a distância não bate, o histórico recomeça, mas isso não foi medido).
 
 **Estado da 5.9: em parte.**
 - **API:** `ArtfRendererOptions.output` (`ARTF_OUTPUT_SRGB`, `_DISPLAY_P3`, `_HDR10`), com `peakNits` (padrão 1000) e `paperWhiteNits` (padrão 203); `artfRendererOutput` diz o que de fato saiu. Exige `hdr`; sem ele, sRGB.

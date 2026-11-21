@@ -12,7 +12,7 @@
 /* The targets a frame's passes share, as big as the frame (the small per-frame buffers are left out). */
 typedef enum ArtfFgTarget {
     FG_FLOAT_COLOR, FG_FLOAT_SURFACE, FG_DEPTH_IMAGE, FG_HIZ, FG_FOG, FG_LIGHT, FG_SECOND, FG_HISTORY, FG_DEPTH, FG_SURFACE,
-    FG_OCCLUSION, FG_BLOOM, FG_BLUR, FG_LOCKS, FG_FRAME, FG_TARGETS
+    FG_OCCLUSION, FG_BLOOM, FG_BLUR, FG_LOCKS, FG_FRAME, FG_GATHERED, FG_TARGETS
 } ArtfFgTarget;
 
 /* Of a Vulkan renderer's last frame: how many of its post passes' dispatches there were, and how many barriers they

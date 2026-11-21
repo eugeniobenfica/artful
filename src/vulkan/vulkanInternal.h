@@ -173,6 +173,9 @@ typedef struct ComputeKey {
     uint64_t scene;
 } ComputeKey;
 
+enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY, POST_METER,
+       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN, POST_SAMPLED, POST_SAMPLED_SPACE, POST_KINDS };
+
 typedef struct Vulkan {
     ArtfRenderer base;
     void* library;
@@ -376,7 +379,7 @@ typedef struct Vulkan {
     VkRenderPass presentPass;
     VkFramebuffer presentFramebuffers[MAX_SWAPCHAIN_IMAGES];
     VkPipeline presentPipeline;
-    VkPipeline postPipelines[16];   /* gather, occlusion, its blur, reflections, froxels, temporal, focus, bloom down, up, reflections' use, meter, motion blur,
+    VkPipeline postPipelines[POST_KINDS];   /* gather, occlusion, its blur, reflections, froxels, temporal, focus, bloom down, up, reflections' use, meter, motion blur,
                                      * velocity, tiles' largest, upscaling, sharpening */
     ArtfMotion motion;              /* how each instance moved: after the instances in each slot's buffer */
     bool exposureValid;             /* auto exposure has a state to go on from */
@@ -411,6 +414,9 @@ typedef struct Vulkan {
     GpuBuffer pastVertices;         /* what the vertex buffer held a frame ago, where a pose moves vertices (binding 68) */
     GpuBuffer postBlur;             /* motion blur's velocities (binding 69): unused since they share postOcclusion */
     GpuBuffer postLocks;            /* upscaling's locks (binding 71): two floats a pixel of the frame, the halves in turn */
+    GpuBuffer postGathered;         /* lights sampled, gathered (binding 72): two vec4s a pixel of the scene, the halves in turn */
+    uint32_t gatheredHalf;
+    bool gatheredValid;
     uint32_t lockHalf;              /* which half this frame's upscaling writes */
     struct Slot* owed;              /* a frame begun whose fence was reset, until it is submitted (frameOwed) */
     bool memoryShort;               /* this frame, the GPU's memory ran out for something (ARTF_EVENT_OUT_OF_MEMORY) */
@@ -420,7 +426,7 @@ typedef struct Vulkan {
     /* What each post pipeline reads and writes (its IR, from its words: postAccessOf), as bits: the three parts of set 1
      * (0 to 2), then set 0's post buffers; and, while postRecord records, what the dispatches since the last barrier read
      * and wrote, by the buffers the parts are then: a barrier goes only where a dispatch would race one before it. */
-    uint32_t postReads[16], postWrites[16];
+    uint32_t postReads[POST_KINDS], postWrites[POST_KINDS];
     uint32_t pendingReads, pendingWrites;
     bool postTracking;
     uint32_t postBarriers, postDispatches; /* (of the last frame: how many barriers its post dispatches took) */
@@ -461,7 +467,7 @@ typedef struct Vulkan {
 
 typedef enum BufferUse { BUFFER_GPU, BUFFER_WRITTEN_BY_CPU, BUFFER_READ_BY_CPU } BufferUse;
 
-enum { NEED_OCCLUSION = 1, NEED_BLUR = 2, NEED_FOG = 4, NEED_SECOND = 8, NEED_HISTORY = 16 };
+enum { NEED_OCCLUSION = 1, NEED_BLUR = 2, NEED_FOG = 4, NEED_SECOND = 8, NEED_HISTORY = 16, NEED_GATHERED = 32 /* lights sampled: what they gave, gathered */ };
 
 /* What the scene's pixel shaders are made with, beyond floats: what vkDraw finds the scene asks for. */
 typedef struct Features { bool probes, walls, froxels, coats, softShadows, shapes, viewShaders, meshletShaders, tracedShadows, tracedHardware; } Features;
@@ -535,8 +541,7 @@ enum { RT_REFITS = 60 };
 /* What one bottom level does this frame. */
 typedef struct RtPlan { uint32_t mesh; bool update, fresh; VkDeviceSize size, scratch; } RtPlan;
 
-enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY, POST_METER,
-       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN };
+
 
 /* ---- what each part calls of the others ---- */
 

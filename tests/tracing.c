@@ -1808,6 +1808,8 @@ static ArtfScene* lampHall(int lamps, bool sampled) {
 void testSampledLights(void) {
     uint32_t* all = artfMalloc(W * H * 4);
     uint32_t* some = artfMalloc(W * H * 4);
+    uint32_t* cpu[3] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    static const double most[3] = {.0683, .0854, .1040}; /* (FLIP measured 0.0583, 0.0754, 0.0940 on both backends) */
     for (int backend = 0; backend < 2; ++backend) {
         ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
         o.hdr = true;
@@ -1827,12 +1829,21 @@ void testSampledLights(void) {
                 artfRendererFree(r);
             }
             apart = differentShare(all, some, 24);
-            printf("%s, %d lamps that cast: all of them %.2f ms a frame, sampled %.2f; sampled after 36 frames, %.2f%% of pixels apart from all\n", backend ? "GPU" : "CPU", counts[k],
-                   took[0][k], took[1][k], apart * 100);
+            const double flip = lastFlip.mean;
+            printf("%s, %d lamps that cast: all of them %.2f ms a frame, sampled %.2f; sampled after 36 frames, %.2f%% of pixels apart from all, FLIP %.4f\n", backend ? "GPU" : "CPU",
+                   counts[k], took[0][k], took[1][k], apart * 100, flip);
+            CHECK(apart < .01 && flip <= most[k]);
+            if (!backend) memcpy(cpu[k], some, W * H * 4);
+            else {
+                const double across = differentShare(cpu[k], some, 8);
+                printf("  sampled and gathered, the GPU against the CPU: %.3f%% of pixels apart\n", across * 100);
+                CHECK(across < .01);
+            }
         }
         /* (the CPU's times: the GPU's are too short to say) */
         if (!backend) CHECK(took[1][2] < took[1][0] * 1.5 && took[0][2] > took[0][0] * 4);
     }
     artfFree(all);
     artfFree(some);
+    for (int k = 0; k < 3; ++k) artfFree(cpu[k]);
 }

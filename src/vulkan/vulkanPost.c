@@ -108,6 +108,16 @@ void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* fram
         passMark(v, c, s, "reflections");
     }
     const bool temporal = frame->post[1][3] > 0;
+    if (frame->more[3] > 0 && temporal && v->postGathered.buffer) {
+        /* lights sampled: gathered over frames, before temporal antialiasing (or upscaling), as post.c's sampledRow */
+        postStep(v, c, POST_SAMPLED, (v->gatheredValid ? 1u : 0u) | v->gatheredHalf << 1, pixels);
+        v->gatheredHalf ^= 1;
+        v->gatheredValid = true;
+        postSwap(v, c, false);
+        postStep(v, c, POST_SAMPLED_SPACE, 0, pixels);
+        postSwap(v, c, false);
+        passMark(v, c, s, "sampled light gathered");
+    } else v->gatheredValid = false;
     if (scaled) {
         /* (from here on, the frame's size) */
         postStep(v, c, POST_UPSCALE, (temporal && v->historyValid ? 1u : 0u) | v->lockHalf << 1, framePixels);

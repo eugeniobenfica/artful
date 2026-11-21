@@ -885,6 +885,72 @@ POST_MAIN(artfShaderPostMotionBlur)
 POST_FINISH()
 
 /* ---- temporal antialiasing: as temporalRow, into the second light ---- */
+/* ---- lights sampled: what they gave gathered over frames (post.c's sampledRow). Binding 72: two vec4s a pixel of the
+ * scene, the gathered light and how many frames, then how far along the view; the halves in turn. The push constant's
+ * bit 0 is 1 when what is there is of the frame before, bit 1 the half this frame writes ---- */
+POST_MAIN(artfShaderPostSampled)
+    SpvId gathered = postBuffer(s, p, p->r.vec4Array, 72);
+    SpvId main = spvBeginMain(s);
+    postSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    SpvId xf = TO_F(x), yf = TO_F(y);
+    SpvId push = postPush(s, p), valid = spvOp2(s, SPV_OP_INotEqual, s->boolType, AND_U(push, UINT(1)), UINT(0)), half = AND_U(spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, push, UINT(1)), UINT(1));
+    SpvId pixels = MUL_U(p->width, p->height);
+    SpvId depth = postFloat(s, p, p->depth, i);
+    SpvId along = PICK_F(P_MORE(depth, FLOAT(0.f)), postAlong(s, p, depth), FLOAT(0.f));
+    SpvId now = postVec4(s, p, p->light, i);
+    SpvId sx, sy, ok;
+    postWasAt(s, p, xf, yf, &sx, &sy, &ok);
+    SpvId inside = P_AND(P_AND(P_MORE(sx, FLOAT(-.5f)), P_MORE(sy, FLOAT(-.5f))), P_AND(P_LESS(sx, SUB_F(p->widthF, FLOAT(.5f))), P_LESS(sy, SUB_F(p->heightF, FLOAT(.5f)))));
+    SpvId follows = P_AND(P_AND(valid, ok), P_AND(inside, P_MORE(along, FLOAT(0.f))));
+    SpvId jx = P_TOU(P_CLAMP(FLOOR_F(ADD_F(sx, FLOAT(.5f))), FLOAT(0.f), SUB_F(p->widthF, FLOAT(1.f))));
+    SpvId jy = P_TOU(P_CLAMP(FLOOR_F(ADD_F(sy, FLOAT(.5f))), FLOAT(0.f), SUB_F(p->heightF, FLOAT(1.f))));
+    SpvId before = MUL_U(ADD_U(MUL_U(SUB_U(UINT(1), half), pixels), ADD_U(MUL_U(jy, p->width), jx)), UINT(2));
+    SpvId was = bufferVec(s, &p->r, gathered, before), there = X(bufferVec(s, &p->r, gathered, ADD_U(before, UINT(1))));
+    SpvId keeps = P_AND(follows, P_AND(P_MORE(W(was), FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, G_ABS(SUB_F(there, along)), MUL_F(FLOAT(.02f), along))));
+    SpvId frames = PICK_F(keeps, MIN_F(ADD_F(W(was), FLOAT(1.f)), FLOAT(64.f)), FLOAT(1.f));
+    SpvId light = spvShuffle3(s, now);
+    SpvId mixed = ADD_V3(spvShuffle3(s, was), spvOp2(s, SPV_OP_FDiv, s->vec3, SUB_V3(light, spvShuffle3(s, was)), vec3Of(s, frames, frames, frames)));
+    SpvId got = pick3(s, P_AND(keeps, P_MORE(frames, FLOAT(1.f))), mixed, light);
+    SpvId mine = MUL_U(ADD_U(MUL_U(half, pixels), i), UINT(2));
+    spvStore(s, spvAccess(s, p->r.ptrStorageVec4, gathered, (SpvId[]){p->r.zero, mine}, 2), vec4Of(s, got, frames));
+    spvStore(s, spvAccess(s, p->r.ptrStorageVec4, gathered, (SpvId[]){p->r.zero, ADD_U(mine, UINT(1))}, 2), vec4Of(s, vec3Of(s, along, FLOAT(0.f), FLOAT(0.f)), FLOAT(0.f)));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, got, W(now)));
+POST_FINISH()
+
+/* What was gathered, across its neighbours: post.c's sampledSpaceRow. */
+POST_MAIN(artfShaderPostSampledSpace)
+    SpvId main = spvBeginMain(s);
+    postSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    static const float kernel[3] = {.375f, .25f, .0625f};
+    SpvId depth = postFloat(s, p, p->depth, i), here = postVec4(s, p, p->light, i);
+    SpvId along = postAlong(s, p, MAX_F(depth, FLOAT(1e-30f))), reach = ADD_F(MUL_F(along, FLOAT(.02f)), FLOAT(1e-3f));
+    SpvId n = postNormal(s, postUint(s, p, p->surface, i));
+    SpvId sum = same3(s, 0.f), total = FLOAT(0.f);
+    SpvId xf = TO_F(x), yf = TO_F(y);
+    for (int dy = -2; dy <= 2; ++dy)
+        for (int dx = -2; dx <= 2; ++dx) {
+            SpvId qxf = ADD_F(xf, FLOAT((float)dx)), qyf = ADD_F(yf, FLOAT((float)dy));
+            SpvId within = P_AND(P_AND(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qxf, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qyf, FLOAT(0.f))),
+                                 P_AND(P_LESS(qxf, p->widthF), P_LESS(qyf, p->heightF)));
+            SpvId j = ADD_U(MUL_U(P_TOU(P_CLAMP(qyf, FLOAT(0.f), SUB_F(p->heightF, FLOAT(1.f)))), p->width), P_TOU(P_CLAMP(qxf, FLOAT(0.f), SUB_F(p->widthF, FLOAT(1.f)))));
+            SpvId qd = postFloat(s, p, p->depth, j);
+            SpvId qn = postNormal(s, postUint(s, p, p->surface, j));
+            SpvId apart = DIV_F(SUB_F(postAlong(s, p, MAX_F(qd, FLOAT(1e-30f))), along), reach);
+            SpvId facing = MAX_F(ADD_F(ADD_F(MUL_F(X(n), X(qn)), MUL_F(Y(n), Y(qn))), MUL_F(Z(n), Z(qn))), FLOAT(0.f)), f2 = MUL_F(facing, facing);
+            SpvId weight = DIV_F(MUL_F(FLOAT(kernel[dx < 0 ? -dx : dx] * kernel[dy < 0 ? -dy : dy]), MUL_F(f2, f2)), ADD_F(FLOAT(1.f), MUL_F(apart, apart)));
+            weight = PICK_F(P_AND(within, P_MORE(qd, FLOAT(0.f))), weight, FLOAT(0.f));
+            sum = ADD_V3(sum, SCALE_V3(spvShuffle3(s, postVec4(s, p, p->light, j)), weight));
+            total = ADD_F(total, weight);
+        }
+    SpvId filtered = SCALE_V3(sum, DIV_F(FLOAT(1.f), MAX_F(total, FLOAT(1e-30f))));
+    SpvId got = pick3(s, P_AND(P_MORE(depth, FLOAT(0.f)), P_MORE(total, FLOAT(0.f))), filtered, spvShuffle3(s, here));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, got, W(here)));
+POST_FINISH()
+
 /* post.c's reactiveAt: of the instance a plane's pixel shows, its material's ArtfMaterialDesc.reactive; 0 for nothing
  * drawn, a vector's word, or no reactive material in the frame. */
 static SpvId postReactive(Spv* s, Post* p, SpvId plane) {
