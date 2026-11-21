@@ -1847,3 +1847,32 @@ void testSampledLights(void) {
     artfFree(some);
     for (int k = 0; k < 3; ++k) artfFree(cpu[k]);
 }
+
+/* Lights sampled while the camera moves: what was gathered follows each pixel (wasAt), and starts over where what is
+ * there now was not there before. Against all the lamps, the camera moving the same way: near, with no trail. */
+void testSampledMoving(void) {
+    uint32_t* all = artfMalloc(W * H * 4);
+    uint32_t* some = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        double apart = 0, flip = 0;
+        for (int sampled = 0; sampled < 2; ++sampled) {
+            ArtfRenderer* r = artfRendererNew(&o);
+            if (!r) break;
+            ArtfScene* s = lampHall(200, sampled != 0);
+            for (int f = 0; f < 36; ++f) {
+                setCamera(s, -3.f + .15f * (float)f, 9, 14, -3.f + .15f * (float)f, 0, 0);
+                drawFrames(r, s, 1, sampled ? some : all);
+            }
+            artfSceneFree(s);
+            artfRendererFree(r);
+        }
+        apart = differentShare(all, some, 24);
+        flip = lastFlip.mean;
+        printf("%s, 200 lamps sampled while the camera moves: %.2f%% of pixels apart from all of them, FLIP %.4f\n", backend ? "GPU" : "CPU", apart * 100, flip);
+        CHECK(apart < .015 && flip < .0951); /* (measured 0.64% and 0.085 on both backends) */
+    }
+    artfFree(all);
+    artfFree(some);
+}

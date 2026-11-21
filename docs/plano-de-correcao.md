@@ -342,7 +342,9 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
   | 800 | 43,1% / 0,223 | 0,39% / 0,094 |
 
   A GPU fica a 0,09–0,23% dos pixels da CPU. Com 124 quadros o FLIP desce para 0,042/0,055/0,069: o que sobra é ruído que diminui, sem viés. O denoiser custa por volta de 1,3 ms na CPU e 0,02–0,04 ms na GPU, fixos. O critério "dentro do limiar FLIP" foi fixado no teste como o medido + 0,01, como os outros limiares por FLIP do projeto.
-- **Falta:** o reuso temporal e espacial dos reservatórios (ReSTIR), que tiraria ruído já na amostragem; a A-SVGF no denoiser do traçador; e um teste com a câmera em movimento (quando a distância não bate, o histórico recomeça, mas isso não foi medido).
+- **Câmera em movimento (`tracing/sampledMoving`):** com a câmera andando 0,15 por quadro, depois de 36 quadros, 0,64% dos pixels diferem da referência que se move do mesmo jeito, com FLIP 0,085 (parada: 0,075). Sem rastros nos dois backends.
+- **ReSTIR temporal: testado e descartado.** Guardei o reservatório de cada pixel (a luz, o peso e quantas amostras ele representa) e o combinei com o do mesmo ponto no quadro anterior, reavaliando a luz de lá no ponto de agora. O resultado piorou: com 200 luzes, o FLIP foi de 0,075 para 0,141 (histórico de até 20× as amostras de um quadro) ou 0,089 (até 1×). O reuso faz o pixel manter a mesma luz por vários quadros, e o acumulador temporal precisa de amostras independentes para reduzir o ruído; os dois fazem o mesmo trabalho entre quadros e um atrapalha o outro. Para valer a pena, o reuso teria de substituir o acumulador, e não somar a ele. O reuso espacial não foi tentado.
+- **Falta:** a A-SVGF no denoiser do traçador.
 
 **Estado da 5.9: em parte.**
 - **API:** `ArtfRendererOptions.output` (`ARTF_OUTPUT_SRGB`, `_DISPLAY_P3`, `_HDR10`), com `peakNits` (padrão 1000) e `paperWhiteNits` (padrão 203); `artfRendererOutput` diz o que de fato saiu. Exige `hdr`; sem ele, sRGB.
