@@ -88,7 +88,8 @@ void testDenoiseChange(ArtfBackend backend) {
         CHECK(artfRendererReadPixels(r, a));
         const double away = errorOf(a, c);
         printf("eight frames after the sun %s: %.2f away\n", kind ? "turned" : "went out", away);
-        CHECK(away < 4);
+        /* (without the temporal gradients, 1.78 and 3.0: A-SVGF's take what changed at once, where it surely did) */
+        CHECK(away < (kind ? 2.4 : .6));
         artfSceneFree(s);
     }
     artfFree(a);

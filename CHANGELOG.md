@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Temporal gradients for the denoiser** (A-SVGF, phase 5.7), on both backends: where the eye stood still, a pixel of
+  each 3 x 3 traces again the frame before's first sample; a change counted in that pixel's own noise pulls what was
+  gathered toward the light around it. Eight frames after a sun goes out, 0.28 from the truth (was 1.78); after it
+  turns, 1.5 to 1.8 (was 3.0); motion and bones a little better.
+- **Fixed:** the CPU's layers by transmittance read their grid and sums with aligned AVX2 loads from memory that was
+  not (a fault on Linux); ray queries read a committed intersection where there was none (lavapipe fell over).
+
 - **Metal runs** (phase 6.1): its shaders are written from the IR as it starts (`irMsl` says what each argument buffer
   holds) and its C side gives them today's bindings; on CI's macOS runner it matches the CPU (0.02 to 0.09% of pixels
   apart). `shaders.inc` and `mkmetal.py` are gone. CI builds again on Linux, macOS and Android: NEON shifted by an

@@ -3614,7 +3614,9 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         ArtfTraceFrame traced;
         artfSceneTraceFrame(scene, &frame, v->sceneWidth, v->sceneHeight, d->denoise ? v->traceFrames : v->traceDone, &traced);
         traced.pad[0] = d->denoise ? 1 : v->traceDone + traceAdding;
-        traced.pad[1] = v->denoiseFirst;
+        /* (bit 0: the filter's first frame; bit 1: the eye stood still since the frame before, so the temporal gradients
+         * are found, as denoise.c's artfDenoiserGradients) */
+        traced.pad[1] = (v->denoiseFirst ? 1u : 0u) | (d->denoise && !v->denoiseFirst && !memcmp(v->tracePrevious, frame.viewProj, sizeof v->tracePrevious) ? 2u : 0u);
         memcpy(traced.previous, v->tracePrevious, sizeof traced.previous);
         if (d->denoise) {
             /* how objects moved, as this slot knows it */

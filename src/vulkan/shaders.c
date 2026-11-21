@@ -1627,6 +1627,7 @@ static Tracer* tracerNew(void);
 static void tracerDeclare(Spv* s, Tracer* t, const Resources* r, SpvId textures, SpvId sampled, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware);
 static void tracerVariables(Tracer* t);
 static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index, SpvId drawn);
+static SpvId packedNormal(Spv* s, SpvId bits);
 static SpvId tracedShadowAtSpv(const Tracer* t, SpvId world, SpvId n, SpvId position, SpvId size, SpvId drawn);
 static SpvId drawnErrorSpv(Spv* s, const Resources* r, SpvId meshWord, SpvId instance);
 /* sceneInternal.h's artfSampledHash and artfSampledWeigh: the same arithmetic, in the same order. */
@@ -3250,6 +3251,11 @@ typedef struct Tracer {
     bool guides;
     SpvId guide, albedoGuide, shiftGuide;
     SpvId guideBits, guidePlace, guideColor, guideInstance, guideShift; /* what a pixel's first surface was */
+    /* A-SVGF's temporal gradients (denoise.c's artfDenoiserGradients): the frame before's guide and what was gathered
+     * (with its moments and first sample's luminance), pong for each square's change; the first sample's luminance, and
+     * that of the frame before's first sample traced again, where its ray met a surface */
+    SpvId previousGuide, history, squares;
+    SpvId firstLum, gradLum, gradBits, gradPlace;
     bool hardware;                 /* rays through the ray tracing hardware */
     bool more;                     /* materials past glTF's core, lights with a shape or a profile: what reads them */
     SpvId extraLights;             /* the lights' buffer, for their profiles */
@@ -4177,6 +4183,9 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         t->guide = spvResource(s, blockOf(s, t->r.vec4Array, true), SPV_STORAGE_StorageBuffer, 27);
         t->albedoGuide = spvResource(s, blockOf(s, t->r.vec4Array, true), SPV_STORAGE_StorageBuffer, 28);
         t->shiftGuide = spvResource(s, blockOf(s, t->r.vec4Array, true), SPV_STORAGE_StorageBuffer, 48);
+        t->previousGuide = spvResource(s, blockOf(s, t->r.vec4Array, true), SPV_STORAGE_StorageBuffer, 29);
+        t->history = spvResource(s, blockOf(s, t->r.vec4Array, true), SPV_STORAGE_StorageBuffer, 30);
+        t->squares = spvResource(s, blockOf(s, t->r.vec4Array, true), SPV_STORAGE_StorageBuffer, 33);
     }
     SpvId uvec3 = spvNewId(s);
     spvEmit(&s->types, 23 /* OpTypeVector */, SPV_WORDS(uvec3, s->uintType, 3));
@@ -4202,6 +4211,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->graphs = graphs;
     t->graphCount = graphCount;
     t->guideBits = VAR(ptrUint); t->guidePlace = VAR(ptrVec3); t->guideColor = VAR(ptrVec3); t->guideInstance = VAR(ptrUint); t->guideShift = VAR(ptrVec3);
+    if (guides) { t->firstLum = VAR(ptrFloat); t->gradLum = VAR(ptrFloat); t->gradBits = VAR(ptrUint); t->gradPlace = VAR(ptrVec3); }
     t->own.color = VAR(ptrVec3); t->own.emissive = VAR(ptrVec3); t->own.normal = VAR(ptrVec3);
     t->own.rough = VAR(ptrFloat); t->own.metal = VAR(ptrFloat); t->own.alpha = VAR(ptrFloat);
     if (more) { t->alongVar = VAR(ptrFloat); t->acrossVar = VAR(ptrFloat); }
@@ -4227,11 +4237,41 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     spvStore(s, t->guideShift, zero3);
     spvStore(s, t->guidePlace, zero3);
     spvStore(s, t->guideColor, zero3);
+    /* the temporal gradients (denoise.c's gradientRow): where the eye stood still (the frame's flag, path row's w bit 1),
+     * one pixel of each square of 3 x 3, which one turning with the frame, traces a sample more, the frame before's
+     * first, where the frame before had a surface */
+    SpvId chosen = spvConstBool(s, false), square = UINT(0);
+    if (guides) {
+        spvStore(s, t->firstLum, FLOAT(0.f));
+        spvStore(s, t->gradLum, FLOAT(0.f));
+        spvStore(s, t->gradBits, UINT(0));
+        spvStore(s, t->gradPlace, zero3);
+        SpvId on = NOT_EQ(AND_U(AS_UINT(W(pathRow)), UINT(2)), UINT(0));
+        SpvId turn = spvOp2(s, SPV_OP_UMod, s->uintType, spvOp2(s, SPV_OP_UDiv, s->uintType, done, spvGlsl2(s, SPV_GLSL_UMax, s->uintType, samples, UINT(1))), UINT(9));
+        SpvId sx = spvOp2(s, SPV_OP_UDiv, s->uintType, x, UINT(3)), sy = spvOp2(s, SPV_OP_UDiv, s->uintType, y, UINT(3));
+        SpvId cx = spvGlsl2(s, SPV_GLSL_UMin, s->uintType, ADD_U(MUL_U(sx, UINT(3)), spvOp2(s, SPV_OP_UMod, s->uintType, turn, UINT(3))), SUB_U(width, UINT(1)));
+        SpvId cy = spvGlsl2(s, SPV_GLSL_UMin, s->uintType, ADD_U(MUL_U(sy, UINT(3)), spvOp2(s, SPV_OP_UMod, s->uintType, spvOp2(s, SPV_OP_UDiv, s->uintType, turn, UINT(3)), UINT(3))), SUB_U(height, UINT(1)));
+        SpvId hadSurface = NOT_EQ(AS_UINT(W(bufferVec(s, &t->r, t->previousGuide, pixel))), UINT(0));
+        chosen = BOTH(BOTH(on, hadSurface), BOTH(IS_EQ(cx, x), IS_EQ(cy, y)));
+        square = ADD_U(sx, MUL_U(sy, spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(width, UINT(2)), UINT(3))));
+        /* (a chosen pixel with no surface the frame before: its square says nothing) */
+        SpvId nothing;
+        spvIfBegin(s, BOTH(BOTH(on, NOT(hadSurface)), BOTH(IS_EQ(cx, x), IS_EQ(cy, y))), &nothing);
+        {
+            const SpvId idx[2] = {t->r.zero, square};
+            spvStore(s, spvAccess(s, t->r.ptrStorageVec4, t->squares, idx, 2), vec4Of(s, vec3Of(s, FLOAT(0.f), FLOAT(-1.f), FLOAT(0.f)), FLOAT(0.f)));
+        }
+        spvIfEnd(s, nothing);
+    }
+    SpvId runs = ADD_U(samples, spvSelect(s, s->uintType, chosen, UINT(1), UINT(0)));
     Loop sampleLoop;
     loopOpen(s, &sampleLoop);
-    loopWhile(s, &sampleLoop, LESS_U(LOAD_U(t->sampleIndex), samples));
+    loopWhile(s, &sampleLoop, LESS_U(LOAD_U(t->sampleIndex), runs));
     {
-        spvStore(s, t->state, traceHash(s, ADD_U(traceHash(s, pixel), ADD_U(done, LOAD_U(t->sampleIndex)))));
+        /* (the sample more: the frame before's first, whose number is this frame's first less this frame's count) */
+        SpvId again = guides ? IS_EQ(LOAD_U(t->sampleIndex), samples) : spvConstBool(s, false);
+        SpvId number = spvSelect(s, s->uintType, again, SUB_U(done, samples), ADD_U(done, LOAD_U(t->sampleIndex)));
+        spvStore(s, t->state, traceHash(s, ADD_U(traceHash(s, pixel), number)));
         spvStore(s, t->diffuseLikely, FLOAT(0.f));
         spvStore(s, t->weighsVar, UINT(0));
         {
@@ -4242,7 +4282,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             spvStore(s, t->coneSpread, PICK_F(flat, FLOAT(0.f), pixelSize));
         }
         SpvId jitter[4];
-        sobol4TurnedOf(t, ADD_U(done, LOAD_U(t->sampleIndex)), x, y, UINT(0), jitter);
+        sobol4TurnedOf(t, number, x, y, UINT(0), jitter);
         SpvId jx = jitter[0], jy = jitter[1];
         SpvId px = SUB_F(MUL_F(DIV_F(ADD_F(TO_F(x), jx), TO_F(width)), FLOAT(2.f)), FLOAT(1.f));
         SpvId py = SUB_F(FLOAT(1.f), MUL_F(DIV_F(ADD_F(TO_F(y), jy), TO_F(height)), FLOAT(2.f)));
@@ -4393,6 +4433,19 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
                         spvStore(s, t->guideShift, SCALE_V3(shift, inverse));
                     }
                     spvIfEnd(s, firstSample);
+                    /* (where the sample more met a surface, and which way it faced) */
+                    SpvId wasFirst;
+                    spvIfBegin(s, again, &wasFirst);
+                    {
+                        SpvId packedAgain = UINT(0);
+                        for (int k = 0; k < 3; ++k) {
+                            SpvId c = ADD_F(MUL_F(ADD_F(MUL_F(spvExtract(s, s->floatType, m.normal, (uint32_t)k), FLOAT(.5f)), FLOAT(.5f)), FLOAT(1023.f)), FLOAT(.5f));
+                            packedAgain = spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, packedAgain, spvOp2(s, SPV_OP_ShiftLeftLogical, s->uintType, TO_U(c), UINT((uint32_t)k * 10)));
+                        }
+                        spvStore(s, t->gradBits, packedAgain);
+                        spvStore(s, t->gradPlace, p);
+                    }
+                    spvIfEnd(s, wasFirst);
                 }
                 spvStore(s, t->keep, shaderFogKeep(s, MUL_F(travelled, Y(look))));
                 {
@@ -4635,9 +4688,27 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
             SpvId gathered = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, LOAD_V3(t->light), limit);
             gathered = ADD_V3(MUL_V3(gathered, LOAD_V3(t->aerialKeep)), LOAD_V3(t->aerialAdd));
             gathered = ADD_V3(fog, SCALE_V3(SUB_V3(gathered, fog), LOAD_F(t->keep)));
-            const SpvId idx[2] = {t->r.zero, pixel};
-            SpvId slot = spvAccess(s, t->r.ptrStorageVec4, t->sum, idx, 2);
-            spvStore(s, slot, ADD_V4(spvLoad(s, s->vec4, slot), vec4Of(s, gathered, FLOAT(1.f))));
+            if (guides) {
+                /* (the sample more is the gradients' alone; the first's luminance is the next frame's to look back on) */
+                SpvId lum = ADD_F(ADD_F(MUL_F(FLOAT(.2126f), spvExtract(s, s->floatType, gathered, 0)), MUL_F(FLOAT(.7152f), spvExtract(s, s->floatType, gathered, 1))), MUL_F(FLOAT(.0722f), spvExtract(s, s->floatType, gathered, 2)));
+                SpvId addIt, otherwise;
+                spvIfElseBegin(s, again, &otherwise, &addIt);
+                spvStore(s, t->gradLum, lum);
+                spvBranch(s, addIt);
+                spvLabel(s, otherwise);
+                {
+                    const SpvId idx[2] = {t->r.zero, pixel};
+                    SpvId slot = spvAccess(s, t->r.ptrStorageVec4, t->sum, idx, 2);
+                    spvStore(s, slot, ADD_V4(spvLoad(s, s->vec4, slot), vec4Of(s, gathered, FLOAT(1.f))));
+                    spvStore(s, t->firstLum, PICK_F(IS_EQ(LOAD_U(t->sampleIndex), UINT(0)), lum, LOAD_F(t->firstLum)));
+                }
+                spvBranch(s, addIt);
+                spvLabel(s, addIt);
+            } else {
+                const SpvId idx[2] = {t->r.zero, pixel};
+                SpvId slot = spvAccess(s, t->r.ptrStorageVec4, t->sum, idx, 2);
+                spvStore(s, slot, ADD_V4(spvLoad(s, s->vec4, slot), vec4Of(s, gathered, FLOAT(1.f))));
+            }
         }
         spvIfEnd(s, kept);
         spvStore(s, t->sampleIndex, ADD_U(LOAD_U(t->sampleIndex), UINT(1)));
@@ -4647,7 +4718,28 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
         const SpvId idx[2] = {t->r.zero, pixel};
         spvStore(s, spvAccess(s, t->r.ptrStorageVec4, t->guide, idx, 2), vec4Of(s, LOAD_V3(t->guidePlace), spvOp1(s, SPV_OP_Bitcast, s->floatType, LOAD_U(t->guideBits))));
         spvStore(s, spvAccess(s, t->r.ptrStorageVec4, t->albedoGuide, idx, 2), vec4Of(s, LOAD_V3(t->guideColor), TO_F(LOAD_U(t->guideInstance))));
-        spvStore(s, spvAccess(s, t->r.ptrStorageVec4, t->shiftGuide, idx, 2), vec4Of(s, LOAD_V3(t->guideShift), FLOAT(0.f)));
+        spvStore(s, spvAccess(s, t->r.ptrStorageVec4, t->shiftGuide, idx, 2), vec4Of(s, LOAD_V3(t->guideShift), LOAD_F(t->firstLum)));
+        /* the square's change and its noise, as gradientRow: where the sample more met the surface the frame before's met */
+        SpvId found;
+        spvIfBegin(s, chosen, &found);
+        {
+            SpvId then = bufferVec(s, &t->r, t->previousGuide, pixel);
+            SpvId pn = packedNormal(s, AS_UINT(W(then))), qn = packedNormal(s, LOAD_U(t->gradBits));
+            SpvId towardEye = SUB_V3(spvShuffle3(s, then), eye);
+            SpvId tolerance = ADD_F(MUL_F(FLOAT(1e-4f), SQRT_F(DOT3(towardEye, towardEye))), FLOAT(1e-5f));
+            SpvId apart = SUB_V3(LOAD_V3(t->gradPlace), spvShuffle3(s, then));
+            SpvId same = BOTH(BOTH(NOT_EQ(LOAD_U(t->gradBits), UINT(0)), spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(apart, apart), MUL_F(tolerance, tolerance))),
+                              spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, DOT3(qn, pn), FLOAT(.99f)));
+            SpvId color = LOAD_V3(t->guideColor);
+            SpvId luma = ADD_F(ADD_F(MUL_F(FLOAT(.2126f), MAX_F(spvExtract(s, s->floatType, color, 0), FLOAT(.02f))), MUL_F(FLOAT(.7152f), MAX_F(spvExtract(s, s->floatType, color, 1), FLOAT(.02f)))),
+                               MUL_F(FLOAT(.0722f), MAX_F(spvExtract(s, s->floatType, color, 2), FLOAT(.02f))));
+            SpvId moments = bufferVec(s, &t->r, t->history, ADD_U(pixel, MUL_U(width, height)));
+            SpvId change = MUL_F(SUB_F(LOAD_F(t->gradLum), Z(moments)), DIV_F(FLOAT(1.f), luma));
+            SpvId deviation = SQRT_F(MAX_F(SUB_F(Y(moments), MUL_F(X(moments), X(moments))), FLOAT(0.f)));
+            const SpvId at[2] = {t->r.zero, square};
+            spvStore(s, spvAccess(s, t->r.ptrStorageVec4, t->squares, at, 2), vec4Of(s, vec3Of(s, PICK_F(same, change, FLOAT(0.f)), PICK_F(same, deviation, FLOAT(-1.f)), FLOAT(0.f)), FLOAT(0.f)));
+        }
+        spvIfEnd(s, found);
     }
     spvIfEnd(s, inFrame);
     spvEndMain(s);
@@ -5427,7 +5519,7 @@ uint32_t* artfShaderDenoiseTime(size_t* size) {
         r[i] = spvLoad(s, s->vec4, spvAccess(s, d.r.ptrUniformVec4, d.frame, idx, 2));
     }
     SpvId samples = TO_F(AS_UINT(W(r[5])));
-    SpvId first = NOT_EQ(AS_UINT(W(r[0])), UINT(0));
+    SpvId first = NOT_EQ(AND_U(AS_UINT(W(r[0])), UINT(1)), UINT(0)), gradients = NOT_EQ(AND_U(AS_UINT(W(r[0])), UINT(2)), UINT(0));
     SpvId noisy = vecAt(s, &d, d.noisy, d.pixel), guide = vecAt(s, &d, d.guide, d.pixel);
     SpvId coverage = DIV_F(W(noisy), samples);
     SpvId bits = AS_UINT(W(guide)), hasSurface = NOT_EQ(bits, UINT(0));
@@ -5511,6 +5603,37 @@ uint32_t* artfShaderDenoiseTime(size_t* size) {
     SpvId drifted = MORE_F(MAX_F(MAX_F(X(over), Y(over)), Z(over)), FLOAT(0.f));
     SpvId found = EITHER(MORE_F(DOT3(change, change), FLOAT(0.f)), drifted);
     SpvId count = PICK_F(taken, MIN_F(ADD_F(whole, FLOAT(1.f)), PICK_F(found, FLOAT(8.f), FLOAT(256.f))), FLOAT(1.f));
+    /* the temporal gradients: how surely the light changed on this pixel's square (as gradientSureRow), and where it
+     * did, what was gathered goes toward the mean around, by as much, and is cut back to 8 (as temporalRow) */
+    {
+        SpvId columns = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(d.width, UINT(2)), UINT(3)), rowsOf = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(d.height, UINT(2)), UINT(3));
+        SpvId sx = spvOp2(s, SPV_OP_UDiv, s->uintType, d.x, UINT(3)), sy = spvOp2(s, SPV_OP_UDiv, s->uintType, d.y, UINT(3));
+        SpvId own = vecAt(s, &d, d.pong, ADD_U(sx, MUL_U(sy, columns)));
+        SpvId sure = PICK_F(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, Y(own), FLOAT(0.f)), DIV_F(DIV_F(ABS_F(X(own)), ADD_F(Y(own), FLOAT(1e-3f))), FLOAT(2.f)), FLOAT(0.f));
+        SpvId sumOf = FLOAT(0.f), varianceOf = FLOAT(0.f), nOf = FLOAT(0.f);
+        SpvId isx = spvOp1(s, SPV_OP_Bitcast, s->intType, sx), isy = spvOp1(s, SPV_OP_Bitcast, s->intType, sy);
+        SpvId icolumns = spvOp1(s, SPV_OP_Bitcast, s->intType, columns), irows = spvOp1(s, SPV_OP_Bitcast, s->intType, rowsOf), zeroI = spvConstInt(s, 0);
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                SpvId qx = spvOp2(s, SPV_OP_IAdd, s->intType, isx, spvConstInt(s, dx)), qy = spvOp2(s, SPV_OP_IAdd, s->intType, isy, spvConstInt(s, dy));
+                SpvId inside = BOTH(BOTH(spvOp2(s, 175 /* OpSGreaterThanEqual */, s->boolType, qx, zeroI), spvOp2(s, 177 /* OpSLessThan */, s->boolType, qx, icolumns)),
+                                    BOTH(spvOp2(s, 175, s->boolType, qy, zeroI), spvOp2(s, 177, s->boolType, qy, irows)));
+                SpvId kx = spvGlsl2(s, 42 /* SMax */, s->intType, spvGlsl2(s, 39 /* SMin */, s->intType, qx, spvOp2(s, SPV_OP_ISub, s->intType, icolumns, spvConstInt(s, 1))), zeroI);
+                SpvId ky = spvGlsl2(s, 42, s->intType, spvGlsl2(s, 39, s->intType, qy, spvOp2(s, SPV_OP_ISub, s->intType, irows, spvConstInt(s, 1))), zeroI);
+                SpvId q = vecAt(s, &d, d.pong, ADD_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, kx), MUL_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, ky), columns)));
+                SpvId counts = BOTH(inside, spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, Y(q), FLOAT(0.f)));
+                sumOf = ADD_F(sumOf, PICK_F(counts, X(q), FLOAT(0.f)));
+                varianceOf = ADD_F(varianceOf, PICK_F(counts, MUL_F(Y(q), Y(q)), FLOAT(0.f)));
+                nOf = ADD_F(nOf, PICK_F(counts, FLOAT(1.f), FLOAT(0.f)));
+            }
+        SpvId some = MORE_F(nOf, FLOAT(0.f)), safeN = MAX_F(nOf, FLOAT(1.f));
+        SpvId aroundSure = DIV_F(ABS_F(DIV_F(sumOf, safeN)), ADD_F(DIV_F(SQRT_F(varianceOf), safeN), FLOAT(1e-3f)));
+        sure = PICK_F(some, MAX_F(sure, aroundSure), sure);
+        SpvId amount = MIN_F(MAX_F(DIV_F(SUB_F(sure, FLOAT(2.f)), FLOAT(4.f)), FLOAT(0.f)), FLOAT(1.f));
+        SpvId applies = BOTH(BOTH(gradients, taken), MORE_F(amount, FLOAT(0.f)));
+        kept = pick3(s, applies, ADD_V3(kept, SCALE_V3(SUB_V3(mean, kept), amount)), kept);
+        count = PICK_F(applies, MIN_F(count, FLOAT(8.f)), count);
+    }
     SpvId alphaBefore = PICK_F(taken, SUB_F(W(h), whole), coverage);
     SpvId before = pick3(s, taken, kept, same3(s, 0.f));
     SpvId share = DIV_F(FLOAT(1.f), count);
@@ -5525,7 +5648,8 @@ uint32_t* artfShaderDenoiseTime(size_t* size) {
     SpvId l = denoiseLuma(s, light);
     m1 = ADD_F(m1, MUL_F(SUB_F(l, m1), share));
     m2 = ADD_F(m2, MUL_F(SUB_F(MUL_F(l, l), m2), share));
-    vecPut(s, &d, d.next, ADD_U(d.pixel, plane), vec4Of(s, vec3Of(s, m1, m2, FLOAT(0.f)), FLOAT(0.f)));
+    /* (and the first sample's luminance, as the trace left it, for the next frame's gradients) */
+    vecPut(s, &d, d.next, ADD_U(d.pixel, plane), vec4Of(s, vec3Of(s, m1, m2, W(vecAt(s, &d, d.shift, d.pixel))), FLOAT(0.f)));
     return denoiseEnd(s, main, global, merge, size);
 }
 

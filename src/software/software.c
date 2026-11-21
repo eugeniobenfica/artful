@@ -559,7 +559,14 @@ static void traceJob(void* user, uint32_t tile, uint32_t worker) {
                 memset(&g, 0, sizeof g);
                 float* light = s->denoiser.noisy + at;
                 memset(light, 0, 16);
-                for (uint32_t i = 0; i < s->traceAdding; ++i) artfTraceSample(f->scene, &f->data, &s->traceFrame, (uint32_t)x, (uint32_t)y, f->traceDone + i, light, i ? NULL : &g);
+                /* (the first sample's luminance alone too, for the frame after's temporal gradients) */
+                float one[4] = {0, 0, 0, 0};
+                if (s->traceAdding) {
+                    artfTraceSample(f->scene, &f->data, &s->traceFrame, (uint32_t)x, (uint32_t)y, f->traceDone, one, &g);
+                    for (int k = 0; k < 4; ++k) light[k] += one[k];
+                }
+                s->denoiser.firstLight[at / 4] = (.2126f * one[0] + .7152f * one[1]) + .0722f * one[2];
+                for (uint32_t i = 1; i < s->traceAdding; ++i) artfTraceSample(f->scene, &f->data, &s->traceFrame, (uint32_t)x, (uint32_t)y, f->traceDone + i, light, NULL);
                 memcpy(s->denoiser.guide + at, g.place, 16);
                 memcpy(s->denoiser.albedo + at, g.albedo, 16);
                 memcpy(s->denoiser.shift + at, g.shift, 16);
@@ -568,6 +575,17 @@ static void traceJob(void* user, uint32_t tile, uint32_t worker) {
             for (uint32_t i = 0; i < s->traceAdding; ++i)
                 artfTraceSample(f->scene, &f->data, &s->traceFrame, (uint32_t)x, (uint32_t)y, f->traceDone + i, f->traceSum + at, NULL);
         }
+}
+
+/* One sample of a pixel, as luminance, and where it met a surface: the temporal gradients' (artfDenoiserGradients). */
+static float gradientTrace(void* user, uint32_t x, uint32_t y, uint32_t sample, float* place) {
+    Software* s = user;
+    float one[4] = {0, 0, 0, 0};
+    ArtfTraceGuide g;
+    memset(&g, 0, sizeof g);
+    artfTraceSample(s->f.scene, &s->f.data, &s->traceFrame, x, y, sample, one, &g);
+    memcpy(place, g.place, 16);
+    return (.2126f * one[0] + .7152f * one[1]) + .0722f * one[2];
 }
 
 /* All that is left to do of a frame with rays: what they gather, and no triangles. */
@@ -591,6 +609,7 @@ static void drawTraced(Software* s, ArtfScene* scene) {
         artfSceneTraceFrame(scene, &f->data, f->width, f->height, s->traceFrames, &s->traceFrame);
         f->traceDone = s->traceFrames; /* (each frame's samples must be others) */
         artfPoolRun(s->pool, traceJob, s, (uint32_t)(f->tilesX * f->tilesY));
+        artfDenoiserGradients(&s->denoiser, s->pool, &f->data, f->traceDone, s->traceFrames / artfMaxi((int)s->traceAdding, 1), gradientTrace, s);
         artfDenoiserRun(&s->denoiser, s->pool, &f->data, s->traceAdding, scene->trace.motion.items, scene->trace.motion.len / 12);
         memcpy(f->traceSum, s->denoiser.noisy, bytes);
         s->traceFrames += s->traceAdding;

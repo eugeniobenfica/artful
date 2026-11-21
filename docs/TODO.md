@@ -12,15 +12,10 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 ## Dá para fazer aqui
 
 ### CI
-- [ ] Linux: `layers/layersBehindSolid` e `layersTransmittance` (camadas na GPU, da 5.8) caem no lavapipe do runner
-  (Mesa 26.0.8, LLVM 21, 256 bits) e não no do MSYS2 (Mesa 26.2.6), nem com a validação de sincronização da CI, nem
-  sem post-depth coverage (`ARTFUL_NO_POST_DEPTH`). Próximo passo: um passo da CI que, quando os testes falham, rode
-  esses dois sob o gdb e mostre o backtrace e as extensões do lavapipe. Os outros 18 testes que a CI pulava passam lá
-  agora (run 44948960739), com a causa corrigida (ray queries lendo a interseção committed sem acerto)
+- [ ] Conferir a run da CI depois da correção do alinhamento das camadas (o Linux caía no AVX2 alinhado de
+  `drawLayersSorted`; a causa e a correção estão no plano)
 
 ### Fase 5 — Alcance de conteúdo
-- [~] 5.7 Gradientes da A-SVGF (CPU, no stash "A-SVGF temporal gradients") — ainda quebram com objetos em movimento e
-  sombra suave: tirar dos gradientes os pixels de instâncias que se moveram e normalizar pelo ruído da amostra
 - [~] 5.9 Saída HDR — faltam os metadados HDR e o scRGB (o teste numa tela HDR está na outra lista)
 - [~] 5.10 Basis Universal — falta transcodificar para blocos da GPU (hoje vai para pixels)
 - [~] 5.12 OpenPBR (camadas no grafo de materiais em C) — no stash "5.12 OpenPBR": API, `graph.c`, flags do material e

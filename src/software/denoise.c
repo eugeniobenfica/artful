@@ -23,6 +23,11 @@
 #define SPREAD 1.25f   /* how many deviations of this frame's light around a pixel what was gathered may be from it */
 #define CUT_BACK 8.f   /* what is left of a history that was found out */
 #define DRIFT 4.f      /* how many standard errors the mean of a neighbourhood may be from what was gathered there */
+/* A-SVGF: a change of fewer deviations than CHANGE_FROM is noise; from CHANGE_TO on, it is sure; between, as sure as
+ * that. One square alone must be twice as sure as the 3 x 3 around it. */
+#define CHANGE_FROM 2.f
+#define CHANGE_TO 6.f
+#define CHANGE_ALONE 2.f
 
 uint32_t artfNormalPack(const float* n) {
     uint32_t bits = 0;
@@ -53,6 +58,97 @@ typedef struct Pass {
     const float* motion;
     size_t motionCount;
 } Pass;
+
+/* ---- temporal gradients (A-SVGF) ---- */
+
+typedef struct Gradients {
+    ArtfDenoiser* d;
+    ArtfDenoiserTrace trace;
+    void* user;
+    uint32_t turn;
+} Gradients;
+
+/* (a pixel's luminance of light over its color: what moments and the filter are in) */
+static inline float albedoLuma(const float* albedo) {
+    return (.2126f * artfMaxf(albedo[0], .02f) + .7152f * artfMaxf(albedo[1], .02f)) + .0722f * artfMaxf(albedo[2], .02f);
+}
+
+/* Each square's change and its noise, as light over color: (change, deviation); a deviation below 0 says nothing was
+ * found there. */
+static void gradientRow(void* user, uint32_t sy, uint32_t worker) {
+    (void)worker;
+    Gradients* g = user;
+    ArtfDenoiser* d = g->d;
+    for (int sx = 0; sx < d->squaresX; ++sx) {
+        float* out = d->changeRaw + ((size_t)sy * d->squaresX + (size_t)sx) * 2;
+        out[0] = 0;
+        out[1] = -1.f;
+        const int x = artfMini(sx * 3 + (int)(g->turn % 3), d->width - 1), y = artfMini((int)sy * 3 + (int)(g->turn / 3 % 3), d->height - 1);
+        const size_t i = (size_t)y * d->width + (size_t)x;
+        const float* then = d->previousGuide + i * 4;
+        float pn[3];
+        if (!normalOf(then, pn)) continue;
+        float place[4] = {0, 0, 0, 0};
+        const float now = g->trace(g->user, (uint32_t)x, (uint32_t)y, d->firstSampleBefore, place);
+        /* (the same surface, where the sample met it: else what is there moved, and says nothing of light) */
+        float qn[3];
+        const float ex = then[0] - d->eye[0], ey = then[1] - d->eye[1], ez = then[2] - d->eye[2];
+        const float tolerance = 1e-4f * sqrtf(ex * ex + ey * ey + ez * ez) + 1e-5f;
+        const float dx = place[0] - then[0], dy = place[1] - then[1], dz = place[2] - then[2];
+        if (!normalOf(place, qn) || dx * dx + dy * dy + dz * dz > tolerance * tolerance || qn[0] * pn[0] + qn[1] * pn[1] + qn[2] * pn[2] < .99f) continue;
+        const float scale = 1.f / albedoLuma(d->albedo + i * 4);
+        const float m1 = d->moments[i * 2], m2 = d->moments[i * 2 + 1];
+        out[0] = (now - d->firstLightBefore[i]) * scale;
+        out[1] = sqrtf(artfMaxf(m2 - m1 * m1, 0.f));
+    }
+}
+
+/* How surely each square's light changed: its change in its own deviations, halved, or the 3 x 3 squares' around in
+ * the mean's, whichever says more; 0 below CHANGE_FROM, 1 from CHANGE_TO. */
+static void gradientSureRow(void* user, uint32_t sy, uint32_t worker) {
+    (void)worker;
+    Gradients* g = user;
+    ArtfDenoiser* d = g->d;
+    for (int sx = 0; sx < d->squaresX; ++sx) {
+        const float* own = d->changeRaw + ((size_t)sy * d->squaresX + (size_t)sx) * 2;
+        float sum = 0, variance = 0, n = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int qx = sx + dx, qy = (int)sy + dy;
+                if (qx < 0 || qy < 0 || qx >= d->squaresX || qy >= d->squaresY) continue;
+                const float* q = d->changeRaw + ((size_t)qy * d->squaresX + (size_t)qx) * 2;
+                if (q[1] < 0) continue;
+                sum += q[0];
+                variance += q[1] * q[1];
+                n += 1.f;
+            }
+        float sure = 0;
+        if (own[1] >= 0) sure = fabsf(own[0]) / (own[1] + 1e-3f) / CHANGE_ALONE;
+        if (n > 0) sure = artfMaxf(sure, fabsf(sum / n) / (sqrtf(variance) / n + 1e-3f));
+        d->change[(size_t)sy * d->squaresX + (size_t)sx] = artfClampf((sure - CHANGE_FROM) / (CHANGE_TO - CHANGE_FROM), 0.f, 1.f);
+    }
+}
+
+void artfDenoiserGradients(ArtfDenoiser* d, ArtfPool* pool, const ArtfFrameData* frame, uint32_t firstSample, uint32_t frameNumber, ArtfDenoiserTrace trace, void* user) {
+    const int squaresX = (d->width + 2) / 3, squaresY = (d->height + 2) / 3;
+    if (d->squaresX != squaresX || d->squaresY != squaresY || !d->change) {
+        artfFree(d->change);
+        artfFree(d->changeRaw);
+        d->change = artfCalloc((size_t)squaresX * squaresY + 1, 4);
+        d->changeRaw = artfCalloc((size_t)squaresX * squaresY * 2 + 2, 4);
+        d->squaresX = squaresX;
+        d->squaresY = squaresY;
+    }
+    /* (only where the eye stood still, and with a frame before: a sample traced again must go the way it went) */
+    d->gradients = !d->first && !memcmp(d->viewProj, frame->viewProj, sizeof d->viewProj);
+    if (d->gradients) {
+        memcpy(d->eye, frame->cameraPos, 12);
+        Gradients g = {d, trace, user, frameNumber % 9u};
+        artfPoolRun(pool, gradientRow, &g, (uint32_t)squaresY);
+        artfPoolRun(pool, gradientSureRow, &g, (uint32_t)squaresY);
+    }
+    d->firstSampleBefore = firstSample;
+}
 
 /* This frame's light over color, in ping: the fourth number says whether there is a surface. */
 static void lightRow(void* user, uint32_t y, uint32_t worker) {
@@ -174,6 +270,16 @@ static void temporalRow(void* user, uint32_t y, uint32_t worker) {
                         found = found || before[k] != h[k];
                     }
                     count = artfMinf(whole + 1.f, found ? CUT_BACK : HISTORY_LIMIT);
+                    if (d->gradients) {
+                        /* (where the light surely changed, by the temporal gradients: what was gathered goes toward this
+                         * frame's light around, its mean over 5 x 5, by as much, rather than starting over from one
+                         * noisy sample; and it is cut back as a light that drifted is) */
+                        const float sure = (d->change[(size_t)artfMini((int)y / 3, d->squaresY - 1) * d->squaresX + artfMini(x / 3, d->squaresX - 1)]);
+                        if (sure > 0) {
+                            for (int k = 0; k < 3; ++k) before[k] += ((low[k] + high[k]) * .5f - before[k]) * sure;
+                            count = artfMinf(count, CUT_BACK);
+                        }
+                    }
                     alphaBefore = h[3] - whole;
                     momentsBefore[0] = d->moments[j * 2];
                     momentsBefore[1] = d->moments[j * 2 + 1];
@@ -338,6 +444,8 @@ void artfDenoiserResize(ArtfDenoiser* d, int width, int height) {
     d->nextMoments = artfCalloc((size_t)width * height * 2 + 2, 4);
     d->variance = artfCalloc((size_t)width * height + 1, 4);
     d->varianceNext = artfCalloc((size_t)width * height + 1, 4);
+    d->firstLight = artfCalloc((size_t)width * height + 1, 4);
+    d->firstLightBefore = artfCalloc((size_t)width * height + 1, 4);
     d->first = true;
 }
 
@@ -355,6 +463,10 @@ void artfDenoiserFree(ArtfDenoiser* d) {
     artfFree(d->nextMoments);
     artfFree(d->variance);
     artfFree(d->varianceNext);
+    artfFree(d->firstLight);
+    artfFree(d->firstLightBefore);
+    artfFree(d->change);
+    artfFree(d->changeRaw);
     memset(d, 0, sizeof *d);
 }
 
@@ -388,4 +500,9 @@ void artfDenoiserRun(ArtfDenoiser* d, ArtfPool* pool, const ArtfFrameData* frame
     d->nextMoments = t;
     memcpy(d->viewProj, frame->viewProj, sizeof d->viewProj);
     d->first = false;
+    /* (this frame's first samples are what the next one's gradients look back on) */
+    t = d->firstLightBefore;
+    d->firstLightBefore = d->firstLight;
+    d->firstLight = t;
+    d->gradients = false;
 }
