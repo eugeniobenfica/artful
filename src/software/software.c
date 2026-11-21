@@ -718,7 +718,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
         artfFree(f->tileLights);
         f->tileLights = artfMalloc((size_t)f->tilesX * f->tilesY * (1 + f->extraCount) * 4);
         artfSceneLightSlices(&f->data, f->extra, f->extraCount);
-        artfSceneLightTiles(&f->data, f->width, f->height, f->extra, f->extraCount, f->tileLights, NULL, NULL, NULL);
+        artfSceneLightTiles(&f->data, f->width, f->height, f->extra, f->extraCount, f->tileLights, f->data.more[3] > 0 ? &f->clusterLights : NULL, &f->clusterRoom, NULL);
     }
     f->nearW = artfOrtho(&f->data) ? .5f : scene->camera.near_; /* (orthographic: w is 1, and depth is cut instead) */
     f->sizedLights = false;

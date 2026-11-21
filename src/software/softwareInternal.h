@@ -136,6 +136,10 @@ typedef struct ArtfSoftFrame {
     ArtfLightData* extra;
     uint32_t extraCount;
     uint32_t* tileLights;
+    /* with lights sampled: the GPU's lists, by squares and slices of depth (artfSceneLightTiles' clusters), so that a
+     * pixel draws of the same lights as there */
+    uint32_t* clusterLights;
+    size_t clusterRoom;
     /* the decals that may show (artfSceneDecals) */
     ArtfDecalData* decals;
     uint32_t decalCount;

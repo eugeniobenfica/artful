@@ -479,6 +479,12 @@ typedef struct ArtfShadowDesc {
      * with temporal antialiasing). They take no maps: with resolution 0, lights past the sixteen and fog that light
      * goes through have no shadows, and with a resolution they keep their maps. */
     bool traced;
+    /* With traced: lights sampled, not all of them (as ReSTIR's direct light, without its reuse): each pixel takes one
+     * of the lights that reach it, the sun apart, chosen of eight drawn at random by how much each would give it
+     * unshadowed, and its shadow from rays; what it gives is weighed so that on average it is all of them. So a frame
+     * costs the same however many lights there are, and is noisy: temporal antialiasing (and the denoiser) gathers it.
+     * Every light is the same to it, the frame's sixteen and those past them. */
+    bool sampled;
 } ArtfShadowDesc;
 
 /* NULL: none. The sun casts; other lights do when asked. */

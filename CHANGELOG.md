@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Lights sampled** (`ArtfShadowDesc.sampled`, phase 5.7, in part): with shadows from rays, each pixel takes one of the
+  lights that reach it, chosen of eight by how much each would give, with its shadow ray, weighed to be all of them
+  on average: a frame costs the same with 50 lamps that cast as with 800 (2.1-2.5 ms on the CPU where all of them
+  take 7-86). Noisy for now: its denoiser is still to come. Lights past the frame's sixteen take shadows from rays too.
+
 - **Rays against the graph's cut** (`ArtfTraceDesc.coarse`, phase 5.6): a mesh made a graph of clusters is traced by
   its cut. Shadows from rays start off what is drawn by how far the level each instance draws may be from its mesh
   (and the cut), in place of a thousandth of the distance: a ball drawn at a lighter level no longer shadows itself

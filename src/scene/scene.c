@@ -1596,6 +1596,7 @@ void artfSceneSetShadows(ArtfScene* s, const ArtfShadowDesc* desc) {
     memset(&s->shadows, 0, sizeof s->shadows);
     if (!desc || (desc->resolution <= 0 && !desc->traced)) return;
     s->shadows.traced = desc->traced;
+    s->shadows.sampled = desc->traced && desc->sampled;
     s->shadows.soft = desc->soft;
     s->shadows.distance = desc->distance > 0 ? desc->distance : 60.f;
     if (desc->resolution <= 0) return;
@@ -1857,6 +1858,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     memcpy(out->aerial, s->aerial, sizeof out->aerial);
     /* (with shadows from rays: how many of those past the frame's own cast, the first in artfSceneExtraLights' list) */
     out->more[2] = 0;
+    out->more[3] = s->shadows.traced && s->shadows.sampled ? 1.f : 0.f;
     if (s->shadows.traced)
         for (uint32_t i = 0, seen = 0; i < ARTF_MAX_LIGHTS; ++i)
             if (s->lightOn[i] && seen++ >= ARTF_FRAME_LIGHTS && s->lightCasts[i]) out->more[2] += 1.f;

@@ -320,6 +320,20 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 - **Um incidente:** um inicializador posicional de `ArtfTraceRange` desalinhou quando a estrutura cresceu, e o RT por hardware passou a ler fora dos buffers. Em poucos minutos a GPU foi perdida dezenas de vezes (LiveKernelEvent 141/117 no Windows), até a tela não voltar. Foi corrigido com campos nomeados, e entraram proteções: depois de 3 perdas reais no processo, `artfVulkanNew` recusa a GPU (`ARTFUL_KEEP_GPU` desliga isso); o percurso de uma árvore para depois de 65.536 passos; os intervalos são conferidos antes de montar as estruturas de RT; e os testes ligam `robustBufferAccess` (`ARTFUL_ROBUST`) e avisam quando a GPU foi perdida.
 - **Não feito:** medir numa GPU integrada; o topo (instâncias) continua binário; as reflexões traçadas depois do quadro ainda usam o 1/1000.
 
+**Estado da 5.7: em parte** (sombras por raio para todas as luzes e amostragem com custo constante feitas; o denoiser e a A-SVGF não).
+- **A, sombras por raio além das 16:** com `ArtfShadowDesc.traced`, as luzes depois das 16 do quadro que projetam sombra vêm primeiro na lista (a contagem vai em `more[2]`) e recebem um raio cada, como as 16, nos dois backends, com o deslocamento pelo nível desenhado. Nesse modo elas não usam mapas. **Teste (`tracing/extraTraced`):** um abajur como 21ª luz projeta a mesma sombra que projetaria sendo uma das 16 (0,91% do quadro), com CPU e GPU idênticas.
+- **B, luzes amostradas (`ArtfShadowDesc.sampled`):** cada pixel sorteia 8 das luzes que podem alcançá-lo (as do quadro e a lista do seu cluster, a mesma da GPU, que a CPU agora também monta) e fica com uma por amostragem ponderada em reservatório, pelo que ela daria sem sombra (luminância × fade² × spot × n·l). Só essa luz é avaliada, pelo caminho normal (tamanho, forma, perfil e raio de sombra), com peso `n × Σ / (8 × a dela)`, para que na média dê todas. Assim acaba a distinção entre as 16 e as demais. O sorteio é um hash da posição do pixel e do número do quadro, igual nos dois backends. Na CPU as 8 pistas são agrupadas pela luz escolhida, com peso zero nas outras; na GPU os laços vão só da escolhida até ela mesma.
+- **Medidas (`tracing/sampledLights`, salão com pilares):**
+
+  | Luzes que projetam sombra | CPU, todas | CPU, amostradas | GPU, todas | GPU, amostradas |
+  |---|---|---|---|---|
+  | 50 | 7,0 ms | 2,1 ms | 0,20 ms | 0,11 ms |
+  | 200 | 21,5 ms | 2,3 ms | 0,45 ms | 0,12 ms |
+  | 800 | 85,8 ms | 2,5 ms | 1,60 ms | 0,13 ms |
+
+  O custo fica constante, que é a primeira metade do critério. A segunda (dentro do limiar FLIP da referência com todas as luzes) **não** está cumprida: depois de 36 quadros de TAA, 24% a 43% dos pixels ainda diferem da referência por mais de 24/255, porque o TAA sozinho não junta amostras suficientes.
+- **Falta:** o denoiser da luz amostrada (acúmulo temporal longo com reprojeção, mais filtro espacial guiado por profundidade e normal), o reuso temporal e espacial dos reservatórios (ReSTIR) e a A-SVGF no denoiser do traçador.
+
 **Estado da 5.9: em parte.**
 - **API:** `ArtfRendererOptions.output` (`ARTF_OUTPUT_SRGB`, `_DISPLAY_P3`, `_HDR10`), com `peakNits` (padrão 1000) e `paperWhiteNits` (padrão 203); `artfRendererOutput` diz o que de fato saiu. Exige `hdr`; sem ele, sRGB.
 - **Como:** a imagem mantém o aspecto que teria numa tela sRGB. A passagem final decodifica o sRGB e converte: Display-P3 (primárias P3, curva sRGB, 8 bits) ou HDR10 (primárias Rec. 2020, PQ, 10 bits, A2R10G10B10 na leitura). Em HDR10 a curva de tom é esticada até pico/branco de papel, então o que a curva não comprime fica com o brilho do papel. A sobreposição é convertida do mesmo jeito (o branco dela vira o branco de papel) e composta no espaço da saída, como a sRGB é composta em sRGB. A conta é a mesma na CPU (`artfDisplayEncode`) e na GPU (`displaySpv`).

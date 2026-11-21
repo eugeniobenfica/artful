@@ -95,6 +95,28 @@ ARTF_INLINE bool artfDagDrawn(const float* bounds, bool first, const float* m, f
 /* All its indices: a graph's levels too. */
 #define ARTF_MESH_ALL_INDICES(m) ((m)->dagBounds ? (m)->dagIndexCount : (m)->indexCount)
 
+/* Lights sampled (ArtfShadowDesc.sampled, phase 5.7), the same on both backends (shaders.c's sampledSpv): of a pixel,
+ * from its place on the screen and the frame's number, eight lights drawn of the n that may reach it (the frame's own,
+ * then its cluster's list), one kept by weighted reservoir sampling on what each would give unshadowed (artfSampledWeigh:
+ * luminance x fade^2 x spot x n.l), and the weight that makes it all of them on average: n x the sum / (8 x its own). */
+#define ARTF_SAMPLED_DRAWS 8
+ARTF_INLINE uint32_t artfSampledHash(uint32_t x) {
+    x = (x ^ x >> 16) * 0x7FEB352Du;
+    x = (x ^ x >> 15) * 0x846CA68Bu;
+    return x ^ x >> 16;
+}
+ARTF_INLINE uint32_t artfSampledSeed(uint32_t x, uint32_t y, uint32_t frame) { return artfSampledHash(x ^ artfSampledHash(y ^ artfSampledHash(frame))); }
+ARTF_INLINE float artfSampledWeigh(const float* position, float radius, const float* color, const float* direction, float spotCut, float spotScale, const float* p, const float* n) {
+    const float d[3] = {position[0] - p[0], position[1] - p[1], position[2] - p[2]};
+    const float d2 = (d[0] * d[0] + d[1] * d[1]) + d[2] * d[2];
+    const float fade = artfMaxf(1.f - d2 / (radius * radius), 0.f);
+    const float inv = 1.f / sqrtf(artfMaxf(d2, 1e-8f));
+    const float l[3] = {d[0] * inv, d[1] * inv, d[2] * inv};
+    const float spot = artfClampf((-((l[0] * direction[0] + l[1] * direction[1]) + l[2] * direction[2]) - spotCut) * spotScale, 0.f, 1.f);
+    const float ndl = artfMaxf((n[0] * l[0] + n[1] * l[1]) + n[2] * l[2], 0.f);
+    const float luminance = (.2126f * color[0] + .7152f * color[1]) + .0722f * color[2];
+    return ((luminance * (fade * fade)) * spot) * ndl;
+}
 /* What a mesh that bends was, by the order of its packed vertices. */
 typedef struct ArtfSkinData {
     float* rest;       /* position and normal: six floats a vertex */
@@ -493,9 +515,20 @@ typedef struct ArtfFrameData {
     /* 1 when a material is reactive (ArtfMaterialDesc.reactive): the instance each pixel shows goes after the frame
      * then, as when something moves; 0 else. How far the trees' cuts may be from their meshes (ArtfTrace.coarseReach).
      * With shadows from rays, how many of the lights past the frame's own cast, the first of artfSceneExtraLights'.
-     * The rest: 0. */
+     * 1 when lights are sampled (ArtfShadowDesc.sampled); 0 else. */
     float more[4];
 } ArtfFrameData;
+
+/* The pixel a point falls on (as artfTracedPlace finds it): x and y. */
+ARTF_INLINE void artfSampledPixel(const ArtfFrameData* f, const float* p, uint32_t* x, uint32_t* y) {
+    const float* m = f->viewProj;
+    const float cx = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], cy = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+    const float cw = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+    const float inv = 1.f / artfMaxf(cw, 1e-6f);
+    *x = (uint32_t)artfClampf(floorf((cx * inv * .5f + .5f) * f->fog[3]), 0.f, f->fog[3] - 1.f);
+    *y = (uint32_t)artfClampf(floorf((.5f - cy * inv * .5f) * f->eye[1][3]), 0.f, f->eye[1][3] - 1.f);
+}
+
 
 /* What the air between the eye and a point this far away (in the scene's units), toward which mu is the cosine to the
  * sun, does to its light: keeps keep of each color and adds add (ArtfFrameData.aerial). The same arithmetic in the

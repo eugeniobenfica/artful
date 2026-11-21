@@ -1766,3 +1766,73 @@ void testExtraTraced(void) {
     artfFree(shaded);
     artfFree(gpuFrame);
 }
+
+/* A floor with pillars under many lamps that cast, each of its own color, as a hall of lights. */
+static ArtfScene* lampHall(int lamps, bool sampled) {
+    ArtfScene* s = plainScene();
+    artfSceneSetAmbient(s, artfVec3(.01f, .01f, .01f), artfVec3(.01f, .01f, .01f));
+    setCamera(s, 0, 9, 14, 0, 0, 0);
+    ArtfMaterialDesc grey = artfMaterialDefaults();
+    grey.baseColor = artfVec3(.6f, .6f, .6f);
+    grey.roughness = .7f;
+    const ArtfMaterial m = artfSceneAddMaterial(s, &grey);
+    addAt(s, artfSceneAddPlane(s, 40, 1), m, 0, 0, 0, 1);
+    const ArtfMesh pillar = artfSceneAddCube(s, 1);
+    for (int z = -2; z <= 2; ++z)
+        for (int x = -3; x <= 3; ++x) {
+            const ArtfTransform t = artfTransformTrs(artfVec3((float)x * 3.f, 1, (float)z * 3.f), artfQuatIdentity(), artfVec3(.5f, 2, .5f));
+            artfSceneAddInstance(s, pillar, m, &t);
+        }
+    uint32_t state = 12345;
+    for (int i = 0; i < lamps; ++i) {
+        state = state * 1664525u + 1013904223u;
+        const float x = (float)(state >> 8 & 1023) / 1023.f * 22.f - 11.f;
+        state = state * 1664525u + 1013904223u;
+        const float z = (float)(state >> 8 & 1023) / 1023.f * 16.f - 8.f;
+        state = state * 1664525u + 1013904223u;
+        const float h = .4f + (float)(state >> 8 & 1023) / 1023.f * 2.f;
+        const ArtfVec3 color = artfVec3(.2f + (float)(i % 3 == 0), .2f + (float)(i % 3 == 1), .2f + (float)(i % 3 == 2));
+        const ArtfLight l = artfSceneAddLight(s, artfVec3(x, h, z), artfVec3Scale(color, 6.f / sqrtf((float)lamps)), 4);
+        artfLightSetShadow(s, l, true);
+    }
+    const ArtfShadowDesc traced = {0, 0, false, true, sampled};
+    artfSceneSetShadows(s, &traced);
+    const ArtfPostDesc post = {.screen.temporal = true};
+    artfSceneSetPost(s, &post);
+    return s;
+}
+
+/* Phase 5.7: lights sampled (ArtfShadowDesc.sampled). A hall under 50, 200 and 800 lamps that cast: sampled, a frame
+ * takes about as long whatever their number, where all of them take longer the more there are; both backends. (How near
+ * the picture is to all of them is printed: noisy until the denoiser for it comes.) */
+void testSampledLights(void) {
+    uint32_t* all = artfMalloc(W * H * 4);
+    uint32_t* some = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        const int counts[3] = {50, 200, 800};
+        double took[2][3];
+        for (int k = 0; k < 3; ++k) {
+            double apart = 0;
+            for (int sampled = 0; sampled < 2; ++sampled) {
+                ArtfRenderer* r = artfRendererNew(&o);
+                if (!r) break;
+                ArtfScene* s = lampHall(counts[k], sampled != 0);
+                drawFrames(r, s, 4, sampled ? some : all);
+                const double t0 = artfNowMs();
+                drawFrames(r, s, 32, sampled ? some : all);
+                took[sampled][k] = (artfNowMs() - t0) / 32.0;
+                artfSceneFree(s);
+                artfRendererFree(r);
+            }
+            apart = differentShare(all, some, 24);
+            printf("%s, %d lamps that cast: all of them %.2f ms a frame, sampled %.2f; sampled after 36 frames, %.2f%% of pixels apart from all\n", backend ? "GPU" : "CPU", counts[k],
+                   took[0][k], took[1][k], apart * 100);
+        }
+        /* (the CPU's times: the GPU's are too short to say) */
+        if (!backend) CHECK(took[1][2] < took[1][0] * 1.5 && took[0][2] > took[0][0] * 4);
+    }
+    artfFree(all);
+    artfFree(some);
+}

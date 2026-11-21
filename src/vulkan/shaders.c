@@ -1584,6 +1584,32 @@ static void tracerVariables(Tracer* t);
 static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index, SpvId drawn);
 static SpvId tracedShadowAtSpv(const Tracer* t, SpvId world, SpvId n, SpvId position, SpvId size, SpvId drawn);
 static SpvId drawnErrorSpv(Spv* s, const Resources* r, SpvId meshWord, SpvId instance);
+/* sceneInternal.h's artfSampledHash and artfSampledWeigh: the same arithmetic, in the same order. */
+static SpvId sampledHashSpv(Spv* s, SpvId x) {
+    x = spvOp2(s, SPV_OP_IMul, s->uintType, spvOp2(s, 198 /* OpBitwiseXor */, s->uintType, x, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, x, UINT(16))), UINT(0x7FEB352Du));
+    x = spvOp2(s, SPV_OP_IMul, s->uintType, spvOp2(s, 198, s->uintType, x, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, x, UINT(15))), UINT(0x846CA68Bu));
+    return spvOp2(s, 198, s->uintType, x, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, x, UINT(16)));
+}
+static SpvId sampledWeighSpv(Spv* s, SpvId a, SpvId b, SpvId c, SpvId p, SpvId n) {
+    SpvId d = SUB_V3(spvShuffle3(s, a), p);
+    SpvId d2 = ADD_F(ADD_F(MUL_F(X(d), X(d)), MUL_F(Y(d), Y(d))), MUL_F(Z(d), Z(d)));
+    SpvId fade = spvGlsl2(s, SPV_GLSL_FMax, s->floatType, SUB_F(FLOAT(1.f), DIV_F(d2, MUL_F(W(a), W(a)))), FLOAT(0.f));
+    SpvId inv = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, d2, FLOAT(1e-8f))));
+    SpvId l = SCALE_V3(d, inv), dir = spvShuffle3(s, c);
+    SpvId along = ADD_F(ADD_F(MUL_F(X(l), X(dir)), MUL_F(Y(l), Y(dir))), MUL_F(Z(l), Z(dir)));
+    SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, along), W(c)), W(b));
+    spot = spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, spot, FLOAT(0.f)), FLOAT(1.f));
+    SpvId ndl = spvGlsl2(s, SPV_GLSL_FMax, s->floatType, ADD_F(ADD_F(MUL_F(X(n), X(l)), MUL_F(Y(n), Y(l))), MUL_F(Z(n), Z(l))), FLOAT(0.f));
+    SpvId luminance = ADD_F(ADD_F(MUL_F(FLOAT(.2126f), X(b)), MUL_F(FLOAT(.7152f), Y(b))), MUL_F(FLOAT(.0722f), Z(b)));
+    return MUL_F(MUL_F(MUL_F(luminance, MUL_F(fade, fade)), spot), ndl);
+}
+#define S_BOTH(a, b) spvOp2(s, SPV_OP_LogicalAnd, s->boolType, a, b)
+#define S_NOT(a) spvOp1(s, SPV_OP_LogicalNot, s->boolType, a)
+#define S_PICK(c, a, b) spvSelect(s, s->floatType, c, a, b)
+/* c ? a : b of two vec4s, a part at a time (a scalar condition does not select vectors before SPIR-V 1.4) */
+static SpvId sampledPick4(Spv* s, SpvId c, SpvId a, SpvId b) {
+    return vec4Of(s, vec3Of(s, S_PICK(c, X(a), X(b)), S_PICK(c, Y(a), Y(b)), S_PICK(c, Z(a), Z(b))), S_PICK(c, W(a), W(b)));
+}
 
 /* Which of a lamp's views a place is in, from its word, as lampShadowSpv. */
 static SpvId lampViewSpv(Spv* s, SpvId lamp, SpvId d) {
@@ -1708,6 +1734,9 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     const GraphVars own = {spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function),
                            spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function)};
     SpvId counter = spvVariable(s, ptrFnUint, SPV_STORAGE_Function);
+    /* (lights sampled: the one taken, its weight, and the sums as they are drawn) */
+    SpvId sampledCode = traced ? spvVariable(s, ptrFnUint, SPV_STORAGE_Function) : 0, sampledWeight = traced ? spvVariable(s, ptrFnFloat, SPV_STORAGE_Function) : 0;
+    SpvId sampledSum = traced ? spvVariable(s, ptrFnFloat, SPV_STORAGE_Function) : 0, sampledMine = traced ? spvVariable(s, ptrFnFloat, SPV_STORAGE_Function) : 0;
     SpvId decalAlbedo = spvVariable(s, ptrFn3, SPV_STORAGE_Function), decalRough = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
     SpvId probeSum = spvVariable(s, ptrFn3, SPV_STORAGE_Function), probeWeights = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
     SpvId probeMirror = spvVariable(s, ptrFn3, SPV_STORAGE_Function);
@@ -2134,7 +2163,72 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
 
     /* the point lights */
     SpvId lightCount = AS_UINT(X(frameVec(s, &r, F_COUNTS)));
-    spvStore(s, counter, UINT(0));
+    SpvId frameEnd = lightCount, sampledOn = 0;
+    if (traced) {
+        /* lights sampled (ArtfShadowDesc.sampled): one taken of eight drawn, as kernels.inc does (artfSampledWeigh) */
+        sampledOn = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, W(frameVec(s, &r, F_MORE)), FLOAT(.5f));
+        spvStore(s, sampledCode, UINT(0xFFFFFFFFu));
+        spvStore(s, sampledWeight, FLOAT(0.f));
+        SpvId choose;
+        spvIfBegin(s, sampledOn, &choose);
+        {
+            /* (the pixel, as artfSampledPixel) */
+            SpvId c4 = ADD_V4(ADD_V4(ADD_V4(SCALE_V4(frameVec(s, &r, F_VIEWPROJ), X(world)), SCALE_V4(frameVec(s, &r, F_VIEWPROJ + 1), Y(world))), SCALE_V4(frameVec(s, &r, F_VIEWPROJ + 2), Z(world))), frameVec(s, &r, F_VIEWPROJ + 3));
+            SpvId inv = DIV_F(FLOAT(1.f), spvGlsl2(s, SPV_GLSL_FMax, s->floatType, W(c4), FLOAT(1e-6f)));
+            SpvId wide = W(frameVec(s, &r, F_FOG)), tall = W(frameVec(s, &r, F_EYE + 1));
+            SpvId fx = spvGlsl1(s, SPV_GLSL_Floor, s->floatType, MUL_F(ADD_F(MUL_F(MUL_F(X(c4), inv), FLOAT(.5f)), FLOAT(.5f)), wide));
+            SpvId fy = spvGlsl1(s, SPV_GLSL_Floor, s->floatType, MUL_F(SUB_F(FLOAT(.5f), MUL_F(MUL_F(Y(c4), inv), FLOAT(.5f))), tall));
+            SpvId px = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, fx, FLOAT(0.f)), SUB_F(wide, FLOAT(1.f))));
+            SpvId py = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, fy, FLOAT(0.f)), SUB_F(tall, FLOAT(1.f))));
+            /* (its cluster's list, as the lights past the frame's own read it below) */
+            SpvId extras = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_EYE + 2)));
+            SpvId tilesX = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(spvOp1(s, SPV_OP_ConvertFToU, s->uintType, wide), UINT(ARTF_LIGHT_TILE - 1)), UINT(ARTF_LIGHT_TILE));
+            SpvId slicing = frameVec(s, &r, F_ORTHO);
+            SpvId toward = SUB_V3(world, spvShuffle3(s, frameVec(s, &r, F_CAMERA))), ahead = spvShuffle3(s, frameVec(s, &r, F_EYE + 2));
+            SpvId along = ADD_F(ADD_F(MUL_F(X(toward), X(ahead)), MUL_F(Y(toward), Y(ahead))), MUL_F(Z(toward), Z(ahead)));
+            SpvId deep = ADD_F(MUL_F(spvGlsl1(s, SPV_GLSL_Log2, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, along, FLOAT(1e-30f))), X(slicing)), Y(slicing));
+            SpvId slice = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, spvGlsl1(s, SPV_GLSL_Floor, s->floatType, deep), FLOAT(0.f)), FLOAT((float)(ARTF_LIGHT_SLICES - 1))));
+            SpvId head = MUL_U(ADD_U(MUL_U(ADD_U(MUL_U(spvOp2(s, SPV_OP_UDiv, s->uintType, py, UINT(ARTF_LIGHT_TILE)), tilesX), spvOp2(s, SPV_OP_UDiv, s->uintType, px, UINT(ARTF_LIGHT_TILE))), UINT(ARTF_LIGHT_SLICES)), slice), UINT(2));
+            SpvId any = spvOp2(s, SPV_OP_ULessThan, s->boolType, UINT(0), extras);
+            SpvId safeHead = spvSelect(s, s->uintType, any, head, UINT(0));
+            SpvId base = spvSelect(s, s->uintType, any, spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, safeHead)), UINT(0));
+            SpvId listed = spvSelect(s, s->uintType, any, spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(safeHead, UINT(1)))), UINT(0));
+            SpvId count = ADD_U(lightCount, listed);
+            SpvId seed = sampledHashSpv(s, spvOp2(s, 198, s->uintType, px, sampledHashSpv(s, spvOp2(s, 198, s->uintType, py, sampledHashSpv(s, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_OUTPUT))))))));
+            spvStore(s, sampledSum, FLOAT(0.f));
+            spvStore(s, sampledMine, FLOAT(0.f));
+            SpvId some = spvOp2(s, SPV_OP_ULessThan, s->boolType, UINT(0), count);
+            SpvId countSafe = spvGlsl2(s, SPV_GLSL_UMax, s->uintType, count, UINT(1));
+            for (uint32_t c = 0; c < ARTF_SAMPLED_DRAWS; ++c) {
+                SpvId j = spvOp2(s, SPV_OP_UMod, s->uintType, sampledHashSpv(s, ADD_U(seed, UINT(2 * c + 1))), countSafe);
+                SpvId isFrame = spvOp2(s, SPV_OP_ULessThan, s->boolType, j, lightCount);
+                SpvId frameAt = ADD_U(UINT(F_LIGHTS), MUL_U(spvGlsl2(s, 38 /* UMin */, s->uintType, j, UINT(ARTF_FRAME_LIGHTS - 1)), UINT(F_LIGHT_ROWS)));
+                SpvId entry = spvSelect(s, s->uintType, isFrame, UINT(0), SUB_U(j, lightCount));
+                SpvId li = spvSelect(s, s->uintType, S_BOTH(any, S_NOT(isFrame)), spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(base, spvSelect(s, s->uintType, any, entry, UINT(0))))), UINT(0));
+                SpvId extraAt = MUL_U(li, UINT(3));
+                SpvId a = sampledPick4(s, isFrame, frameVecAt(s, &r, frameAt), bufferVec(s, &r, extraLights, extraAt));
+                SpvId b = sampledPick4(s, isFrame, frameVecAt(s, &r, ADD_U(frameAt, UINT(1))), bufferVec(s, &r, extraLights, ADD_U(extraAt, UINT(1))));
+                SpvId cc = sampledPick4(s, isFrame, frameVecAt(s, &r, ADD_U(frameAt, UINT(2))), bufferVec(s, &r, extraLights, ADD_U(extraAt, UINT(2))));
+                SpvId weigh = S_PICK(some, sampledWeighSpv(s, a, b, cc, world, n), FLOAT(0.f));
+                SpvId sum = ADD_F(spvLoad(s, s->floatType, sampledSum), weigh);
+                spvStore(s, sampledSum, sum);
+                SpvId rnd = MUL_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, sampledHashSpv(s, ADD_U(seed, UINT(2 * c + 2))), UINT(8))), FLOAT(1.f / 16777216.f));
+                SpvId take = S_BOTH(spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, weigh, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, MUL_F(rnd, sum), weigh));
+                SpvId code = spvSelect(s, s->uintType, isFrame, j, spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, entry, UINT(0x80000000u)));
+                spvStore(s, sampledCode, spvSelect(s, s->uintType, take, code, spvLoad(s, s->uintType, sampledCode)));
+                spvStore(s, sampledMine, S_PICK(take, weigh, spvLoad(s, s->floatType, sampledMine)));
+            }
+            SpvId mine = spvLoad(s, s->floatType, sampledMine);
+            SpvId weight = DIV_F(MUL_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, count), spvLoad(s, s->floatType, sampledSum)), MUL_F(FLOAT((float)ARTF_SAMPLED_DRAWS), spvGlsl2(s, SPV_GLSL_FMax, s->floatType, mine, FLOAT(1e-30f))));
+            spvStore(s, sampledWeight, S_PICK(spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, mine, FLOAT(0.f)), weight, FLOAT(0.f)));
+        }
+        spvIfEnd(s, choose);
+        /* (only the frame's light taken, if one is) */
+        SpvId code = spvLoad(s, s->uintType, sampledCode), isFrameTaken = spvOp2(s, SPV_OP_ULessThan, s->boolType, code, UINT(0x80000000u));
+        SpvId start = spvSelect(s, s->uintType, S_BOTH(sampledOn, isFrameTaken), code, UINT(0));
+        frameEnd = spvSelect(s, s->uintType, sampledOn, spvSelect(s, s->uintType, isFrameTaken, ADD_U(code, UINT(1)), UINT(0)), lightCount);
+        spvStore(s, counter, start);
+    } else spvStore(s, counter, UINT(0));
     SpvId header = spvNewId(s), test = spvNewId(s), body = spvNewId(s), next = spvNewId(s), done = spvNewId(s);
     spvBranch(s, header);
     spvLabel(s, header);
@@ -2142,7 +2236,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     spvBranch(s, test);
     spvLabel(s, test);
     SpvId i = spvLoad(s, s->uintType, counter);
-    spvBranchIf(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, i, lightCount), body, done);
+    spvBranchIf(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, i, frameEnd), body, done);
     spvLabel(s, body);
     {
         SpvId at = ADD_U(UINT(F_LIGHTS), MUL_U(i, UINT(F_LIGHT_ROWS)));
@@ -2156,6 +2250,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId toLight = SCALE_V3(d, invLength);
         SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(toLight, spvShuffle3(s, lightC))), W(lightC)), W(lightB));
         spot = MIN_F(MAX_F(spot, FLOAT(0.f)), FLOAT(1.f));
+        if (traced) spot = MUL_F(spot, S_PICK(sampledOn, spvLoad(s, s->floatType, sampledWeight), FLOAT(1.f)));
         /* its shadow: as artfShadowOfLight */
         spvStore(s, shadowed, FLOAT(1.f));
         if (coats) spvStore(s, through, FLOAT(0.f));
@@ -2260,7 +2355,14 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId head = MUL_U(ADD_U(MUL_U(ADD_U(MUL_U(ty, tilesX), tx), UINT(ARTF_LIGHT_SLICES)), slice), UINT(2));
         SpvId base = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, head));
         SpvId listed = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(head, UINT(1))));
-        spvStore(s, counter, UINT(0));
+        SpvId extraEnd = listed;
+        if (traced) {
+            /* (lights sampled: only the one of the list taken, if one is) */
+            SpvId code = spvLoad(s, s->uintType, sampledCode), isExtraTaken = S_BOTH(spvOp2(s, 174 /* OpUGreaterThanEqual */, s->boolType, code, UINT(0x80000000u)), spvOp2(s, SPV_OP_INotEqual, s->boolType, code, UINT(0xFFFFFFFFu)));
+            SpvId entry = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, code, UINT(0x7FFFFFFFu));
+            spvStore(s, counter, spvSelect(s, s->uintType, S_BOTH(sampledOn, isExtraTaken), entry, UINT(0)));
+            extraEnd = spvSelect(s, s->uintType, sampledOn, spvSelect(s, s->uintType, isExtraTaken, ADD_U(entry, UINT(1)), UINT(0)), listed);
+        } else spvStore(s, counter, UINT(0));
         SpvId eHeader = spvNewId(s), eTest = spvNewId(s), eBody = spvNewId(s), eNext = spvNewId(s), eDone = spvNewId(s);
         spvBranch(s, eHeader);
         spvLabel(s, eHeader);
@@ -2268,7 +2370,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         spvBranch(s, eTest);
         spvLabel(s, eTest);
         SpvId k = spvLoad(s, s->uintType, counter);
-        spvBranchIf(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, k, listed), eBody, eDone);
+        spvBranchIf(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, k, extraEnd), eBody, eDone);
         spvLabel(s, eBody);
         {
             SpvId li = spvLoad(s, s->uintType, bufferUintPtr(s, &r, tileLights, ADD_U(base, k)));
@@ -2283,6 +2385,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
             SpvId toLight = SCALE_V3(d, invLength);
             SpvId spot = MUL_F(SUB_F(spvOp1(s, SPV_OP_FNegate, s->floatType, DOT3(toLight, spvShuffle3(s, lightC))), W(lightC)), W(lightB));
             spot = MIN_F(MAX_F(spot, FLOAT(0.f)), FLOAT(1.f));
+            if (traced) spot = MUL_F(spot, S_PICK(sampledOn, spvLoad(s, s->floatType, sampledWeight), FLOAT(1.f)));
             /* the first few have shadows of their own: as artfShadowOfExtra */
             SpvId listed = spvOp2(s, SPV_OP_ULessThan, s->boolType, li, UINT(ARTF_SHADOW_EXTRA));
             SpvId lamp = AS_UINT(X(shadowRow(s, &shadows, ADD_U(UINT(S_EXTRA), spvGlsl2(s, 38 /* UMin */, s->uintType, li, UINT(ARTF_SHADOW_EXTRA - 1))))));

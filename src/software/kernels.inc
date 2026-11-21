@@ -854,6 +854,14 @@ static V8F tracedLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
     return v8fLoad(out);
 }
 
+/* Lights sampled: of each lane, the weight of the light it took, where it took this one (code: a frame's light, or
+ * 0x80000000 | the place of one past them); 0 elsewhere. */
+static V8F sampledWeight(const uint32_t* chosen, const float* weight, uint32_t code) {
+    _Alignas(32) float w[8];
+    for (int l = 0; l < 8; ++l) w[l] = chosen[l] == code ? weight[l] : 0.f;
+    return v8fLoad(w);
+}
+
 /* The same toward one of the lights past the frame's own (no size), for those that cast. */
 static V8F tracedLanesAt(const ArtfSoftFrame* f, const float* at, Lanes3 world, Lanes3 n, V8F strength, const float* drawn) {
     _Alignas(32) float wx[8], wy[8], wz[8], nx[8], ny[8], nz[8], reach[8], out[8];
@@ -1419,6 +1427,56 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         addLight(n, view, toSun, sunShadow, frame->sunColor, shiny, &reflecting, &diffuse, &highlight);
         if (coated) addExtras(extras, n, view, toSun, sunShadow, one, under && f->shadows ? throughLanes(f, -1, world, x.reach) : zero, frame->sunColor);
     }
+    /* lights sampled (ArtfShadowDesc.sampled): each pixel takes one light, artfSampledWeigh's; only those taken are looked
+     * at, each weighed in the lanes that took it and nothing in the others */
+    const bool sampled = frame->more[3] > 0;
+    uint32_t chosen[8], extraTaken[8], extraTakenCount = 0;
+    float chosenWeight[8];
+    if (sampled) {
+        _Alignas(32) float wx[8], wy[8], wz[8], nx[8], ny[8], nz[8];
+        v8fStore(wx, world.x); v8fStore(wy, world.y); v8fStore(wz, world.z);
+        v8fStore(nx, n.x); v8fStore(ny, n.y); v8fStore(nz, n.z);
+        lights = 0;
+        for (int l = 0; l < 8; ++l) {
+            const float p[3] = {wx[l], wy[l], wz[l]}, nn[3] = {nx[l], ny[l], nz[l]};
+            uint32_t px, py, base = 0, listed = 0;
+            artfSampledPixel(frame, p, &px, &py);
+            if (f->extraCount && f->clusterLights) {
+                const uint32_t tilesX = ((uint32_t)frame->fog[3] + ARTF_LIGHT_TILE - 1) / ARTF_LIGHT_TILE;
+                const float e[3] = {p[0] - frame->cameraPos[0], p[1] - frame->cameraPos[1], p[2] - frame->cameraPos[2]};
+                const float along = (e[0] * frame->eye[2][0] + e[1] * frame->eye[2][1]) + e[2] * frame->eye[2][2];
+                const float deep = log2f(artfMaxf(along, 1e-30f)) * frame->slices[0] + frame->slices[1];
+                const uint32_t slice = (uint32_t)artfClampf(floorf(deep), 0.f, (float)(ARTF_LIGHT_SLICES - 1));
+                const uint32_t head = (((py / ARTF_LIGHT_TILE) * tilesX + px / ARTF_LIGHT_TILE) * ARTF_LIGHT_SLICES + slice) * 2;
+                base = f->clusterLights[head];
+                listed = f->clusterLights[head + 1];
+            }
+            const uint32_t count = frame->lightCount + listed, seed = artfSampledSeed(px, py, (uint32_t)frame->output[3]);
+            chosen[l] = UINT32_MAX;
+            chosenWeight[l] = 0;
+            float sum = 0, mine = 0;
+            for (uint32_t c = 0; count && c < ARTF_SAMPLED_DRAWS; ++c) {
+                const uint32_t j = artfSampledHash(seed + 2 * c + 1) % count;
+                const uint32_t code = j < frame->lightCount ? j : 0x80000000u | f->clusterLights[base + j - frame->lightCount];
+                const ArtfLightData* L = code & 0x80000000u ? &f->extra[code & 0x7FFFFFFFu] : &frame->lights[j];
+                const float weigh = artfSampledWeigh(L->position, L->radius, L->color, L->direction, L->spotCut, L->spotScale, p, nn);
+                sum += weigh;
+                const float r = (float)(artfSampledHash(seed + 2 * c + 2) >> 8) * (1.f / 16777216.f);
+                if (weigh > 0 && r * sum < weigh) {
+                    chosen[l] = code;
+                    mine = weigh;
+                }
+            }
+            if (chosen[l] == UINT32_MAX) continue;
+            chosenWeight[l] = (float)count * sum / ((float)ARTF_SAMPLED_DRAWS * mine);
+            if (chosen[l] & 0x80000000u) {
+                bool known = false;
+                for (uint32_t k = 0; k < extraTakenCount; ++k) known = known || extraTaken[k] == (chosen[l] & 0x7FFFFFFFu);
+                if (!known) extraTaken[extraTakenCount++] = chosen[l] & 0x7FFFFFFFu;
+            } else lights |= 1u << chosen[l];
+        }
+    }
+#define SAMPLED_WEIGHT(code) sampledWeight(chosen, chosenWeight, code)
     for (uint32_t i = 0; lights >> i; ++i) {
         if (!(lights >> i & 1)) continue;
         const ArtfLightData* L = &frame->lights[i];
@@ -1431,6 +1489,7 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
+        if (sampled) spot = v8fMul(spot, SAMPLED_WEIGHT(i));
         const V8F cone = spot;
         if (frame->tracedCasts >> i & 1) spot = v8fMul(spot, tracedLanes(f, (int)i, world, n, v8fMul(fade, spot), drawn));
         else if (f->shadows && f->shadows->frame->lights[i][0]) spot = v8fMul(spot, shadowLanes(f, (int)i, world, n));
@@ -1445,8 +1504,9 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         if (coated) addExtras(extras, n, view, toLight, v8fMul(v8fMul(fade, fade), spot), v8fMul(v8fMul(fade, fade), cone), through, L->color);
     }
     /* those past them that reach this tile: the same light; the first few with a shadow of their own */
-    for (uint32_t k = 0; extra && k < extra[0]; ++k) {
-        const uint32_t index = extra[1 + k];
+    const uint32_t extraVisits = sampled ? extraTakenCount : extra ? extra[0] : 0;
+    for (uint32_t k = 0; k < extraVisits; ++k) {
+        const uint32_t index = sampled ? extraTaken[k] : extra[1 + k];
         const ArtfLightData* L = &f->extra[index];
         Lanes3 d = {v8fSub(v8fSet(L->position[0]), world.x), v8fSub(v8fSet(L->position[1]), world.y), v8fSub(v8fSet(L->position[2]), world.z)};
         V8F d2 = dot3(d, d);
@@ -1458,6 +1518,7 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
+        if (sampled) spot = v8fMul(spot, SAMPLED_WEIGHT(0x80000000u | index));
         if ((float)index < frame->more[2]) spot = v8fMul(spot, tracedLanesAt(f, L->position, world, n, v8fMul(fade, spot), drawn));
         else if (f->shadows && index < ARTF_SHADOW_EXTRA && f->shadows->frame->extra[index][0]) spot = v8fMul(spot, shadowLanesExtra(f, index, L->position, world, n));
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
