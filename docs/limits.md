@@ -115,12 +115,12 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   pixel and light, 13 with temporal antialiasing (gathered over frames, so they settle in a few); their penumbra is at most 12 texels wide, and lights past the sixteen and fog that light goes
   through keep sharp ones.
 - Past glTF's core: what sheen takes from all around is a fit by eye to Charlie's lobe, not its integral, and nothing
-  makes up for the light sheen takes from under it. The coat's normal map has a scale of 1. Of
-  `KHR_materials_specular`, `_iridescence`, `_anisotropy` and `_volume`, the factors are read and the textures left out
-  (and logged): a film is as thick as its maximum, and drawn out highlights go one way over the whole material. A thin
-  film is two beams at three wavelengths, seen along the normal, not Belcour and Barla's model; what comes from all
-  around is reflected as if the surface were not drawn out. `specularColor` tints what a dielectric reflects head on,
-  not at grazing angles.
+  makes up for the light sheen takes from under it. The coat's normal map has a scale of 1. `KHR_materials_volume`'s
+  thickness texture is left out (the distance inside is traced). A thin film is Belcour and Barla's, as glTF's
+  reference shader has it, standing for what the surface reflects head on, with Schlick's toward grazing after it: head
+  on the same as the reference, which mixes the film after Schlick's; a little brighter toward grazing. What comes from
+  all around is reflected as if the surface were not drawn out. `specularColor` tints what a dielectric reflects head
+  on, not at grazing angles.
 - Light under the surface is a cheap model when drawing: light wraps half a radian past where the surface turns from
   it, and comes through from behind as much as what it went through leaves, by the depth in the light's shadow map;
   so only the sun and the sixteen lights with shadows bring light through, and from what is first in their way, not

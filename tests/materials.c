@@ -1101,3 +1101,23 @@ void testHighlightFlicker(void) {
     CHECK(mean[1] > truth * .6 && mean[1] < truth * 1.2);
     artfSceneFree(s);
 }
+
+/* A thin film (KHR_materials_iridescence) is Belcour and Barla's, as glTF's reference shader has it: its colors at an
+ * index of 1.3, head on and toward grazing, over a dielectric and over a colored metal, are the reference's (the same
+ * formula in doubles) to 1e-5. */
+void testFilmBelcour(void) {
+    static const struct { float base[3], cosine, thickness, want[3]; } cases[3] = {
+        {{.04f, .04f, .04f}, 1.f, 300.f, {.024653f, .004652f, .021335f}},
+        {{.9f, .6f, .3f}, .6f, 550.f, {.901340f, .600838f, .117934f}},
+        {{.9f, .6f, .3f}, .2f, 300.f, {1.010293f, .800436f, .608388f}},
+    };
+    for (int k = 0; k < 3; ++k) {
+        float f0[3] = {cases[k].base[0], cases[k].base[1], cases[k].base[2]};
+        artfIridescence(f0, cases[k].cosine, 1.f, 1.3f, cases[k].thickness);
+        for (int c = 0; c < 3; ++c) CHECK(fabsf(f0[c] - cases[k].want[c]) < 1e-5f);
+    }
+    /* (none of it, and no film: as it was) */
+    float f0[3] = {.5f, .4f, .3f};
+    artfIridescence(f0, .7f, 0.f, 1.3f, 400.f);
+    CHECK(f0[0] == .5f && f0[1] == .4f && f0[2] == .3f);
+}

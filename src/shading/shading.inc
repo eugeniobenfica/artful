@@ -252,24 +252,80 @@ S_DEF S_F S_FN(Charlie)(S_SELF S_F ndh, S_F ndl, S_F ndv, S_F inverse) {
     return S_DIV(d, S_ADD(S_MUL(S_C(4.f), S_SUB(S_ADD(ndl, ndv), S_MUL(ndl, ndv))), S_C(1e-4f)));
 }
 
-/* What a thin film makes of what a surface reflects head on, seen at cosine (n . v): two beams, off its top and its
- * bottom, at red, green and blue's wavelengths, as much as amount says (KHR_materials_iridescence). */
-S_DEF S_F S_FN(FilmChannel)(S_SELF S_F was, S_F r12, S_F ior, S_F phase, S_F amount) {
-    const S_F root = S_SQRT(S_CLAMP(was, S_C(0.f), S_C(.99f))), under = S_DIV(S_ADD(S_C(1.f), root), S_SUB(S_C(1.f), root));
-    const S_F r23 = S_DIV(S_SUB(ior, under), S_ADD(ior, under));
-    const S_F twice = S_MUL(S_MUL(S_MUL(S_C(2.f), r12), r23), S_COS(phase));
-    const S_F both = S_DIV(S_ADD(S_ADD(S_MUL(r12, r12), S_MUL(r23, r23)), twice), S_ADD(S_ADD(S_C(1.f), S_MUL(S_MUL(S_MUL(r12, r12), r23), r23)), twice));
-    return S_ADD(was, S_MUL(S_SUB(both, was), amount));
+/* What a thin film makes of what a surface reflects head on, seen at cosine (n . v), as much as amount says
+ * (KHR_materials_iridescence): Belcour and Barla's (2017), as glTF's reference has it. Fresnel at the film's top (from
+ * air) and at its bottom (into what is under it, whose index is its f0's), each with the half turn it takes where the
+ * index falls; the light that goes back and forth in it, as a sum whose first terms are exact (the mean, and two
+ * orders), each order's colors the eye's response (CIE XYZ, fitted by Gaussians in Fourier space) to its path's
+ * difference, taken to sRGB. Thickness in nanometres. */
+S_DEF S_F S_FN(FilmSchlick)(S_SELF S_F f0, S_F cosine) {
+    const S_F m = S_CLAMP(S_SUB(S_C(1.f), cosine), S_C(0.f), S_C(1.f)), m2 = S_MUL(m, m);
+    return S_ADD(f0, S_MUL(S_SUB(S_C(1.f), f0), S_MUL(S_MUL(m2, m2), m)));
+}
+S_DEF S_F S_FN(FilmF0)(S_SELF S_F into, S_F from) {
+    const S_F q = S_DIV(S_SUB(into, from), S_ADD(into, from));
+    return S_MUL(q, q);
+}
+/* one Gaussian of the response, a its amplitude (over the fit's 1.0685e-7), at a path's phase, shifted */
+S_DEF S_F S_FN(FilmGauss)(S_SELF float a, float position, float variance, S_F phase, S_F shift) {
+    const S_F fall = S_EXP2(S_MUL(S_MUL(S_MUL(phase, phase), S_C(variance)), S_C(-1.44269504f)));
+    return S_MUL(S_MUL(S_C(a), S_COS(S_ADD(S_MUL(S_C(position), phase), shift))), fall);
+}
+/* (the response to a path's difference of opd nanometres, each color shifted: in sRGB) */
+S_DEF S_V3 S_FN(FilmResponse)(S_SELF S_F opd, S_F shiftR, S_F shiftG, S_F shiftB) {
+    const S_F phase = S_MUL(opd, S_C(6.28318531e-9f));
+    const S_F x = S_ADD(S_FN(FilmGauss)(S_PASS .84659f, 1.6810e+06f, 4.3278e+09f, phase, shiftR), S_FN(FilmGauss)(S_PASS .15386831f, 2.2399e+06f, 4.5282e+09f, phase, shiftR));
+    const S_F y = S_FN(FilmGauss)(S_PASS 1.0002219f, 1.7953e+06f, 9.3046e+09f, phase, shiftG);
+    const S_F z = S_FN(FilmGauss)(S_PASS 1.0011225f, 2.2084e+06f, 6.6121e+09f, phase, shiftB);
+    return S_V3_OF(S_ADD(S_ADD(S_MUL(S_C(3.2404542f), x), S_MUL(S_C(-1.5371385f), y)), S_MUL(S_C(-.4985314f), z)),
+                   S_ADD(S_ADD(S_MUL(S_C(-.9692660f), x), S_MUL(S_C(1.8760108f), y)), S_MUL(S_C(.0415560f), z)),
+                   S_ADD(S_ADD(S_MUL(S_C(.0556434f), x), S_MUL(S_C(-.2040259f), y)), S_MUL(S_C(1.0572252f), z)));
+}
+/* (one channel's: what the bottom reflects, its half turn, from what the surface reflects head on; and its sum, but for
+ * the orders) */
+S_DEF S_F S_FN(FilmBottom)(S_SELF S_F f0, S_F ior, S_F cosine2, S_F* turn) {
+    const S_F root = S_SQRT(S_CLAMP(f0, S_C(0.f), S_C(.9999f))), under = S_DIV(S_ADD(S_C(1.f), root), S_SUB(S_C(1.f), root));
+    *turn = S_SELECT(S_GT(ior, under), S_C(3.14159265f), S_C(0.f));
+    return S_FN(FilmSchlick)(S_PASS S_FN(FilmF0)(S_PASS under, ior), cosine2);
 }
 S_DEF S_V3 S_FN(Iridescence)(S_SELF S_V3 f0, S_F cosine, S_F amount, S_F ior, S_F thickness) {
-    const S_F sin2 = S_DIV(S_SUB(S_C(1.f), S_MUL(cosine, cosine)), S_MUL(ior, ior)), inside = S_SQRT(S_MAX(S_SUB(S_C(1.f), sin2), S_C(0.f)));
-    const S_F r12 = S_DIV(S_SUB(S_C(1.f), ior), S_ADD(S_C(1.f), ior));
-    /* (the path's difference, over a wavelength: 4 pi ior thickness cos inside / lambda) */
-    const S_F phase = S_MUL(S_MUL(S_MUL(S_C(12.5663706f), ior), thickness), inside);
-    const S_F r = S_FN(FilmChannel)(S_PASS S_X(f0), r12, ior, S_MUL(phase, S_C(1.f / 650.f)), amount);
-    const S_F g = S_FN(FilmChannel)(S_PASS S_Y(f0), r12, ior, S_MUL(phase, S_C(1.f / 510.f)), amount);
-    const S_F b = S_FN(FilmChannel)(S_PASS S_Z(f0), r12, ior, S_MUL(phase, S_C(1.f / 475.f)), amount);
-    return S_V3_OF(r, g, b);
+    /* (no film, no index of its own: from 0 to .03 nm, smoothly) */
+    const S_F t = S_CLAMP(S_DIV(thickness, S_C(.03f)), S_C(0.f), S_C(1.f));
+    const S_F film = S_ADD(S_C(1.f), S_MUL(S_SUB(ior, S_C(1.f)), S_MUL(S_MUL(t, t), S_SUB(S_C(3.f), S_MUL(S_C(2.f), t)))));
+    const S_F sin2 = S_MUL(S_DIV(S_C(1.f), S_MUL(film, film)), S_SUB(S_C(1.f), S_MUL(cosine, cosine)));
+    const S_F cos2Sq = S_SUB(S_C(1.f), sin2), cosine2 = S_SQRT(S_MAX(cos2Sq, S_C(0.f)));
+    /* the top: from air */
+    const S_F r12 = S_FN(FilmSchlick)(S_PASS S_FN(FilmF0)(S_PASS film, S_C(1.f)), cosine), t121 = S_SUB(S_C(1.f), r12);
+    const S_F phi21 = S_SELECT(S_GT(S_C(1.f), film), S_C(0.f), S_C(3.14159265f));
+    S_F turnR, turnG, turnB;
+    const S_F r23[3] = {S_FN(FilmBottom)(S_PASS S_X(f0), film, cosine2, &turnR), S_FN(FilmBottom)(S_PASS S_Y(f0), film, cosine2, &turnG), S_FN(FilmBottom)(S_PASS S_Z(f0), film, cosine2, &turnB)};
+    const S_F shift[3] = {S_ADD(phi21, turnR), S_ADD(phi21, turnG), S_ADD(phi21, turnB)};
+    const S_F opd = S_MUL(S_MUL(S_MUL(S_C(2.f), film), thickness), cosine2);
+    S_F sum[3], order[3], root[3];
+    for (int c = 0; c < 3; ++c) {
+        const S_F r123 = S_CLAMP(S_MUL(r12, r23[c]), S_C(1e-5f), S_C(.9999f));
+        root[c] = S_SQRT(r123);
+        const S_F rs = S_DIV(S_MUL(S_MUL(t121, t121), r23[c]), S_SUB(S_C(1.f), r123));
+        sum[c] = S_ADD(r12, rs);
+        order[c] = S_SUB(rs, t121);
+    }
+    for (int m = 1; m <= 2; ++m) {
+        const S_V3 response = S_FN(FilmResponse)(S_PASS S_MUL(S_C((float)m), opd), S_MUL(S_C((float)m), shift[0]), S_MUL(S_C((float)m), shift[1]), S_MUL(S_C((float)m), shift[2]));
+        const S_F each[3] = {S_X(response), S_Y(response), S_Z(response)};
+        for (int c = 0; c < 3; ++c) {
+            order[c] = S_MUL(order[c], root[c]);
+            sum[c] = S_ADD(sum[c], S_MUL(order[c], S_MUL(S_C(2.f), each[c])));
+        }
+    }
+    /* (past the critical angle, all; and what is out of sRGB's gamut, cut at 0) */
+    const S_F all = S_SELECT(S_GT(S_C(0.f), cos2Sq), S_C(1.f), S_C(0.f));
+    const S_F was[3] = {S_X(f0), S_Y(f0), S_Z(f0)};
+    S_F out[3];
+    for (int c = 0; c < 3; ++c) {
+        const S_F i = S_ADD(S_MUL(S_MAX(sum[c], S_C(0.f)), S_SUB(S_C(1.f), all)), all);
+        out[c] = S_ADD(was[c], S_MUL(S_SUB(i, was[c]), amount));
+    }
+    return S_V3_OF(out[0], out[1], out[2]);
 }
 
 /* ---- light from a rectangle or a tube ----

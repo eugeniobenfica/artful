@@ -233,6 +233,7 @@ int main(int argc, char** argv) {
     RUN("materials/moreMaterials", testMoreMaterials());
     RUN("materials/specularMaps", testSpecularMaps());
     RUN("materials/filmMaps", testFilmMaps());
+    RUN("materials/filmBelcour", testFilmBelcour());
     RUN("materials/textureRoles", testTextureRoles());
     RUN("materials/highlightFlicker", testHighlightFlicker());
     RUN("files/gltfMore", testGltfMore());

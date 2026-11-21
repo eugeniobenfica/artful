@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A thin film is Belcour and Barla's** (KHR_materials_iridescence, phase 5.12): Fresnel at both of its faces with
+  their phase shifts, and its colors as the eye's response to each order of the light that goes back and forth in it,
+  as glTF's reference shader has it (to 2e-6), on both backends, drawn and traced. It was two beams at three
+  wavelengths.
+
 - **Clouds in the scene** (phase 5.11): with aerial perspective and a frame in floats, the sky's clouds are in front of
   what is drawn too, on both backends alike: followed along a ray every 4 x 4 pixels, as far as what is drawn there, and
   each pixel takes what is in front of it, so a tower goes up through them. 0.6 ms a frame at 1080p on the GPU.
