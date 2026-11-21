@@ -6,15 +6,17 @@ números e decisões ficam nas seções "Estado" do plano e no [CHANGELOG](../CH
 Duas listas: o que dá para fazer com o que esta máquina e a CI já têm, e o que depende de hardware, de um sistema ou de
 uma ferramenta que não está aqui. Legenda: `[~]` em parte (o que falta vem ao lado) · `[ ]` não iniciado.
 
-Branch: `unreal-parity`. Última CI conferida: run 44945833108 (21/11/2026): Windows, Android e macOS passam, com o Metal
-rodando no macOS; os fuzzers passam. O Linux caía no lavapipe do runner (abaixo).
+Branch: `unreal-parity`. Última CI conferida: run 44948960739 (21/11/2026): Windows, Android e macOS passam, com o Metal
+rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lavapipe do runner (abaixo).
 
 ## Dá para fazer aqui
 
 ### CI
-- [ ] Linux: conferir no runner se `layers/layersTransmittance` e `layersBehindSolid` (camadas na GPU, da 5.8) ainda
-  caem no lavapipe dele; o lavapipe do MSYS2 roda os dois limpos, também sob validação. A causa dos outros 18 que a CI
-  pulava foi achada e corrigida (ray queries lendo a interseção committed sem acerto), e a CI não pula mais nada
+- [ ] Linux: `layers/layersBehindSolid` e `layersTransmittance` (camadas na GPU, da 5.8) caem no lavapipe do runner
+  (Mesa 26.0.8, LLVM 21, 256 bits) e não no do MSYS2 (Mesa 26.2.6), nem com a validação de sincronização da CI, nem
+  sem post-depth coverage (`ARTFUL_NO_POST_DEPTH`). Próximo passo: um passo da CI que, quando os testes falham, rode
+  esses dois sob o gdb e mostre o backtrace e as extensões do lavapipe. Os outros 18 testes que a CI pulava passam lá
+  agora (run 44948960739), com a causa corrigida (ray queries lendo a interseção committed sem acerto)
 
 ### Fase 5 — Alcance de conteúdo
 - [~] 5.7 Gradientes da A-SVGF (CPU, no stash "A-SVGF temporal gradients") — ainda quebram com objetos em movimento e
