@@ -69,6 +69,8 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* options);
 extern int artfVulkanSubmitsLeft;
 /* For tests: whether the renderer asks the driver what lost its device (VK_EXT_device_fault), and what it said. */
 bool artfVulkanFaultReports(const ArtfRenderer* r);
+/* Whether it reads textures by constant indices only (no non-uniform indexing, or ARTFUL_UNIFORM_TEXTURES). */
+bool artfVulkanUniformTextures(const ArtfRenderer* r);
 extern bool artfVulkanRefuseSwapchain;
 /* For tests: with preRotate and no surface, the turn the frame is made with (0 to 3: 0, 90, 180, 270 degrees
  * clockwise), as a turned screen's swapchain would ask; artfRendererReadPixels then gives the image as it is. */

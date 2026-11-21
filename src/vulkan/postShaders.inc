@@ -482,11 +482,10 @@ POST_FINISH()
 uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware) {
     Spv b, *s = &b;
     spvInit(s);
-    spvCapability(s, 5301); /* ShaderNonUniform */
-    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    maxTextures = textureCapabilities(s, maxTextures);
     spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (hardware) spvCapability(s, 4472 /* RayQueryKHR */);
-    spvExtension(s, "SPV_EXT_descriptor_indexing");
+    if (!s->uniformTextures) spvExtension(s, "SPV_EXT_descriptor_indexing");
     Post post, *p = &post;
     postDeclare(s, p);
     SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);

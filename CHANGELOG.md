@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Vulkan without non-uniform texture indexing** (phase 6.3): a device without it draws on the GPU instead of the
+  CPU. Each sample reaches its texture down a tree of ifs by constant indices (64 textures at most); the whole suite
+  passes so (`ARTFUL_UNIFORM_TEXTURES` forces it), and 40 textures draw as with it.
+
 - **Light under the surface spreads across it** (phase 5.12): with a frame in floats, a material's diffuse light and
   what went under it are spread across the screen as far as its subsurfaceRadius, separably (Jimenez et al.), by a
   profile of two Gaussians (not Burley's, which is patented), between pixels at about the same distance: a sharp

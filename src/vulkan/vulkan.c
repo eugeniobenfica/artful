@@ -826,7 +826,7 @@ void retiredFree(Vulkan* v, bool all) {
 /* The scene's pixel shader's code: with shadows from rays, what they meet may be of the program's own materials. */
 uint32_t* sceneFragmentCode(const Vulkan* v, bool cutout, const ArtfGraphData* graphs, uint32_t count, uint32_t variant, size_t* size) {
     if (!cutout && !(variant & ARTF_SHADER_TRACED)) graphs = NULL, count = 0;
-    return artfShaderSceneFragment(size, v->maxTextures, cutout, graphs, count, 0, variant);
+    return artfShaderSceneFragment(size, textureArg(v), cutout, graphs, count, 0, variant);
 }
 
 /* The overdraw view's: each triangle adds its step wherever it is, whatever is in front (artfShaderOverdraw). */
@@ -995,9 +995,9 @@ bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uint32_t c
     VkShaderModule fragment = 0, whole = 0, resolving = 0, gridding = 0;
     if (list) {
         const int lists = v->samples | (v->depthCoverage ? ARTF_LISTS_POST_DEPTH : 0);
-        code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, lists, variant & ~(uint32_t)ARTF_SHADER_FLOATS);
+        code = artfShaderSceneFragment(&size, textureArg(v), true, graphs, count, lists, variant & ~(uint32_t)ARTF_SHADER_FLOATS);
         fragment = shaderModule(v, code, size);
-        code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, lists | ARTF_LISTS_GRID, variant & ~(uint32_t)ARTF_SHADER_FLOATS);
+        code = artfShaderSceneFragment(&size, textureArg(v), true, graphs, count, lists | ARTF_LISTS_GRID, variant & ~(uint32_t)ARTF_SHADER_FLOATS);
         gridding = shaderModule(v, code, size);
     }
     if (resolve) {
@@ -1227,8 +1227,8 @@ void computeJobRun(void* user) {
     ComputeJob* j = user;
     Vulkan* v = j->v;
     size_t size;
-    uint32_t* code = j->kind == MAKE_TRACE ? artfShaderTrace(&size, v->maxTextures, j->graphs, j->key.graphCount, j->key.guides, j->key.hardware, j->key.more)
-                                           : artfShaderPostReflectionTraced(&size, v->maxTextures, j->graphs, j->key.graphCount, j->key.hardware);
+    uint32_t* code = j->kind == MAKE_TRACE ? artfShaderTrace(&size, textureArg(v), j->graphs, j->key.graphCount, j->key.guides, j->key.hardware, j->key.more)
+                                           : artfShaderPostReflectionTraced(&size, textureArg(v), j->graphs, j->key.graphCount, j->key.hardware);
     j->ok = computePipelineCreate(v, code, size, &j->made);
     if (j->ok && j->denoise) {
         code = artfShaderDenoiseLight(&size);
@@ -1538,7 +1538,7 @@ bool pipelinesMake(Vulkan* v) {
     compute[7] = shaderModule(v, code, size);
     code = artfShaderSceneVertex(&size, v->floats);
     VkShaderModule sceneVertex = shaderModule(v, code, size);
-    code = artfShaderSceneFragment(&size, v->maxTextures, false, NULL, 0, 0, shaderVariant(v));
+    code = artfShaderSceneFragment(&size, textureArg(v), false, NULL, 0, 0, shaderVariant(v));
     VkShaderModule sceneFragment = shaderModule(v, code, size);
     code = artfShaderOverlayVertex(&size);
     VkShaderModule overlayVertex = shaderModule(v, code, size);
@@ -1553,7 +1553,7 @@ bool pipelinesMake(Vulkan* v) {
     VkShaderModule environmentFragment = shaderModule(v, code, size);
     code = artfShaderShadowVertex(&size);
     VkShaderModule shadowVertex = shaderModule(v, code, size);
-    code = artfShaderShadowFragment(&size, v->maxTextures);
+    code = artfShaderShadowFragment(&size, textureArg(v));
     VkShaderModule shadowFragment = shaderModule(v, code, size);
     for (int i = 0; i < COMPUTE_SHADERS; ++i)
         if (!compute[i]) return false;
@@ -3126,7 +3126,7 @@ bool syncIndirect(Vulkan* v, Slot* s, ArtfScene* scene, const ArtfFrameData* fra
     }
     if (!v->probePipeline) {
         size_t size;
-        uint32_t* code = artfShaderProbes(&size, v->maxTextures, scene->graphs.items, (uint32_t)scene->graphs.len, hardware, more, walls, rays, keep);
+        uint32_t* code = artfShaderProbes(&size, textureArg(v), scene->graphs.items, (uint32_t)scene->graphs.len, hardware, more, walls, rays, keep);
         VkShaderModule module = shaderModule(v, code, size);
         if (!module) return false;
         const ComputePipelineCreateInfo info = {ST_COMPUTE_PIPELINE, NULL, 0, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_COMPUTE, module, "main", NULL}, v->pipelineLayout, 0, -1};
@@ -4379,8 +4379,8 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
                 rayQuery = query.rayQuery && as.accelerationStructure && more.rest[8] /* bufferDeviceAddress */;
             }
         }
-        if (!features.features.drawIndirectFirstInstance || !f12.shaderSampledImageArrayNonUniformIndexing) {
-            artfLog("artful: %s lacks drawIndirectFirstInstance or non-uniform texture indexing", props.deviceName);
+        if (!features.features.drawIndirectFirstInstance) {
+            artfLog("artful: %s lacks drawIndirectFirstInstance", props.deviceName);
             continue;
         }
 
@@ -4418,6 +4418,11 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             /* (a few samplers stay for the overlay, the depth buffer and what the driver keeps) */
             const uint32_t samplers = props.maxPerStageDescriptorSamplers > 8 ? props.maxPerStageDescriptorSamplers - 8 : 1;
             v->maxTextures = samplers < MAX_TEXTURES ? samplers : MAX_TEXTURES;
+            /* without non-uniform indexing (or with ARTFUL_UNIFORM_TEXTURES, as a device without, for tests): textures by
+             * constant indices, down a tree of ifs, and fewer of them (ARTF_TEXTURES_UNIFORM) */
+            v->uniformTextures = !f12.shaderSampledImageArrayNonUniformIndexing || getenv("ARTFUL_UNIFORM_TEXTURES");
+            if (v->uniformTextures && v->maxTextures > UNIFORM_TEXTURES) v->maxTextures = UNIFORM_TEXTURES;
+            if (v->uniformTextures) artfLog("artful: %s: textures by constant indices (no non-uniform indexing), %u at most", props.deviceName, v->maxTextures);
             *chosen = props;
         }
     }
@@ -4508,6 +4513,7 @@ void lose(Vulkan* v, VkResult result) {
 }
 
 bool artfVulkanFaultReports(const ArtfRenderer* r) { return r && r->backend == ARTF_BACKEND_VULKAN && ((const Vulkan*)r)->deviceFault; }
+bool artfVulkanUniformTextures(const ArtfRenderer* r) { return r && r->backend == ARTF_BACKEND_VULKAN && ((const Vulkan*)r)->uniformTextures; }
 
 bool createDevice(Vulkan* v) {
     const float priority = 1.f;
@@ -4515,7 +4521,7 @@ bool createDevice(Vulkan* v) {
     Vulkan12Features f12;
     memset(&f12, 0, sizeof f12);
     f12.sType = ST_VULKAN12_FEATURES;
-    f12.shaderSampledImageArrayNonUniformIndexing = 1;
+    f12.shaderSampledImageArrayNonUniformIndexing = !v->uniformTextures;
     f12.drawIndirectCount = v->drawCounted;
     PhysicalDeviceFeatures2 features;
     memset(&features, 0, sizeof features);

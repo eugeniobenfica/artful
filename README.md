@@ -383,8 +383,8 @@ Adreno GPU (Android).<br>
 the tests on Linux (on a software Vulkan, under validation and sanitizers), macOS (on the CPU) and MSVC; none of
 them has opened a window. iOS is written, not built. **Metal has never been run**, is built only with `-DARTFUL_METAL=ON`, and lacks most of what came after 0.4 ([limits](docs/limits.md)), so it is chosen only by name.
 
-Vulkan needs version 1.2, `drawIndirectFirstInstance` and non-uniform texture indexing; a device
-without them draws on the CPU, which needs only a C compiler.
+Vulkan needs version 1.2 and `drawIndirectFirstInstance`; a device without them draws on the CPU, which needs only a
+C compiler. Without non-uniform texture indexing, the shaders reach each texture by a constant index (64 at most).
 
 <details>
 <summary><b>Measured</b></summary>

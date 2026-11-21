@@ -36,6 +36,10 @@ enum { ARTF_SHADER_FLOATS = 1, ARTF_SHADER_PROBES = 2, ARTF_SHADER_WALLS = 4 /* 
 
        ARTF_SHADER_TRACED = 256 /* shadows from rays, through the trees */, ARTF_SHADER_RAY_QUERY = 512 /* and those through the ray tracing hardware */,
        ARTF_SHADER_SHAPES = 1024 /* lights with a shape or a profile */ };
+/* With maxTextures, where it is passed: the texture array only by a constant index, for GPUs without non-uniform
+ * indexing (shaderSampledImageArrayNonUniformIndexing): each sample goes down a tree of ifs to its texture, with the
+ * coordinates' slopes taken before. */
+#define ARTF_TEXTURES_UNIFORM 0x80000000u
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant);
 /* The overdraw view: a step of a count, added up (as artfViewHeat's); what is a back that is not to show is left. */
 uint32_t* artfShaderOverdraw(size_t* size, bool hdr);

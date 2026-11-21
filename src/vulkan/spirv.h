@@ -22,6 +22,9 @@ typedef struct Spv {
     SpvId block;          /* the label of the block being written */
     const char *file, *function; /* where in C it is built (spvInit), for the debugging information */
     int line;
+    /* textures of the array only by a constant index (ARTF_TEXTURES_UNIFORM), for GPUs that cannot index it by a value
+     * that differs between pixels: how many it has; 0, by any index */
+    uint32_t uniformTextures;
 } Spv;
 
 enum {
@@ -94,6 +97,7 @@ void spvStore(Spv* s, SpvId pointer, SpvId value);
 SpvId spvAtomicAdd(Spv* s, SpvId pointer, SpvId value);
 SpvId spvImageSample(Spv* s, SpvId sampledImage, SpvId uv);
 SpvId spvImageSampleLod(Spv* s, SpvId sampledImage, SpvId uv, SpvId lod); /* outside fragment shaders */
+SpvId spvImageSampleGrad(Spv* s, SpvId sampledImage, SpvId uv, SpvId dx, SpvId dy); /* by the coordinates' slopes */
 SpvId spvImageFetchAs(Spv* s, SpvId resultType, SpvId imageType, SpvId sampledImage, SpvId coords); /* level 0, of any type */
 SpvId spvTypeSampledImage2DOf(Spv* s, SpvId sampledType, SpvId* imageType); /* of uints, say */
 SpvId spvTypeVector(Spv* s, SpvId element, uint32_t count);
@@ -103,6 +107,8 @@ SpvId spvImageFetchSample(Spv* s, SpvId imageType, SpvId sampledImage, SpvId coo
 void spvBranch(Spv* s, SpvId label);
 void spvIfBegin(Spv* s, SpvId condition, SpvId* merge); /* an if with no else; ends at spvIfEnd */
 void spvIfEnd(Spv* s, SpvId merge);
+/* an if with an else: yes, then no (spvLabel), each to merge; the merge's phi takes each side's last block */
+void spvIfElseBegin(Spv* s, SpvId condition, SpvId* no, SpvId* merge);
 /* A value that is a where the block `from` led here, and b where `other` did: what an if computed, or what was before. */
 SpvId spvPhi(Spv* s, SpvId type, SpvId a, SpvId from, SpvId b, SpvId other);
 void spvKillIf(Spv* s, SpvId condition); /* a fragment shader leaves this pixel */

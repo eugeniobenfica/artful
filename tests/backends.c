@@ -87,6 +87,59 @@ void testVulkan(void) {
 
 /* (Without Vulkan, what follows has nothing to run on: its switches are Vulkan's, and the tests are empty.) */
 #ifdef ARTFUL_VULKAN
+/* A GPU without non-uniform texture indexing (ARTFUL_UNIFORM_TEXTURES, as one): forty textured cubes, each its own
+ * texture, a stripe of a color of its own, beside the plain GPU's and the CPU's. The plan's 6.3. */
+void testUniformTextures(void) {
+    ArtfScene* s = artfSceneNew();
+    static uint32_t px[40][16 * 16];
+    for (int k = 0; k < 40; ++k) {
+        const uint32_t color = 0xFF000000u | (uint32_t)(k * 53 % 256) << 16 | (uint32_t)(k * 97 % 256) << 8 | (uint32_t)(255 - k * 6);
+        for (int i = 0; i < 16 * 16; ++i) px[k][i] = (i / 16 + i % 16) % 4 < 2 ? color : 0xFF202020u;
+        ArtfMaterialDesc d = {artfVec3(1, 1, 1), artfSceneAddTexture(s, px[k], 16, 16, 0), 0, .6f, artfVec3(0, 0, 0)};
+        addAt(s, artfSceneAddCube(s, .8f), artfSceneAddMaterial(s, &d), (float)(k % 8) - 3.5f, (float)(k / 8) - 2.f, 0, 1);
+    }
+    artfSceneAddLight(s, artfVec3(0, 2, 6), artfVec3(1, 1, 1), 40.f);
+    setCamera(s, 0, 0, 9, 0, 0, 0);
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* plain = artfRendererNew(&o);
+    if (!plain) { artfSceneFree(s); return; }
+#ifdef _WIN32
+    _putenv("ARTFUL_UNIFORM_TEXTURES=1");
+#else
+    setenv("ARTFUL_UNIFORM_TEXTURES", "1", 1);
+#endif
+    ArtfRenderer* uniform = artfRendererNew(&o);
+#ifdef _WIN32
+    _putenv("ARTFUL_UNIFORM_TEXTURES=");
+#else
+    unsetenv("ARTFUL_UNIFORM_TEXTURES");
+#endif
+    o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    CHECK(uniform && artfVulkanUniformTextures(uniform) && !artfVulkanUniformTextures(plain));
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    uint32_t* c = artfMalloc((size_t)W * H * 4);
+    drawSamples(plain, s, 2, a);
+    drawSamples(uniform, s, 2, b);
+    drawSamples(cpu, s, 1, c);
+    const double apart = differentShare(a, b, 2), fromCpu = differentShare(b, c, 24);
+    printf("without non-uniform indexing, pixels that differ by more than 2 of 255 from with it: %.3f%%; from the CPU (24): %.2f%%\n", apart * 100, fromCpu * 100);
+    CHECK(apart < .001);
+    CHECK(fromCpu < .02);
+    /* (and colored: the textures were read, not left white) */
+    int colored = 0;
+    for (int i = 0; i < W * H; ++i) colored += abs(CHANNEL(b[i], 16) - CHANNEL(b[i], 0)) > 40;
+    CHECK(colored > W * H / 20);
+    artfFree(a);
+    artfFree(b);
+    artfFree(c);
+    artfRendererFree(plain);
+    artfRendererFree(uniform);
+    artfRendererFree(cpu);
+    artfSceneFree(s);
+}
+
 /* A device lost in the middle of it all: false, and false after that; the renderer can be freed; and the scene
  * goes to a new one, which draws what the first did. */
 /* What events say: each kind, how many, and what of the last. */
@@ -515,6 +568,7 @@ void testPipelinesAhead(void) {
 }
 #else
 void testLostDevice(void) { missing("vulkan"); }
+void testUniformTextures(void) { missing("vulkan"); }
 void testTextureMemory(void) { missing("vulkan"); }
 void testRefusedSwapchain(void) { missing("vulkan"); }
 void testShadersAhead(void) { missing("vulkan"); }

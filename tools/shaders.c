@@ -96,6 +96,12 @@ int main(int argc, char** argv) {
     SAVE("sceneFragmentFloats", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_WALLS | ARTF_SHADER_FROXELS));
     SAVE("sceneCutoutFloats", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_WALLS | ARTF_SHADER_FROXELS));
     SAVE("sceneFragmentCoat", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_COAT));
+    /* (without non-uniform indexing: textures down a tree, by constant indices) */
+    SAVE("sceneFragmentUniform", artfShaderSceneFragment(&size, 64 | ARTF_TEXTURES_UNIFORM, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_COAT));
+    SAVE("sceneCutoutUniform", artfShaderSceneFragment(&size, 64 | ARTF_TEXTURES_UNIFORM, true, NULL, 0, 0, 0));
+    SAVE("shadowFragmentUniform", artfShaderShadowFragment(&size, 64 | ARTF_TEXTURES_UNIFORM));
+    SAVE("traceMoreUniform", artfShaderTrace(&size, 64 | ARTF_TEXTURES_UNIFORM, NULL, 0, false, false, true));
+    SAVE("probesUniform", artfShaderProbes(&size, 64 | ARTF_TEXTURES_UNIFORM, NULL, 0, false, true, true, 64, .9f));
     SAVE("sceneFragmentSoft", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_COAT | ARTF_SHADER_SOFT));
     SAVE("sceneFragmentSoftPlain", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_SOFT));
     SAVE("sceneFragmentFloatsPlain", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS));

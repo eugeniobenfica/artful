@@ -81,7 +81,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 ## Fase 6 — Alcance de plataforma
 - [ ] 6.1 Metal executado 📱 (depende de 4.1 passo 4 provado)
 - [ ] 6.2 WebGPU (emissor WGSL e backend)
-- [ ] 6.3 Caminho sem descriptor indexing
+- [x] 6.3 Caminho sem descriptor indexing — árvore de ifs por índice constante, gradientes tomados antes; nenhuma funcionalidade pedida; até 64 texturas; suíte inteira passa forçada (`ARTFUL_UNIFORM_TEXTURES`); 40 texturas iguais ao caminho normal (0,000%)
 
 ## Ferramentas de verificação montadas nesta máquina
 - Validação Vulkan: camada do MSYS2 (`VK_ADD_LAYER_PATH=C:\msys64\ucrt64\bin`); a sincronização liga com

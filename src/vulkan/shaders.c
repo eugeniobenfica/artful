@@ -1396,9 +1396,49 @@ static void addExtras(Spv* s, const Coating* c, SpvId n, SpvId view, SpvId toLig
     spvStore(s, c->under, ADD_V3(spvLoad(s, s->vec3, c->under), SCALE_V3(color, lit)));
 }
 
+/* The texture array's capabilities: non-uniform indexing, or (ARTF_TEXTURES_UNIFORM) none, by constant indices
+ * (s->uniformTextures); how many textures it has. */
+static uint32_t textureCapabilities(Spv* s, uint32_t maxTextures) {
+    if (maxTextures & ARTF_TEXTURES_UNIFORM) {
+        s->uniformTextures = maxTextures & ~ARTF_TEXTURES_UNIFORM;
+        return s->uniformTextures;
+    }
+    spvCapability(s, 5301); /* ShaderNonUniform */
+    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    return maxTextures;
+}
+
+/* Without non-uniform indexing (s->uniformTextures): the texture index, down a tree of ifs (half the array at each),
+ * to a leaf with its constant index, which samples it (leaf) or what it says; the leaves' results come back by phis.
+ * Beyond the array: its last texture, which the host leaves white (as it does all beyond it). */
+typedef SpvId (*TextureLeaf)(Spv* s, SpvId image, const SpvId* with);
+static SpvId textureTree(Spv* s, SpvId textures, SpvId sampled, SpvId type, SpvId index, uint32_t lo, uint32_t hi, TextureLeaf leaf, const SpvId* with) {
+    if (hi - lo <= 1) {
+        SpvId k = spvConstUint(s, lo);
+        SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, sampled), textures, &k, 1);
+        return leaf(s, spvLoad(s, sampled, slot), with);
+    }
+    const uint32_t mid = lo + (hi - lo) / 2;
+    SpvId no, merge;
+    spvIfElseBegin(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, index, spvConstUint(s, mid)), &no, &merge);
+    SpvId a = textureTree(s, textures, sampled, type, index, lo, mid, leaf, with), fromA = s->block;
+    spvBranch(s, merge);
+    spvLabel(s, no);
+    SpvId b = textureTree(s, textures, sampled, type, index, mid, hi, leaf, with), fromB = s->block;
+    spvBranch(s, merge);
+    spvLabel(s, merge);
+    return spvPhi(s, type, a, fromA, b, fromB);
+}
+static SpvId leafLod(Spv* s, SpvId image, const SpvId* with) { return spvImageSampleLod(s, image, with[0], with[1]); }
+static SpvId leafGrad(Spv* s, SpvId image, const SpvId* with) { return spvImageSampleGrad(s, image, with[0], with[1], with[2]); }
+
 /* A texture of the array, by an index that differs from pixel to pixel. */
 /* As textureAt, from one mipmap. */
 static SpvId textureLodAt(Spv* s, SpvId textures, SpvId sampled, SpvId index, SpvId uv, SpvId lod) {
+    if (s->uniformTextures) {
+        const SpvId with[2] = {uv, lod};
+        return textureTree(s, textures, sampled, s->vec4, index, 0, s->uniformTextures, leafLod, with);
+    }
     spvDecorate(s, index, SPV_DECORATE_NonUniform, -1);
     SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, sampled), textures, &index, 1);
     spvDecorate(s, slot, SPV_DECORATE_NonUniform, -1);
@@ -1438,6 +1478,11 @@ static MoreMaps moreMapsSpv(Spv* s, const SpvId* e, SpvId filmTexel, SpvId thick
 }
 
 static SpvId textureAt(Spv* s, SpvId textures, SpvId sampled, SpvId index, SpvId uv) {
+    if (s->uniformTextures) {
+        /* (the slopes here, where the pixels are together, as the sample would have taken them) */
+        const SpvId with[3] = {uv, spvOp1(s, 207 /* OpDPdx */, s->vec2, uv), spvOp1(s, 208 /* OpDPdy */, s->vec2, uv)};
+        return textureTree(s, textures, sampled, s->vec4, index, 0, s->uniformTextures, leafGrad, with);
+    }
     spvDecorate(s, index, SPV_DECORATE_NonUniform, -1);
     SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, sampled), textures, &index, 1);
     spvDecorate(s, slot, SPV_DECORATE_NonUniform, -1);
@@ -1649,12 +1694,11 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     Spv b, *s = &b;
     spvInit(s);
     if (lists > 1) spvCapability(s, postDepth ? 4447u /* SampleMaskPostDepthCoverage */ : 35u /* SampleRateShading: layers go by sample */);
-    spvCapability(s, 5301); /* ShaderNonUniform */
-    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    maxTextures = textureCapabilities(s, maxTextures);
     spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (meshletIds) spvCapability(s, 2); /* Geometry: for PrimitiveId */
     if (rayQuery) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
-    spvExtension(s, "SPV_EXT_descriptor_indexing");
+    if (!s->uniformTextures) spvExtension(s, "SPV_EXT_descriptor_indexing");
     if (postDepth) spvExtension(s, "SPV_KHR_post_depth_coverage");
     Resources r;
     declare(s, &r, false);
@@ -2691,10 +2735,9 @@ uint32_t* artfShaderShadowVertex(size_t* size) {
 uint32_t* artfShaderShadowFragment(size_t* size, uint32_t maxTextures) {
     Spv b, *s = &b;
     spvInit(s);
-    spvCapability(s, 5301); /* ShaderNonUniform */
-    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    maxTextures = textureCapabilities(s, maxTextures);
     spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
-    spvExtension(s, "SPV_EXT_descriptor_indexing");
+    if (!s->uniformTextures) spvExtension(s, "SPV_EXT_descriptor_indexing");
     Resources r;
     declare(s, &r, false);
     SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);
@@ -3469,25 +3512,41 @@ static SpvId maxOf3(Spv* s, SpvId v) { return MAX_F(X(v), MAX_F(Y(v), Z(v))); }
 /* A texture of the array, in its largest mipmap. */
 /* trace.c's texelCone: the level by the cone (lodBase), from the texture's size as the GPU has it (its first held
  * level is level 0 here), between two, by the sampler. */
-static SpvId traceTexture(const Tracer* t, SpvId lodBase, SpvId index, SpvId uv) {
-    Spv* s = t->s;
-    spvDecorate(s, index, SPV_DECORATE_NonUniform, -1);
-    SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, t->sampledType), t->textures, &index, 1);
-    spvDecorate(s, slot, SPV_DECORATE_NonUniform, -1);
-    SpvId image = spvLoad(s, t->sampledType, slot);
-    spvDecorate(s, image, SPV_DECORATE_NonUniform, -1);
+/* (its size and levels: the sides, the count, 0) */
+static SpvId traceTextureInfo(Spv* s, SpvId image, const SpvId* with) {
+    (void)with;
     SpvId imageType;
     spvTypeSampledImage2D(s, &imageType);
     SpvId plain = spvOp1(s, 100 /* OpImage */, imageType, image);
-    spvDecorate(s, plain, SPV_DECORATE_NonUniform, -1);
+    if (!s->uniformTextures) spvDecorate(s, plain, SPV_DECORATE_NonUniform, -1);
     SpvId size = spvOp2(s, 103 /* OpImageQuerySizeLod */, spvTypeVector(s, s->intType, 2), plain, spvConstInt(s, 0));
     SpvId levels = spvOp1(s, 106 /* OpImageQueryLevels */, s->intType, plain);
+    const SpvId parts[4] = {spvExtract(s, s->intType, size, 0), spvExtract(s, s->intType, size, 1), levels, spvConstInt(s, 0)};
+    return spvCompose(s, spvTypeVector(s, s->intType, 4), parts, 4);
+}
+static SpvId traceTexture(const Tracer* t, SpvId lodBase, SpvId index, SpvId uv) {
+    Spv* s = t->s;
+    SpvId image = 0, info;
+    if (s->uniformTextures) /* (without non-uniform indexing: down the tree for its size, then again for the sample) */
+        info = textureTree(s, t->textures, t->sampledType, spvTypeVector(s, s->intType, 4), index, 0, s->uniformTextures, traceTextureInfo, NULL);
+    else {
+        spvDecorate(s, index, SPV_DECORATE_NonUniform, -1);
+        SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, t->sampledType), t->textures, &index, 1);
+        spvDecorate(s, slot, SPV_DECORATE_NonUniform, -1);
+        image = spvLoad(s, t->sampledType, slot);
+        spvDecorate(s, image, SPV_DECORATE_NonUniform, -1);
+        info = traceTextureInfo(s, image, NULL);
+    }
     /* (half the log2 of its texels, by their sides' highest bits: trace.c's) */
-    SpvId wideBits = spvGlsl1(s, SPV_GLSL_FindUMsb, s->uintType, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvExtract(s, s->intType, size, 0)));
-    SpvId highBits = spvGlsl1(s, SPV_GLSL_FindUMsb, s->uintType, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvExtract(s, s->intType, size, 1)));
+    SpvId wideBits = spvGlsl1(s, SPV_GLSL_FindUMsb, s->uintType, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvExtract(s, s->intType, info, 0)));
+    SpvId highBits = spvGlsl1(s, SPV_GLSL_FindUMsb, s->uintType, spvOp1(s, SPV_OP_Bitcast, s->uintType, spvExtract(s, s->intType, info, 1)));
     SpvId bits = spvOp1(s, SPV_OP_ConvertUToF, s->floatType, spvOp2(s, SPV_OP_IAdd, s->uintType, wideBits, highBits));
-    SpvId most = SUB_F(spvOp1(s, 111 /* OpConvertSToF */, s->floatType, levels), FLOAT(1.f));
+    SpvId most = SUB_F(spvOp1(s, 111 /* OpConvertSToF */, s->floatType, spvExtract(s, s->intType, info, 2)), FLOAT(1.f));
     SpvId at = MIN_F(MAX_F(ADD_F(lodBase, MUL_F(FLOAT(.5f), bits)), FLOAT(0.f)), most);
+    if (s->uniformTextures) {
+        const SpvId with[2] = {uv, at};
+        return textureTree(s, t->textures, t->sampledType, s->vec4, index, 0, s->uniformTextures, leafLod, with);
+    }
     return spvImageSampleLod(s, image, uv, at);
 }
 
@@ -4075,11 +4134,10 @@ static SpvId tracedShadowAtSpv(const Tracer* t, SpvId world, SpvId n, SpvId posi
 uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphData* graphs, uint32_t graphCount, bool guides, bool hardware, bool more) {
     Spv b, *s = &b;
     spvInit(s);
-    spvCapability(s, 5301); /* ShaderNonUniform */
-    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    maxTextures = textureCapabilities(s, maxTextures);
     spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (hardware) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
-    spvExtension(s, "SPV_EXT_descriptor_indexing");
+    if (!s->uniformTextures) spvExtension(s, "SPV_EXT_descriptor_indexing");
     Tracer tracer, *t = &tracer;
     memset(t, 0, sizeof *t);
     t->s = s;
@@ -4699,11 +4757,10 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
     enum { GROUP = ARTF_PROBE_SIDE * ARTF_PROBE_SIDE }; /* (one for each texel of a probe's map) */
     Spv b, *s = &b;
     spvInit(s);
-    spvCapability(s, 5301); /* ShaderNonUniform */
-    spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
+    maxTextures = textureCapabilities(s, maxTextures);
     spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (hardware) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
-    spvExtension(s, "SPV_EXT_descriptor_indexing");
+    if (!s->uniformTextures) spvExtension(s, "SPV_EXT_descriptor_indexing");
     Resources r;
     declare(s, &r, false);
     SpvId imageType, sampled = spvTypeSampledImage2D(s, &imageType);

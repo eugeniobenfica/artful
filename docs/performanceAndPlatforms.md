@@ -109,16 +109,20 @@ from x86.
 
 ### What Vulkan needs, and who has it
 
-The backend asks for Vulkan 1.2 with `multiDrawIndirect`, `drawIndirectFirstInstance`, partially bound
-descriptors and non-uniform texture indexing. A device without them draws on the CPU.
+The backend asks for Vulkan 1.2 with `drawIndirectFirstInstance`. A device without them draws on the CPU.
+`multiDrawIndirect` and non-uniform texture indexing are used where they are found.
 
 - **`multiDrawIndirect` does not have to be required.** Issuing one indirect draw per mesh passed all
   37,217 checks here. With 1,000 meshes it cost 0.08 ms more of CPU, and the same GPU time. This is
   the cheapest thing to do for reach: reports say older Mali GPUs lack the feature (the sources
   disagree on which), and Metal has no such call.
-- **Descriptor indexing is the harder limit**: it is how one draw reaches every texture. One
-  developer's list has Mali-G52 failing for this reason. Without it such devices stay on the CPU,
-  unless a path with texture arrays is written.
+- **Descriptor indexing was the harder limit**: it is how one draw reaches every texture. One
+  developer's list has Mali-G52 failing for this reason. Without it (phase 6.3), each sample goes down a tree of ifs
+  (half the array at each) to its texture by a constant index, with the coordinates' slopes taken before, so no
+  feature is asked for. The cost: 64 textures at most (what is beyond draws white), and shaders larger by the tree at
+  each sample: the scene's pixel shader 284 KB of SPIR-V against 110 KB, the tracer's 1.5 MB against 0.3 MB.
+  `ARTFUL_UNIFORM_TEXTURES` forces it, for tests: the whole suite passes so, and `backends/uniformTextures` draws 40
+  textures the same as with it (0.000% of pixels apart).
 - **Android**: its documentation says devices launching with Android 13 or later should support Vulkan
   1.3. No reliable figure was found for how many devices have each feature.
 

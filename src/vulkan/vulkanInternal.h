@@ -43,6 +43,9 @@ enum { TRACK_FOG, TRACK_HIZ, TRACK_TRACE, TRACK_LAYERS, TRACK_DEPTH, TRACK_POST,
 #define TRACK(x) (1u << (x))
 #define QUERIES (ARTF_PASS_TIMES + 1) /* timestamps of a slot: where its frame starts, and where each pass ends */
 #define MAX_TEXTURES 1024  /* in the one descriptor array, where the device allows; what is beyond draws white */
+#define UNIFORM_TEXTURES 64 /* and without non-uniform indexing, where each sample goes down a tree to its texture */
+/* (the texture array, as the shaders that read it are told) */
+#define textureArg(v) ((v)->maxTextures | ((v)->uniformTextures ? ARTF_TEXTURES_UNIFORM : 0u))
 #define MAX_SWAPCHAIN_IMAGES 8
 #define DENOISE_PIPELINES (4 + ARTF_DENOISE_PASSES) /* the filter's: light, time, variance, its passes in space, the end */
 
@@ -315,6 +318,7 @@ typedef struct Vulkan {
     uint64_t rtIndexScene, rtIndexRemovals; /* what the corners were written for, and how many triangles */
     size_t rtIndexTriangles;
     uint32_t maxTextures;
+    bool uniformTextures; /* no non-uniform indexing: the shaders' ARTF_TEXTURES_UNIFORM */
     /* the depth pyramid; flags: what showed last frame */
     GpuBuffer hiz, flags;
     uint32_t hizLevels;

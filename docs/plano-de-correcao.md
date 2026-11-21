@@ -473,6 +473,11 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 | 6.2 | **WebGPU**: emissor WGSL e um backend sobre `webgpu.h`. O backend de CPU em WebAssembly com SIMD vem antes, por ser só compilar o que existe. | 4.1, 4.2 | A cena `spheres` roda em Chrome e Safari, nos dois caminhos. | G |
 | 6.3 | **Caminho sem descriptor indexing** (arranjos de texturas por material) para GPUs como a Mali-G52, que hoje caem para a CPU. | 4.2 | Um dispositivo sem a funcionalidade desenha na GPU. | M |
 
+**Estado da 6.3: feita (21/11/2026).**
+- **Como:** sem `shaderSampledImageArrayNonUniformIndexing`, cada amostra do arranjo de texturas desce uma árvore de ifs (metade do arranjo em cada nível) até uma folha com índice constante, e os resultados voltam por phis. Índice constante não exige nenhuma funcionalidade, nem a indexação dinâmica uniforme. No pixel shader, as derivadas das coordenadas são tomadas antes da árvore e a amostra usa gradientes explícitos (`spvImageSampleGrad`; o MSL ganhou `gradient2d`). No traçador, a árvore é descida duas vezes: uma para o tamanho e os níveis da textura, outra para a amostra. Os cinco shaders que leem o arranjo recebem `ARTF_TEXTURES_UNIFORM` junto com o número de texturas e então não declaram `ShaderNonUniform` nem a extensão.
+- **Custo:** até 64 texturas (o resto fica branco, como já acontecia além do limite do aparelho). Os shaders crescem: o de pixel da cena vai de 110 KB para 284 KB de SPIR-V, e o traçador e as probes de 0,3 MB para 1,5 MB. Uma função SPIR-V única para a árvore encolheria isso, mas o emissor MSL ainda não escreve funções.
+- **Prova:** `ARTFUL_UNIFORM_TEXTURES` força o caminho num aparelho que tem a funcionalidade. A suíte inteira passa assim (403.803 verificações, 0 falhas), os 122 shaders passam no `spirv-val`, e `backends/uniformTextures` desenha 40 texturas com 0,000% dos pixels diferentes do caminho normal e 0,43% da CPU. Não há aparelho sem a funcionalidade aqui; a Mali-G52 ainda precisa de `drawIndirectFirstInstance`, que alguns drivers dela não têm.
+
 ---
 
 ## Fora do plano, por decisão

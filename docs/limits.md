@@ -209,6 +209,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   the scene's meshes, as long as levels of detail take, and it is the full mesh, not the level drawn. A surface
   stops a pick when at least half of it is there, so glass more transparent than not is gone through. A material in
   C's normals do not count: the normal is the triangle's. The triangle is in the order Artful keeps the mesh in.
+- A Vulkan device without non-uniform texture indexing reads at most 64 textures (what is beyond is white), each
+  sample down a tree of ifs: its shaders are larger (the tracer's five times), and slower to build.
 - **Metal has never been run**, and is not built unless asked for (`-DARTFUL_METAL=ON`, Apple only). It was written
   without a Mac: CI builds it on macOS and puts its shaders through Apple's compiler, and no more than that is known.
   So it is chosen only by name, and needs Metal 3. Its shaders (`src/metal/shaders.inc`) are seventeen of Vulkan's,

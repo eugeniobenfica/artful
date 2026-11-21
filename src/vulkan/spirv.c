@@ -361,6 +361,12 @@ SpvId spvImageSampleLod(Spv* s, SpvId sampledImage, SpvId uv, SpvId lod) {
     return id;
 }
 
+SpvId spvImageSampleGrad(Spv* s, SpvId sampledImage, SpvId uv, SpvId dx, SpvId dy) {
+    SpvId id = spvNewId(s);
+    spvEmit(&s->code, 88 /* OpImageSampleExplicitLod */, SPV_WORDS(s->vec4, id, sampledImage, uv, 4 /* Grad */, dx, dy));
+    return id;
+}
+
 SpvId spvImageFetchSample(Spv* s, SpvId imageType, SpvId sampledImage, SpvId coords, SpvId sample) {
     SpvId image = spvOp1(s, OP_Image, imageType, sampledImage);
     SpvId id = spvNewId(s);
@@ -375,6 +381,15 @@ void spvIfBegin(Spv* s, SpvId condition, SpvId* merge) {
     *merge = spvNewId(s);
     spvEmit(&s->code, OP_SelectionMerge, SPV_WORDS(*merge, 0));
     spvEmit(&s->code, OP_BranchConditional, SPV_WORDS(condition, yes, *merge));
+    spvLabel(s, yes);
+}
+
+void spvIfElseBegin(Spv* s, SpvId condition, SpvId* no, SpvId* merge) {
+    SpvId yes = spvNewId(s);
+    *no = spvNewId(s);
+    *merge = spvNewId(s);
+    spvEmit(&s->code, OP_SelectionMerge, SPV_WORDS(*merge, 0));
+    spvEmit(&s->code, OP_BranchConditional, SPV_WORDS(condition, yes, *no));
     spvLabel(s, yes);
 }
 

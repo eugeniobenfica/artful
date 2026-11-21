@@ -301,6 +301,7 @@ int main(int argc, char** argv) {
     RUN("layers/decals", testDecals());
     RUN("scale/extras", testExtras());
     RUN("backends/lostDevice", testLostDevice());
+    RUN("backends/uniformTextures", testUniformTextures());
     RUN("backends/shaderIr", testShaderIr());
     RUN("backends/spirvRoundTrip", testSpirvRoundTrip());
     RUN("backends/frameGraph", testFrameGraph());

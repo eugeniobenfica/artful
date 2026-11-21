@@ -481,6 +481,8 @@ static void instruction(Msl* s, const IrInst* i) {
         const char* smp = s->sampler[w[0]];
         if (!smp) { fail(s, "a sample with no sampler (%%%u)", w[0]); return; }
         if (i->op == 87) line(s, "_%u = %s.sample(%s, %s);", r, valueOf(s, w[0]), smp, valueOf(s, w[1]));
+        else if (i->count > 4 && w[2] == 4) /* Grad */
+            line(s, "_%u = %s.sample(%s, %s, gradient2d(%s, %s));", r, valueOf(s, w[0]), smp, valueOf(s, w[1]), valueOf(s, w[3]), valueOf(s, w[4]));
         else line(s, "_%u = %s.sample(%s, %s, level(%s));", r, valueOf(s, w[0]), smp, valueOf(s, w[1]), i->count > 3 ? valueOf(s, w[3]) : "0.0f");
         return;
     }
