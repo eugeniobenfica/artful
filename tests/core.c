@@ -88,6 +88,7 @@ void testSamePixels(void) {
         ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, runs[i].threads, false);
         o.simd = runs[i].simd;
         ArtfRenderer* r = artfRendererNew(&o);
+        if (!i) printf("on %s\n", artfRendererDescription(r));
         for (int k = 0; k < 2; ++k) CHECK(artfRendererDraw(r, s));
         CHECK(artfRendererReadPixels(r, frame));
         uint64_t h = hashOf(frame, (size_t)W * H);

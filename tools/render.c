@@ -69,6 +69,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "spheres.h"
 
 /* ---- a PNG with no compression: stored deflate blocks ---- */
 
@@ -163,12 +164,6 @@ static bool savePng(const char* path, const uint32_t* pixels, int w, int h) {
 
 /* ---- the scenes ---- */
 
-static ArtfTexture checker(ArtfScene* s) {
-    static uint32_t px[256 * 256];
-    for (int y = 0; y < 256; ++y)
-        for (int x = 0; x < 256; ++x) px[y * 256 + x] = ((x / 32 + y / 32) & 1) ? 0xFFE8E4DCu : 0xFF3A4252u;
-    return artfSceneAddTexture(s, px, 256, 256, 0);
-}
 
 static void camera(ArtfScene* s, float x, float y, float z) {
     ArtfCamera c = {artfVec3(x, y, z), artfVec3(0, 0, 0), artfVec3(0, 1, 0), 1.0f, .1f};
@@ -218,22 +213,9 @@ static float frandom(uint32_t* st) {
 
 /* a few lit objects: what shading looks like */
 static void sceneSpheres(ArtfScene* s) {
-    ArtfMaterialDesc floorDesc = {artfVec3(.9f, .9f, .9f), checker(s), .1f, .33f, artfVec3(0, 0, 0)};
-    ArtfMesh plane = artfSceneAddPlane(s, 40.f, 10.f);
-    ArtfTransform t = artfTransformAt(0, -1.2f, 0, 1);
-    artfSceneAddInstance(s, plane, artfSceneAddMaterial(s, &floorDesc), &t);
-    ArtfMesh sphere = artfSceneAddSphere(s, 1.f, 48, 64), torus = artfSceneAddTorus(s, 1.f, .35f, 64, 32), cube = artfSceneAddCube(s, 1.6f);
-    ArtfMaterialDesc red = {artfVec3(.8f, .12f, .1f), 0, .8f, .14f, artfVec3(0, 0, 0)};
-    ArtfMaterialDesc gold = {artfVec3(.85f, .6f, .15f), 0, .6f, .24f, artfVec3(0, 0, 0)};
-    ArtfMaterialDesc box = {artfVec3(1, 1, 1), checker(s), .3f, .24f, artfVec3(0, 0, 0)};
-    t = artfTransformAt(-2.6f, 0, 0, 1);
-    artfSceneAddInstance(s, sphere, artfSceneAddMaterial(s, &red), &t);
-    t = artfTransformTrs(artfVec3(0, 0, 0), artfQuatAxisAngle(artfVec3(1, .2f, 0), 1.1f), artfVec3(1, 1, 1));
-    artfSceneAddInstance(s, torus, artfSceneAddMaterial(s, &gold), &t);
-    t = artfTransformTrs(artfVec3(2.6f, -.2f, 0), artfQuatAxisAngle(artfVec3(0, 1, 0), .6f), artfVec3(1, 1, 1));
-    artfSceneAddInstance(s, cube, artfSceneAddMaterial(s, &box), &t);
-    artfSceneAddLight(s, artfVec3(-1.5f, 1.5f, 2.5f), artfVec3(.2f, .5f, 1.2f), 7.f);
-    camera(s, 0, 2.4f, 6.5f);
+    ArtfCamera c;
+    spheresScene(s, &c);
+    setCamera(s, &c);
 }
 
 /* what lies past glTF's core, under lights with a size, a shape and a profile: each piece of the shading model */

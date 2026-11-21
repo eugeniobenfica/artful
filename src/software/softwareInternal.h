@@ -253,6 +253,9 @@ extern const ArtfKernels artfKernelsAvx2;
 #ifdef ARTFUL_HAVE_SSE41
 extern const ArtfKernels artfKernelsSse41;
 #endif
+#ifdef ARTFUL_HAVE_WASM_SIMD
+extern const ArtfKernels artfKernelsWasm;
+#endif
 #ifdef ARTFUL_HAVE_NEON
 extern const ArtfKernels artfKernelsNeon;
 #endif

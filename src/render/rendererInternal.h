@@ -105,5 +105,7 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* options);
 void artfVulkanWarm(ArtfRenderer* r);
 /* NULL when Metal 3 is not here. */
 ArtfRenderer* artfMetalNew(const ArtfRendererOptions* options);
+/* NULL when WebGPU is not here (no adapter, or not what it needs). */
+ArtfRenderer* artfWebGpuNew(const ArtfRendererOptions* options);
 
 #endif

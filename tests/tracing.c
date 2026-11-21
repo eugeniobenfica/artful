@@ -1727,12 +1727,14 @@ void testExtraTraced(void) {
     uint32_t* gpuFrame = artfMalloc(W * H * 4);
     const ArtfShadowDesc none = {0, 0, false, false}, traced = {0, 0, false, true};
     float under[3] = {0, 0, 0};
+    bool gpu = false; /* (where there is no GPU, the CPU's two runs alone) */
     for (int run = 0; run < 3; ++run) {
         /* (the CPU, the GPU, and the CPU with the lamp one of the frame's own: the same shadow) */
         const int backend = run == 1;
         ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
         ArtfRenderer* r = artfRendererNew(&o);
         if (!r) continue;
+        gpu |= backend;
         ArtfScene* s = plainScene();
         artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
         setCamera(s, 0, 5, 6, 0, 0, 0);
@@ -1761,7 +1763,7 @@ void testExtraTraced(void) {
     }
     printf("a lamp past the frame's sixteen: %.2f%% of the frame in its shadow from rays on the CPU, %.2f%% on the GPU; %.2f%% as one of the sixteen\n", under[0] * 100,
            under[1] * 100, under[2] * 100);
-    CHECK(under[0] > .005f && fabsf(under[0] - under[1]) < .001f && fabsf(under[0] - under[2]) < .001f);
+    CHECK(under[0] > .005f && (!gpu || fabsf(under[0] - under[1]) < .001f) && fabsf(under[0] - under[2]) < .001f);
     artfFree(lit);
     artfFree(shaded);
     artfFree(gpuFrame);
@@ -1815,11 +1817,12 @@ void testSampledLights(void) {
         o.hdr = true;
         const int counts[3] = {50, 200, 800};
         double took[2][3];
-        for (int k = 0; k < 3; ++k) {
+        bool made = true;
+        for (int k = 0; k < 3 && made; ++k) {
             double apart = 0;
-            for (int sampled = 0; sampled < 2; ++sampled) {
+            for (int sampled = 0; sampled < 2 && made; ++sampled) {
                 ArtfRenderer* r = artfRendererNew(&o);
-                if (!r) break;
+                if (!r) { made = false; break; } /* (no GPU here) */
                 ArtfScene* s = lampHall(counts[k], sampled != 0);
                 drawFrames(r, s, 4, sampled ? some : all);
                 const double t0 = artfNowMs();
@@ -1828,6 +1831,7 @@ void testSampledLights(void) {
                 artfSceneFree(s);
                 artfRendererFree(r);
             }
+            if (!made) break;
             apart = differentShare(all, some, 24);
             const double flip = lastFlip.mean;
             printf("%s, %d lamps that cast: all of them %.2f ms a frame, sampled %.2f; sampled after 36 frames, %.2f%% of pixels apart from all, FLIP %.4f\n", backend ? "GPU" : "CPU",

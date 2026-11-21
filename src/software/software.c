@@ -91,6 +91,9 @@ static const ArtfKernels* chooseKernels(ArtfSimd simd) {
 #ifdef ARTFUL_HAVE_SSE41
     if (simd != ARTF_SIMD_PORTABLE && haveSse41()) return &artfKernelsSse41;
 #endif
+#ifdef ARTFUL_HAVE_WASM_SIMD
+    if (simd != ARTF_SIMD_PORTABLE) return &artfKernelsWasm;
+#endif
 #ifdef ARTFUL_HAVE_NEON
     if (simd != ARTF_SIMD_PORTABLE) return &artfKernelsNeon;
 #endif

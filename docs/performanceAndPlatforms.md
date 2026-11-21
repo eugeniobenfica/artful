@@ -87,7 +87,7 @@ Mac here.
 | RISC-V | The CPU kernels build. | The rest of the library, and a machine. |
 | Windows, MSVC | Not built: no compiler here. Needs C11 atomics, which need a recent MSVC and a flag, and `__cpuid` for AVX2. | Visual Studio. |
 | macOS, iOS | Not built. | A Mac, and more: below. |
-| Web | The CPU kernels build for WebAssembly with SIMD, and it uses it. Nothing else does yet. | See below. |
+| Web | The CPU backend runs in WebAssembly with SIMD, on the browser's cores: all of its tests pass under node, with the same pixels as x86's; the spheres draw in Chromium in 3.0 ms a frame at 960x540 on 16 threads. | Safari, and WebGPU: below. |
 | Consoles | Not open to this project. | Their SDKs are under NDA, which also conflicts with having no dependencies. |
 
 ### What the CPU backend gives
@@ -140,10 +140,11 @@ Three options, and a Mac is needed for all of them:
 
 ### The web
 
-The CPU backend could run on WebAssembly: its kernels already build for it, with a 128-bit backend as
-for NEON. Threads need a page served with cross-origin isolation. WebGPU would be a backend of its own,
-with WGSL for shaders. The sources found on which browsers support what disagree, so that needs
-checking first. cascade does not target the web either, so this comes last.
+The CPU backend runs on WebAssembly (phase 6.2): its kernels have a 128-bit set of their own on WebAssembly's
+SIMD (`kernelsWasm.c`, two registers of four, as NEON's), and its threads are workers sharing memory, which needs a
+page served with cross-origin isolation (`tools/web/serve.py`). Under node, every test of the CPU passes (328,461
+checks) with the same pixels as the portable kernels; in Chromium the spheres take 3.0 ms a frame at 960x540 on 16
+threads. Safari has WebAssembly's SIMD since 16.4 and shared memory with the same headers, but has not been tried.
 
 ## What to do, in order
 

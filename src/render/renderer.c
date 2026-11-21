@@ -8,6 +8,7 @@ const char* artfBackendName(ArtfBackend b) {
     case ARTF_BACKEND_VULKAN: return "Vulkan";
     case ARTF_BACKEND_SOFTWARE: return "software";
     case ARTF_BACKEND_METAL: return "Metal";
+    case ARTF_BACKEND_WEBGPU: return "WebGPU";
     default: return "auto";
     }
 }
@@ -19,6 +20,13 @@ ArtfRenderer* artfRendererNew(const ArtfRendererOptions* o) {
         r = artfMetalNew(o);
 #endif
         if (!r) artfLog("artful: no Metal backend here");
+        return r;
+    }
+    if (o->backend == ARTF_BACKEND_WEBGPU) {
+#ifdef ARTFUL_WEBGPU
+        r = artfWebGpuNew(o);
+#endif
+        if (!r) artfLog("artful: no WebGPU backend here");
         return r;
     }
 #ifdef ARTFUL_VULKAN

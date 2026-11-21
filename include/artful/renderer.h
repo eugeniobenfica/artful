@@ -22,7 +22,8 @@
 extern "C" {
 #endif
 
-typedef enum ArtfBackend { ARTF_BACKEND_AUTO, ARTF_BACKEND_VULKAN, ARTF_BACKEND_SOFTWARE, ARTF_BACKEND_METAL } ArtfBackend;
+/* WebGPU: chosen only by name, where it is built (ARTFUL_WEBGPU: a browser through Emscripten, or wgpu-native) */
+typedef enum ArtfBackend { ARTF_BACKEND_AUTO, ARTF_BACKEND_VULKAN, ARTF_BACKEND_SOFTWARE, ARTF_BACKEND_METAL, ARTF_BACKEND_WEBGPU } ArtfBackend;
 
 const char* artfBackendName(ArtfBackend b);
 

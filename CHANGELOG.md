@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **The CPU backend in a browser** (phase 6.2): with Emscripten, its kernels use WebAssembly's SIMD and its threads
+  are workers; every CPU test passes under node with the same pixels as on x86, and `artful-web.html` draws the
+  spheres in Chromium in 3.0 ms a frame at 960x540.
+
 - **Vulkan without non-uniform texture indexing** (phase 6.3): a device without it draws on the GPU instead of the
   CPU. Each sample reaches its texture down a tree of ifs by constant indices (64 textures at most); the whole suite
   passes so (`ARTFUL_UNIFORM_TEXTURES` forces it), and 40 textures draw as with it.

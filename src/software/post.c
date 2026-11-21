@@ -26,6 +26,7 @@
 #include "core/threads.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 /* (what runs for every pixel, inlined into its row, whatever the compiler would choose) */
 #ifdef _MSC_VER

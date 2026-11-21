@@ -1,6 +1,6 @@
 /* artful — eight lanes at a time. The kernels are written once on these operations, and built once for
- * each instruction set: with AVX2 (each operation one instruction), with SSE4.1 or NEON (two registers of
- * four lanes), and portable (loops over eight lanes, which the compiler makes what it can of). Each operation gives the
+ * each instruction set: with AVX2 (each operation one instruction), with SSE4.1, NEON or WebAssembly's SIMD (two
+ * registers of four lanes), and portable (loops over eight lanes, which the compiler makes what it can of). Each operation gives the
  * same bits in all of them, so they draw the same pixels: no fused multiply-adds, no approximate
  * reciprocals, and max and min as x86 defines them. */
 #ifndef ARTFUL_SIMD_H
@@ -17,7 +17,7 @@
 #define V8_INLINE static inline __attribute__((always_inline))
 #endif
 
-#if defined(ARTF_KERNEL_SSE41) || defined(ARTF_KERNEL_NEON)
+#if defined(ARTF_KERNEL_SSE41) || defined(ARTF_KERNEL_NEON) || defined(ARTF_KERNEL_WASM)
 
 /* Eight lanes as two registers of four. */
 
@@ -60,6 +60,47 @@ typedef __m128i V4I;
 #define v4iAsF _mm_castsi128_ps
 #define v4fAsI _mm_castps_si128
 #define v4iSigns(a) _mm_movemask_ps(_mm_castsi128_ps(a))
+#elif defined(ARTF_KERNEL_WASM)
+#include <wasm_simd128.h>
+typedef v128_t V4F;
+typedef v128_t V4I;
+#define v4fSet wasm_f32x4_splat
+#define v4fLoad wasm_v128_load
+#define v4fStore wasm_v128_store
+#define v4fAdd wasm_f32x4_add
+#define v4fSub wasm_f32x4_sub
+#define v4fMul wasm_f32x4_mul
+#define v4fDiv wasm_f32x4_div
+/* (as x86 does: with a NaN, the second) */
+#define v4fMin(a, b) wasm_v128_bitselect(a, b, wasm_f32x4_lt(a, b))
+#define v4fMax(a, b) wasm_v128_bitselect(a, b, wasm_f32x4_gt(a, b))
+#define v4fSqrt wasm_f32x4_sqrt
+#define v4fFloor wasm_f32x4_floor
+#define v4fAbs wasm_f32x4_abs
+#define v4fGt wasm_f32x4_gt
+#define v4fLt wasm_f32x4_lt
+#define v4fToI wasm_i32x4_trunc_sat_f32x4
+/* (by its top bit, as on x86) */
+#define v4fSelect(m, a, b) wasm_v128_bitselect(b, a, wasm_i32x4_shr(m, 31))
+#define v4iSet wasm_i32x4_splat
+#define v4iLoad(p) wasm_v128_load(p)
+#define v4iStore(p, a) wasm_v128_store(p, a)
+#define v4iAdd wasm_i32x4_add
+#define v4iSub wasm_i32x4_sub
+#define v4iMul wasm_i32x4_mul
+#define v4iAnd wasm_v128_and
+#define v4iOr wasm_v128_or
+#define v4iXor wasm_v128_xor
+#define v4iAndNot(a, b) wasm_v128_andnot(b, a)
+#define v4iShl(a, n) wasm_i32x4_shl(a, (uint32_t)(n))
+#define v4iShr(a, n) wasm_u32x4_shr(a, (uint32_t)(n))
+#define v4iEq wasm_i32x4_eq
+#define v4iGt wasm_i32x4_gt
+#define v4iSelect(m, a, b) wasm_v128_bitselect(b, a, wasm_i32x4_shr(m, 31))
+#define v4iToF wasm_f32x4_convert_i32x4
+#define v4iAsF(a) (a)
+#define v4fAsI(a) (a)
+#define v4iSigns(a) ((int)wasm_i32x4_bitmask(a))
 #else
 #include <arm_neon.h>
 typedef float32x4_t V4F;

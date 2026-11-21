@@ -376,6 +376,7 @@ about a second and a half each on a Vega 8. How it works is [here](docs/architec
 | **Windows** x64, MSVC | Vulkan, software | Tier 2 |
 | **Android** armv7, x86-64 | Vulkan, software | Tier 2 |
 | **iOS** | software; Metal | Tier 2 |
+| **Web** (Emscripten) | software, in WebAssembly's SIMD, on the browser's cores | Tier 2 |
 
 **Tier 1**: all tests and a real window with a page over the scene, run on an AMD GPU (Windows) and an
 Adreno GPU (Android).<br>
@@ -493,6 +494,12 @@ what got slower.
 
 A C11 compiler and CMake 3.16: GCC or Clang (MinGW-w64 on Windows). Nothing else, not even the Vulkan
 SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful)`.
+
+For a browser, with Emscripten: `emcmake cmake -S . -B build-wasm -G Ninja`, then `cmake --build build-wasm`.
+`node build-wasm/artful-tests.js` runs the tests (all of the CPU's pass, with the same pixels as on x86);
+`python tools/web/serve.py build-wasm` serves `artful-web.html`, the spheres drawn on the CPU in the page (its headers
+let the page's threads share memory). On Windows, Binaryen's optimizer may hang with many threads:
+`BINARYEN_CORES=1`.
 
 <details>
 <summary><b>Build options</b></summary>

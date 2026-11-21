@@ -570,6 +570,7 @@ void testPipelinesAhead(void) {
 void testLostDevice(void) { missing("vulkan"); }
 void testUniformTextures(void) { missing("vulkan"); }
 void testTextureMemory(void) { missing("vulkan"); }
+void testGpuMemory(void) { missing("vulkan"); }
 void testRefusedSwapchain(void) { missing("vulkan"); }
 void testShadersAhead(void) { missing("vulkan"); }
 void testPipelinesAhead(void) { missing("vulkan"); }
