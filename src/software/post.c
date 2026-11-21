@@ -516,6 +516,15 @@ POST_INLINE void temporalPixel(ArtfSoftPost* p, int x, int y) {
 
 /* Through the kernels, eight pixels at a time, where they can (temporalLanes: in perspective, away from the sides, and
  * where no pixel went by its vertices); here, a pixel at a time, where they cannot. The same bytes either way. */
+/* How reactive the surface at a plane's pixel is (ArtfMaterialDesc.reactive): of the instance it shows, its material's;
+ * 0 for what was not drawn and for what a pose bent (its word is a vector, not an instance). */
+static float reactiveAt(const ArtfSoftPost* p, size_t plane) {
+    if (!p->f->reactive || !(p->f->postDepth[plane] > 0)) return 0.f;
+    const uint32_t who = p->f->postInstance[plane];
+    if (!who || (who & ARTF_MOTION_VECTOR) || who > p->f->scene->instances.len) return 0.f;
+    return p->f->scene->materialsMore.items[p->f->scene->instances.items[who - 1].material].reactive;
+}
+
 static void temporalRow(ArtfSoftPost* p, int y) {
     enum { STRETCH = 2048 };
     uint8_t done[STRETCH / 8];
@@ -527,6 +536,14 @@ static void temporalRow(ArtfSoftPost* p, int y) {
         for (int x = from; x < to; ++x)
             if (!done[(x - from) >> 3]) temporalPixel(p, x, y);
     }
+    /* what is reactive takes that much more of what it shows now */
+    if (p->f->reactive)
+        for (int x = 0; x < p->width; ++x) {
+            const size_t i = (size_t)y * p->width + x;
+            const float r = reactiveAt(p, planeAt(p, x, y));
+            if (r > 0)
+                for (int c = 0; c < 3; ++c) p->scratch[c][i] += (p->f->postLight[c][i] - p->scratch[c][i]) * r;
+        }
 }
 
 /* ---- upscaling: the scene drawn smaller, made whole at the frame's size ----
@@ -613,6 +630,22 @@ static void upscaleRow(ArtfSoftPost* p, int y) {
         const float byNow = share / (1.f + lumaNow), byWas = (1.f - share) / (1.f + lumaWas), taken = byNow / (byNow + byWas);
         for (int c = 0; c < 3; ++c) p->scratch[c][i] = was[c] + (now[c] - was[c]) * taken;
     }
+    /* what is reactive takes that much more of the scene read between its pixels now (temporalRow) */
+    if (temporal && p->f->reactive)
+        for (int x = 0; x < p->width; ++x) {
+            const float r = reactiveAt(p, planeAt(p, x, y));
+            if (!(r > 0)) continue;
+            const size_t i = (size_t)y * p->width + x;
+            const float u = ((float)x + .5f) * rx - .5f + jx;
+            const int x0 = floorInt(u);
+            const float fx = u - (float)x0;
+            const size_t q[4] = {row0 + artfClampi(x0, 0, sw - 1), row0 + artfClampi(x0 + 1, 0, sw - 1), row1 + artfClampi(x0, 0, sw - 1), row1 + artfClampi(x0 + 1, 0, sw - 1)};
+            const float weights[4] = {(1.f - fx) * (1.f - fy), fx * (1.f - fy), (1.f - fx) * fy, fx * fy};
+            for (int c = 0; c < 3; ++c) {
+                const float now = light[c][q[0]] * weights[0] + light[c][q[1]] * weights[1] + light[c][q[2]] * weights[2] + light[c][q[3]] * weights[3];
+                p->scratch[c][i] += (now - p->scratch[c][i]) * r;
+            }
+        }
 }
 
 /* ---- sharpening, after temporal antialiasing: each pixel away from the mean of its four neighbours, within them ---- */

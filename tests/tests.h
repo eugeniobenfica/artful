@@ -137,6 +137,7 @@ void testPreRotate(void);
 void testPostAliasing(void);
 void testSharpHistory(void);
 void testDisplayOutput(void);
+void testReactive(void);
 void testProbesHard(void);
 void test2DThreadRule(void);
 void testTextureHandles(void);

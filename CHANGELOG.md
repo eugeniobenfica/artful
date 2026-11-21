@@ -7,6 +7,12 @@
   both backends alike (the CPU's meshlet culling and the GPU's), with no cracks, and cooked. A 73,728-triangle
   terrain seen from its edge at a pixel's error draws 45,492 where the three levels draw all of it, and looks the
   same to 0.06% of pixels.
+- **A reactive mask** (`ArtfMaterialDesc.reactive`, phase 5.4): what such a surface shows is taken anew that much
+  each frame past what temporal antialiasing or upscaling keeps, for screens, flames and moving textures; both
+  backends.
+- **The graph of clusters works alongside the lighter versions**: an instance draws the cut only where it would draw
+  the full mesh, so nothing draws more than before; meshes under 4,096 triangles are refused, and a group that
+  simplifies far worse than its level's others no longer raises all the errors above it.
 - **Iridescence's and anisotropy's textures** (phase 5.12): `iridescenceTexture`, `iridescenceThicknessTexture` and
   `anisotropyTexture` are read from glTF and drawn and traced on both backends.
 

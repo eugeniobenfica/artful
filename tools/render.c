@@ -61,6 +61,7 @@
 #include "artful/artful.h"
 #include "artful/blackhole.h"
 #ifdef ARTFUL_VULKAN
+#include "scene/sceneInternal.h"
 #include "vulkan/frameGraph.h"
 #endif
 
@@ -660,6 +661,7 @@ int main(int argc, char** argv) {
     bool passes = false;
     const char* json = NULL;
     float hlodCell = 0, streamBudget = -1;
+    bool clusters = false;
     uint32_t particles = 0;
     HoleOptions hole = {0, 0, 74.1f, 3.44f, 0, 19.f, 1.f, .6f, 0, 0, -1.f, 1, false, 0, .9f, -1.f, -1000.f, -1000.f}; /* (the eye of the film's own pictures) */
     for (int i = 1; i < argc; ++i) {
@@ -709,6 +711,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--motion-blur") && i + 1 < argc) post.lens.motionBlur = (float)atof(argv[++i]);
         else if (!strcmp(a, "--indirect")) indirect = true;
         else if (!strcmp(a, "--through-walls")) throughWalls = true;
+        else if (!strcmp(a, "--clusters")) clusters = true;
         else if (!strcmp(a, "--hlod")) hlodCell = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 64.f;
         else if (!strcmp(a, "--particles") && i + 1 < argc) particles = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(a, "--stream-meshes")) streamBudget = i + 1 < argc && argv[i + 1][0] != '-' ? (float)atof(argv[++i]) : 0.f;
@@ -894,6 +897,30 @@ int main(int argc, char** argv) {
             artfFree(data);
             printf("wrote %s: %.1f MB\n", cook, (double)size / 1048576.0);
         }
+    }
+    if (clusters) {
+        /* each mesh as a graph of clusters (phase 5.5), in place of its lighter versions */
+        const double c0 = artfNowMs();
+        uint32_t made = 0;
+        const size_t count = s->meshes.len;
+        for (size_t i = 0; i < count; ++i)
+            if (!s->meshes.items[i].removed && !s->meshes.items[i].isLod) {
+                const uint32_t triangles = s->meshes.items[i].indexCount / 3;
+                float levelErrors[3] = {0, 0, 0};
+                for (uint32_t l = 0; l < s->meshes.items[i].lodCount; ++l) levelErrors[l] = s->meshes.items[i].lodErrors[l];
+                if (!artfSceneMeshSetClusters(s, artfMeshHandleOf(s, (uint32_t)i))) continue;
+                ++made;
+                if (getenv("ARTFUL_DAG_STATS")) {
+                    const ArtfMeshData* m = &s->meshes.items[i];
+                    uint32_t roots = 0, rootTriangles = 0;
+                    float rootError = 0, rootLeast = 1e30f;
+                    for (uint32_t k = 0; k < m->meshletCount; ++k)
+                        if (!(m->dagBounds[k * 10 + 9] < 1e30f)) { ++roots; rootTriangles += m->meshlets[k].triangleCount; rootError = fmaxf(rootError, m->dagBounds[k * 10 + 4]); rootLeast = fminf(rootLeast, m->dagBounds[k * 10 + 4]); }
+                    printf("  the three levels' errors %g %g %g; the top's %g to %g; radius %g\n", levelErrors[0], levelErrors[1], levelErrors[2], rootLeast, rootError, m->radius);
+                    printf("  mesh %zu: %u triangles, %u meshlets (%u of the full mesh), %u at the top with %u triangles\n", i, triangles, m->meshletCount, m->dagWhole, roots, rootTriangles);
+                }
+            }
+        printf("%u meshes as graphs of clusters in %.1f ms\n", made, artfNowMs() - c0);
     }
     ArtfEmitter emitter = 0;
     if (particles) {

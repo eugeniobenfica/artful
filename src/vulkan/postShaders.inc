@@ -319,7 +319,7 @@ uint32_t* artfShaderPostGather(size_t* size, int samples) {
     spvStore(s, postPtr(s, p, p->surface, s->uintType, i), spvExtract(s, s->uintType, word, 0));
     /* (the instance that shows, after all the words: when something moved, for what follows it) */
     SpvId movedMerge;
-    spvIfBegin(s, P_MORE(Y(frameVec(s, &p->r, F_CULL)), FLOAT(0.f)), &movedMerge);
+    spvIfBegin(s, P_OR(P_MORE(Y(frameVec(s, &p->r, F_CULL)), FLOAT(0.f)), P_MORE(X(frameVec(s, &p->r, F_MORE)), FLOAT(0.f))), &movedMerge);
     spvStore(s, postPtr(s, p, p->surface, s->uintType, ADD_U(MUL_U(p->width, p->height), i)), spvExtract(s, s->uintType, word, 1));
     spvIfEnd(s, movedMerge);
     spvIfEnd(s, rest);
@@ -885,6 +885,22 @@ POST_MAIN(artfShaderPostMotionBlur)
 POST_FINISH()
 
 /* ---- temporal antialiasing: as temporalRow, into the second light ---- */
+/* post.c's reactiveAt: of the instance a plane's pixel shows, its material's ArtfMaterialDesc.reactive; 0 for nothing
+ * drawn, a vector's word, or no reactive material in the frame. */
+static SpvId postReactive(Spv* s, Post* p, SpvId plane) {
+    SpvId on = P_AND(P_MORE(X(frameVec(s, &p->r, F_MORE)), FLOAT(0.f)), P_MORE(postFloat(s, p, p->depth, plane), FLOAT(0.f)));
+    SpvId before = s->block, merge;
+    spvIfBegin(s, on, &merge);
+    SpvId who = postUint(s, p, p->surface, ADD_U(MUL_U(p->sceneW, p->sceneH), plane));
+    SpvId valid = P_AND(spvOp2(s, SPV_OP_INotEqual, s->boolType, who, UINT(0)), spvOp2(s, 170 /* OpIEqual */, s->boolType, AND_U(who, UINT(ARTF_MOTION_VECTOR)), UINT(0)));
+    SpvId which = SUB_U(spvGlsl2(s, 41 /* UMax */, s->uintType, spvSelect(s, s->uintType, valid, who, UINT(1)), UINT(1)), UINT(1));
+    SpvId material = AS_UINT(Y(bufferVec(s, &p->r, p->r.instances, ADD_U(MUL_U(which, UINT(4)), UINT(3)))));
+    SpvId row = ADD_U(ADD_U(MUL_U(AS_UINT(X(frameVec(s, &p->r, F_MATERIALS))), UINT(ARTF_MATERIAL_ROWS)), MUL_U(material, UINT(ARTF_MATERIAL_MORE_ROWS))), UINT(9));
+    SpvId got = PICK_F(valid, X(bufferVec(s, &p->r, p->r.materials, row)), FLOAT(0.f)), from = s->block;
+    spvIfEnd(s, merge);
+    return spvPhi(s, s->floatType, got, from, FLOAT(0.f), before);
+}
+
 POST_MAIN(artfShaderPostTemporal)
     SpvId main = spvBeginMain(s);
     postSizes(s, p);
@@ -907,7 +923,10 @@ POST_MAIN(artfShaderPostTemporal)
     SpvId now = postVec4(s, p, p->light, i);
     SpvId was = spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, postHistoryTap(s, p, sx, sy)), lo), hi);
     SpvId share = PICK_F(valid, FLOAT(.1f), FLOAT(1.f));
-    postLightStore(s, p, p->scratch, i, vec4Of(s, P_MIX3(was, spvShuffle3(s, now), share), W(now)));
+    SpvId mixed = P_MIX3(was, spvShuffle3(s, now), share);
+    /* what is reactive takes that much more of what it shows now (post.c's temporalRow) */
+    mixed = P_MIX3(mixed, spvShuffle3(s, now), postReactive(s, p, postPlane(s, p, xf, yf)));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, mixed, W(now)));
 POST_FINISH()
 
 /* ---- upscaling: as upscaleRow, from the scene's light into the second light at the frame's size. The push constant's
@@ -988,6 +1007,8 @@ POST_MAIN(artfShaderPostUpscale)
     /* (each by 1 / (1 + its luma)) */
     SpvId byNow = DIV_F(share, ADD_F(FLOAT(1.f), postLuma(s, fresher))), byWas = DIV_F(SUB_F(FLOAT(1.f), share), ADD_F(FLOAT(1.f), postLuma(s, was)));
     SpvId gathered = P_MIX3(was, fresher, DIV_F(byNow, ADD_F(byNow, byWas)));
+    /* what is reactive takes that much more of the scene read between its pixels now (post.c's upscaleRow) */
+    gathered = P_MIX3(gathered, spatialRgb, postReactive(s, p, postPlane(s, p, xf, yf)));
     SpvId gatheredFrom = s->block;
     spvIfEnd(s, followMerge);
     SpvId got = spvPhi(s, s->vec3, gathered, gatheredFrom, spatialRgb, before);

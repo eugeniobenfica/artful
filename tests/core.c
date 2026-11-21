@@ -30,7 +30,7 @@ void testPacking(void) {
         CHECK(found);
     }
     artfSceneFree(s);
-    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 182 * 16);
+    CHECK(sizeof(ArtfPackedVertex) == 16 && sizeof(ArtfInstanceData) == 64 && sizeof(ArtfMaterialData) == 144 && sizeof(ArtfFrameData) == 183 * 16);
 }
 
 void testMeshlets(void) {

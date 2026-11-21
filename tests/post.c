@@ -1240,3 +1240,60 @@ void testDisplayOutput(void) {
     artfFree(frame);
     artfFree(overlay);
 }
+
+/* A reactive mask (ArtfMaterialDesc.reactive): a block whose checks turn over each frame (as a screen that plays),
+ * with temporal antialiasing, shows what it is now when reactive, and a grey of both when not (its neighbours hold both,
+ * so the history is kept). What is left reactive is the jitter: the frame it is held to has none. Both backends, at the
+ * frame's size and upscaled. */
+void testReactive(void) {
+    uint32_t* frame = artfMalloc(W * H * 4);
+    uint32_t* truth = artfMalloc(W * H * 4);
+    static uint32_t cells[2][16 * 16];
+    for (int i = 0; i < 16 * 16; ++i) {
+        const bool on = (i / 16 / 2 + i % 16 / 2) & 1;
+        cells[0][i] = on ? 0xFFFFFFFFu : 0xFF000000u;
+        cells[1][i] = on ? 0xFF000000u : 0xFFFFFFFFu;
+    }
+    for (int backend = 0; backend < 2; ++backend)
+        for (int scaled = 0; scaled < 2; ++scaled) {
+            double off[2];
+            for (int reactive = 0; reactive < 2; ++reactive) {
+                ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+                o.hdr = true;
+                o.renderScale = scaled ? .5f : 0;
+                ArtfRenderer* r = artfRendererNew(&o);
+                if (!r) break;
+                ArtfScene* s = plainScene();
+                const ArtfPostDesc post = {.screen.temporal = true};
+                artfSceneSetPost(s, &post);
+                ArtfMaterialDesc d = artfMaterialDefaults();
+                d.unlit = true;
+                d.reactive = reactive ? 1.f : 0.f;
+                ArtfMaterial m[2];
+                for (int k = 0; k < 2; ++k) {
+                    d.texture = artfSceneAddTexture(s, cells[k], 16, 16, 0);
+                    m[k] = artfSceneAddMaterial(s, &d);
+                }
+                const ArtfInstance block = addAt(s, artfSceneAddCube(s, 1), m[0], 0, 0, 0, 2);
+                for (int f = 0; f < 12; ++f) {
+                    artfInstanceSetMaterial(s, block, m[f & 1]);
+                    drawFrames(r, s, 1, frame);
+                }
+                /* what it is now, with no history */
+                const ArtfPostDesc none = {0};
+                artfSceneSetPost(s, &none);
+                drawFrames(r, s, 1, truth);
+                double sum = 0;
+                for (int y = H / 2 - 16; y < H / 2 + 16; ++y)
+                    for (int x = W / 2 - 16; x < W / 2 + 16; ++x) sum += abs((int)(frame[y * W + x] >> 8 & 255) - (int)(truth[y * W + x] >> 8 & 255));
+                off[reactive] = sum / (32.0 * 32.0 * 255.0);
+                artfSceneFree(s);
+                artfRendererFree(r);
+            }
+            printf("%s%s: checks that turn over each frame, from what they are now: %.3f with temporal antialiasing, %.3f reactive\n", backend ? "GPU" : "CPU", scaled ? ", upscaled" : "",
+                   off[0], off[1]);
+            CHECK(off[0] > .08 && off[1] < off[0] * .5);
+        }
+    artfFree(frame);
+    artfFree(truth);
+}

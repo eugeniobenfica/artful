@@ -693,6 +693,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
             f->motion = s->motion.moving ? s->motion.motion : NULL;
             f->motionBack = s->motion.moving ? s->motion.back : NULL;
         }
+        f->reactive = scene->post.screen.temporal && f->data.more[0] > 0;
         if (s->renderScale >= 1.f) {
             s->post.overlay = f->overlay;
             s->post.overlayWidth = f->overlayWidth;

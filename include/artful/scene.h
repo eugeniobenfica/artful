@@ -96,11 +96,13 @@ ArtfTexture artfSceneAddPreparedTexture(ArtfScene* s, ArtfPreparedTexture* prepa
 /* Gives back a mesh, with its lighter versions, or a texture, on both backends. false, and logged, while an
  * instance or a material still uses it. A texture's place is used again; a mesh's memory is. */
 bool artfSceneRemoveMesh(ArtfScene* s, ArtfMesh mesh);
-/* A mesh as a graph of clusters at every level of detail (as Nanite's), in place of its lighter versions: each part is
- * drawn as fine as the lod error asks where it is (artfSceneSetLodError), not the whole mesh by its nearest point, on
- * both backends alike, with no cracks between parts. With the lod feature off, an orthographic camera, or what draws a
- * mesh whole (shadows, sorted layers, holes cut out, rays), the full mesh is drawn. About 2.5 ms per thousand triangles,
- * on the calling thread. false: it bends, is a level of another, is already so, or is not there. */
+/* A mesh as a graph of clusters at every level of detail as well (as Nanite's): where an instance would draw the full
+ * mesh, each part of it is drawn as fine as the lod error asks where it is (artfSceneSetLodError), not all of it by its
+ * nearest point, on both backends alike, with no cracks between parts; far enough for one of its lighter versions, that
+ * is drawn whole, as before (they stay). With the lod feature off, an orthographic camera, or what draws a mesh whole
+ * (shadows, sorted layers, holes cut out, fading between levels on the GPU, rays), the full mesh is drawn. About 2.5 ms per thousand triangles,
+ * on the calling thread. false: it bends, is a level of another, is already so, has fewer than 4096 triangles (it would
+ * gain nothing), or is not there. */
 bool artfSceneMeshSetClusters(ArtfScene* s, ArtfMesh mesh);
 bool artfSceneRemoveTexture(ArtfScene* s, ArtfTexture texture);
 
@@ -250,6 +252,11 @@ typedef struct ArtfMaterialDesc {
      * to 1, turned by anisotropyRotation) and strength (blue). 0: none */
     ArtfTexture iridescenceMap, iridescenceThicknessMap, anisotropyMap;
     float iridescenceThicknessMin;
+    /* With temporal antialiasing or upscaling: how much of what this surface shows is taken anew each frame, 0 to 1,
+     * past what the history would keep (a reactive mask, as FSR's): for what changes in ways motion cannot follow (a
+     * screen, flames, a texture that moves). 1 keeps nothing of before: no ghosts, and no smoothing either. 0: none.
+     * Solid surfaces alone: what layers show over them is not. */
+    float reactive;
     /* Traced, what light keeps of each color through its inside (KHR_materials_volume): this much after this far.
      * 0: it keeps all */
     ArtfVec3 attenuation;

@@ -252,7 +252,8 @@ bool artfSceneMeshSetClusters(ArtfScene* s, ArtfMesh mesh) {
     const uint32_t index = artfMeshIndexOf(s, mesh);
     if (index == UINT32_MAX) return false;
     ArtfMeshData* m = &s->meshes.items[index];
-    if (m->skin || m->isLod || m->dagBounds || m->indexCount < 3 || m->evicted) return false;
+    /* (a small mesh gains nothing: its lighter versions do as well, and the GPU draws it whole, not by meshlets) */
+    if (m->skin || m->isLod || m->dagBounds || m->indexCount / 3 < ARTF_DAG_LEAST_TRIANGLES || m->evicted) return false;
     ArtfVertex* v = artfMalloc((size_t)m->vertexCount * sizeof *v);
     artfMeshUnpack(m, v);
     ArtfDag dag;
@@ -261,16 +262,11 @@ bool artfSceneMeshSetClusters(ArtfScene* s, ArtfMesh mesh) {
     if (!built) return false;
     artfMeshSetDag(m, &dag);
     artfDagFree(&dag);
-    /* its lighter versions go: the graph holds them */
-    const uint32_t count = m->lodCount;
-    uint32_t lods[ARTF_MAX_LODS];
-    memcpy(lods, m->lods, sizeof lods);
-    m->lodCount = 0;
+    /* (its lighter versions stay: an instance far enough for one draws it whole, as before; nearer, the cut) */
     ++m->generation;
     ++s->meshRemovals;
     ++s->lodVersion;
     ++s->structureVersion;
-    for (uint32_t i = 0; i < count; ++i) forgetMesh(s, lods[i]);
     return true;
 }
 
@@ -850,6 +846,7 @@ static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc*
     m.iridescenceIor = d->iridescenceIor >= 1.f ? d->iridescenceIor : 1.3f;
     m.iridescenceThickness = d->iridescenceThickness > 0 ? d->iridescenceThickness : 400.f;
     m.iridescenceThicknessMin = artfClampf(d->iridescenceThicknessMin, 0, m.iridescenceThickness);
+    m.reactive = artfClampf(d->reactive, 0, 1);
     if (m.iridescence > 0) m.flags |= ARTF_MORE_IRIDESCENCE;
     m.subsurface[0] = artfMaxf(d->subsurface.x, 0);
     m.subsurface[1] = artfMaxf(d->subsurface.y, 0);
@@ -1846,6 +1843,8 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->look[1] = s->fogDensity;
     out->look[2] = s->sunSize;
     memcpy(out->aerial, s->aerial, sizeof out->aerial);
+    for (size_t i = 0; i < s->materialsMore.len && !(out->more[0] > 0); ++i)
+        if (s->materialsMore.items[i].reactive > 0) out->more[0] = 1.f;
 #undef SET3
     out->instanceCount = (uint32_t)s->instances.len;
     out->focalY = proj.m[5];

@@ -24,8 +24,8 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_GRADE2 = 104, F_ORTHO = 111, F_TRACED = 112, F_SHAPES = 113, F_OUTPUT = 177, F_AERIAL = 178, F_SIZE = 182 };
-_Static_assert(sizeof(ArtfFrameData) == F_SIZE * 16 && offsetof(ArtfFrameData, aerial) == F_AERIAL * 16 && offsetof(ArtfFrameData, output) == F_OUTPUT * 16, "the frame's rows");
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_GRADE2 = 104, F_ORTHO = 111, F_TRACED = 112, F_SHAPES = 113, F_OUTPUT = 177, F_AERIAL = 178, F_MORE = 182, F_SIZE = 183 };
+_Static_assert(sizeof(ArtfFrameData) == F_SIZE * 16 && offsetof(ArtfFrameData, aerial) == F_AERIAL * 16 && offsetof(ArtfFrameData, more) == F_MORE * 16 && offsetof(ArtfFrameData, output) == F_OUTPUT * 16, "the frame's rows");
 
 typedef struct Resources {
     SpvId frame, instances, visible, meshes, materials, indirect, hiz, flags, environment;

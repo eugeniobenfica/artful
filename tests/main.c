@@ -238,6 +238,7 @@ int main(int argc, char** argv) {
     RUN("post/aliasing", testPostAliasing());
     RUN("post/sharpHistory", testSharpHistory());
     RUN("post/displayOutput", testDisplayOutput());
+    RUN("post/reactive", testReactive());
     RUN("motion/skinnedMotion", testSkinnedMotion());
     RUN("motion/skinScenes", testSkinScenes());
     RUN("motion/blurEdges", testBlurEdges());

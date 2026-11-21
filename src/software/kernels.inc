@@ -2553,8 +2553,8 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
     /* (what comes after reads the depth of what is solid: layers write theirs over it; and what instance shows) */
     if (f->post) {
         memcpy(w->postDepth, w->depth, ARTF_TILE_PIXELS * 4);
-        /* (only when something moved: what stood still needs no instance) */
-        if (f->motion) {
+        /* (only when something moved, or a material is reactive: else no instance is needed) */
+        if (f->motion || f->reactive) {
             /* (pixels side by side mostly show the same triangle: it is looked up once for them) */
             uint32_t last = ~0u, who = 0;
             const ArtfRasterTri* bent = NULL; /* (what a pose moved goes by its vertices) */
@@ -2654,7 +2654,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
                 for (int k = 0; k < 4; ++k) memcpy(f->postLight[k] + row + x, out[k], (size_t)n * 4);
                 memcpy(f->postDepth + row + x, depth, (size_t)n * 4);
                 memcpy(f->postSurface + row + x, color + ARTF_POST_SURFACE + x, (size_t)n * 4);
-                if (f->motion) memcpy(f->postInstance + row + x, w->postInstance + y * ARTF_TILE + x, (size_t)n * 4);
+                if (f->motion || f->reactive) memcpy(f->postInstance + row + x, w->postInstance + y * ARTF_TILE + x, (size_t)n * 4);
             }
         }
         return 0;

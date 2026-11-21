@@ -54,6 +54,7 @@ typedef struct ArtfMeshlet {
 /* A mesh as a graph of clusters at every level of detail (dag.c, phase 5.5). Each cluster's triangles are indices into
  * the mesh's vertices; self and parent: a ball (center, radius) and an error, in the mesh's units: its own, from the
  * group it was made from (error 0 on the first level), and that of the group it went into (error infinite: none). */
+#define ARTF_DAG_LEAST_TRIANGLES 4096 /* artfSceneMeshSetClusters takes no smaller mesh */
 typedef struct ArtfDagCluster {
     uint32_t indexOffset, indexCount, level;
     float self[5], parent[5];
@@ -242,8 +243,9 @@ typedef struct ArtfMaterialMore {
     /* KHR_materials_iridescence's and KHR_materials_anisotropy's textures, and the film's least thickness */
     uint32_t iridescenceMap, iridescenceThicknessMap, anisotropyMap;
     float iridescenceThicknessMin;
+    float reactive, pad3[3];            /* ArtfMaterialDesc.reactive */
 } ArtfMaterialMore;
-#define ARTF_MATERIAL_MORE_ROWS 9
+#define ARTF_MATERIAL_MORE_ROWS 10
 enum {
     ARTF_MORE_COAT = 1, ARTF_MORE_SHEEN = 2, ARTF_MORE_SPECULAR = 4, ARTF_MORE_ANISOTROPY = 8, ARTF_MORE_IRIDESCENCE = 16,
     ARTF_MORE_SUBSURFACE = 32, ARTF_MORE_MAPS = 64 /* the coat's or sheen's textures */, ARTF_MORE_VOLUME = 128,
@@ -488,6 +490,9 @@ typedef struct ArtfFrameData {
      * toward the eye, over what it takes: Rayleigh's part, times 1 + mu^2, and its haze's g; haze's, times that over
      * Cornette and Shanks's (1 + g^2 - 2 g mu)^1.5; the sky's, the same all ways, and 1 when it is on (0: none). */
     float aerial[4][4];
+    /* 1 when a material is reactive (ArtfMaterialDesc.reactive): the instance each pixel shows goes after the frame
+     * then, as when something moves; 0 else. The rest: 0. */
+    float more[4];
 } ArtfFrameData;
 
 /* What the air between the eye and a point this far away (in the scene's units), toward which mu is the cosine to the

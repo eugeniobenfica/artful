@@ -68,8 +68,8 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [x] 5.1 Probes escaláveis — estados e histerese adaptativa (critério atingido); volumes que seguem a câmera (`follow`), em cascata (`cascades`, até 4); realocação descartada
 - [x] 5.2 Luzes em clusters — 0 omitidas no corredor (antes 1.846), 0,09 ms a 1080p
 - [x] 5.3 LTC para retângulos e tubos — retângulo 54–58% → 4–9% do traçado, tubo 22% → 0,5%
-- [~] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); histórico cúbico (`sharpHistory`); faltam máscaras reativa/composição
-- [~] 5.5 DAG de clusters — construção, corte, desenho nos dois backends (`artfSceneMeshSetClusters`) e cozimento; faltam medidas em `city`/`heavy` e erro por atributo
+- [x] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); histórico cúbico (`sharpHistory`); máscara reativa (`reactive`); composição de camadas de fora
+- [x] 5.5 DAG de clusters — construção, corte, desenho nos dois backends e cozimento, junto com os 3 níveis; sem ganho em `city`/`heavy` (nada lá pede o grafo); erro por atributo de fora
 - [ ] 5.6 Raios contra o corte grosso; BVH largo
 - [ ] 5.7 Luzes estocásticas, denoiser de sombra, A-SVGF
 - [ ] 5.8 Transparência por transmitância em froxels

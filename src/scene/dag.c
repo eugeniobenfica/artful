@@ -271,6 +271,16 @@ static uint32_t groupClusters(const Built* b, const uint32_t* places, uint32_t f
 
 /* ---- the graph ---- */
 
+typedef struct Simplified {
+    uint32_t members, triangles, levels;
+    float childError;
+    ArtfSimplified out[2];
+} Simplified;
+static int compareFloats(const void* a, const void* b) {
+    const float x = *(const float*)a, y = *(const float*)b;
+    return x < y ? -1 : x > y;
+}
+
 bool artfDagBuild(const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, ArtfDag* out) {
     memset(out, 0, sizeof *out);
     if (!vertexCount || indexCount < 3) return false;
@@ -293,18 +303,19 @@ bool artfDagBuild(const ArtfVertex* vertices, uint32_t vertexCount, const uint32
         uint32_t* group = artfMalloc((size_t)count * 4);
         const uint32_t groups = groupClusters(&b, places, first, count, group);
         const uint32_t nextFirst = (uint32_t)b.clusters.len;
-        const float** balls = artfMalloc((size_t)count * sizeof *balls);
         ++level;
+        /* each group simplified to three quarters and to half of its triangles (with the group's vertices alone) */
+        Simplified* made = artfCalloc((size_t)groups + 1, sizeof *made);
+        float* errors = artfMalloc((size_t)groups * sizeof *errors + 4);
+        uint32_t halves = 0;
         for (uint32_t g = 0; g < groups; ++g) {
-            /* its triangles, with the group's vertices alone */
             gathered.len = back.len = groupVertices.len = 0;
-            uint32_t members = 0;
-            float childError = 0;
+            Simplified* m = &made[g];
             for (uint32_t i = 0; i < count; ++i) {
                 if (group[i] != g) continue;
                 const ArtfDagCluster* c = &b.clusters.items[first + i];
-                balls[members++] = c->self;
-                childError = artfMaxf(childError, c->self[4]);
+                ++m->members;
+                m->childError = artfMaxf(m->childError, c->self[4]);
                 for (uint32_t k = 0; k < c->indexCount; ++k) {
                     const uint32_t v = b.indices.items[c->indexOffset + k];
                     if (local[v] == UINT32_MAX) {
@@ -315,30 +326,49 @@ bool artfDagBuild(const ArtfVertex* vertices, uint32_t vertexCount, const uint32
                     artfVecPush(&gathered, local[v]);
                 }
             }
-            const uint32_t triangles = (uint32_t)gathered.len / 3, target = triangles / 2;
-            ArtfSimplified simplified = {0};
-            const uint32_t made = members > 1 ? artfSimplify(groupVertices.items, (uint32_t)groupVertices.len, gathered.items, (uint32_t)gathered.len, &target, 1, &simplified) : 0;
+            m->triangles = (uint32_t)gathered.len / 3;
+            const uint32_t targets[2] = {m->triangles * 3 / 4, m->triangles / 2};
+            m->levels = m->members > 1 ? artfSimplify(groupVertices.items, (uint32_t)groupVertices.len, gathered.items, (uint32_t)gathered.len, targets, 2, m->out) : 0;
+            for (uint32_t l = 0; l < m->levels; ++l)
+                for (uint32_t k = 0; k < m->out[l].indexCount; ++k) m->out[l].indices[k] = back.items[m->out[l].indices[k]];
             for (size_t i = 0; i < back.len; ++i) local[back.items[i]] = UINT32_MAX;
-            if (!made || simplified.indexCount / 3 * 6 > triangles * 5) {
-                /* (it cannot go far enough: these clusters are as coarse as they get) */
-                if (made) artfFree(simplified.indices);
-                continue;
-            }
-            float bounds[5];
-            ballAround(balls, members, bounds);
-            bounds[4] = childError + simplified.error;
-            for (uint32_t i = 0; i < count; ++i)
-                if (group[i] == g) memcpy(b.clusters.items[first + i].parent, bounds, sizeof bounds);
-            for (uint32_t k = 0; k < simplified.indexCount; ++k) simplified.indices[k] = back.items[simplified.indices[k]];
-            const uint32_t from = (uint32_t)b.clusters.len;
-            clusterize(&b, places, simplified.indices, simplified.indexCount / 3, vertexCount, level);
-            for (uint32_t i = from; i < (uint32_t)b.clusters.len; ++i) {
-                memcpy(b.clusters.items[i].self, bounds, sizeof bounds);
-                b.clusters.items[i].parent[4] = INFINITY;
-            }
-            artfFree(simplified.indices);
+            if (m->levels == 2 && m->out[1].indexCount / 3 * 6 <= m->triangles * 5) errors[halves++] = m->out[1].error;
         }
-        artfFree(balls);
+        /* what a group may move the surface: four times what the level's groups move it, by their median, so that a group
+         * that simplifies far worse than the rest (as around a sphere's poles) does not raise all above it: it goes a
+         * quarter of the way, or stays as it is */
+        qsort(errors, halves, sizeof *errors, compareFloats);
+        const float most = halves ? errors[halves / 2] * 4.f : 0.f;
+        artfFree(errors);
+        for (uint32_t g = 0; g < groups; ++g) {
+            Simplified* m = &made[g];
+            const ArtfSimplified* chosen = NULL;
+            for (int l = (int)m->levels - 1; l >= 0 && !chosen; --l)
+                if (m->out[l].indexCount / 3 * 6 <= m->triangles * 5 && m->out[l].error <= most) chosen = &m->out[l];
+            if (chosen) {
+                const float* balls[64];
+                const float** ball = m->members <= 64 ? balls : artfMalloc((size_t)m->members * sizeof *ball);
+                uint32_t n = 0;
+                for (uint32_t i = 0; i < count; ++i)
+                    if (group[i] == g) ball[n++] = b.clusters.items[first + i].self;
+                float bounds[5];
+                ballAround(ball, n, bounds);
+                if (ball != balls) artfFree((void*)ball);
+                /* (what the group moved the surface, past what its clusters had: so a bound for all before it) */
+                bounds[4] = m->childError + chosen->error;
+                for (uint32_t i = 0; i < count; ++i)
+                    if (group[i] == g) memcpy(b.clusters.items[first + i].parent, bounds, sizeof bounds);
+                const uint32_t from = (uint32_t)b.clusters.len;
+                clusterize(&b, places, chosen->indices, chosen->indexCount / 3, vertexCount, level);
+                for (uint32_t i = from; i < (uint32_t)b.clusters.len; ++i) {
+                    memcpy(b.clusters.items[i].self, bounds, sizeof bounds);
+                    b.clusters.items[i].parent[4] = INFINITY;
+                }
+            }
+            /* (else these clusters are as coarse as they get) */
+            for (uint32_t l = 0; l < m->levels; ++l) artfFree(m->out[l].indices);
+        }
+        artfFree(made);
         artfFree(group);
         first = nextFirst;
         count = (uint32_t)b.clusters.len - nextFirst;
