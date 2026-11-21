@@ -889,8 +889,8 @@ static void softFree(ArtfRenderer* r) {
         artfAlignedFree(f->workers[i].postDepth);
         artfAlignedFree(f->workers[i].postInstance);
         artfFree(f->workers[i].solidDepth);
-        artfFree(f->workers[i].layerGrid);
-        artfFree(f->workers[i].layerSums);
+        artfAlignedFree(f->workers[i].layerGrid);
+        artfAlignedFree(f->workers[i].layerSums);
         artfFree(f->workers[i].layerBelow);
         artfVecFree(&f->workers[i].layerBits);
         artfVecFree(&f->workers[i].tris);

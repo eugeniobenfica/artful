@@ -2252,8 +2252,9 @@ static void drawLayersSorted(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, in
     const size_t all = (size_t)ARTF_TILE_PIXELS * (size_t)f->samples;
     if (!w->solidDepth) {
         w->solidDepth = artfMalloc(all * 4);
-        w->layerGrid = artfMalloc((size_t)COLUMNS * COLUMNS * ARTF_LAYER_SLICES * 4);
-        w->layerSums = artfMalloc(all * ARTF_LAYER_SUMS * 4);
+        /* (aligned for the lanes: these are read and written eight at a time) */
+        w->layerGrid = artfAlignedMalloc((size_t)COLUMNS * COLUMNS * ARTF_LAYER_SLICES * 4, 64);
+        w->layerSums = artfAlignedMalloc(all * ARTF_LAYER_SUMS * 4, 64);
         w->layerBelow = artfMalloc(all * 4);
     }
     memcpy(w->solidDepth, w->depth, all * 4);
@@ -2367,14 +2368,14 @@ static void drawLayersSorted(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, in
     const V8F scaleT = v8fSet(-1.f / ARTF_LAYER_ONE), c255 = v8fSet(255.f), half = v8fSet(.5f), oneF = v8fSet(1.f);
     const V8I byte = v8iSet(255), round = v8iSet(128);
     for (size_t i = 0; i < all; i += 8) {
-        const V8I a = v8iLoad(sums[3] + i), none = v8iEq(a, zeroI);
+        const V8I a = v8iLoadU(sums[3] + i), none = v8iEq(a, zeroI);
         if (v8iSigns(none) == 0xFF) continue;
-        const V8F cover = v8fSub(oneF, gradeExp2(v8fMul(v8iToF(v8iLoad(sums[4] + i)), scaleT)));
+        const V8F cover = v8fSub(oneF, gradeExp2(v8fMul(v8iToF(v8iLoadU(sums[4] + i)), scaleT)));
         const V8F coverBytes = v8fMul(cover, c255);
         const V8F scale = v8fDiv(coverBytes, v8iToF(v8iSelect(none, a, v8iSet(1))));
         const V8I alpha = v8fToI(v8fAdd(coverBytes, half));
         V8I top = v8iShl(alpha, 24);
-        for (int k = 0; k < 3; ++k) top = v8iOr(top, v8iShl(v8fToI(v8fMin(v8fAdd(v8fMul(v8iToF(v8iLoad(sums[k] + i)), scale), half), c255)), 16 - 8 * k));
+        for (int k = 0; k < 3; ++k) top = v8iOr(top, v8iShl(v8fToI(v8fMin(v8fAdd(v8fMul(v8iToF(v8iLoadU(sums[k] + i)), scale), half), c255)), 16 - 8 * k));
         const V8I under = v8iLoad(w->color + i), rest = v8iSub(byte, alpha);
         V8I blended = v8iSet(0);
         for (int k = 0; k < 4; ++k) {
