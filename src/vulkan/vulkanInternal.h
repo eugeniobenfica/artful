@@ -241,7 +241,7 @@ typedef struct Vulkan {
     /* layers by each pixel's depth */
     bool fragmentStores, sampleShading;
     GpuBuffer layerCounts, layerFragments;
-    VkPipeline layerListPipeline, layerResolvePipeline;
+    VkPipeline layerListPipeline, layerResolvePipeline, layerGridPipeline, layerPrefixPipeline; /* layers by transmittance: their sums, the sums over the frame, the grid, its columns */
     VkRenderPass midPass, resolvePass;
     VkFramebuffer resolveFramebuffer;
     /* meshlets on the GPU: their table, and what each mesh has of it */
@@ -301,6 +301,7 @@ typedef struct Vulkan {
     /* The ray tracing hardware (ArtfTraceDesc.hardware): a bottom level for each mesh traced, in one buffer; the top
      * level over the traced instances, in their order (binding 64). */
     bool rayQuery;        /* the device has acceleration structures and ray queries, and they are on */
+    bool depthCoverage;   /* VK_EXT_post_depth_coverage: layers by transmittance go a pixel at a time, with samples (ARTFUL_NO_POST_DEPTH: as without) */
     bool traceHardware;   /* the trace pipeline goes through them */
     bool traceMore;       /* the trace pipeline reads materials past glTF's core and lights' shapes */
     /* Each mesh's bottom level is its own, built or refitted in the frame's commands (slotMeshSync), in a room of one of
@@ -418,6 +419,7 @@ typedef struct Vulkan {
     GpuBuffer postGathered;         /* lights sampled, gathered (binding 72): two vec4s a pixel of the scene, the halves in turn */
     uint32_t gatheredHalf;
     bool gatheredValid;
+    bool layerSumsFresh; /* layers by transmittance: their sums were just made, and are not 0 yet */
     uint32_t lockHalf;              /* which half this frame's upscaling writes */
     struct Slot* owed;              /* a frame begun whose fence was reset, until it is submitted (frameOwed) */
     bool memoryShort;               /* this frame, the GPU's memory ran out for something (ARTF_EVENT_OUT_OF_MEMORY) */
@@ -491,7 +493,7 @@ typedef struct ShaderJob {
     bool lists, resolve;            /* the layers' lists' pipeline (it was there), and their resolve (new passes) */
     VkRenderPass pass, resolvePass; /* those the pipelines are made in */
     VkRenderPass passes[5];
-    VkPipeline plain, cutout[4], lister[2], behind[4];
+    VkPipeline plain, cutout[4], lister[3], behind[4];
     bool ok;
 } ShaderJob;
 

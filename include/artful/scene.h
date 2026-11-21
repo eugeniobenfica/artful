@@ -50,9 +50,12 @@ typedef enum ArtfFeature {
     /* A mesh goes from one level of detail to the next over a stretch of distance, through a pattern of pixels, and not
      * all at once. What is in that stretch is drawn twice, each level in its half of the pixels. Off to start with. */
     ARTF_FEATURE_LOD_FADE,
-    /* Layers go by each pixel's depth, and not by their centers, so two that cut through each other show as they are: up
-     * to eight in a pixel, the farthest going first when there are more. It costs memory on the GPU: 96 bytes a pixel.
-     * Where a device cannot do it, layers go whole. Off to start with. */
+    /* Layers go by each pixel's depth, and not by their centers, so two that cut through each other show as they are, as
+     * many as there are in a pixel, each of their surfaces (by transmittance: blended by weight, each surface weighed
+     * by what the layers in front of it leave, from a grid along the view). Two surfaces closer than a slice of the
+     * grid (64 from the nearest layer to the farthest), or in a column of 8 x 8 pixels that other layers only partly
+     * cover, are mixed rather than ordered. It costs memory on the GPU: 20 bytes a sample, and the grid. With a frame in
+     * floats, or where a device cannot do it, layers go whole. Off to start with. */
     ARTF_FEATURE_LAYERS_SORTED,
     ARTF_FEATURE_COUNT
 } ArtfFeature;

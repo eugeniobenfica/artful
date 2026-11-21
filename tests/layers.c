@@ -475,6 +475,7 @@ void testLayersSorted(ArtfBackend backend) {
     drawInto(r, s, a);
     /* on the right the first is nearer, on the left the second: more of what is in front shows */
     const uint32_t left = a[(size_t)(H / 2) * W + W / 2 - 30], right = a[(size_t)(H / 2) * W + W / 2 + 30];
+    printf("sorted layers: on the left red %u, blue %u; on the right red %u, blue %u\n", CHANNEL(left, 16), CHANNEL(left, 0), CHANNEL(right, 16), CHANNEL(right, 0));
     CHECK(CHANNEL(right, 16) > CHANNEL(right, 0) + 40);
     CHECK(CHANNEL(left, 0) > CHANNEL(left, 16) + 40);
 
@@ -577,4 +578,54 @@ void testDecals(void) {
     artfSceneFree(s);
     artfFree(a);
     artfFree(b);
+}
+
+/* Layers by transmittance: three that do not cut through each other, one behind another, come out as they do whole, the
+ * farthest first (when what is in front of a surface is all of its column, the weights are what the layers over it
+ * leave); and the CPU's and the GPU's are the same. */
+void testLayersTransmittance(void) {
+    ArtfScene* s = plainScene();
+    const uint32_t colors[3] = {0xFFFF2020u, 0xFF20FF20u, 0xFF2020FFu};
+    for (int k = 0; k < 3; ++k) {
+        const float z = (float)k - 1.f;
+        const ArtfVertex v[4] = {{-2, -2, z, 0, 0, 1, 0, 0, 0}, {2, -2, z, 0, 0, 1, 0, 0, 0}, {2, 2, z, 0, 0, 1, 0, 0, 0}, {-2, 2, z, 0, 0, 1, 0, 0, 0}};
+        const uint32_t idx[6] = {0, 1, 2, 0, 2, 3};
+        ArtfMaterialDesc m = artfMaterialDefaults();
+        m.baseColor = artfVec3((float)(colors[k] >> 16 & 255) / 255.f, (float)(colors[k] >> 8 & 255) / 255.f, (float)(colors[k] & 255) / 255.f);
+        m.alphaMode = ARTF_ALPHA_BLEND;
+        m.transparency = .4f + .1f * (float)k;
+        m.specular = 0;
+        m.doubleSided = true;
+        const ArtfTransform at = artfTransformAt(0, 0, 0, 1);
+        artfSceneAddInstance(s, artfSceneAddMesh(s, v, 4, idx, 6), artfSceneAddMaterial(s, &m), &at);
+    }
+    uint32_t* whole = artfMalloc((size_t)W * H * 4);
+    uint32_t* cpu = artfMalloc((size_t)W * H * 4);
+    uint32_t* gpu = artfMalloc((size_t)W * H * 4);
+    ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    drawInto(r, s, whole);
+    artfSceneSetFeature(s, ARTF_FEATURE_LAYERS_SORTED, true);
+    drawInto(r, s, cpu);
+    const double apart = differentShare(whole, cpu, 8);
+    printf("layers by transmittance against whole, the farthest first: %.3f%% of pixels differ by more than 8 of 255\n", apart * 100);
+    CHECK(apart < .01);
+    artfRendererFree(r);
+    o.backend = ARTF_BACKEND_VULKAN;
+    r = artfRendererNew(&o);
+    if (r) {
+        drawInto(r, s, gpu);
+        const double backends = differentShare(cpu, gpu, 8);
+        /* (what the backends differ by whole, at edges and in light: this may add little to it) */
+        artfSceneSetFeature(s, ARTF_FEATURE_LAYERS_SORTED, false);
+        drawInto(r, s, cpu);
+        const double wholeBackends = differentShare(whole, cpu, 8);
+        printf("layers by transmittance, the GPU against the CPU: %.3f%% of pixels differ by more than 8 of 255, and %.3f%% whole\n", backends * 100, wholeBackends * 100);
+        CHECK(backends <= wholeBackends * 1.1 + .002);
+        artfRendererFree(r);
+    }
+    artfFree(whole);
+    artfFree(cpu);
+    artfFree(gpu);
+    artfSceneFree(s);
 }

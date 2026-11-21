@@ -927,8 +927,8 @@ bool cutoutPipelinesCreate(Vulkan* v, VkShaderModule fragment, VkRenderPass pass
 
 /* What the cutout shader draws, and what is made from it when first asked (the layers' lists), retired. */
 void cutoutPipelinesRetire(Vulkan* v) {
-    VkPipeline* const old[5] = {&v->layerDepthPipeline, &v->layerPipeline, &v->cutoutPipeline, &v->layerListPipeline, &v->particlePipeline};
-    for (int i = 0; i < 5; ++i) {
+    VkPipeline* const old[6] = {&v->layerDepthPipeline, &v->layerPipeline, &v->cutoutPipeline, &v->layerListPipeline, &v->particlePipeline, &v->layerGridPipeline};
+    for (int i = 0; i < 6; ++i) {
         pipelineRetire(v, *old[i]);
         *old[i] = 0;
     }
@@ -984,13 +984,16 @@ bool behindPipelinesCreate(Vulkan* v, VkRenderPass pass, VkPipeline* made) {
  * resolves them, in resolvePass with samples, pass without. Those asked for (list, resolve). On any thread, as
  * scenePipelineCreate. */
 bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uint32_t count, uint32_t variant, VkRenderPass pass, VkRenderPass resolvePass, bool list, bool resolve, VkPipeline* made) {
-    made[0] = made[1] = 0;
+    made[0] = made[1] = made[2] = 0;
     size_t size;
     uint32_t* code;
-    VkShaderModule fragment = 0, whole = 0, resolving = 0;
+    VkShaderModule fragment = 0, whole = 0, resolving = 0, gridding = 0;
     if (list) {
-        code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, v->samples, variant & ~(uint32_t)ARTF_SHADER_FLOATS);
+        const int lists = v->samples | (v->depthCoverage ? ARTF_LISTS_POST_DEPTH : 0);
+        code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, lists, variant & ~(uint32_t)ARTF_SHADER_FLOATS);
         fragment = shaderModule(v, code, size);
+        code = artfShaderSceneFragment(&size, v->maxTextures, true, graphs, count, lists | ARTF_LISTS_GRID, variant & ~(uint32_t)ARTF_SHADER_FLOATS);
+        gridding = shaderModule(v, code, size);
     }
     if (resolve) {
         code = artfShaderOverlayVertex(&size);
@@ -998,7 +1001,7 @@ bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uint32_t c
         code = artfShaderLayerResolve(&size, v->samples);
         resolving = shaderModule(v, code, size);
     }
-    bool ok = (!list || fragment) && (!resolve || (whole && resolving));
+    bool ok = (!list || (fragment && gridding)) && (!resolve || (whole && resolving));
     if (ok) {
         const VertexBinding binding = {0, sizeof(ArtfPackedVertex), 0};
         const VertexAttribute attributes[3] = {{0, 0, FORMAT_RGBA16_UNORM, 0}, {1, 0, FORMAT_RG16_SNORM, 8}, {2, 0, FORMAT_RG16_FLOAT, 12}};
@@ -1008,6 +1011,8 @@ bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uint32_t c
         const PipelineViewport viewport = {ST_PIPELINE_VIEWPORT, NULL, 0, 1, NULL, 1, NULL};
         const PipelineRasterization rasterNone = {ST_PIPELINE_RASTERIZATION, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.f};
         const PipelineMultisample multisample = {ST_PIPELINE_MULTISAMPLE, NULL, 0, v->samples, 0, 0, NULL, 0, 0};
+        /* (a layer's surfaces, by sample: each tested against its own depth) */
+        const PipelineMultisample bySample = {ST_PIPELINE_MULTISAMPLE, NULL, 0, v->samples, v->samples > 1 && !v->depthCoverage, 1.f, NULL, 0, 0};
         PipelineDepthStencil depthLook, depthOff;
         memset(&depthLook, 0, sizeof depthLook);
         depthLook.sType = ST_PIPELINE_DEPTH_STENCIL;
@@ -1024,14 +1029,19 @@ bool layerListPipelinesCreate(Vulkan* v, const ArtfGraphData* graphs, uint32_t c
         const PipelineDynamic dynamic = {ST_PIPELINE_DYNAMIC, NULL, 0, 2, states};
         const PipelineShaderStage listStages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, v->sceneVertexModule, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, fragment, "main", NULL}};
         const PipelineShaderStage resolveStages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, whole, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, resolving, "main", NULL}};
-        const GraphicsPipelineCreateInfo info[2] = {
-            {ST_GRAPHICS_PIPELINE, NULL, 0, 2, listStages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthLook, &blendNone, &dynamic, v->pipelineLayout, pass, 0, 0, -1},
-            {ST_GRAPHICS_PIPELINE, NULL, 0, 2, resolveStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendOn, &dynamic, v->pipelineLayout, v->samples > 1 ? resolvePass : pass, 0, 0, -1}};
+        const PipelineShaderStage gridStages[2] = {{ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_VERTEX, v->sceneVertexModule, "main", NULL}, {ST_PIPELINE_SHADER_STAGE, NULL, 0, SHADER_FRAGMENT, gridding, "main", NULL}};
+        /* (the resolve goes in the pass the sums were drawn in, after them, by sample as they are) */
+        (void)resolvePass;
+        const GraphicsPipelineCreateInfo info[3] = {
+            {ST_GRAPHICS_PIPELINE, NULL, 0, 2, listStages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &bySample, &depthLook, &blendNone, &dynamic, v->pipelineLayout, pass, 0, 0, -1},
+            {ST_GRAPHICS_PIPELINE, NULL, 0, 2, resolveStages, &noInput, &assembly, NULL, &viewport, &rasterNone, &multisample, &depthOff, &blendOn, &dynamic, v->pipelineLayout, pass, 0, 0, -1},
+            {ST_GRAPHICS_PIPELINE, NULL, 0, 2, gridStages, &vertexInput, &assembly, NULL, &viewport, &rasterNone, &bySample, &depthLook, &blendNone, &dynamic, v->pipelineLayout, pass, 0, 0, -1}};
         if (list) ok = v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 1, &info[0], NULL, &made[0]) == VK_OK;
+        if (list && ok) ok = v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 1, &info[2], NULL, &made[2]) == VK_OK;
         if (resolve && ok) ok = v->vkCreateGraphicsPipelines(v->device, v->pipelineCache, 1, &info[1], NULL, &made[1]) == VK_OK;
     }
-    const VkShaderModule modules[3] = {fragment, whole, resolving};
-    for (int i = 0; i < 3; ++i)
+    const VkShaderModule modules[4] = {fragment, whole, resolving, gridding};
+    for (int i = 0; i < 4; ++i)
         if (modules[i]) v->vkDestroyShaderModule(v->device, modules[i], NULL);
     return ok;
 }
@@ -1179,12 +1189,13 @@ bool shaderJobEnd(Vulkan* v, const ArtfScene* scene, bool use) {
         v->cutoutPipeline = j->cutout[2];
         v->particlePipeline = j->cutout[3];
         v->layerListPipeline = j->lister[0];
+        v->layerGridPipeline = j->lister[2];
         featuresSet(v, &j->features);
         v->graphCount = j->graphCount;
         v->graphScene = j->scene;
     } else {
-        VkPipeline* const made[11] = {&j->plain, &j->cutout[0], &j->cutout[1], &j->cutout[2], &j->cutout[3], &j->lister[0], &j->lister[1], &j->behind[0], &j->behind[1], &j->behind[2], &j->behind[3]};
-        for (int i = 0; i < 11; ++i)
+        VkPipeline* const made[12] = {&j->plain, &j->cutout[0], &j->cutout[1], &j->cutout[2], &j->cutout[3], &j->lister[0], &j->lister[1], &j->lister[2], &j->behind[0], &j->behind[1], &j->behind[2], &j->behind[3]};
+        for (int i = 0; i < 12; ++i)
             if (*made[i]) v->vkDestroyPipeline(v->device, *made[i], NULL);
         for (int i = 0; i < 5; ++i)
             if (j->passes[i]) v->vkDestroyRenderPass(v->device, j->passes[i], NULL);
@@ -1303,25 +1314,54 @@ bool computeFollow(Vulkan* v, const ArtfScene* scene, int kind, bool wait, bool*
 }
 
 
-/* Layers by each pixel's depth, when a scene first asks: their lists, for this size, and what fills and reads them. */
+/* The layers in view, each surface once: in one call where a device can. */
+static void layerDraws(Vulkan* v, VkCommandBuffer c, const Slot* s, uint32_t layerCount) {
+    if (v->multiDraw) {
+        v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, 0, layerCount, 20);
+        return;
+    }
+    for (uint32_t i = 0; i < layerCount; ++i) v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, (VkDeviceSize)i * 20, 1, 20);
+}
+
+/* The columns of the grid of layers by transmittance, for the scene's size. */
+static uint32_t layerColumns(const Vulkan* v) {
+    return (uint32_t)((v->sceneWidth + ARTF_LAYER_TILE - 1) / ARTF_LAYER_TILE) * (uint32_t)((v->sceneHeight + ARTF_LAYER_TILE - 1) / ARTF_LAYER_TILE);
+}
+
+/* Layers by each pixel's depth, by transmittance, when a scene first asks: the grid and each sample's sums, for this
+ * size, and what fills and reads them. */
 bool layerListsMake(Vulkan* v, const ArtfScene* scene) {
-    const VkDeviceSize pixels = (VkDeviceSize)v->sceneWidth * v->sceneHeight;
-    if (v->layerCounts.size < pixels * 4) {
+    const VkDeviceSize samples = (VkDeviceSize)v->sceneWidth * v->sceneHeight * (VkDeviceSize)v->samples;
+    const VkDeviceSize gridBytes = (VkDeviceSize)layerColumns(v) * ARTF_LAYER_SLICES * 4, sumBytes = samples * ARTF_LAYER_SUMS * 4;
+    if (v->layerCounts.size < gridBytes || v->layerFragments.size < sumBytes) {
         v->vkDeviceWaitIdle(v->device);
         bufferFree(v, &v->layerCounts);
         bufferFree(v, &v->layerFragments);
-        if (!bufferNew(v, &v->layerCounts, pixels * 4, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
-        if (!bufferNew(v, &v->layerFragments, pixels * ARTF_LAYER_FRAGMENTS * 12, BUFFER_STORAGE, false)) return false;
+        if (!bufferNew(v, &v->layerCounts, gridBytes, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
+        if (!bufferNew(v, &v->layerFragments, sumBytes, BUFFER_STORAGE | BUFFER_TRANSFER_DST, false)) return false;
+        v->layerSumsFresh = true; /* (to 0 once: then each resolve leaves what it read at 0) */
         for (int i = 0; i < SLOTS; ++i) {
             bindStorage(v, &v->slots[i], 44, &v->layerCounts);
             bindStorage(v, &v->slots[i], 45, &v->layerFragments);
         }
     }
-    if (v->layerListPipeline && v->layerResolvePipeline) return true;
-    VkPipeline made[2];
-    const bool list = !v->layerListPipeline, resolve = !v->layerResolvePipeline;
+    if (!v->layerPrefixPipeline) {
+        size_t size;
+        uint32_t* code = artfShaderLayerPrefix(&size);
+        if (!computePipelineCreate(v, code, size, &v->layerPrefixPipeline)) return false;
+    }
+    if (v->layerListPipeline && v->layerGridPipeline && v->layerResolvePipeline) return true;
+    VkPipeline made[3];
+    const bool list = !v->layerListPipeline || !v->layerGridPipeline, resolve = !v->layerResolvePipeline;
+    if (list) {
+        pipelineRetire(v, v->layerListPipeline);
+        pipelineRetire(v, v->layerGridPipeline);
+    }
     const bool ok = layerListPipelinesCreate(v, scene->graphs.items, v->graphCount, shaderVariant(v), v->renderPass, v->resolvePass, list, resolve, made);
-    if (list) v->layerListPipeline = made[0];
+    if (list) {
+        v->layerListPipeline = made[0];
+        v->layerGridPipeline = made[2];
+    }
     if (resolve) v->layerResolvePipeline = made[1];
     return ok;
 }
@@ -1369,7 +1409,7 @@ bool pipelinesMake(Vulkan* v) {
         {34, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {35, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {36, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {37, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {38, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {39, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {40, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {41, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {42, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {43, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
-        {44, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL}, {45, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL},
+        {44, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {45, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT, NULL},
         {46, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {47, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL},
         {48, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, {49, DESCRIPTOR_STORAGE, 1, graphics | SHADER_COMPUTE, NULL},
         {60, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL}, {61, DESCRIPTOR_STORAGE, 1, SHADER_FRAGMENT | SHADER_COMPUTE, NULL},
@@ -3567,6 +3607,9 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     } else if (scene->translucentCount) {
         artfVecReserve(&v->layers, scene->translucentCount);
         layerCount = artfSceneLayers(scene, &frame, v->layers.items);
+        /* (where the grid of layers by transmittance is: the frame's row, written again) */
+        artfLayerRange(&frame, v->layers.items, layerCount);
+        memcpy((char*)s->frame.mapped + offsetof(ArtfFrameData, layers), frame.layers, sizeof frame.layers);
         const VkDeviceSize bytes = (VkDeviceSize)layerCount * 8;
         if (bytes > s->layerList.size) {
             bufferFree(v, &s->layerList);
@@ -3610,7 +3653,7 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     VkCommandBuffer c = s->commands;
     /* (its descriptors change here: not once the set is bound) */
     const bool overdraw = view == ARTF_VIEW_OVERDRAW;
-    const bool sorted = layerCount && v->fragmentStores && !v->floats && (v->samples == 1 || v->sampleShading) && scene->features[ARTF_FEATURE_LAYERS_SORTED] && !overdraw;
+    const bool sorted = layerCount && v->fragmentStores && !v->floats && (v->samples == 1 || v->sampleShading || v->depthCoverage) && scene->features[ARTF_FEATURE_LAYERS_SORTED] && !overdraw;
     if (sorted && !layerListsMake(v, scene)) return false;
     if (sorted) {
         /* (one call for all of them: what they add to the lists has no order) */
@@ -3738,6 +3781,8 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         /* (the frame before read them) */
         trackUse(v, c, 0, TRACK(TRACK_LAYERS), STAGE_TRANSFER, 0, ACCESS_TRANSFER_WRITE);
         v->vkCmdFillBuffer(c, v->layerCounts.buffer, 0, ~(VkDeviceSize)0, 0);
+        if (v->layerSumsFresh) v->vkCmdFillBuffer(c, v->layerFragments.buffer, 0, ~(VkDeviceSize)0, 0);
+        v->layerSumsFresh = false;
     }
     /* what the scene's passes' pixel shaders read (fog's grid, what was traced) and the layers' lists they write: one
      * barrier for all, from what wrote each (trackUse); depth, by the passes' own dependencies */
@@ -3816,36 +3861,28 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
         v->vkCmdSetScissor(c, 0, 1, &area);
     }
     if (sorted) {
-        v->vkCmdBindPipeline(c, 0, v->layerListPipeline);
+        /* by transmittance: what each surface takes into the grid; the grid's columns, by what is in front; each
+         * surface into its sample's sums, by its weight; the sums over the frame. (Sums of integers: no order.) */
+        v->vkCmdBindPipeline(c, 0, v->layerGridPipeline);
         v->vkCmdBindDescriptorSets(c, 0, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
-        if (v->multiDraw) {
-            v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, 0, layerCount, 20);
-        } else {
-            /* (one at a time: each after the one before wrote its fragments, as the pass's own dependency allows) */
-            const GlobalBarrier after = {ST_MEMORY_BARRIER, NULL, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE};
-            for (uint32_t i = 0; i < layerCount; ++i) {
-                if (i) v->vkCmdPipelineBarrier(c, STAGE_FRAGMENT, STAGE_FRAGMENT, 1 /* by region */, 1, &after, 0, NULL, 0, NULL);
-                v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, (VkDeviceSize)i * 20, 1, 20);
-            }
-        }
+        layerDraws(v, c, s, layerCount);
         v->vkCmdEndRenderPass(c);
-        memoryBarrier(v, c, STAGE_FRAGMENT | STAGE_EARLY_TESTS | STAGE_LATE_TESTS, STAGE_FRAGMENT, ACCESS_SHADER_WRITE | ACCESS_DEPTH_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
-        pass.renderPass = v->samples > 1 ? v->resolvePass : v->latePass;
-        if (v->samples > 1) pass.framebuffer = v->resolveFramebuffer;
+        memoryBarrier(v, c, STAGE_FRAGMENT, STAGE_COMPUTE, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE);
+        v->vkCmdBindPipeline(c, 1, v->layerPrefixPipeline);
+        v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
+        v->vkCmdDispatch(c, (layerColumns(v) + 63) / 64, 1, 1);
+        memoryBarrier(v, c, STAGE_COMPUTE, STAGE_FRAGMENT, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ);
+        pass.renderPass = v->latePass;
         v->vkCmdBeginRenderPass(c, &pass, 0);
         v->vkCmdSetViewport(c, 0, 1, &viewport);
         v->vkCmdSetScissor(c, 0, 1, &area);
+        v->vkCmdBindPipeline(c, 0, v->layerListPipeline);
+        layerDraws(v, c, s, layerCount);
+        /* (a sample's sums are its own: the pass's own dependency, by region, is enough) */
+        const GlobalBarrier after = {ST_MEMORY_BARRIER, NULL, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ};
+        v->vkCmdPipelineBarrier(c, STAGE_FRAGMENT, STAGE_FRAGMENT, 1 /* by region */, 1, &after, 0, NULL, 0, NULL);
         v->vkCmdBindPipeline(c, 0, v->layerResolvePipeline);
         v->vkCmdDraw(c, 3, 1, 0, 0);
-        if (v->samples > 1) {
-            /* (depth was a texture there: what is left of the frame goes on as it does) */
-            v->vkCmdEndRenderPass(c);
-            pass.renderPass = v->latePass;
-            pass.framebuffer = v->framebuffers[image];
-            v->vkCmdBeginRenderPass(c, &pass, 0);
-            v->vkCmdSetViewport(c, 0, 1, &viewport);
-            v->vkCmdSetScissor(c, 0, 1, &area);
-        }
     } else if (layerCount) {
         drawLayers(v, c, scene, layerCount);
     }
@@ -4091,6 +4128,8 @@ void vkFree(ArtfRenderer* r) {
         if (v->cutoutPipeline) v->vkDestroyPipeline(v->device, v->cutoutPipeline, NULL);
         if (v->layerListPipeline) v->vkDestroyPipeline(v->device, v->layerListPipeline, NULL);
         if (v->layerResolvePipeline) v->vkDestroyPipeline(v->device, v->layerResolvePipeline, NULL);
+        if (v->layerGridPipeline) v->vkDestroyPipeline(v->device, v->layerGridPipeline, NULL);
+        if (v->layerPrefixPipeline) v->vkDestroyPipeline(v->device, v->layerPrefixPipeline, NULL);
         bufferFree(v, &v->layerCounts);
         bufferFree(v, &v->layerFragments);
         if (v->midPass) v->vkDestroyRenderPass(v->device, v->midPass, NULL);
@@ -4263,7 +4302,7 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
         features.pNext = &f12;
         v->vkGetPhysicalDeviceFeatures2(gpus[i], &features);
         /* the ray tracing hardware: both extensions, and what they need (ARTFUL_NO_RAY_QUERY: as a device without) */
-        bool rayQuery = false, deviceFault = false, nonSemantic = false;
+        bool rayQuery = false, deviceFault = false, nonSemantic = false, postDepth = false;
         {
             ExtensionProperties* have = artfMalloc(512 * sizeof *have);
             uint32_t extensionCount = 512;
@@ -4271,8 +4310,10 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             if (v->vkEnumerateDeviceExtensionProperties && v->vkEnumerateDeviceExtensionProperties(gpus[i], NULL, &extensionCount, have) >= 0)
                 for (uint32_t e = 0; e < extensionCount; ++e)
                     found |= (!strcmp(have[e].name, "VK_KHR_acceleration_structure") ? 1 : 0) | (!strcmp(have[e].name, "VK_KHR_ray_query") ? 2 : 0) | (!strcmp(have[e].name, "VK_KHR_deferred_host_operations") ? 4 : 0) |
-                             (!strcmp(have[e].name, "VK_EXT_device_fault") ? 8 : 0) | (!strcmp(have[e].name, "VK_KHR_shader_non_semantic_info") ? 16 : 0);
+                             (!strcmp(have[e].name, "VK_EXT_device_fault") ? 8 : 0) | (!strcmp(have[e].name, "VK_KHR_shader_non_semantic_info") ? 16 : 0) |
+                             (!strcmp(have[e].name, "VK_EXT_post_depth_coverage") ? 32 : 0);
             nonSemantic = (found & 16) != 0;
+            postDepth = (found & 32) != 0 && !getenv("ARTFUL_NO_POST_DEPTH");
             artfFree(have);
             if (found & 8) {
                 FaultFeatures fault = {ST_FAULT_FEATURES, NULL, 0, 0};
@@ -4325,6 +4366,7 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             v->fragmentStores = features.features.fragmentStoresAndAtomics;
             v->rayQuery = rayQuery;
             v->deviceFault = deviceFault;
+            v->depthCoverage = postDepth;
             /* (ARTFUL_SHADER_DEBUG: shaders that say which C built them, for RenderDoc: spirv.h's artfShaderDebugInfo) */
             v->shaderDebug = nonSemantic && getenv("ARTFUL_SHADER_DEBUG");
             v->sampleShading = features.features.sampleRateShading;
@@ -4451,9 +4493,10 @@ bool createDevice(Vulkan* v) {
     features.features.sampleRateShading = v->sampleShading;
     features.features.independentBlend = v->independentBlend;
     features.features.geometryShader = v->primitiveIds;
-    const char* extensions[8];
+    const char* extensions[10];
     uint32_t extensionCount = 0;
     if (v->surface) extensions[extensionCount++] = "VK_KHR_swapchain";
+    if (v->depthCoverage) extensions[extensionCount++] = "VK_EXT_post_depth_coverage";
     if (v->surface && v->native.kind == ARTF_SURFACE_METAL) extensions[extensionCount++] = "VK_KHR_portability_subset";
     RayQueryFeatures query = {ST_RAY_QUERY_FEATURES, NULL, 1};
     AsFeatures as = {ST_AS_FEATURES, &query, 1, 0, 0, 0, 0};

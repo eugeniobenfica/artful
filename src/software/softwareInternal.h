@@ -61,15 +61,22 @@ typedef struct ArtfVisible {
 
 /* Scratch of one thread: a tile's memory. Depth and ids stay here: what leaves a tile is its color.
  * Each is a plane for each sample, one after the other. */
+/* A surface of a layer, when layers are sorted (drawLayersSorted). */
+typedef struct ArtfLayerBit {
+    uint32_t at, color, taken, slice;
+} ArtfLayerBit;
+
 typedef struct ArtfWorker {
     float* depth;
     uint32_t* ids;      /* index in tris + 1, or in a layer's triangles; 0: nothing */
     uint32_t* color;
     uint32_t* layer;    /* the colors of the layer being drawn */
-    float* solidDepth;  /* when layers are sorted: what they all go by; then each pixel's fragments */
-    float* fragmentDepth;
-    uint32_t* fragmentColor;
-    uint8_t* fragmentCount;
+    float* solidDepth;  /* when layers are sorted: what they all go by */
+    /* and what each of their surfaces left in a sample (its place in the tile's samples, its color, what it takes,
+     * its slice); the tile's grid (artfLayerSlice); each sample's sums */
+    ARTF_VEC(ArtfLayerBit) layerBits;
+    uint32_t *layerGrid, *layerSums;
+    float* layerBelow; /* the surfaces peeled before: the next is behind them */
     float* postDepth;   /* with a frame in floats: what is solid, before layers */
     uint32_t* postInstance; /* and what instance shows there, + 1 */
     ARTF_VEC(const ArtfRasterTri*) tris;
@@ -121,6 +128,7 @@ typedef struct ArtfSoftFrame {
     /* a frame in floats (ArtfRendererOptions.hdr): what the tiles leave for post.c */
     bool post;
     bool postFog;        /* fog that light goes through: from the grid of froxels (artfSoftFroxels), not as it is drawn */
+    uint32_t layerTaken[256]; /* layers by transmittance: what each alpha takes (artfLayerTaken) */
     const float* froxels; /* that grid: ARTF_FROXEL_SLICES slices of froxelsX x froxelsY, four floats a cell */
     int froxelsX, froxelsY;
     float* postLight[4]; /* premultiplied light, and alpha */

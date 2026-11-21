@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Layers by transmittance** (`layers-sorted`, phase 5.8): layers go by weight, each surface weighed by what the layers in
+  front of it leave of it, from a grid along the view, in place of each pixel's list of eight. Every surface of every
+  layer shows, as many as there are, and the order they come in changes nothing: in integers, the same on both
+  backends. Three layers one behind another come out as they do whole, farthest first. At 1920 x 1080 on the GPU a
+  frame of the layers scene takes 0.41 ms where the lists took 0.87 (0.91 where they took 1.29 with four samples),
+  in 49 MB where they took 207. A layer now shows its far side too, where it faces the eye.
+
 - **The tracer's denoiser filters as SVGF does** (phase 5.7): each pixel gathers its light's moments with its light,
   and how much it varies guides five passes of the wavelet filter (in place of three), which smooth what is still
   noisy and leave what has settled, on both backends alike. Four samples filtered are 0.91 from 512 where they were

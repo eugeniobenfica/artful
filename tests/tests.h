@@ -150,6 +150,7 @@ void testAntialias(ArtfBackend backend);
 void testLayersBothBackends(void);
 void testLayersSorted(ArtfBackend backend);
 void testLayersBehindSolid(void);
+void testLayersTransmittance(void);
 void testDecals(void);
 /* materials.c: what things are made of: materials, materials of your own, lights with a size and a shape */
 void testPhysical(ArtfBackend backend);

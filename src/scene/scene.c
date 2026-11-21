@@ -1179,11 +1179,26 @@ uint32_t artfSceneLayers(const ArtfScene* s, const ArtfFrameData* frame, ArtfLay
         if (artfTooSmall(frame, r, artfMaxf(distance - r, frame->nearW))) continue;
         /* (by depth along the view, as depth is tested: what faces the eye then comes in the order it shows in) */
         const float along = dx * frame->eye[2][0] + dy * frame->eye[2][1] + dz * frame->eye[2][2];
-        const ArtfLayer layer = {(uint32_t)i, artfMeshLevel(s, inst->mesh, frame->lodScale, inst->maxScale, artfSeenDistance(frame, artfMaxf(distance - r, frame->nearW))), along};
+        const ArtfLayer layer = {(uint32_t)i, artfMeshLevel(s, inst->mesh, frame->lodScale, inst->maxScale, artfSeenDistance(frame, artfMaxf(distance - r, frame->nearW))), along, r};
         out[n++] = layer;
     }
     qsort(out, n, sizeof *out, fartherFirst);
     return n;
+}
+
+void artfLayerRange(ArtfFrameData* frame, const ArtfLayer* layers, uint32_t count) {
+    memset(frame->layers, 0, sizeof frame->layers);
+    if (!count) return;
+    float nearest = INFINITY, farthest = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        nearest = artfMinf(nearest, layers[i].distance - layers[i].radius);
+        farthest = artfMaxf(farthest, layers[i].distance + layers[i].radius);
+    }
+    nearest = artfMaxf(nearest, frame->nearW);
+    farthest = artfMaxf(farthest, nearest * 1.001f);
+    if (!(nearest > 0)) return;
+    frame->layers[0] = 1.f / nearest;
+    frame->layers[1] = (float)ARTF_LAYER_SLICES / log2f(farthest / nearest);
 }
 
 /* ---- light and the view ---- */

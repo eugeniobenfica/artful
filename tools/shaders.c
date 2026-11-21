@@ -87,6 +87,11 @@ int main(int argc, char** argv) {
     SAVE("sceneVertexMotion", artfShaderSceneVertex(&size, true));
     SAVE("sceneFragment", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, 0));
     SAVE("sceneCutout", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, 0));
+    SAVE("layerGrid", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 1 | ARTF_LISTS_GRID, 0));
+    SAVE("layerGrid4", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4 | ARTF_LISTS_GRID, 0));
+    SAVE("layerGrid4Post", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4 | ARTF_LISTS_GRID | ARTF_LISTS_POST_DEPTH, 0));
+    SAVE("layerSums4Post", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 4 | ARTF_LISTS_POST_DEPTH, 0));
+    SAVE("layerPrefix", artfShaderLayerPrefix(&size));
     SAVE("sceneFragmentProbes", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_PROBES));
     SAVE("sceneFragmentFloats", artfShaderSceneFragment(&size, 1024, false, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_WALLS | ARTF_SHADER_FROXELS));
     SAVE("sceneCutoutFloats", artfShaderSceneFragment(&size, 1024, true, NULL, 0, 0, ARTF_SHADER_FLOATS | ARTF_SHADER_PROBES | ARTF_SHADER_WALLS | ARTF_SHADER_FROXELS));

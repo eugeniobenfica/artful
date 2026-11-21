@@ -389,10 +389,21 @@ On the GPU a mesh of 512 meshlets or more goes through `meshletCull`: a command 
 draws by a count the shaders leave. With occlusion each meshlet of each instance remembers whether it showed: those go first,
 and the rest are tested against the pyramid that left, as whole instances are.
 
-With `layers-sorted`, a layer's pixels go to a list of eight for each pixel, against what is solid. Then, on the GPU in
-`layerResolve` and on the CPU at the end of a tile, each list goes over the frame in order, keeping of each instance
-only its nearest. With antialiasing the CPU keeps a list a sample; the GPU keeps one a pixel, with the samples each
-fragment covers, and resolves sample by sample, against the depth of what is solid at that sample.
+With `layers-sorted`, layers go by transmittance: blended by weight (McGuire and Bavoil's), each surface weighed by what
+the layers in front of it leave of it, from a grid along the view (as AVBOIT has it). The grid's columns are 8 x 8
+pixels, 64 slices deep, by the log of distance, from the nearest layer to the farthest (`ArtfFrameData.layers`). Each
+surface of a layer, against what is solid, adds what it takes (its optical depth) to its cell; then each column's cells
+become what those in front of each took; then each surface goes into its sample's five sums (its color and alpha times
+its weight, and its optical depth), and the sums over the frame (`artfLayerResolve`). When what is in front of a
+surface covers all of its column, this is the same as layers over each other, the farthest first. All of it is in
+integers, so that the order surfaces come in changes nothing, and the CPU's and the GPU's are the same.
+
+On the CPU a tile is so many columns, and does it all: each layer's surfaces are peeled (the nearest against what is
+solid, then the next behind it, while two of its triangles meet in a sample), and the sums are resolved eight samples at
+a time. On the GPU the layers are drawn twice: into the grid, by a shader that ends once it knows alpha, then into the
+sums; a compute pass makes the columns between them, and the resolve, in the same pass as the sums, leaves what it read
+at 0 for the next frame. With antialiasing the sums are a sample's; where the device has `VK_EXT_post_depth_coverage`, a
+surface is shaded once a pixel and goes to the samples it covers past the depth test, and once a sample without.
 
 ## Materials in C
 

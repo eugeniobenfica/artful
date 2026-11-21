@@ -361,6 +361,36 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 - **Os gradientes da A-SVGF sobre o filtro da SVGF: ainda não.** Com o filtro novo, o sol apagado cai para 0,22, mas o sol girado sobe para 22,9, o movimento para 9,6 e os ossos para 31,3. Há dois problemas. Primeiro, a amostra traçada de novo encontra a geometria que se moveu, e o gradiente lê isso como mudança de luz. Segundo, onde a sombra é suave, uma única amostra varia o bastante para cortar o histórico de blocos inteiros: o primeiro quadro depois de o sol girar é ruído de 1 caminho por pixel em quase todo o chão, e o erro decai como 1/n (22,9 no 8º quadro, 3,45 no 64º). Faltaria tirar dos gradientes os pixels de instâncias que se moveram e normalizar o gradiente pelo ruído da amostra, e não pelo máximo entre as duas. O código continua no stash ("A-SVGF temporal gradients on the CPU").
 - **Falta:** os gradientes da A-SVGF (ver acima) e o reuso espacial da ReSTIR.
 
+**Estado da 5.8: feita** (com antialiasing a memória cai pouco, e o modo continua só para quadros de 8 bits).
+- **Transparência por transmitância (`layers-sorted`), nos dois backends, no lugar das listas.** O blending é por peso (McGuire e Bavoil, 2013), e o peso de cada superfície é a transmitância do que está na frente dela, tirada de uma grade ao longo da vista, como no AVBOIT. A grade tem colunas de 8×8 pixels e 64 fatias pelo log da distância, da camada mais próxima à mais distante (`ArtfFrameData.layers`, linha `F_LAYERS` do quadro). Não reaproveitei a grade da névoa: ela é de 16 px, as fatias dela dependem da densidade e ela só existe com névoa.
+  - Cada superfície soma à sua célula a profundidade óptica (−log2 de 1 − α).
+  - As colunas viram a soma das células da frente.
+  - Cada superfície entra nas cinco somas da sua amostra: cor × peso, α × peso e a profundidade óptica.
+  - A resolução dá cor = Σcαw / Σαw e α = 1 − 2^(−Σ profundidade).
+
+  Quando o que está na frente cobre a coluna inteira, o peso é exatamente o que as camadas da frente deixam, e o resultado é o mesmo das camadas uma sobre a outra. Tudo é feito em inteiros (`ARTF_LAYER_ONE` = 4096), então a ordem das superfícies não muda nada e CPU e GPU fazem a mesma conta.
+  - **Na CPU:** um tile tem 8×8 colunas e faz tudo sozinho. As superfícies de cada camada são descascadas: a mais próxima contra o sólido, depois a próxima atrás dela, enquanto dois triângulos da camada se encontram numa amostra. A resolução usa 8 pistas, com a mesma aritmética.
+  - **Na GPU:** as camadas são desenhadas duas vezes.
+    1. Na grade, com um shader que termina assim que sabe o α.
+    2. Um compute faz a soma de cada coluna.
+    3. As camadas são desenhadas de novo, nas somas.
+    4. A resolução roda no mesmo passe das somas e devolve a 0 o que leu, então não há preenchimento por quadro.
+
+    Com antialiasing, onde há `VK_EXT_post_depth_coverage`, a superfície é sombreada uma vez por pixel e vai às amostras que passaram no teste de profundidade; sem a extensão, é sombreada por amostra (`ARTFUL_NO_POST_DEPTH` testa esse caminho).
+  - **O que mudou no comportamento:** uma camada mostra todas as suas superfícies, e não só a mais próxima (um cubo de vidro dos dois lados mostra também o fundo). Não há mais limite de 8 por pixel.
+- **Critérios:**
+  - **Memória fixa:** 20 bytes por amostra mais a grade (8,3 MB em 1080p). Em 1080p ficam 49 MB contra 207 MB das listas, ou 174 MB com 4 amostras.
+  - **Interpenetração correta nos casos do teste de camadas:** `layers/layersSorted` (dois quadrados que se cruzam: 212 contra 27 de cada lado, nos dois backends). Há também um caso novo, `layers/layersTransmittance`: três camadas paralelas dão a mesma imagem que inteiras, com 0,000% dos pixels a mais de 8/255 na CPU; a GPU difere da CPU tanto quanto com as camadas inteiras (0,573%).
+  - **Custo abaixo das listas em 1080p** (cena `layers`, GPU):
+
+    | | 1 amostra | 4 amostras |
+    |---|---|---|
+    | Listas | 0,87–0,93 ms | 1,27–1,29 ms |
+    | Transmitância | 0,41 ms | 0,91 ms |
+
+    Na CPU fica perto das listas: 2,6 contra 2,5 ms e 4,7 contra 4,5 ms.
+- **Não feito:** quadro em floats (as camadas seguem inteiras, como antes); vista ortográfica (as fatias seguem o w da perspectiva, então lá há uma só); e as reflexões traçadas sobre camadas continuam como eram.
+
 **Estado da 5.9: em parte.**
 - **API:** `ArtfRendererOptions.output` (`ARTF_OUTPUT_SRGB`, `_DISPLAY_P3`, `_HDR10`), com `peakNits` (padrão 1000) e `paperWhiteNits` (padrão 203); `artfRendererOutput` diz o que de fato saiu. Exige `hdr`; sem ele, sRGB.
 - **Como:** a imagem mantém o aspecto que teria numa tela sRGB. A passagem final decodifica o sRGB e converte: Display-P3 (primárias P3, curva sRGB, 8 bits) ou HDR10 (primárias Rec. 2020, PQ, 10 bits, A2R10G10B10 na leitura). Em HDR10 a curva de tom é esticada até pico/branco de papel, então o que a curva não comprime fica com o brilho do papel. A sobreposição é convertida do mesmo jeito (o branco dela vira o branco de papel) e composta no espaço da saída, como a sRGB é composta em sRGB. A conta é a mesma na CPU (`artfDisplayEncode`) e na GPU (`displaySpv`).

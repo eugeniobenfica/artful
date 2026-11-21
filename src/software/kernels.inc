@@ -289,7 +289,14 @@ static const int8_t sampleX[4] = {-2, 6, -6, 2}, sampleY[4] = {-6, -2, 2, 6};
 
 /* Depth and id of a triangle over the part of a tile it covers, into one sample's planes. ox, oy: the
  * tile's corner; sx, sy: where the sample is. */
+static inline void rasterizeBelow(float* depthPlane, uint32_t* idPlane, const ArtfRasterTri* t, uint32_t id, int ox, int oy, int sx_, int sy_, const ShadeContext* mask, const float* belowPlane, bool* met);
 static inline void rasterize(float* depthPlane, uint32_t* idPlane, const ArtfRasterTri* t, uint32_t id, int ox, int oy, int sx_, int sy_, const ShadeContext* mask) {
+    rasterizeBelow(depthPlane, idPlane, t, id, ox, oy, sx_, sy_, mask, NULL, NULL);
+}
+
+/* As rasterize, and only what is farther than belowPlane says, where it is given (depth is greater when nearer); met,
+ * where given, made true if it covers a pixel that another triangle took. */
+static inline void rasterizeBelow(float* depthPlane, uint32_t* idPlane, const ArtfRasterTri* t, uint32_t id, int ox, int oy, int sx_, int sy_, const ShadeContext* mask, const float* belowPlane, bool* met) {
     /* in the tile; columns from a whole vector */
     const int bx0 = (t->minX > ox ? t->minX - ox : 0) & ~7, by0 = t->minY > oy ? t->minY - oy : 0;
     const int bx1 = t->maxX - ox < ARTF_TILE - 1 ? t->maxX - ox : ARTF_TILE - 1, by1 = t->maxY - oy < ARTF_TILE - 1 ? t->maxY - oy : ARTF_TILE - 1;
@@ -340,6 +347,8 @@ static inline void rasterize(float* depthPlane, uint32_t* idPlane, const ArtfRas
                 entered = true;
                 V8F old = v8fLoad(depth + x);
                 V8I closer = v8iAnd(v8iGt(outside, minusOne), v8fGt(z, old));
+                if (belowPlane) closer = v8iAnd(closer, v8fLt(z, v8fLoad(belowPlane + y * ARTF_TILE + x)));
+                if (met && (v8iSigns(v8iGt(outside, minusOne)) & ~v8iSigns(v8iEq(v8iLoad(ids + x), v8iSet(0))))) *met = true;
                 if (mask && v8iSigns(closer)) closer = v8iAndNot(maskHoles(mask, x, y), closer);
                 if (v8iSigns(closer)) {
                     v8fStore(depth + x, v8fSelect(closer, old, z));
@@ -2213,69 +2222,148 @@ static void drawLayers(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, 
     }
 }
 
-/* Layers by each pixel's depth: each is drawn against what is solid alone, and what it leaves in a pixel goes in the
- * pixel's list. Then each list goes over the frame, the farthest first. */
+/* Layers by each pixel's depth, by transmittance (artfLayerResolve): each layer's surfaces, peeled one after another
+ * (the nearest against what is solid, the next behind it), and what each leaves goes in the tile's grid; then each
+ * goes in its sample's sums, by its weight, and the sums over the frame. (The grid's columns are in the tile: a tile
+ * is so many of them.) */
 static void drawLayersSorted(ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, int tw, int th) {
-    enum { MOST = ARTF_LAYER_FRAGMENTS };
+    enum { COLUMNS = ARTF_TILE / ARTF_LAYER_TILE, PEELS = 16 /* surfaces of one layer in a sample, at most */ };
+    _Static_assert(ARTF_TILE % ARTF_LAYER_TILE == 0, "a tile, so many columns of the grid");
+    (void)oy;
     const size_t all = (size_t)ARTF_TILE_PIXELS * (size_t)f->samples;
     if (!w->solidDepth) {
         w->solidDepth = artfMalloc(all * 4);
-        w->fragmentDepth = artfMalloc(all * MOST * 4);
-        w->fragmentColor = artfMalloc(all * MOST * 4);
-        w->fragmentCount = artfMalloc(all);
+        w->layerGrid = artfMalloc((size_t)COLUMNS * COLUMNS * ARTF_LAYER_SLICES * 4);
+        w->layerSums = artfMalloc(all * ARTF_LAYER_SUMS * 4);
+        w->layerBelow = artfMalloc(all * 4);
     }
     memcpy(w->solidDepth, w->depth, all * 4);
-    memset(w->fragmentCount, 0, all);
+    memset(w->layerGrid, 0, (size_t)COLUMNS * COLUMNS * ARTF_LAYER_SLICES * 4);
+    w->layerBits.len = 0;
+    const float* range = f->data.layers;
     const V8I zeroI = v8iSet(0);
     const ArtfRasterTri* const* tris = w->layers.items;
     const size_t count = w->layers.len;
+    (void)ox;
     for (size_t at = 0, end; at < count; at = end) {
-        for (end = at; end < count && tris[end]->instance == tris[at]->instance; ++end) {}
-        memcpy(w->depth, w->solidDepth, all * 4);
-        for (size_t i = 0; i < all; i += 8) v8iStore(w->ids + i, zeroI);
-        for (size_t i = at; i < end; ++i) rasterizeSamples(f, w, tris[i], (uint32_t)(i - at + 1), ox, oy);
-        for (int k = 0; k < f->samples; ++k) {
-            const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
-            shadePlane(f, w, tris + at, end - at, w->ids + plane, k ? w->ids : NULL, w->layer + plane, ox, oy, tw, 0, th);
+        /* (only the rows its triangles reach) */
+        int y0 = th, y1 = 0;
+        for (end = at; end < count && tris[end]->instance == tris[at]->instance; ++end) {
+            y0 = artfMini(y0, artfMaxi(tris[end]->minY - oy, 0));
+            y1 = artfMaxi(y1, artfMini(tris[end]->maxY - oy + 1, th));
         }
-        for (size_t i = 0; i < all; ++i) {
-            if (!w->ids[i]) continue;
-            /* (what shows the same as in the first sample was shaded there) */
-            const size_t inFirst = i % ARTF_TILE_PIXELS;
-            const uint32_t color = w->ids[i] == w->ids[inFirst] ? w->layer[inFirst] : w->layer[i];
-            float* depths = w->fragmentDepth + (size_t)i * MOST;
-            uint32_t* colors = w->fragmentColor + (size_t)i * MOST;
-            int n = w->fragmentCount[i];
-            if (n == MOST) {
-                /* the farthest goes: depth is greater when nearer */
-                if (w->depth[i] <= depths[0]) continue;
-                --n;
-                memmove(depths, depths + 1, (size_t)n * 4);
-                memmove(colors, colors + 1, (size_t)n * 4);
+        if (y0 >= y1) continue;
+        const size_t rows = (size_t)(y1 - y0) * ARTF_TILE;
+        /* each of its surfaces, the nearest first: each time against what is solid and behind the surfaces before */
+        for (int peel = 0; peel < PEELS; ++peel) {
+            /* (whether two of its triangles met in a sample: if not, there is nothing behind for another time) */
+            bool met = false;
+            for (int k = 0; k < f->samples; ++k) {
+                const size_t from = (size_t)k * ARTF_TILE_PIXELS + (size_t)y0 * ARTF_TILE;
+                memcpy(w->depth + from, w->solidDepth + from, rows * 4);
+                for (size_t p = 0; p < rows; p += 8) v8iStore(w->ids + from + p, zeroI);
             }
-            int place = n;
-            while (place > 0 && depths[place - 1] > w->depth[i]) {
-                depths[place] = depths[place - 1];
-                colors[place] = colors[place - 1];
-                --place;
+            for (size_t i = at; i < end; ++i) {
+                const ArtfRasterTri* t = tris[i];
+                ShadeContext setup;
+                const bool masked = f->visible[t->instance].masked;
+                if (masked) shadeSetup(&setup, f, t, ox, oy);
+                for (int k = 0; k < f->samples; ++k) {
+                    const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
+                    rasterizeBelow(w->depth + plane, w->ids + plane, t, (uint32_t)(i - at + 1), ox, oy, f->samples > 1 ? sampleX[k] : 0, f->samples > 1 ? sampleY[k] : 0, masked ? &setup : NULL, peel ? w->layerBelow + plane : NULL, &met);
+                }
             }
-            depths[place] = w->depth[i];
-            colors[place] = color;
-            w->fragmentCount[i] = (uint8_t)(n + 1);
+            bool found = false;
+            for (int k = 0; k < f->samples && !found; ++k) {
+                const size_t from = (size_t)k * ARTF_TILE_PIXELS + (size_t)y0 * ARTF_TILE;
+                for (size_t p = 0; p < rows && !found; p += 8) found = v8iSigns(v8iEq(v8iLoad(w->ids + from + p), zeroI)) != 0xFF;
+            }
+            if (!found) break;
+            for (int k = 0; k < f->samples; ++k) {
+                const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
+                shadePlane(f, w, tris + at, end - at, w->ids + plane, k ? w->ids : NULL, w->layer + plane, ox, oy, tw, y0, y1);
+            }
+            for (int k = 0; k < f->samples; ++k) {
+                const size_t plane = (size_t)k * ARTF_TILE_PIXELS;
+                for (int p = y0 * ARTF_TILE; p < y1 * ARTF_TILE; ++p) {
+                    const uint32_t id = w->ids[plane + p];
+                    if (!id) continue;
+                    /* (what shows the same as in the first sample was shaded there) */
+                    const uint32_t color = k && w->ids[p] == id ? w->layer[p] : w->layer[plane + p];
+                    if (!(color >> 24)) continue;
+                    const uint32_t taken = f->layerTaken[color >> 24], slice = artfLayerSlice(range, w->depth[plane + p]);
+                    const uint32_t column = (uint32_t)((p / ARTF_TILE / ARTF_LAYER_TILE) * COLUMNS + p % ARTF_TILE / ARTF_LAYER_TILE);
+                    w->layerGrid[column * ARTF_LAYER_SLICES + slice] += taken;
+                    artfVecReserve(&w->layerBits, w->layerBits.len + 1);
+                    w->layerBits.items[w->layerBits.len].at = (uint32_t)(plane + (size_t)p);
+                    w->layerBits.items[w->layerBits.len].color = color;
+                    w->layerBits.items[w->layerBits.len].taken = taken;
+                    w->layerBits.items[w->layerBits.len++].slice = slice;
+                }
+            }
+            if (!met) break;
+            /* (the next surface is behind this one; where there was none, behind what is solid: nothing) */
+            for (int k = 0; k < f->samples; ++k) {
+                const size_t from = (size_t)k * ARTF_TILE_PIXELS + (size_t)y0 * ARTF_TILE;
+                memcpy(w->layerBelow + from, w->depth + from, rows * 4);
+            }
         }
     }
-    for (size_t i = 0; i < all; ++i) {
-        uint32_t under = w->color[i];
-        for (int k = 0; k < w->fragmentCount[i]; ++k) {
-            const uint32_t top = w->fragmentColor[(size_t)i * MOST + (size_t)k], rest = 255 - (top >> 24);
-            uint32_t t0 = (under & 255) * rest + 128, t1 = ((under >> 8) & 255) * rest + 128, t2 = ((under >> 16) & 255) * rest + 128, t3 = (under >> 24) * rest + 128;
-            t0 = (t0 + (t0 >> 8)) >> 8;
-            t1 = (t1 + (t1 >> 8)) >> 8;
-            t2 = (t2 + (t2 >> 8)) >> 8;
-            t3 = (t3 + (t3 >> 8)) >> 8;
-            under = top + (t0 | t1 << 8 | t2 << 16 | t3 << 24);
+    memcpy(w->depth, w->solidDepth, all * 4);
+    if (!w->layerBits.len) return;
+    /* each column's cells: what those in front of each took */
+    for (int c = 0; c < COLUMNS * COLUMNS; ++c) {
+        uint32_t* cells = w->layerGrid + (size_t)c * ARTF_LAYER_SLICES;
+        uint32_t before = 0;
+        for (int k = 0; k < ARTF_LAYER_SLICES; ++k) {
+            const uint32_t here = cells[k];
+            cells[k] = before;
+            before += here;
         }
-        w->color[i] = under;
+    }
+    /* and each cell's weight, by that: artfLayerWeight, eight at a time, the same arithmetic in the same order */
+    {
+        const V8F perSample = v8fSet(1.f / (ARTF_LAYER_ONE * (float)((uint32_t)f->samples * ARTF_LAYER_TILE * ARTF_LAYER_TILE)));
+        const V8F one = v8fSet(ARTF_LAYER_ONE), halfF = v8fSet(.5f), zeroF = v8fSet(0.f);
+        for (int c = 0; c < COLUMNS * COLUMNS * ARTF_LAYER_SLICES; c += 8) {
+            const V8F mean = v8fMul(v8iToF(v8iLoad(w->layerGrid + c)), perSample);
+            const V8I weight = v8fToI(v8fAdd(v8fMul(gradeExp2(v8fSub(zeroF, mean)), one), halfF));
+            v8iStore(w->layerGrid + c, v8iSelect(v8iEq(weight, zeroI), weight, v8iSet(1)));
+        }
+    }
+    /* (the sums in planes: red, green, blue, alpha, optical depth) */
+    uint32_t* const sums[ARTF_LAYER_SUMS] = {w->layerSums, w->layerSums + all, w->layerSums + all * 2, w->layerSums + all * 3, w->layerSums + all * 4};
+    memset(w->layerSums, 0, all * ARTF_LAYER_SUMS * 4);
+    for (size_t i = 0; i < w->layerBits.len; ++i) {
+        const uint32_t at = w->layerBits.items[i].at, color = w->layerBits.items[i].color, p = at % ARTF_TILE_PIXELS;
+        const uint32_t column = (p / ARTF_TILE / ARTF_LAYER_TILE) * COLUMNS + p % ARTF_TILE / ARTF_LAYER_TILE;
+        const uint32_t weight = w->layerGrid[column * ARTF_LAYER_SLICES + w->layerBits.items[i].slice];
+        sums[0][at] += (color >> 16 & 255) * weight;
+        sums[1][at] += (color >> 8 & 255) * weight;
+        sums[2][at] += (color & 255) * weight;
+        sums[3][at] += (color >> 24) * weight;
+        sums[4][at] += w->layerBits.items[i].taken;
+    }
+    /* each sample's sums over it: artfLayerResolve, eight at a time, the same arithmetic in the same order */
+    const V8F scaleT = v8fSet(-1.f / ARTF_LAYER_ONE), c255 = v8fSet(255.f), half = v8fSet(.5f), oneF = v8fSet(1.f);
+    const V8I byte = v8iSet(255), round = v8iSet(128);
+    for (size_t i = 0; i < all; i += 8) {
+        const V8I a = v8iLoad(sums[3] + i), none = v8iEq(a, zeroI);
+        if (v8iSigns(none) == 0xFF) continue;
+        const V8F cover = v8fSub(oneF, gradeExp2(v8fMul(v8iToF(v8iLoad(sums[4] + i)), scaleT)));
+        const V8F coverBytes = v8fMul(cover, c255);
+        const V8F scale = v8fDiv(coverBytes, v8iToF(v8iSelect(none, a, v8iSet(1))));
+        const V8I alpha = v8fToI(v8fAdd(coverBytes, half));
+        V8I top = v8iShl(alpha, 24);
+        for (int k = 0; k < 3; ++k) top = v8iOr(top, v8iShl(v8fToI(v8fMin(v8fAdd(v8fMul(v8iToF(v8iLoad(sums[k] + i)), scale), half), c255)), 16 - 8 * k));
+        const V8I under = v8iLoad(w->color + i), rest = v8iSub(byte, alpha);
+        V8I blended = v8iSet(0);
+        for (int k = 0; k < 4; ++k) {
+            V8I t = v8iAdd(v8iMul(v8iAnd(v8iShr(under, 8 * k), byte), rest), round);
+            t = v8iShr(v8iAdd(t, v8iShr(t, 8)), 8);
+            blended = v8iOr(blended, v8iShl(t, 8 * k));
+        }
+        v8iStore(w->color + i, v8iSelect(none, v8iAdd(top, blended), under));
     }
 }
 

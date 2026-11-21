@@ -206,6 +206,7 @@ int main(int argc, char** argv) {
     RUN("core/lodFade/vulkan", testLodFade(ARTF_BACKEND_VULKAN));
     RUN("core/gpuMeshlets", testGpuMeshlets());
     RUN("layers/layersBehindSolid", testLayersBehindSolid());
+    RUN("layers/layersTransmittance", testLayersTransmittance());
     RUN("layers/layersSorted/software", testLayersSorted(ARTF_BACKEND_SOFTWARE));
     RUN("layers/layersSorted/vulkan", testLayersSorted(ARTF_BACKEND_VULKAN));
     RUN("files/blockDecoders", testBlockDecoders());

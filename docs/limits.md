@@ -2,9 +2,11 @@
 
 What Artful does not do yet, or does only in part. What comes next, and in what order, is in [the roadmap](roadmap.md).
 
-- When drawing triangles, layers go by the distance of their centers, whole, unless `layers-sorted` is on: then by each
-  pixel's depth, up to eight in a pixel, at 96 bytes a pixel on the GPU. A layer shows only its nearest surface. Tracing
-  has neither limit.
+- When drawing triangles, layers go by the distance of their centers, whole, showing only their nearest surface, unless
+  `layers-sorted` is on: then by transmittance, every surface, at 20 bytes a sample on the GPU and a grid of 8 x 8
+  pixel columns, 64 slices deep. Surfaces in the same slice, or in a column that other layers only partly cover, are
+  mixed by weight rather than ordered; the slices go by perspective's w, so an orthographic view has one. On the CPU a
+  layer has at most 16 surfaces in a sample. With a frame in floats layers go whole. Tracing has none of these limits.
 - Antialiasing is four samples, or none, and it smooths edges only: what a texture or a highlight does
   inside a triangle is not sampled again; a highlight is widened by how much the normal turns over a pixel and by a
   normal map's texels (Toksvig's), which takes some of its light out where the normals turn less widely than GGX's tail

@@ -120,7 +120,7 @@ Decided (plan 1.4): source compatibility, not binary.
 | `artfSceneSetCullSize` | What is too small to see is not drawn. |
 | `artfSceneSetTrace` | Rays or paths in place of triangles; `denoise` takes the noise out; `hardware` uses the GPU's ray tracing hardware. |
 | `artfSceneAddMorphMesh`, `artfInstanceSetMorphWeights` | A mesh with targets, mixed per instance, with or without bones. |
-| `ARTF_FEATURE_LOD_FADE`, `ARTF_FEATURE_LAYERS_SORTED` | Levels that fade into each other; layers by each pixel's depth. |
+| `ARTF_FEATURE_LOD_FADE`, `ARTF_FEATURE_LAYERS_SORTED` | Levels that fade into each other; layers by each pixel's depth (by transmittance, all of their surfaces). |
 | `artfSceneAddTextureStreamed` | A texture whose larger mipmaps are read when they become resident. |
 | `artfPrepareModel`, `artfSceneAddPreparedModel` | A glTF model made on any thread, and added quickly. |
 | `artfSceneSetShadows`, `artfLightSetShadow` | Shadows when drawing triangles; `soft` makes them as wide as their light; `traced` takes them from rays (through the ray tracing hardware where there is some), exact, through what shows through. |

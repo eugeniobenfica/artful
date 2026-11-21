@@ -643,6 +643,9 @@ static void addLayers(Software* s, ArtfScene* scene) {
     if (scene->translucentCount) {
         artfVecReserve(&s->layers, scene->translucentCount);
         const uint32_t count = artfSceneLayers(scene, &f->data, s->layers.items);
+        artfLayerRange(&f->data, s->layers.items, count);
+        if (!f->layerTaken[255])
+            for (uint32_t a = 0; a < 256; ++a) f->layerTaken[a] = artfLayerTaken(a);
         for (uint32_t i = 0; i < count; ++i)
             if (placeInstance(f, s->layers.items[i].instance, &f->visible[f->visibleCount])) ++f->visibleCount;
     }
@@ -881,9 +884,10 @@ static void softFree(ArtfRenderer* r) {
         artfAlignedFree(f->workers[i].postDepth);
         artfAlignedFree(f->workers[i].postInstance);
         artfFree(f->workers[i].solidDepth);
-        artfFree(f->workers[i].fragmentDepth);
-        artfFree(f->workers[i].fragmentColor);
-        artfFree(f->workers[i].fragmentCount);
+        artfFree(f->workers[i].layerGrid);
+        artfFree(f->workers[i].layerSums);
+        artfFree(f->workers[i].layerBelow);
+        artfVecFree(&f->workers[i].layerBits);
         artfVecFree(&f->workers[i].tris);
         artfVecFree(&f->workers[i].layers);
         artfVecFree(&f->workers[i].seen);

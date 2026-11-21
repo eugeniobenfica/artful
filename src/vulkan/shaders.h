@@ -19,8 +19,13 @@ uint32_t* artfShaderHiz(size_t* size, bool fromDepth, int samples);
 uint32_t* artfShaderSceneVertex(size_t* size, bool motion);
 /* cutout: for what plain solid surfaces are not: holes, backs and alpha. It leaves pixels, which the plain
  * one must not, so that a GPU can test depth before it. */
-/* lists: how many samples a pixel has, if a layer's pixels go to their pixel's list, for artfShaderLayerResolve, and not
- * to the frame; 0: they do not. */
+/* lists: how many samples a pixel has, if a layer's surfaces go to the sums of their samples (by transmittance:
+ * artfLayerResolve), for artfShaderLayerResolve, and not to the frame; or, with ARTF_LISTS_GRID, to the grid of what
+ * they take (and nothing else is done: only their alpha is found); 0: neither. */
+#define ARTF_LISTS_GRID 0x100
+/* and with ARTF_LISTS_POST_DEPTH, a pixel at a time, by the samples it covers past the depth test
+ * (VK_EXT_post_depth_coverage), where they go a sample at a time without */
+#define ARTF_LISTS_POST_DEPTH 0x200
 /* What a scene's pixel shader holds beside the rest: a frame in floats, light from probes (what costs its registers, so
  * that a scene without probes does not pay for them). */
 enum { ARTF_SHADER_FLOATS = 1, ARTF_SHADER_PROBES = 2, ARTF_SHADER_WALLS = 4 /* the probes' maps of how far they see */, ARTF_SHADER_FROXELS = 8,
@@ -35,6 +40,8 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
 /* The overdraw view: a step of a count, added up (as artfViewHeat's); what is a back that is not to show is left. */
 uint32_t* artfShaderOverdraw(size_t* size, bool hdr);
 uint32_t* artfShaderLayerResolve(size_t* size, int samples);
+/* Layers by transmittance: each column of the grid's cells, into what those in front of each took. */
+uint32_t* artfShaderLayerPrefix(size_t* size);
 /* Shadow maps: depth from a light; and, for what has holes, what leaves pixels. */
 uint32_t* artfShaderShadowVertex(size_t* size);
 uint32_t* artfShaderShadowFragment(size_t* size, uint32_t maxTextures);

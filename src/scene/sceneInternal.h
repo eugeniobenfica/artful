@@ -517,6 +517,9 @@ typedef struct ArtfFrameData {
      * With shadows from rays, how many of the lights past the frame's own cast, the first of artfSceneExtraLights'.
      * 1 when lights are sampled (ArtfShadowDesc.sampled); 0 else. */
     float more[4];
+    /* Layers by transmittance (artfLayerSlice): 1 over how far along the view the nearest layer's front is, and the
+     * slices to each doubling of that from there; 0 and 0 when there are no layers. */
+    float layers[4];
 } ArtfFrameData;
 
 /* The pixel a point falls on (as artfTracedPlace finds it): x and y. */
@@ -1477,7 +1480,7 @@ bool artfTracedReflection(const ArtfScene* s, const ArtfFrameData* f, const floa
 /* A layer in view: an instance (dense index) that shows what is behind it, and the mesh it takes. */
 typedef struct ArtfLayer {
     uint32_t instance, mesh;
-    float distance;
+    float distance, radius; /* (its center's along the view, and its ball's) */
 } ArtfLayer;
 
 /* The layers in view, the farthest first: both backends draw them in this order, after the rest. out:
@@ -1561,7 +1564,50 @@ ARTF_INLINE uint32_t artfMeshLevel(const ArtfScene* s, uint32_t mesh, float lodS
     return chosen;
 }
 
-#define ARTF_LAYER_FRAGMENTS 8 /* of a pixel, when layers are sorted */
+/* Layers by each pixel's depth (ARTF_FEATURE_LAYERS_SORTED), by transmittance: blended by weight (McGuire and Bavoil,
+ * 2013), each surface weighed by what the layers in front of it leave of it, from a grid along the view, as AVBOIT
+ * (Drobot, 2025) has it. The grid's columns are ARTF_LAYER_TILE pixels square, and ARTF_LAYER_SLICES deep, by the log
+ * of depth, from the nearest layer to the farthest. A surface adds what it takes (its optical depth, in bits) to its
+ * cell; its weight is 2 to the minus the mean of what the cells in front of it took. A pixel's sample sums the colors
+ * times their weights, the alphas times their weights, and the optical depths: the color is the first over the
+ * second, its alpha all that the third takes. When what is in front of a surface is all of its column, that is the
+ * same as layers over each other, the farthest first. All of it is in integers of ARTF_LAYER_ONE a unit, so that the
+ * order the surfaces come in changes nothing, and the CPU's and the GPU's are the same. */
+#define ARTF_LAYER_TILE 8
+#define ARTF_LAYER_SLICES 64
+#define ARTF_LAYER_ONE 4096.f
+#define ARTF_LAYER_SUMS 5 /* of a sample: red, green, blue and alpha, times weights; optical depths */
+
+/* What a surface of alpha a (of 255) takes of what is behind it: -log2(1 - a / 255), a unit ARTF_LAYER_ONE, at most
+ * 254's. */
+ARTF_INLINE uint32_t artfLayerTaken(uint32_t a) {
+    const float left = (float)(255u - (a < 254u ? a : 254u)) * (1.f / 255.f);
+    return (uint32_t)(-artfLog2Fast(left) * ARTF_LAYER_ONE + .5f);
+}
+/* The slice of the grid a surface is in, by 1 over how far along the view it is (its w's: a pixel's 1 / w): layers is
+ * the frame's. (In perspective: orthographic views have one slice.) */
+ARTF_INLINE uint32_t artfLayerSlice(const float* layers, float inverseW) {
+    const float k = artfLog2Fast(layers[0] / inverseW) * layers[1];
+    return k > 0 ? (uint32_t)artfMinf(k, (float)(ARTF_LAYER_SLICES - 1)) : 0u;
+}
+/* A surface's weight, of ARTF_LAYER_ONE, by what the cells of its column in front of it took (front), over the
+ * column's samples (ARTF_LAYER_TILE^2 times a pixel's): at least 1. */
+ARTF_INLINE uint32_t artfLayerWeight(uint32_t front, uint32_t samples) {
+    const float mean = (float)front * (1.f / (ARTF_LAYER_ONE * (float)(samples * ARTF_LAYER_TILE * ARTF_LAYER_TILE)));
+    const uint32_t w = (uint32_t)(artfExp2Fast(-mean) * ARTF_LAYER_ONE + .5f);
+    return w ? w : 1u;
+}
+/* A sample's sums, as a color over what is behind (premultiplied, packed as a frame's: alpha << 24, red << 16). */
+ARTF_INLINE uint32_t artfLayerResolve(const uint32_t* sums) {
+    if (!sums[3]) return 0;
+    const float cover = 1.f - artfExp2Fast(-(float)sums[4] * (1.f / ARTF_LAYER_ONE));
+    const float scale = cover * 255.f / (float)sums[3];
+    uint32_t out = (uint32_t)(cover * 255.f + .5f) << 24;
+    for (int k = 0; k < 3; ++k) out |= (uint32_t)artfMinf((float)sums[k] * scale + .5f, 255.f) << (16 - 8 * k);
+    return out;
+}
+/* The frame's layers (ArtfFrameData.layers), for these layers in view. */
+void artfLayerRange(ArtfFrameData* frame, const ArtfLayer* layers, uint32_t count);
 
 /* Where a mesh is on its way from one level to the next: 0 if it is not, or else how far, from 1 to 254, with other the
  * level it comes from. chosen is what artfMeshLevel gives. */

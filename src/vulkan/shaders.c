@@ -24,7 +24,7 @@
 #include <stdlib.h>
 
 /* where things are in the frame's vec4s */
-enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_GRADE2 = 104, F_ORTHO = 111, F_TRACED = 112, F_SHAPES = 113, F_OUTPUT = 177, F_AERIAL = 178, F_MORE = 182, F_SIZE = 183 };
+enum { F_VIEWPROJ = 0, F_PLANES = 4, F_CAMERA = 9, F_TOSUN = 10, F_SUNCOLOR = 11, F_SKY = 12, F_GROUND = 13, F_COUNTS = 15, F_LIGHTS = 16, F_LIGHT_ROWS = 3, F_PROJECTION = 64, F_HIZ = 65, F_LOOK = 80, F_FOG = 81, F_EYE = 82, F_POST = 85, F_PREVIOUS = 88, F_INDIRECT = 92, F_GRADE = 95, F_MATERIALS = 98, F_LIGHT_SIZES = 99, F_CULL = 103, F_GRADE2 = 104, F_ORTHO = 111, F_TRACED = 112, F_SHAPES = 113, F_OUTPUT = 177, F_AERIAL = 178, F_MORE = 182, F_LAYERS = 183, F_SIZE = 184 };
 _Static_assert(sizeof(ArtfFrameData) == F_SIZE * 16 && offsetof(ArtfFrameData, aerial) == F_AERIAL * 16 && offsetof(ArtfFrameData, more) == F_MORE * 16 && offsetof(ArtfFrameData, output) == F_OUTPUT * 16, "the frame's rows");
 
 typedef struct Resources {
@@ -1624,19 +1624,38 @@ static SpvId lampViewSpv(Spv* s, SpvId lamp, SpvId d) {
     return ADD_U(ADD_U(spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, lamp, UINT(255)), UINT(0xFFFFFFFFu)), spvSelect(s, s->uintType, cube, face, UINT(0)));
 }
 
+/* Layers by transmittance: of a surface of alpha a (of 255) at coord, what it takes (as artfLayerTaken), and its cell of
+ * the grid (as artfLayerSlice, in its column of ARTF_LAYER_TILE pixels square). */
+static void layerCell(Spv* s, const Resources* r, SpvId coord, SpvId a, SpvId* taken, SpvId* cell) {
+    SpvId left = MUL_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, SUB_U(UINT(255), spvGlsl2(s, 38 /* UMin */, s->uintType, a, UINT(254)))), FLOAT(1.f / 255.f));
+    *taken = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, spvLog2Fast(s, left)), FLOAT(ARTF_LAYER_ONE)), FLOAT(.5f)));
+    SpvId range = frameVec(s, r, F_LAYERS);
+    SpvId k = MUL_F(spvLog2Fast(s, DIV_F(X(range), W(coord))), Y(range));
+    SpvId slice = spvSelect(s, s->uintType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, k, FLOAT(0.f)), spvOp1(s, SPV_OP_ConvertFToU, s->uintType, MIN_F(k, FLOAT((float)(ARTF_LAYER_SLICES - 1)))), UINT(0));
+    SpvId width = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, r, F_FOG)));
+    SpvId columns = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(width, UINT(ARTF_LAYER_TILE - 1)), UINT(ARTF_LAYER_TILE));
+    SpvId cx = spvOp2(s, SPV_OP_UDiv, s->uintType, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(coord)), UINT(ARTF_LAYER_TILE));
+    SpvId cy = spvOp2(s, SPV_OP_UDiv, s->uintType, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(coord)), UINT(ARTF_LAYER_TILE));
+    *cell = ADD_U(MUL_U(ADD_U(MUL_U(cy, columns), cx), UINT(ARTF_LAYER_SLICES)), slice);
+}
+
 uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutout, const ArtfGraphData* graphs, uint32_t graphCount, int lists, uint32_t variant) {
+    const bool gridPass = (lists & ARTF_LISTS_GRID) != 0, postDepth = (lists & ARTF_LISTS_POST_DEPTH) != 0 && (lists & 0xFF) > 1;
+    lists &= 0xFF;
     const bool hdr = variant & ARTF_SHADER_FLOATS, withProbes = variant & ARTF_SHADER_PROBES, walls = variant & ARTF_SHADER_WALLS, froxelsOn = hdr && variant & ARTF_SHADER_FROXELS;
     const bool coats = variant & ARTF_SHADER_COAT, softShadows = variant & ARTF_SHADER_SOFT, shapes = variant & ARTF_SHADER_SHAPES;
     const bool viewed = variant & ARTF_SHADER_VIEW, meshletIds = viewed && variant & ARTF_SHADER_MESHLETS;
     const bool traced = variant & ARTF_SHADER_TRACED, rayQuery = traced && variant & ARTF_SHADER_RAY_QUERY;
     Spv b, *s = &b;
     spvInit(s);
+    if (lists > 1) spvCapability(s, postDepth ? 4447u /* SampleMaskPostDepthCoverage */ : 35u /* SampleRateShading: layers go by sample */);
     spvCapability(s, 5301); /* ShaderNonUniform */
     spvCapability(s, 5307); /* SampledImageArrayNonUniformIndexing */
     spvCapability(s, 50); /* ImageQuery: a texture's size, for the tracer's cones */
     if (meshletIds) spvCapability(s, 2); /* Geometry: for PrimitiveId */
     if (rayQuery) spvCapability(s, 4472 /* RayQueryKHR: capabilities come before extensions */);
     spvExtension(s, "SPV_EXT_descriptor_indexing");
+    if (postDepth) spvExtension(s, "SPV_KHR_post_depth_coverage");
     Resources r;
     declare(s, &r, false);
 
@@ -1662,9 +1681,16 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     spvDecorate(s, vColor, SPV_DECORATE_Location, 4);
     SpvId vOpacity = 0, frontFacing = 0, vFade = 0, fragCoord = 0, vInstance = 0, listCounts = 0, listFragments = 0, sampleMask = 0;
     if (lists > 1) {
-        /* (which of a pixel's samples this covers) */
-        sampleMask = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, spvTypeArray(s, s->intType, 1, 0)), SPV_STORAGE_Input);
-        spvDecorate(s, sampleMask, SPV_DECORATE_BuiltIn, 20 /* SampleMask */);
+        /* (which of a pixel's samples this is: layers go by sample, each tested against its own depth) */
+        if (postDepth) {
+            /* (the samples this covers that passed the depth test) */
+            sampleMask = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, spvTypeArray(s, s->intType, 1, 0)), SPV_STORAGE_Input);
+            spvDecorate(s, sampleMask, SPV_DECORATE_BuiltIn, 20 /* SampleMask */);
+        } else {
+            sampleMask = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->intType), SPV_STORAGE_Input);
+            spvDecorate(s, sampleMask, SPV_DECORATE_BuiltIn, 18 /* SampleId */);
+            spvDecorate(s, sampleMask, SPV_DECORATE_Flat, -1);
+        }
     }
     if (lists || hdr || viewed || tracer) {
         vInstance = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->uintType), SPV_STORAGE_Input);
@@ -1880,6 +1906,33 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         rough = spvLoad(s, s->floatType, own.rough);
         metal = spvLoad(s, s->floatType, own.metal);
         shown = MUL_F(shown, spvLoad(s, s->floatType, own.alpha));
+    }
+    if (gridPass) {
+        /* what this surface takes, into its cell of the grid: as drawLayersSorted */
+        SpvId coord = spvLoad(s, s->vec4, fragCoord);
+        SpvId a = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(MIN_F(MAX_F(shown, FLOAT(0.f)), FLOAT(1.f)), FLOAT(255.f)), FLOAT(.5f)));
+        SpvId some;
+        spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, a, UINT(0)), &some);
+        SpvId taken, cell;
+        layerCell(s, &r, coord, a, &taken, &cell);
+        if (postDepth) {
+            SpvId mask = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvLoad(s, s->intType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_Input, s->intType), sampleMask, &r.zero, 1)));
+            taken = MUL_U(taken, spvOp1(s, 205 /* OpBitCount */, s->uintType, mask));
+        }
+        spvAtomicAdd(s, bufferUintPtr(s, &r, listCounts, cell), taken);
+        spvIfEnd(s, some);
+        spvEndMain(s);
+        const SpvId all[13] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, vOpacity, frontFacing, vFade, pixelCoord, vInstance, sampleMask, primitive};
+        SpvId interface[13];
+        uint32_t used = 0;
+        for (int k = 0; k < 13; ++k)
+            if (all[k]) interface[used++] = all[k];
+        spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, used);
+        spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
+        spvExecutionMode(s, main, 9 /* EarlyFragmentTests */, 0, 0, 0, 0);
+        if (postDepth) spvExecutionMode(s, main, 4446 /* PostDepthCoverage */, 0, 0, 0, 0);
+        artfFree(tracer);
+        return finish(s, size);
     }
     /* decals over it, as on the CPU: in the order they were added, not on what blends */
     {
@@ -2523,30 +2576,39 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId finished = vec4Of(s, SCALE_V3(srgbEncode3(s, clamped), alpha), alpha);
     spvStore(s, outColor, finished);
     if (lists) {
-        /* in this pixel's list: where it is, its color as a frame holds it, and whose it is */
+        /* into this sample's sums, by its weight: what the cells of its column in front of it took (as drawLayersSorted) */
         SpvId coord = spvLoad(s, s->vec4, fragCoord);
+        const SpvId parts[4] = {X(finished), Y(finished), Z(finished), W(finished)};
+        SpvId bytes[4];
+        for (int k = 0; k < 4; ++k) bytes[k] = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(parts[k], FLOAT(255.f)), FLOAT(.5f)));
+        SpvId some;
+        spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, bytes[3], UINT(0)), &some);
+        SpvId taken, cell;
+        layerCell(s, &r, coord, bytes[3], &taken, &cell);
+        SpvId front = spvLoad(s, s->uintType, bufferUintPtr(s, &r, listCounts, cell));
+        SpvId mean = MUL_F(spvOp1(s, SPV_OP_ConvertUToF, s->floatType, front), FLOAT(1.f / (ARTF_LAYER_ONE * (float)((uint32_t)lists * ARTF_LAYER_TILE * ARTF_LAYER_TILE))));
+        SpvId weight = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(spvExp2Fast(s, spvOp1(s, SPV_OP_FNegate, s->floatType, mean)), FLOAT(ARTF_LAYER_ONE)), FLOAT(.5f)));
+        weight = spvGlsl2(s, 41 /* UMax */, s->uintType, weight, UINT(1));
         SpvId width = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_FOG)));
         SpvId pixel = ADD_U(MUL_U(spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(coord)), width), spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(coord)));
-        SpvId slot = spvAtomicAdd(s, bufferUintPtr(s, &r, listCounts, pixel), UINT(1));
-        SpvId fits, packed = UINT(0);
-        const SpvId parts[4] = {X(finished), Y(finished), Z(finished), W(finished)};
-        static const uint32_t shifts[4] = {16, 8, 0, 24};
-        for (int k = 0; k < 4; ++k) {
-            SpvId byte = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(parts[k], FLOAT(255.f)), FLOAT(.5f)));
-            packed = spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, packed, spvOp2(s, 196 /* OpShiftLeftLogical */, s->uintType, byte, UINT(shifts[k])));
-        }
-        spvIfBegin(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, slot, UINT(ARTF_LAYER_FRAGMENTS)), &fits);
-        SpvId at = MUL_U(ADD_U(MUL_U(pixel, UINT(ARTF_LAYER_FRAGMENTS)), slot), UINT(3));
-        spvStore(s, bufferUintPtr(s, &r, listFragments, at), AS_UINT(Z(coord)));
-        spvStore(s, bufferUintPtr(s, &r, listFragments, ADD_U(at, UINT(1))), packed);
-        /* (without the bit that says a pose bent it: a layer's motion goes by its instance) */
-        SpvId who = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvLoad(s, s->uintType, vInstance), UINT(~ARTF_MOTION_VECTOR));
-        if (lists > 1) {
+        const SpvId adds[5] = {MUL_U(bytes[0], weight), MUL_U(bytes[1], weight), MUL_U(bytes[2], weight), MUL_U(bytes[3], weight), taken};
+        /* (in planes, one of each sum: a sample's sums are a plane apart) */
+        SpvId plane = MUL_U(MUL_U(width, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_EYE + 1)))), UINT((uint32_t)lists));
+        if (postDepth) {
+            /* each sample it covers past the depth test */
             SpvId mask = spvOp1(s, SPV_OP_Bitcast, s->uintType, spvLoad(s, s->intType, spvAccess(s, spvTypePointer(s, SPV_STORAGE_Input, s->intType), sampleMask, &r.zero, 1)));
-            who = spvOp2(s, 197, s->uintType, who, spvOp2(s, 196, s->uintType, mask, UINT(28)));
+            for (int q = 0; q < lists; ++q) {
+                SpvId covered;
+                spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, mask, UINT(1u << q)), UINT(0)), &covered);
+                SpvId at = ADD_U(MUL_U(pixel, UINT((uint32_t)lists)), UINT((uint32_t)q));
+                for (int k = 0; k < 5; ++k) spvAtomicAdd(s, bufferUintPtr(s, &r, listFragments, ADD_U(at, MUL_U(plane, UINT((uint32_t)k)))), adds[k]);
+                spvIfEnd(s, covered);
+            }
+        } else {
+            SpvId at = lists > 1 ? ADD_U(MUL_U(pixel, UINT((uint32_t)lists)), spvOp1(s, SPV_OP_Bitcast, s->uintType, spvLoad(s, s->intType, sampleMask))) : pixel;
+            for (int k = 0; k < 5; ++k) spvAtomicAdd(s, bufferUintPtr(s, &r, listFragments, ADD_U(at, MUL_U(plane, UINT((uint32_t)k)))), adds[k]);
         }
-        spvStore(s, bufferUintPtr(s, &r, listFragments, ADD_U(at, UINT(2))), who);
-        spvIfEnd(s, fits);
+        spvIfEnd(s, some);
     }
     spvEndMain(s);
 
@@ -2558,6 +2620,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, used);
     spvExecutionMode(s, main, 7 /* OriginUpperLeft */, 0, 0, 0, 0);
     if (lists) spvExecutionMode(s, main, 9 /* EarlyFragmentTests */, 0, 0, 0, 0);
+    if (postDepth) spvExecutionMode(s, main, 4446 /* PostDepthCoverage */, 0, 0, 0, 0);
     artfFree(tracer);
     return finish(s, size);
 }
@@ -4885,94 +4948,84 @@ uint32_t* artfShaderProbes(size_t* size, uint32_t maxTextures, const ArtfGraphDa
 }
 
 /* What was gathered, over what is there: premultiplied, in the frame's colors. */
-/* A pixel's list, in order: of what one instance left, its nearest; the rest, the farthest first, into one color that
- * goes over the frame. Depth is greater when nearer. */
+/* A sample's sums of layers, as a color over the frame: as artfLayerResolve, premultiplied, in the frame's colors. */
 uint32_t* artfShaderLayerResolve(size_t* size, int samples) {
-    enum { MOST = ARTF_LAYER_FRAGMENTS };
     Spv b, *s = &b;
     spvInit(s);
     if (samples > 1) spvCapability(s, 35 /* SampleRateShading */);
     Resources r;
     declare(s, &r, false);
-    SpvId counts = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 44);
-    SpvId fragments = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 45);
+    SpvId sums = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 45);
     SpvId fragCoord = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->vec4), SPV_STORAGE_Input);
     spvDecorate(s, fragCoord, SPV_DECORATE_BuiltIn, SPV_BUILTIN_FragCoord);
     SpvId outColor = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, s->vec4), SPV_STORAGE_Output);
     spvDecorate(s, outColor, SPV_DECORATE_Location, 0);
-    SpvId sampleId = 0, imageType = 0, sampled = 0, solidDepth = 0, ivec2 = 0;
+    SpvId sampleId = 0;
     if (samples > 1) {
         sampleId = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->intType), SPV_STORAGE_Input);
         spvDecorate(s, sampleId, SPV_DECORATE_BuiltIn, 18 /* SampleId */);
         spvDecorate(s, sampleId, SPV_DECORATE_Flat, -1);
-        sampled = spvTypeSampledImage2DMS(s, &imageType);
-        solidDepth = spvResource(s, sampled, SPV_STORAGE_UniformConstant, 8);
-        ivec2 = spvNewId(s);
-        spvEmit(&s->types, 23 /* OpTypeVector */, SPV_WORDS(ivec2, s->intType, 2));
     }
     SpvId main = spvBeginMain(s);
     SpvId coord = spvLoad(s, s->vec4, fragCoord);
     SpvId width = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_FOG)));
     SpvId pixel = ADD_U(MUL_U(spvOp1(s, SPV_OP_ConvertFToU, s->uintType, Y(coord)), width), spvOp1(s, SPV_OP_ConvertFToU, s->uintType, X(coord)));
-    SpvId count = spvLoad(s, s->uintType, bufferUintPtr(s, &r, counts, pixel));
-    SpvId thisSample = samples > 1 ? spvOp2(s, 196 /* OpShiftLeftLogical */, s->uintType, UINT(1 << 28), spvOp1(s, SPV_OP_Bitcast, s->uintType, spvLoad(s, s->intType, sampleId))) : 0;
-    /* what is solid at this sample: a fragment was tested at its pixel's center, and may be behind it here */
-    SpvId solid = 0;
-    if (samples > 1) {
-        const SpvId xy[2] = {spvOp1(s, SPV_OP_ConvertFToS, s->intType, X(coord)), spvOp1(s, SPV_OP_ConvertFToS, s->intType, Y(coord))};
-        solid = X(spvImageFetchSample(s, imageType, spvLoad(s, sampled, solidDepth), spvCompose(s, ivec2, xy, 2), spvLoad(s, s->intType, sampleId)));
+    SpvId at = samples > 1 ? ADD_U(MUL_U(pixel, UINT((uint32_t)samples)), spvOp1(s, SPV_OP_Bitcast, s->uintType, spvLoad(s, s->intType, sampleId))) : pixel;
+    SpvId plane = MUL_U(MUL_U(width, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_EYE + 1)))), UINT((uint32_t)samples));
+    const SpvId nothing[4] = {FLOAT(0.f), FLOAT(0.f), FLOAT(0.f), FLOAT(0.f)};
+    spvStore(s, outColor, spvCompose(s, s->vec4, nothing, 4));
+    /* (alpha's plane alone where no layer is: the rest only where one is, and then back to 0 for the next frame) */
+    SpvId sum[5], some;
+    sum[3] = spvLoad(s, s->uintType, bufferUintPtr(s, &r, sums, ADD_U(at, MUL_U(plane, UINT(3)))));
+    spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, sum[3], UINT(0)), &some);
+    for (int k = 0; k < 5; ++k) {
+        SpvId place = bufferUintPtr(s, &r, sums, ADD_U(at, MUL_U(plane, UINT((uint32_t)k))));
+        if (k != 3) sum[k] = spvLoad(s, s->uintType, place);
+        spvStore(s, place, UINT(0));
     }
-    SpvId depth[MOST], color[MOST], who[MOST], there[MOST];
-    for (int k = 0; k < MOST; ++k) {
-        SpvId at = MUL_U(ADD_U(MUL_U(pixel, UINT(MOST)), UINT((uint32_t)k)), UINT(3));
-        there[k] = spvOp2(s, SPV_OP_ULessThan, s->boolType, UINT((uint32_t)k), count);
-        depth[k] = spvOp1(s, SPV_OP_Bitcast, s->floatType, spvLoad(s, s->uintType, bufferUintPtr(s, &r, fragments, at)));
-        color[k] = spvLoad(s, s->uintType, bufferUintPtr(s, &r, fragments, ADD_U(at, UINT(1))));
-        who[k] = spvLoad(s, s->uintType, bufferUintPtr(s, &r, fragments, ADD_U(at, UINT(2))));
-        if (samples > 1) {
-            /* (only what covers this sample; whose it is, in the bits below) */
-            there[k] = BOTH(there[k], NOT_EQ(AND_U(who[k], thisSample), UINT(0)));
-            there[k] = BOTH(there[k], spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, depth[k], MUL_F(solid, FLOAT(.999f))));
-            who[k] = AND_U(who[k], UINT((1u << 28) - 1));
-        }
-    }
-    /* what lies behind another of the same instance goes */
-    SpvId kept[MOST];
-    for (int k = 0; k < MOST; ++k) {
-        kept[k] = there[k];
-        for (int j = 0; j < MOST; ++j) {
-            if (j == k) continue;
-            SpvId same = BOTH(there[j], spvOp2(s, 170 /* OpIEqual */, s->boolType, who[j], who[k]));
-            SpvId nearer = j < k ? spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, depth[j], depth[k]) : MORE_F(depth[j], depth[k]);
-            kept[k] = BOTH(kept[k], spvOp1(s, SPV_OP_LogicalNot, s->boolType, BOTH(same, nearer)));
-        }
-    }
-    for (int k = 0; k < MOST; ++k) {
-        depth[k] = PICK_F(kept[k], depth[k], FLOAT(-1.f));
-        color[k] = spvSelect(s, s->uintType, kept[k], color[k], UINT(0));
-    }
-    /* in order, with a network of compare and swap */
-    static const uint8_t network[19][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {1, 2}, {5, 6}, {0, 4}, {3, 7}, {1, 5}, {2, 6}, {1, 4}, {3, 6}, {2, 4}, {3, 5}, {3, 4}};
-    for (int n = 0; n < 19; ++n) {
-        const int a = network[n][0], c = network[n][1];
-        SpvId swap = MORE_F(depth[a], depth[c]);
-        SpvId da = PICK_F(swap, depth[c], depth[a]), dc = PICK_F(swap, depth[a], depth[c]);
-        SpvId ca = spvSelect(s, s->uintType, swap, color[c], color[a]), cc = spvSelect(s, s->uintType, swap, color[a], color[c]);
-        depth[a] = da; depth[c] = dc;
-        color[a] = ca; color[c] = cc;
-    }
-    const SpvId zero[4] = {FLOAT(0.f), FLOAT(0.f), FLOAT(0.f), FLOAT(0.f)};
-    SpvId all = spvCompose(s, s->vec4, zero, 4);
-    for (int k = 0; k < MOST; ++k) {
-        const SpvId parts[4] = {BYTE_OF(color[k], 16), BYTE_OF(color[k], 8), BYTE_OF(color[k], 0), BYTE_OF(color[k], 24)};
-        SpvId top = spvCompose(s, s->vec4, parts, 4);
-        all = spvOp2(s, SPV_OP_FAdd, s->vec4, top, spvOp2(s, SPV_OP_VectorTimesScalar, s->vec4, all, SUB_F(FLOAT(1.f), W(top))));
-    }
-    spvStore(s, outColor, all);
+    SpvId cover = SUB_F(FLOAT(1.f), spvExp2Fast(s, MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, TO_F(sum[4])), FLOAT(1.f / ARTF_LAYER_ONE))));
+    SpvId scale = DIV_F(MUL_F(cover, FLOAT(255.f)), TO_F(sum[3]));
+    SpvId parts[4];
+    for (int k = 0; k < 3; ++k) parts[k] = TO_F(spvOp1(s, SPV_OP_ConvertFToU, s->uintType, MIN_F(ADD_F(MUL_F(TO_F(sum[k]), scale), FLOAT(.5f)), FLOAT(255.f))));
+    parts[3] = TO_F(spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(cover, FLOAT(255.f)), FLOAT(.5f))));
+    for (int k = 0; k < 4; ++k) parts[k] = MUL_F(parts[k], FLOAT(1.f / 255.f));
+    spvStore(s, outColor, spvCompose(s, s->vec4, parts, 4));
+    spvIfEnd(s, some);
     spvEndMain(s);
     const SpvId interface[3] = {fragCoord, outColor, sampleId};
     spvEntryPoint(s, SPV_MODEL_Fragment, main, interface, samples > 1 ? 3 : 2);
     spvExecutionMode(s, main, 7, 0, 0, 0, 0);
+    return finish(s, size);
+}
+
+uint32_t* artfShaderLayerPrefix(size_t* size) {
+    Spv b, *s = &b;
+    spvInit(s);
+    Resources r;
+    declare(s, &r, false);
+    SpvId grid = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 44);
+    SpvId uvec3 = spvNewId(s);
+    spvEmit(&s->types, 23 /* OpTypeVector */, SPV_WORDS(uvec3, s->uintType, 3));
+    SpvId global = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, uvec3), SPV_STORAGE_Input);
+    spvDecorate(s, global, SPV_DECORATE_BuiltIn, SPV_BUILTIN_GlobalInvocationId);
+    SpvId main = spvBeginMain(s);
+    SpvId column = spvExtract(s, s->uintType, spvLoad(s, uvec3, global), 0);
+    SpvId width = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_FOG))), height = spvOp1(s, SPV_OP_ConvertFToU, s->uintType, W(frameVec(s, &r, F_EYE + 1)));
+    SpvId across = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(width, UINT(ARTF_LAYER_TILE - 1)), UINT(ARTF_LAYER_TILE));
+    SpvId down = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(height, UINT(ARTF_LAYER_TILE - 1)), UINT(ARTF_LAYER_TILE));
+    SpvId merge;
+    spvIfBegin(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, column, MUL_U(across, down)), &merge);
+    SpvId first = MUL_U(column, UINT(ARTF_LAYER_SLICES)), before = UINT(0);
+    for (uint32_t k = 0; k < ARTF_LAYER_SLICES; ++k) {
+        SpvId place = bufferUintPtr(s, &r, grid, ADD_U(first, UINT(k)));
+        SpvId here = spvLoad(s, s->uintType, place);
+        spvStore(s, place, before);
+        before = ADD_U(before, here);
+    }
+    spvIfEnd(s, merge);
+    spvEndMain(s);
+    spvEntryPoint(s, SPV_MODEL_GLCompute, main, &global, 1);
+    spvExecutionMode(s, main, 17 /* LocalSize */, 64, 1, 1, 3);
     return finish(s, size);
 }
 
