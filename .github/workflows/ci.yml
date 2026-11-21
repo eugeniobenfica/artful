@@ -48,7 +48,10 @@ jobs:
         if: failure()
         run: |
           vulkaninfo 2>/dev/null | grep -iE "driverInfo|apiVersion" | head -4 || true
-          gdb -batch -ex run -ex bt -ex "info registers rip" --args build/artful-tests 2d/ 2>&1 | grep -vE "^\[(New|Thread)" | tail -40
+          ARTFUL_TEST_TRACE=1 gdb -batch -ex run -ex bt -ex 'info symbol $pc' -ex 'x/8i $pc-16' -ex 'info proc mappings' -ex 'thread apply all bt 4' --args build/artful-tests 2d/ > gdb.txt 2>&1 || true
+          grep -E "^\[2d/|SIGSEGV|^#|=>" gdb.txt | tail -60
+          pc=$(grep -oE "^=> 0x[0-9a-f]+" gdb.txt | head -1 | cut -c4-); echo "pc $pc"
+          awk -v pc="$pc" 'BEGIN{p=strtonum(pc)} /0x[0-9a-f]+ +0x[0-9a-f]+/{s=strtonum($1); e=strtonum($2); if (p>=s && p<e) print}' gdb.txt
       # (what FLIP measured of each comparison here, to set thresholds by it: docs/plano-de-correcao.md, 0.4)
       - uses: actions/upload-artifact@v4
         if: always()
