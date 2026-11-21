@@ -806,6 +806,35 @@ static uint32_t basisHash(const uint32_t* pixels, size_t count) {
     return h;
 }
 
+/* UASTC's 19 modes as ASTC's: of each, blocks of random bits after its code; every one UASTC reads gives the same 16
+ * texels as ASTC 4 x 4. */
+void testBasisAstc(void) {
+    static const uint8_t codes[19][2] = {{0x1, 4}, {0x35, 6}, {0x1D, 5}, {0x3, 5}, {0x13, 5}, {0xB, 5}, {0x1B, 5}, {0x7, 5}, {0x17, 5}, {0xF, 5},
+                                         {0x2, 3}, {0x0, 2}, {0x6, 3}, {0x1F, 5}, {0xD, 5}, {0x5, 7}, {0x15, 6}, {0x25, 6}, {0x9, 4}};
+    uint32_t state = 12345u, read = 0, made = 0, apart = 0, modesRead = 0;
+    for (int mode = 0; mode < 19; ++mode) {
+        uint32_t readHere = 0;
+        for (int n = 0; n < 4000; ++n) {
+            uint8_t block[16], astc[16];
+            for (int i = 0; i < 16; ++i) {
+                state = state * 1664525u + 1013904223u;
+                block[i] = (uint8_t)(state >> 24);
+            }
+            block[0] = (uint8_t)((block[0] & ~((1u << codes[mode][1]) - 1)) | codes[mode][0]);
+            uint32_t direct[16], back[16];
+            if (!artfBasisUastc(block, 16, 4, 4, direct)) continue;
+            ++read, ++readHere;
+            if (!artfBasisAstc(block, 16, astc)) continue;
+            ++made;
+            artfDecodeAstc(astc, 4, 4, back);
+            apart += memcmp(direct, back, sizeof direct) != 0;
+        }
+        modesRead += readHere > 0;
+    }
+    printf("UASTC as ASTC: %u blocks read in %u modes, %u made, %u with texels apart\n", read, modesRead, made, apart);
+    CHECK(modesRead == 19 && read > 30000 && made == read && apart == 0);
+}
+
 /* KTX2 files of Basis Universal's, ETC1S (with alpha's own slices) and UASTC with Zstandard: every level as the
  * reference transcoder makes it, to the bit; a texture with its own mipmaps; and what is cut short or spoiled refused,
  * or read, without reading past it. */
@@ -818,11 +847,55 @@ void testBasis(void) {
         if (pixels) CHECK(basisHash(pixels, 867) == files[f].hash); /* (30 x 22, 15 x 11, 7 x 5, 3 x 2, 1 x 1) */
         CHECK(offsets[4] == 866);
         artfFree(pixels);
+        /* as blocks a GPU takes: UASTC as ASTC 4 x 4, ETC1S (its alpha's slices left out: ETC1 has none) as ETC1; the
+         * blocks turned back into pixels are the same, to the bit */
+        uint8_t* plain = artfMalloc(files[f].size);
+        memcpy(plain, files[f].data, files[f].size);
+        if (!f) {
+            const uint32_t sgd = (uint32_t)plain[64] | (uint32_t)plain[65] << 8 | (uint32_t)plain[66] << 16 | (uint32_t)plain[67] << 24;
+            for (int level = 0; level < 5; ++level) memset(plain + sgd + 20 + level * 20 + 12, 0, 8); /* (alpha's offset and length) */
+        }
+        uint32_t* direct = NULL;
+        uint32_t directOffsets[16];
+        CHECK(artfBasisLevels(plain, files[f].size, &direct, directOffsets));
+        ArtfTextureData blocks;
+        memset(&blocks, 0, sizeof blocks);
+        blocks.width = 30, blocks.height = 22, blocks.mipCount = 5;
+        CHECK(artfBasisBlocks(plain, files[f].size, &blocks.format, &blocks.blocks, &blocks.blockBytes, blocks.blockOffsets));
+        CHECK(blocks.format == (f ? 157u : 147u) && blocks.blockBytes == (size_t)(48 + 12 + 4 + 1 + 1) * (f ? 16 : 8));
+        if (blocks.blocks && direct) {
+            artfTextureDecode(&blocks);
+            size_t apart = 0;
+            for (int i = 0; i < 867; ++i) apart += blocks.pixels[i] != direct[i];
+            printf("Basis %s as %s blocks: %zu of 867 texels apart\n", f ? "UASTC" : "ETC1S", f ? "ASTC" : "ETC1", apart);
+            CHECK(apart == 0);
+        }
+        artfFree(blocks.blocks);
+        artfFree(blocks.pixels);
+        artfFree(direct);
+        if (!f) CHECK(!artfBasisBlocks(files[f].data, files[f].size, &blocks.format, &blocks.blocks, &blocks.blockBytes, blocks.blockOffsets)); /* (with alpha: pixels) */
+        /* in a scene: UASTC's blocks kept, ETC1S with alpha as pixels */
         ArtfScene* s = artfSceneNew();
         const ArtfTexture t = artfSceneAddTextureKtx2(s, files[f].data, files[f].size);
         CHECK(t != 0);
-        if (t) CHECK(s->textures.items[t].mipCount == 5 && s->textures.items[t].format == 0 && s->textures.items[t].pixels);
+        if (t) CHECK(s->textures.items[t].mipCount == 5 && s->textures.items[t].format == (f ? 157u : 0u) && (f ? s->textures.items[t].blocks != NULL : s->textures.items[t].pixels != NULL));
         artfSceneFree(s);
+        s = artfSceneNew();
+        const ArtfTexture u = artfSceneAddTextureKtx2(s, plain, files[f].size);
+        if (u) CHECK(s->textures.items[u].format == (f ? 157u : 147u));
+        artfSceneFree(s);
+        artfFree(plain);
+        /* every block a byte spoiled: turned or refused, never past the block */
+        uint8_t* spoiled = artfMalloc(files[f].size);
+        for (size_t i = 0; i < files[f].size; i += 3) {
+            memcpy(spoiled, files[f].data, files[f].size);
+            spoiled[i] ^= 0xA5;
+            uint8_t* out = NULL;
+            uint32_t format, offs[16];
+            size_t bytes;
+            if (artfBasisBlocks(spoiled, files[f].size, &format, &out, &bytes, offs)) artfFree(out);
+        }
+        artfFree(spoiled);
         uint8_t* copy = artfMalloc(files[f].size);
         int refused = 0;
         for (size_t cut = 0; cut < files[f].size; ++cut) {

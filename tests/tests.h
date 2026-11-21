@@ -175,6 +175,7 @@ void testHighlightFlicker(void);
 void testBlocks(void);
 void testBlockDecoders(void);
 void testBasis(void);
+void testBasisAstc(void);
 void testGltfSparse(void);
 void testGltfExtensions(void);
 void testGltfMeshopt(void);

@@ -212,6 +212,200 @@ static bool uastcBlock(const uint8_t* b, uint32_t* out) {
     return true;
 }
 
+/* ---- UASTC as ASTC ----
+ * UASTC is ASTC 4 x 4's, written otherwise: the same endpoints in the same ranges, the same weights, partitions ASTC
+ * has. So a block is turned into ASTC's by moving its numbers: the endpoints' trits and quints packed as ASTC packs
+ * them, each subset at its partition's place, the weights from the far end; where ASTC would see a subset's endpoints
+ * as going down (and contract blue), they change places and its weights turn over, which gives the same texels. */
+
+/* ASTC packs five trits in 8 bits and three quints in 7: of each base-3 (base-5) number, its code */
+static const uint8_t astcTritCode[243] = {0, 1, 2, 4, 5, 6, 8, 9, 10, 16, 17, 18, 20, 21, 22, 24, 25, 26, 3, 7, 11, 19, 23, 27, 12, 13, 14, 32, 33, 34, 36, 37, 38, 40, 41, 42, 48, 49, 50, 52, 53, 54, 56, 57, 58, 35, 39, 43, 51, 55, 59, 44, 45, 46, 64, 65, 66, 68, 69, 70, 72, 73, 74, 80, 81, 82, 84, 85, 86, 88, 89, 90, 67, 71, 75, 83, 87, 91, 76, 77, 78, 128, 129, 130, 132, 133, 134, 136, 137, 138, 144, 145, 146, 148, 149, 150, 152, 153, 154, 131, 135, 139, 147, 151, 155, 140, 141, 142, 160, 161, 162, 164, 165, 166, 168, 169, 170, 176, 177, 178, 180, 181, 182, 184, 185, 186, 163, 167, 171, 179, 183, 187, 172, 173, 174, 192, 193, 194, 196, 197, 198, 200, 201, 202, 208, 209, 210, 212, 213, 214, 216, 217, 218, 195, 199, 203, 211, 215, 219, 204, 205, 206, 96, 97, 98, 100, 101, 102, 104, 105, 106, 112, 113, 114, 116, 117, 118, 120, 121, 122, 99, 103, 107, 115, 119, 123, 108, 109, 110, 224, 225, 226, 228, 229, 230, 232, 233, 234, 240, 241, 242, 244, 245, 246, 248, 249, 250, 227, 231, 235, 243, 247, 251, 236, 237, 238, 28, 29, 30, 60, 61, 62, 92, 93, 94, 156, 157, 158, 188, 189, 190, 220, 221, 222, 31, 63, 95, 159, 191, 223, 124, 125, 126};
+static const uint8_t astcQuintCode[125] = {0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 24, 25, 26, 27, 28, 5, 13, 21, 29, 6, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 37, 45, 53, 61, 14, 64, 65, 66, 67, 68, 72, 73, 74, 75, 76, 80, 81, 82, 83, 84, 88, 89, 90, 91, 92, 69, 77, 85, 93, 22, 96, 97, 98, 99, 100, 104, 105, 106, 107, 108, 112, 113, 114, 115, 116, 120, 121, 122, 123, 124, 101, 109, 117, 125, 30, 102, 103, 70, 71, 38, 110, 111, 78, 79, 46, 118, 119, 86, 87, 54, 126, 127, 94, 95, 62, 39, 47, 55, 63, 7};
+/* each pattern's ASTC seed, and where each of its subsets is among ASTC's partitions */
+static const uint16_t astcSeeds2[30][3] = {{28, 0, 1}, {20, 0, 1}, {16, 0, 1}, {29, 0, 1}, {91, 0, 1}, {9, 0, 1}, {107, 0, 1}, {72, 0, 1}, {149, 0, 1}, {204, 0, 1}, {50, 0, 1}, {114, 0, 1}, {496, 0, 1}, {17, 0, 1}, {78, 0, 1}, {39, 0, 1}, {252, 0, 1}, {828, 0, 1}, {43, 0, 1}, {156, 0, 1}, {116, 0, 1}, {210, 0, 1}, {476, 0, 1}, {273, 0, 1}, {684, 0, 1}, {359, 0, 1}, {246, 0, 1}, {195, 0, 1}, {694, 0, 1}, {524, 0, 1}};
+static const uint16_t astcSeeds3[11][4] = {{260, 0, 1, 2}, {74, 0, 1, 2}, {32, 0, 1, 2}, {156, 0, 1, 2}, {183, 0, 1, 2}, {15, 0, 1, 2}, {745, 0, 1, 2}, {0, 0, 1, 2}, {335, 0, 1, 2}, {902, 0, 1, 2}, {254, 0, 1, 2}};
+static const uint16_t astcSeeds7[19][3] = {{36, 0, 1}, {48, 0, 1}, {61, 0, 1}, {137, 0, 1}, {161, 0, 1}, {183, 0, 1}, {226, 0, 1}, {281, 0, 1}, {302, 0, 1}, {307, 0, 1}, {479, 0, 1}, {495, 0, 1}, {593, 0, 1}, {594, 0, 1}, {605, 0, 1}, {799, 0, 1}, {812, 0, 1}, {988, 0, 1}, {993, 0, 1}};
+
+/* (n bits of v, LSB first, at bit `at`; the block's 128 at most) */
+static inline void bitsPut(uint8_t* b, uint32_t* at, uint32_t v, uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i, ++*at)
+        if (*at < 128 && (v >> i & 1)) b[*at >> 3] |= (uint8_t)(1u << (*at & 7));
+}
+
+/* count numbers in a range, ASTC's integer sequence: with trits, groups of five (each one's bits, then the code's
+ * parts between them); with quints, of three; what a last group does not fill is left out. */
+static void numbersPut(uint8_t* b, uint32_t at, const uint8_t* bitsOf, const uint8_t* digit, uint32_t count, int range) {
+    const uint32_t n = astcRange[range][0], trits = astcRange[range][1], quints = astcRange[range][2];
+    if (!trits && !quints) {
+        for (uint32_t i = 0; i < count; ++i) bitsPut(b, &at, bitsOf[i], n);
+        return;
+    }
+    const uint32_t size = trits ? 5 : 3, end = at + count * n + (trits ? (count * 8 + 4) / 5 : (count * 7 + 2) / 3);
+    static const uint8_t tritWidths[5] = {2, 2, 1, 2, 1}, quintWidths[3] = {3, 2, 2};
+    for (uint32_t g = 0; g * size < count; ++g) {
+        uint32_t value = 0, scale = 1;
+        for (uint32_t k = 0; k < size; ++k, scale *= trits ? 3 : 5)
+            if (g * size + k < count) value += digit[g * size + k] * scale;
+        uint32_t packed = trits ? astcTritCode[value] : astcQuintCode[value];
+        for (uint32_t k = 0; k < size; ++k) {
+            const uint32_t i = g * size + k, width = trits ? tritWidths[k] : quintWidths[k];
+            const uint32_t v = i < count ? bitsOf[i] : 0;
+            for (uint32_t j = 0; j < n && at < end; ++j, ++at)
+                if (v >> j & 1) b[at >> 3] |= (uint8_t)(1u << (at & 7));
+            for (uint32_t j = 0; j < width && at < end; ++j, ++at)
+                if (packed >> j & 1) b[at >> 3] |= (uint8_t)(1u << (at & 7));
+            packed >>= width;
+        }
+    }
+}
+
+/* (ASTC's integer sequence's length) */
+static uint32_t numbersLength(uint32_t count, int range) {
+    return count * astcRange[range][0] + (astcRange[range][1] ? (count * 8 + 4) / 5 : 0) + (astcRange[range][2] ? (count * 7 + 2) / 3 : 0);
+}
+
+/* A UASTC block as ASTC 4 x 4's. false: not a block, or not one ASTC holds the same (none such is made by basisu). */
+static bool uastcAstc(const uint8_t* b, uint8_t* out) {
+    memset(out, 0, 16);
+    int mode = -1;
+    for (int m = 0; m < UASTC_MODES && mode < 0; ++m)
+        if ((b[0] & ((1u << uastcCode[m][1]) - 1)) == uastcCode[m][0]) mode = m;
+    if (mode < 0) return false;
+    uint32_t at = uastcCode[mode][1];
+    if (mode == UASTC_SOLID) {
+        /* ASTC's one color all over: no extent, its colors as 16 bits */
+        static const uint8_t solid[8] = {0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        memcpy(out, solid, 8);
+        for (int c = 0; c < 4; ++c) {
+            const uint32_t v = bitsAt(b, &at, 8);
+            out[8 + c * 2] = (uint8_t)v;
+            out[9 + c * 2] = (uint8_t)v;
+        }
+        return true;
+    }
+    at += uastcHintBits[mode];
+    const uint32_t subsets = uastcSubsets[mode], planes = uastcPlanes[mode], comps = uastcComponents[mode];
+    const uint8_t* anchors;
+    static const uint8_t noAnchors[3];
+    const uint8_t* pattern = NULL;
+    const uint16_t* seed = NULL;
+    if (mode == 2 || mode == 4 || mode == 7 || mode == 9 || mode == 16) {
+        const uint32_t p = bitsAt(b, &at, 5);
+        if (mode == 7) {
+            if (p >= 19) return false;
+            anchors = uastcAnchors7[p], pattern = uastcPatterns7[p], seed = astcSeeds7[p];
+        } else {
+            if (p >= 30) return false;
+            anchors = uastcAnchors2[p], pattern = uastcPatterns2[p], seed = astcSeeds2[p];
+        }
+    } else if (mode == 3) {
+        const uint32_t p = bitsAt(b, &at, 4);
+        if (p >= 11) return false;
+        anchors = uastcAnchors3[p], pattern = uastcPatterns3[p], seed = astcSeeds3[p];
+    } else anchors = noAnchors;
+    uint32_t ccs = 0;
+    if (mode == 6 || mode == 11 || mode == 13) ccs = bitsAt(b, &at, 2);
+    else if (mode == 17) ccs = 3;
+    /* the endpoints: each one's bits and its trit or quint, and what it means */
+    const int range = uastcEndpointRange[mode];
+    const uint32_t values = comps * 2 * subsets, bits = astcRange[range][0], trits = astcRange[range][1], quints = astcRange[range][2];
+    uint32_t bundles[8], count = 0, size = 0, base = 0;
+    if (trits || quints) {
+        size = trits ? 5 : 3;
+        base = trits ? 3 : 5;
+        count = (values + size - 1) / size;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t n = trits ? 8 : 7;
+            if (i == count - 1) {
+                const uint32_t rest = values - (count - 1) * size;
+                if (trits) n = rest == 1 ? 2 : rest == 2 ? 4 : rest == 3 ? 5 : rest == 4 ? 7 : n;
+                else n = rest == 1 ? 3 : rest == 2 ? 5 : n;
+            }
+            bundles[i] = bitsAt(b, &at, n);
+        }
+    }
+    uint8_t low[24], digit[24], meant[24];
+    uint32_t accumulated = 0, left = 0, next = 0;
+    for (uint32_t i = 0; i < values; ++i) {
+        low[i] = (uint8_t)bitsAt(b, &at, bits);
+        digit[i] = 0;
+        if (count) {
+            if (!left) {
+                accumulated = bundles[next++];
+                left = size;
+            }
+            digit[i] = (uint8_t)(accumulated % base);
+            accumulated /= base;
+            --left;
+        }
+        if (digit[i] >= (trits ? 3 : quints ? 5 : 1)) return false;
+        meant[i] = (uint8_t)astcEndpoint((uint32_t)digit[i] << bits | low[i], range);
+    }
+    const uint32_t weightBits = uastcWeightBits[mode];
+    uint8_t weight[32];
+    for (uint32_t i = 0; i < 16 * planes; ++i) {
+        const uint32_t texel = i / planes;
+        bool anchor = false;
+        for (uint32_t s = 0; s < subsets; ++s) anchor = anchor || anchors[s] == texel;
+        weight[i] = (uint8_t)bitsAt(b, &at, anchor ? weightBits - 1 : weightBits);
+    }
+    if (at > 128) return false;
+    /* where ASTC would read a subset's colors as going down (RGB and RGBA: by their sums), they change places, and
+     * the subset's weights turn over (ASTC's weights of bits alone are even about the middle) */
+    const uint32_t cem = comps == 2 ? 4 : comps == 3 ? 8 : 12, top = (1u << weightBits) - 1;
+    for (uint32_t s = 0; s < subsets && comps >= 3; ++s) {
+        const uint32_t e = s * comps * 2;
+        if ((uint32_t)meant[e + 1] + meant[e + 3] + meant[e + 5] >= (uint32_t)meant[e] + meant[e + 2] + meant[e + 4]) continue;
+        for (uint32_t c = 0; c < comps; ++c) {
+            uint8_t t = low[e + c * 2]; low[e + c * 2] = low[e + c * 2 + 1]; low[e + c * 2 + 1] = t;
+            t = digit[e + c * 2]; digit[e + c * 2] = digit[e + c * 2 + 1]; digit[e + c * 2 + 1] = t;
+        }
+        for (uint32_t i = 0; i < 16 * planes; ++i)
+            if ((pattern ? pattern[i / planes] : 0) == s) weight[i] = (uint8_t)(top - weight[i]);
+    }
+    /* the block: its mode (a 4 x 4 grid, the weights' range, one or two planes), partitions, endpoints' mode */
+    static const uint8_t rOf[6] = {0, 2, 4, 7, 4, 7}, hOf[6] = {0, 0, 0, 0, 1, 1};
+    const uint32_t r = rOf[weightBits], blockMode = (r >> 1 & 3) | (r & 1) << 4 | 2u << 5 | (uint32_t)hOf[weightBits] << 9 | (planes == 2 ? 1u : 0u) << 10;
+    uint32_t put = 0;
+    bitsPut(out, &put, blockMode, 11);
+    bitsPut(out, &put, subsets - 1, 2);
+    if (subsets == 1) bitsPut(out, &put, cem, 4);
+    else {
+        bitsPut(out, &put, seed[0], 10);
+        bitsPut(out, &put, cem << 2, 6);
+    }
+    const uint32_t weightCount = 16 * planes, weightLength = weightCount * weightBits;
+    const uint32_t colorBits = 128 - put - weightLength - (planes == 2 ? 2 : 0);
+    /* (the endpoints' range ASTC finds from what room is left: UASTC's, or the block is not one ASTC reads the same) */
+    int level = -1;
+    for (int i = 20; i >= 0 && level < 0; --i)
+        if (numbersLength(values, i) <= colorBits) level = i;
+    if (level != range) return false;
+    /* each subset's endpoints at its partition's place */
+    uint8_t lowAt[24], digitAt[24];
+    for (uint32_t s = 0; s < subsets; ++s) {
+        const uint32_t to = (subsets > 1 ? seed[1 + s] : 0) * comps * 2;
+        memcpy(lowAt + to, low + s * comps * 2, comps * 2);
+        memcpy(digitAt + to, digit + s * comps * 2, comps * 2);
+    }
+    numbersPut(out, put, lowAt, digitAt, values, range);
+    if (planes == 2) {
+        uint32_t c = 128 - weightLength - 2;
+        bitsPut(out, &c, ccs, 2);
+    }
+    /* the weights, from the far end: weight bit j at the block's bit 127 - j */
+    for (uint32_t i = 0, j = 0; i < weightCount; ++i)
+        for (uint32_t k = 0; k < weightBits; ++k, ++j)
+            if (weight[i] >> k & 1) out[(127 - j) >> 3] |= (uint8_t)(1u << ((127 - j) & 7));
+    return true;
+}
+
+bool artfBasisAstc(const uint8_t* uastc, size_t size, uint8_t* astc) {
+    for (size_t i = 0; i + 16 <= size; i += 16)
+        if (!uastcAstc(uastc + i, astc + i)) return false;
+    return true;
+}
+
 bool artfBasisUastc(const uint8_t* blocks, size_t size, uint32_t width, uint32_t height, uint32_t* out) {
     const uint32_t across = (width + 3) / 4, down = (height + 3) / 4;
     if ((size_t)across * down * 16 != size) return false;
@@ -420,7 +614,25 @@ static bool etc1sCodebooks(Etc1s* e, const uint8_t* endpoints, size_t endpointBy
 
 /* A slice: its blocks' endpoints and selectors, and their colors into out (width x height pixels); alpha: only into the
  * pixels' alpha, from green (as basisu's transcode_slice, to RGBA32 and A32). */
-static bool etc1sSlice(const Etc1s* e, const uint8_t* data, size_t size, uint32_t width, uint32_t height, uint32_t* out, bool alpha) {
+/* An ETC1S block as ETC1's: differential, both halves of the one color (no delta) and the one table; its selectors run
+ * from -large to +large, ETC's codes are +small, +large, -small, -large, and its texels go by columns. */
+static void etc1Block(const uint8_t* ep, const uint8_t* rows, uint8_t* out) {
+    static const uint32_t code[4] = {3, 2, 0, 1};
+    const uint32_t high = (uint32_t)ep[0] << 27 | (uint32_t)ep[1] << 19 | (uint32_t)ep[2] << 11 | (uint32_t)ep[3] << 5 | (uint32_t)ep[3] << 2 | 2u;
+    uint32_t low = 0;
+    for (uint32_t y = 0; y < 4; ++y)
+        for (uint32_t x = 0; x < 4; ++x) {
+            const uint32_t c = code[rows[y] >> (x * 2) & 3], i = x * 4 + y;
+            low |= (c >> 1) << (i + 16) | (c & 1) << i;
+        }
+    for (int k = 0; k < 4; ++k) {
+        out[k] = (uint8_t)(high >> (24 - 8 * k));
+        out[4 + k] = (uint8_t)(low >> (24 - 8 * k));
+    }
+}
+
+/* A slice into pixels (alpha: its green into their alpha); or, with blocks, into ETC1's blocks (8 bytes each). */
+static bool etc1sSlice(const Etc1s* e, const uint8_t* data, size_t size, uint32_t width, uint32_t height, uint32_t* out, bool alpha, uint8_t* blocks) {
     const uint32_t across = (width + 3) / 4, down = (height + 3) / 4, total = across * down;
     Bits b = {data, data + size, 0, 0};
     /* (of each column, the row before's and this one's: prediction bits for the 2 x 2 group, the endpoint) */
@@ -498,6 +710,10 @@ static bool etc1sSlice(const Etc1s* e, const uint8_t* data, size_t size, uint32_
             }
             ok = ok && endpoint < e->endpointCount && selector < e->selectorCount;
             if (!ok) break;
+            if (blocks) {
+                etc1Block(e->endpoints[endpoint], e->selectors[selector], blocks + ((size_t)by * across + bx) * 8);
+                continue;
+            }
             /* its colors */
             const uint8_t* ep = e->endpoints[endpoint];
             const int* table = etc1Intensity[ep[3]];
@@ -527,7 +743,7 @@ static bool etc1sSlice(const Etc1s* e, const uint8_t* data, size_t size, uint32_
 
 /* The levels of an ETC1S file (scheme 1): its global data (each image's slices, the codebooks, the tables), then each
  * level's slices, color and alpha. */
-static bool etc1sLevels(const uint8_t* d, size_t size, uint32_t width, uint32_t height, uint32_t levels, uint32_t* pixels, const uint32_t* offsets) {
+static bool etc1sLevels(const uint8_t* d, size_t size, uint32_t width, uint32_t height, uint32_t levels, uint32_t* pixels, const uint32_t* offsets, uint8_t* blocks) {
     const uint64_t sgdOffset = read64(d + 64), sgdLength = read64(d + 72);
     if (sgdOffset > size || sgdLength > size - sgdOffset || sgdLength < 20 + (uint64_t)levels * 20) return false;
     const uint8_t* g = d + sgdOffset;
@@ -546,8 +762,9 @@ static bool etc1sLevels(const uint8_t* d, size_t size, uint32_t width, uint32_t 
         const uint64_t levelOffset = read64(d + 80 + (size_t)i * 24), levelLength = read64(d + 88 + (size_t)i * 24);
         const uint32_t rgbOffset = read32(desc + 4), rgbLength = read32(desc + 8), alphaOffset = read32(desc + 12), alphaLength = read32(desc + 16);
         ok = levelOffset <= size && levelLength <= size - levelOffset && rgbLength && (uint64_t)rgbOffset + rgbLength <= levelLength && (uint64_t)alphaOffset + alphaLength <= levelLength;
-        ok = ok && etc1sSlice(&e, d + levelOffset + rgbOffset, rgbLength, w, h, pixels + offsets[i], false);
-        if (ok && alphaLength) ok = etc1sSlice(&e, d + levelOffset + alphaOffset, alphaLength, w, h, pixels + offsets[i], true);
+        ok = ok && (!blocks || !alphaLength); /* (blocks: ETC1's, which have no alpha) */
+        ok = ok && etc1sSlice(&e, d + levelOffset + rgbOffset, rgbLength, w, h, blocks ? NULL : pixels + offsets[i], false, blocks ? blocks + offsets[i] : NULL);
+        if (ok && alphaLength) ok = etc1sSlice(&e, d + levelOffset + alphaOffset, alphaLength, w, h, pixels + offsets[i], true, NULL);
         w = w > 1 ? w / 2 : 1;
         h = h > 1 ? h / 2 : 1;
     }
@@ -577,7 +794,7 @@ bool artfBasisLevels(const uint8_t* d, size_t size, uint32_t** pixelsOut, uint32
     }
     uint32_t* pixels = artfMalloc(total * 4);
     bool ok = true;
-    if (model == 163) ok = etc1sLevels(d, size, width, height, levels, pixels, offsets);
+    if (model == 163) ok = etc1sLevels(d, size, width, height, levels, pixels, offsets, NULL);
     else {
         w = width;
         h = height;
@@ -599,5 +816,55 @@ bool artfBasisLevels(const uint8_t* d, size_t size, uint32_t** pixelsOut, uint32
         return false;
     }
     *pixelsOut = pixels;
+    return true;
+}
+
+/* Its blocks, as a GPU takes them: ETC1S without alpha as ETC1's (ETC2's RGB format, 147), UASTC as ASTC 4 x 4 (157);
+ * the same texels as artfBasisLevels gives. false: not so (ETC1S with alpha), or not a file this reads. */
+bool artfBasisBlocks(const uint8_t* d, size_t size, uint32_t* format, uint8_t** blocksOut, size_t* bytes, uint32_t* offsets) {
+    *blocksOut = NULL;
+    if (size < 80) return false;
+    const uint32_t vkFormat = read32(d + 12), width = read32(d + 20), height = read32(d + 24), depth = read32(d + 28), layers = read32(d + 32), faces = read32(d + 36);
+    const uint32_t levels = read32(d + 40) ? read32(d + 40) : 1, scheme = read32(d + 44), dfdOffset = read32(d + 48), dfdLength = read32(d + 52);
+    if (vkFormat || depth > 1 || layers > 1 || faces != 1 || !width || !height || width > 16384 || height > 16384 || levels > 16 || 80 + (size_t)levels * 24 > size) return false;
+    if (dfdLength < 12 || dfdOffset > size || dfdLength > size - dfdOffset) return false;
+    const uint32_t model = d[dfdOffset + 12];
+    if (!(model == 163 && scheme == 1) && !(model == 166 && (scheme == 0 || scheme == 2))) return false;
+    const size_t blockBytes = model == 163 ? 8 : 16;
+    size_t total = 0;
+    uint32_t w = width, h = height;
+    for (uint32_t i = 0; i < levels; ++i) {
+        offsets[i] = (uint32_t)total;
+        total += (size_t)((w + 3) / 4) * ((h + 3) / 4) * blockBytes;
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+    }
+    uint8_t* blocks = artfMalloc(total);
+    bool ok;
+    if (model == 163) ok = etc1sLevels(d, size, width, height, levels, NULL, offsets, blocks);
+    else {
+        ok = true;
+        w = width;
+        h = height;
+        for (uint32_t i = 0; i < levels && ok; ++i) {
+            const uint64_t offset = read64(d + 80 + (size_t)i * 24), length = read64(d + 88 + (size_t)i * 24), full = read64(d + 96 + (size_t)i * 24);
+            const size_t n = (size_t)((w + 3) / 4) * ((h + 3) / 4) * 16;
+            ok = offset <= size && length <= size - offset && full == n;
+            if (ok && scheme == 2) {
+                uint8_t* raw = artfMalloc(n);
+                ok = artfZstdDecode(d + offset, (size_t)length, raw, n) && artfBasisAstc(raw, n, blocks + offsets[i]);
+                artfFree(raw);
+            } else if (ok) ok = length == n && artfBasisAstc(d + offset, n, blocks + offsets[i]);
+            w = w > 1 ? w / 2 : 1;
+            h = h > 1 ? h / 2 : 1;
+        }
+    }
+    if (!ok) {
+        artfFree(blocks);
+        return false;
+    }
+    *format = model == 163 ? 147u : 157u;
+    *blocksOut = blocks;
+    *bytes = total;
     return true;
 }

@@ -397,7 +397,12 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
     Na CPU fica perto das listas: 2,6 contra 2,5 ms e 4,7 contra 4,5 ms.
 - **Não feito:** quadro em floats (as camadas seguem inteiras, como antes); vista ortográfica (as fatias seguem o w da perspectiva, então lá há uma só); e as reflexões traçadas sobre camadas continuam como eram.
 
-**Estado da 5.10: feita** (os arquivos viram pixels; transcodificar para BC7/ASTC na GPU fica de fora).
+**Estado da 5.10: feita** (os arquivos viram blocos de GPU onde a transcodificação é exata: UASTC para ASTC 4×4 e ETC1S sem alfa para ETC1; BC7 e BC1 ficam de fora).
+- **Para blocos de GPU (21/11/2026):** com a cadeia de mipmaps completa, a textura guarda blocos em vez de pixels, e vira pixels só onde é preciso (na CPU, ou numa GPU que não lê o formato), como os KTX2 em blocos já faziam.
+  - **UASTC para ASTC 4×4:** o UASTC é o ASTC escrito de outro jeito: os mesmos endpoints nas mesmas faixas, os mesmos pesos, partições que o ASTC tem. A transcodificação só move os números (`uastcAstc`, `basis.c`): os trits e quints dos endpoints empacotados como o ASTC empacota (tabelas geradas a partir do decodificador), cada subconjunto no lugar da sua partição (a semente e a permutação de cada um dos 60 padrões, achadas pela função de partição do ASTC, e que batem com a tabela da Binomial), os pesos a partir do fim do bloco. Onde o ASTC leria os endpoints de um subconjunto como descendo (e contrairia o azul), eles trocam de lugar e os pesos se invertem, o que dá os mesmos texels porque os pesos do ASTC só de bits são simétricos. A cor única vira o bloco de cor única do ASTC.
+  - **ETC1S sem alfa para ETC1:** cada bloco é um bloco ETC1 diferencial com as duas metades da mesma cor e da mesma tabela; os seletores mudam de ordem e os texels vão por colunas. Com alfa, continua em pixels (o ETC2 com EAC não reproduz o alfa do ETC1S exatamente).
+  - **Testes:** `files/basis` transcodifica os dois arquivos do repositório (o ETC1S com as fatias de alfa tiradas) e decodifica os blocos com os decodificadores de ASTC e ETC que já existiam: 0 de 867 texels diferentes em cada. `files/basisAstc` gera blocos com bits aleatórios depois do código de cada um dos 19 modos: dos 72.174 que o UASTC lê, todos viram ASTC e nenhum texel difere. Um byte estragado em cada posição é transcodificado ou recusado, sem ler fora.
+  - **O que muda:** numa GPU que lê ASTC (celulares, alguns integrados), uma textura UASTC ocupa um quarto da memória dos pixels, sem perda; ETC1S, um oitavo. Numa GPU de desktop, que não lê ASTC nem ETC2, vira pixels como antes (com `compressTextures`, BC na subida). Na CPU, os pixels saem do decodificador de ASTC, mais lento que o de UASTC.
 - **Zstandard (`src/scene/zstd.c`), escrito a partir da RFC 8878.**
   - Cobre quadros e blocos crus, RLE e comprimidos: literais por Huffman (com pesos em FSE e 4 fluxos) e sequências por FSE (tabelas predefinidas, RLE, descritas e repetidas), com os offsets repetidos.
   - Cada leitura é conferida contra o arquivo, e cada escrita contra o tamanho esperado.
@@ -414,7 +419,7 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
   - Os modelos carregam e aparecem com as texturas; o FlightHelmet, com 15 texturas de 2048², carrega em 130–150 ms.
   - Nada disso entra no repositório (54 MB). Entram dois arquivos pequenos feitos pelo basisu, um em ETC1S com alfa e outro em UASTC+Zstd, de 30×22 com mipmaps, e o hash da saída da referência para cada um (`files/basis`). Esse teste também tenta todas as versões truncadas e todas com um byte trocado, sem ler fora do arquivo.
 - **Não feito:**
-  - Transcodificar para os blocos da GPU (ETC1S para BC1/ETC1, UASTC para BC7/ASTC): na memória a textura ocupa o mesmo que um PNG.
+  - UASTC para BC7 e ETC1S para BC1 (as GPUs de desktop): a conversão da Binomial é por tabelas e modo a modo, de outra ordem de tamanho; e ETC1S com alfa para ETC2 com EAC.
   - UASTC HDR, XUASTC e XUBC7 (basisu 2.x).
   - Arrays, cube maps e vídeo.
 

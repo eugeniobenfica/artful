@@ -1628,6 +1628,12 @@ bool artfBasisUastc(const uint8_t* blocks, size_t size, uint32_t width, uint32_t
 /* A KTX2 file of Basis Universal's (ETC1S with BasisLZ, or UASTC, raw or with Zstandard): its levels, the largest first,
  * into *pixels (artfMalloc'd), each at offsets[level] pixels; false when it is not one, or not whole. */
 bool artfBasisLevels(const uint8_t* data, size_t size, uint32_t** pixels, uint32_t* offsets);
+/* Its blocks as a GPU takes them, the same texels (ETC1S without alpha: ETC1's, format 147; UASTC: ASTC 4 x 4, 157),
+ * each level's at offsets, in bytes. UASTC's blocks, as ASTC's (16 bytes each): false where one cannot be. */
+bool artfBasisBlocks(const uint8_t* data, size_t size, uint32_t* format, uint8_t** blocks, size_t* bytes, uint32_t* offsets);
+bool artfBasisAstc(const uint8_t* uastc, size_t size, uint8_t* astc);
+/* (tests: Basis Universal's files into pixels, as before their blocks were kept) */
+extern bool artfBasisPixelsOnly;
 /* Such a file as a texture to add (texture.c), on any thread: its own mipmaps when it has them all. NULL: it is not one. */
 ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size);
 /* Clouds in the scene (5.11): of each column of ARTF_CLOUD_TILE pixels square, along the ray through its middle, where

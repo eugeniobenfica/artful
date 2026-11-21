@@ -217,6 +217,7 @@ int main(int argc, char** argv) {
     RUN("layers/layersSorted/vulkan", testLayersSorted(ARTF_BACKEND_VULKAN));
     RUN("files/blockDecoders", testBlockDecoders());
     RUN("files/basis", testBasis());
+    RUN("files/basisAstc", testBasisAstc());
     RUN("streaming/streamedTexture/software", testStreamedTexture(ARTF_BACKEND_SOFTWARE));
     RUN("streaming/streamedTexture/vulkan", testStreamedTexture(ARTF_BACKEND_VULKAN));
     RUN("streaming/residencyGraph/software", testResidencyGraph(ARTF_BACKEND_SOFTWARE));

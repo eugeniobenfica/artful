@@ -17,7 +17,8 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
   que caíam antes, foram corrigidas e passam na CI.
 
 ### Fase 5 — Alcance de conteúdo
-- [~] 5.10 Basis Universal — falta transcodificar para blocos da GPU (hoje vai para pixels)
+- [ ] 5.10 Basis Universal para BC7 (UASTC) e BC1 (ETC1S), para GPUs de desktop; ETC1S com alfa para ETC2 com EAC (UASTC
+  para ASTC e ETC1S sem alfa para ETC1 feitos)
 
 ### Fase 6 — Alcance de plataforma
 - [~] 6.1 Metal — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado e as camadas, e rodar nele os

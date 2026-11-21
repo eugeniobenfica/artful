@@ -448,6 +448,21 @@ ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size) {
     const uint8_t* d = data;
     uint32_t* pixels;
     uint32_t offsets[16];
+    if (size >= 80) {
+        /* its blocks as a GPU takes them, where it has all its mipmaps: ETC1S without alpha as ETC1's, UASTC as ASTC's,
+         * the same texels; turned into pixels only where they are wanted (for the CPU, a GPU that does not take them) */
+        const uint32_t width = read32(d + 20), height = read32(d + 24), levels = read32(d + 40) ? read32(d + 40) : 1;
+        uint32_t whole = 1;
+        for (uint32_t w = width, h = height; w > 1 || h > 1; w = w > 1 ? w / 2 : 1, h = h > 1 ? h / 2 : 1) ++whole;
+        ArtfTextureData t;
+        memset(&t, 0, sizeof t);
+        if (levels == whole && !artfBasisPixelsOnly && artfBasisBlocks(d, size, &t.format, &t.blocks, &t.blockBytes, t.blockOffsets)) {
+            t.width = (int)width;
+            t.height = (int)height;
+            t.mipCount = (int)levels;
+            return artfPreparedTextureOf(&t);
+        }
+    }
     if (size < 80 || !artfBasisLevels(d, size, &pixels, offsets)) {
         artfLog("artful: a KTX2 file of Basis Universal's that cannot be read here (ETC1S or UASTC 4 x 4, one image, no video)");
         return NULL;
@@ -470,6 +485,8 @@ ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size) {
     memcpy(t.offsets, offsets, sizeof(uint32_t) * levels);
     return artfPreparedTextureOf(&t);
 }
+
+bool artfBasisPixelsOnly = false;
 
 /* sRGB formats are the same blocks: Artful reads colors as sRGB itself, as it does all bytes. */
 static uint32_t knownFormat(uint32_t f) {
