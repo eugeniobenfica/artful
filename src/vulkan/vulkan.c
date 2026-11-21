@@ -1219,12 +1219,14 @@ void computeJobRun(void* user) {
         j->ok = computePipelineCreate(v, code, size, &j->denoised[0]);
         code = artfShaderDenoiseTime(&size);
         j->ok = j->ok && computePipelineCreate(v, code, size, &j->denoised[1]);
-        for (int i = 0; i < 3; ++i) {
+        code = artfShaderDenoiseVariance(&size);
+        j->ok = j->ok && computePipelineCreate(v, code, size, &j->denoised[2]);
+        for (int i = 0; i < ARTF_DENOISE_PASSES; ++i) {
             code = artfShaderDenoiseSpace(&size, i);
-            j->ok = j->ok && computePipelineCreate(v, code, size, &j->denoised[2 + i]);
+            j->ok = j->ok && computePipelineCreate(v, code, size, &j->denoised[3 + i]);
         }
         code = artfShaderDenoiseEnd(&size);
-        j->ok = j->ok && computePipelineCreate(v, code, size, &j->denoised[5]);
+        j->ok = j->ok && computePipelineCreate(v, code, size, &j->denoised[3 + ARTF_DENOISE_PASSES]);
     }
 }
 
@@ -1260,15 +1262,15 @@ bool computeJobEnd(Vulkan* v, const ArtfScene* scene, int kind, bool use) {
         if (kind == MAKE_TRACE) {
             if (j->key.hardware) artfLog("artful: rays go through the ray tracing hardware");
             v->traceDone = 0; /* (what was gathered with another shader starts over) */
-            VkPipeline* const filter[6] = {&v->denoiseLight, &v->denoiseTime, &v->denoiseSpace[0], &v->denoiseSpace[1], &v->denoiseSpace[2], &v->denoiseEnd};
-            for (int i = 0; i < 6 && j->denoise; ++i) {
+            VkPipeline* const filter[DENOISE_PIPELINES] = {&v->denoiseLight, &v->denoiseTime, &v->denoiseVariance, &v->denoiseSpace[0], &v->denoiseSpace[1], &v->denoiseSpace[2], &v->denoiseSpace[3], &v->denoiseSpace[4], &v->denoiseEnd};
+            for (int i = 0; i < DENOISE_PIPELINES && j->denoise; ++i) {
                 pipelineRetire(v, *filter[i]);
                 *filter[i] = j->denoised[i];
             }
         }
     } else {
         if (j->made) v->vkDestroyPipeline(v->device, j->made, NULL);
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < DENOISE_PIPELINES; ++i)
             if (j->denoised[i]) v->vkDestroyPipeline(v->device, j->denoised[i], NULL);
     }
     graphsFree(j->graphs, j->key.graphCount);
@@ -4012,7 +4014,8 @@ void vkFree(ArtfRenderer* r) {
         artfVecFree(&v->scratchSkinCounts);
         if (v->denoiseLight) v->vkDestroyPipeline(v->device, v->denoiseLight, NULL);
         if (v->denoiseTime) v->vkDestroyPipeline(v->device, v->denoiseTime, NULL);
-        for (int i = 0; i < 3; ++i)
+        if (v->denoiseVariance) v->vkDestroyPipeline(v->device, v->denoiseVariance, NULL);
+        for (int i = 0; i < ARTF_DENOISE_PASSES; ++i)
             if (v->denoiseSpace[i]) v->vkDestroyPipeline(v->device, v->denoiseSpace[i], NULL);
         if (v->denoiseEnd) v->vkDestroyPipeline(v->device, v->denoiseEnd, NULL);
         if (v->shadowFramebuffer) v->vkDestroyFramebuffer(v->device, v->shadowFramebuffer, NULL);

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The tracer's denoiser filters as SVGF does** (phase 5.7): each pixel gathers its light's moments with its light,
+  and how much it varies guides five passes of the wavelet filter (in place of three), which smooth what is still
+  noisy and leave what has settled, on both backends alike. Four samples filtered are 0.91 from 512 where they were
+  1.13; a frame after the camera moves, 0.80 where it was 1.04; eight frames after the sun turns, 3.01 where it was
+  3.36.
+
 - **Lights sampled** (`ArtfShadowDesc.sampled`, phase 5.7, in part): with shadows from rays, each pixel takes one of the
   lights that reach it, chosen of eight by how much each would give, with its shadow ray, weighed to be all of them
   on average: a frame costs the same with 50 lamps that cast as with 800 (2.1-2.5 ms on the CPU where all of them

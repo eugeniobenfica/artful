@@ -55,6 +55,8 @@ uint32_t* artfShaderMeshletCull(size_t* size, ArtfCullPhase phase);
 uint32_t* artfShaderShadowCull(size_t* size);
 uint32_t* artfShaderDenoiseLight(size_t* size);
 uint32_t* artfShaderDenoiseTime(size_t* size);
+#define ARTF_DENOISE_PASSES 5 /* the filter's in space (SVGF's), as denoise.c's */
+uint32_t* artfShaderDenoiseVariance(size_t* size);
 uint32_t* artfShaderDenoiseSpace(size_t* size, int pass);
 uint32_t* artfShaderDenoiseEnd(size_t* size);
 uint32_t* artfShaderTraceShow(size_t* size, bool hdr);

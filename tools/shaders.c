@@ -125,9 +125,12 @@ int main(int argc, char** argv) {
     SAVE("shadowCull", artfShaderShadowCull(&size));
     SAVE("denoiseLight", artfShaderDenoiseLight(&size));
     SAVE("denoiseTime", artfShaderDenoiseTime(&size));
+    SAVE("denoiseVariance", artfShaderDenoiseVariance(&size));
     SAVE("denoiseSpace0", artfShaderDenoiseSpace(&size, 0));
     SAVE("denoiseSpace1", artfShaderDenoiseSpace(&size, 1));
     SAVE("denoiseSpace2", artfShaderDenoiseSpace(&size, 2));
+    SAVE("denoiseSpace3", artfShaderDenoiseSpace(&size, 3));
+    SAVE("denoiseSpace4", artfShaderDenoiseSpace(&size, 4));
     SAVE("denoiseEnd", artfShaderDenoiseEnd(&size));
     /* (with a material of every step, as spirv-val must see them too) */
     ArtfScene* scene = artfSceneNew();

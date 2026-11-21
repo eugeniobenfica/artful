@@ -44,6 +44,7 @@ enum { TRACK_FOG, TRACK_HIZ, TRACK_TRACE, TRACK_LAYERS, TRACK_DEPTH, TRACK_POST,
 #define QUERIES (ARTF_PASS_TIMES + 1) /* timestamps of a slot: where its frame starts, and where each pass ends */
 #define MAX_TEXTURES 1024  /* in the one descriptor array, where the device allows; what is beyond draws white */
 #define MAX_SWAPCHAIN_IMAGES 8
+#define DENOISE_PIPELINES (4 + ARTF_DENOISE_PASSES) /* the filter's: light, time, variance, its passes in space, the end */
 
 typedef struct GpuBuffer {
     VkBuffer buffer;
@@ -352,7 +353,7 @@ typedef struct Vulkan {
     GpuBuffer traceNodes, traceTriangles, traceVertices, traceSum;
     /* the filter: what surfaces are, what was gathered, what its passes hand on */
     GpuBuffer denoiseBuffers[7], denoiseShift;
-    VkPipeline denoiseLight, denoiseTime, denoiseSpace[3], denoiseEnd;
+    VkPipeline denoiseLight, denoiseTime, denoiseVariance, denoiseSpace[ARTF_DENOISE_PASSES], denoiseEnd;
     bool denoiseFirst;
     uint32_t traceFrames;
     float tracePrevious[16];
@@ -503,7 +504,7 @@ typedef struct ComputeJob {
     ComputeKey key;
     ArtfGraphData* graphs;
     bool denoise;
-    VkPipeline made, denoised[6]; /* the filter's: light, time, three in space, the end */
+    VkPipeline made, denoised[DENOISE_PIPELINES]; /* the filter's: light, time, variance, five in space, the end */
     bool ok;
 } ComputeJob;
 

@@ -13,6 +13,9 @@ typedef struct ArtfDenoiser {
     float *noisy, *guide, *albedo, *shift, *previousGuide, *history, *nextHistory, *ping, *pong;
     float viewProj[16], eye[3];
     bool first;
+    /* SVGF (Schied et al., 2017): of each pixel, its light's luminance and its square, gathered as its light is (the
+     * frame before's and this one's); and how much that light varies, for the filter's passes, in turn. */
+    float *moments, *nextMoments, *variance, *varianceNext;
 } ArtfDenoiser;
 
 void artfDenoiserResize(ArtfDenoiser* d, int width, int height);

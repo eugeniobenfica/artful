@@ -6,15 +6,20 @@
  *           to what was gathered there; what was hidden starts over. What was gathered must look like this frame's light around
  *           the pixel, one by one and on the whole: when a light or a shadow changed over a surface that stayed,
  *           it does not, and is cut back
- *   space   three passes of a wavelet filter (Dammertz et al., 2010), over what faces the same way at the same
- *           distance: each pass reads twice as far, with five taps a side */
+ *   space   SVGF's (Schied et al., 2017): how much each pixel's light varies, from the moments gathered with it (or,
+ *           with a short history, from those around it), then five passes of a wavelet filter (Dammertz et al., 2010),
+ *           each reading twice as far, five taps a side, over what faces the same way at the same distance and has
+ *           light near its own, near by as many deviations as it varies: where it is still noisy it is smoothed more,
+ *           where it has settled, hardly */
 #include "software/denoise.h"
 #include "core/threads.h"
 
 #include <stdlib.h>
 
 #define HISTORY_LIMIT 256.f
-#define SETTLED 48.f /* gathered this much, a pixel needs no help from its neighbours */
+#define SVGF_PASSES 5
+#define SVGF_LIGHT 4.f      /* how many deviations of a pixel's light another's may be from it, and still count */
+#define SVGF_SHORT 4.f      /* a history shorter than this takes its variance from around it */
 #define SPREAD 1.25f   /* how many deviations of this frame's light around a pixel what was gathered may be from it */
 #define CUT_BACK 8.f   /* what is left of a history that was found out */
 #define DRIFT 4.f      /* how many standard errors the mean of a neighbourhood may be from what was gathered there */
@@ -146,7 +151,7 @@ static void temporalRow(void* user, uint32_t y, uint32_t worker) {
             n[2] = k[8] * n0 + k[9] * n1 + k[10] * n2;
         }
         const float cx = m[0] * wx + m[4] * wy + m[8] * wz + m[12], cy = m[1] * wx + m[5] * wy + m[9] * wz + m[13], cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15];
-        float count = 1.f, before[3] = {0, 0, 0}, alphaBefore = coverage;
+        float count = 1.f, before[3] = {0, 0, 0}, alphaBefore = coverage, momentsBefore[2] = {0, 0};
         if (!p->first && cw > 0) {
             const float px = (cx / cw * .5f + .5f) * (float)W, py = (.5f - cy / cw * .5f) * (float)H;
             if (px >= 0 && py >= 0 && px < (float)W && py < (float)H) {
@@ -170,34 +175,110 @@ static void temporalRow(void* user, uint32_t y, uint32_t worker) {
                     }
                     count = artfMinf(whole + 1.f, found ? CUT_BACK : HISTORY_LIMIT);
                     alphaBefore = h[3] - whole;
+                    momentsBefore[0] = d->moments[j * 2];
+                    momentsBefore[1] = d->moments[j * 2 + 1];
                 }
             }
         }
         const float share = 1.f / count;
         for (int k = 0; k < 3; ++k) out[k] = before[k] + (light[k] - before[k]) * share;
         out[3] = count + artfMinf(alphaBefore + (coverage - alphaBefore) * share, .999f);
+        /* (the luminance's moments, gathered the same way: count 1 starts them over) */
+        const float l = (.2126f * light[0] + .7152f * light[1]) + .0722f * light[2];
+        d->nextMoments[i * 2] = momentsBefore[0] + (l - momentsBefore[0]) * share;
+        d->nextMoments[i * 2 + 1] = momentsBefore[1] + (l * l - momentsBefore[1]) * share;
     }
 }
 
+/* (where a guide says a pixel is, along the eye, and its normal: 0 when nothing is there) */
+static inline float placeOf(const ArtfDenoiser* d, size_t i, float* n) {
+    const float* guide = d->guide + i * 4;
+    if (!normalOf(guide, n)) return 0.f;
+    const float ex = guide[0] - d->eye[0], ey = guide[1] - d->eye[1], ez = guide[2] - d->eye[2];
+    return sqrtf(ex * ex + ey * ey + ez * ez);
+}
+
+/* What a neighbour's place and facing are worth: its normal's cosine to the 128th (multiplied out), and 1 / (1 + its
+ * distance's difference over 2% of this one's, squared). */
+static inline float placeWeight(const float* n, float distance, const float* qn, float qDistance) {
+    const float reach = distance * .02f + 1e-3f, apart = (qDistance - distance) / reach;
+    float facing = artfMaxf((n[0] * qn[0] + n[1] * qn[1]) + n[2] * qn[2], 0.f);
+    for (int k = 0; k < 7; ++k) facing *= facing;
+    return facing / (1.f + apart * apart);
+}
+
+/* How much each pixel's light varies: its moments' variance; with a short history, that of the moments around it
+ * (5 x 5, by place and facing), made larger by how short it is, as SVGF does. */
+static void varianceRow(void* user, uint32_t y, uint32_t worker) {
+    (void)worker;
+    Pass* p = user;
+    ArtfDenoiser* d = p->d;
+    const int W = d->width, H = d->height;
+    for (int x = 0; x < W; ++x) {
+        const size_t i = (size_t)y * W + (size_t)x;
+        float n[3];
+        const float distance = placeOf(d, i, n), count = floorf(d->nextHistory[i * 4 + 3]);
+        if (distance <= 0) {
+            d->variance[i] = 0;
+            continue;
+        }
+        if (count >= SVGF_SHORT) {
+            d->variance[i] = artfMaxf(d->nextMoments[i * 2 + 1] - d->nextMoments[i * 2] * d->nextMoments[i * 2], 0.f);
+            continue;
+        }
+        float m1 = 0, m2 = 0, total = 0;
+        for (int dy = -2; dy <= 2; ++dy) {
+            const int qy = (int)y + dy;
+            if (qy < 0 || qy >= H) continue;
+            for (int dx = -2; dx <= 2; ++dx) {
+                const int qx = x + dx;
+                if (qx < 0 || qx >= W) continue;
+                const size_t j = (size_t)qy * W + (size_t)qx;
+                float qn[3];
+                const float qDistance = placeOf(d, j, qn);
+                if (qDistance <= 0) continue;
+                const float w = placeWeight(n, distance, qn, qDistance);
+                m1 += d->nextMoments[j * 2] * w;
+                m2 += d->nextMoments[j * 2 + 1] * w;
+                total += w;
+            }
+        }
+        const float inverse = total > 0 ? 1.f / total : 0.f;
+        m1 *= inverse;
+        m2 *= inverse;
+        d->variance[i] = artfMaxf(m2 - m1 * m1, 0.f) * (SVGF_SHORT / artfMaxf(count, 1.f));
+    }
+}
+
+/* A pass of the filter, step apart: SVGF's weights (place, facing, light by its deviation), and its variance carried
+ * through, as the sum of each weight squared times what it took, over the weights' sum squared. */
 static void spatialRow(void* user, uint32_t y, uint32_t worker) {
     (void)worker;
-    static const float kernel[3] = {.375f, .25f, .0625f};
+    static const float kernel[3] = {.375f, .25f, .0625f}, blur[2] = {.25f, .125f};
     Pass* p = user;
     ArtfDenoiser* d = p->d;
     const int W = d->width, H = d->height, step = p->step;
     for (int x = 0; x < W; ++x) {
         const size_t i = (size_t)y * W + (size_t)x;
-        const float* guide = d->guide + i * 4;
         const float* center = p->from + i * 4;
         float* out = p->to + i * 4;
         float n[3];
-        if (!normalOf(guide, n) || floorf(d->nextHistory[i * 4 + 3]) >= SETTLED) {
+        const float distance = placeOf(d, i, n);
+        if (distance <= 0) {
             memcpy(out, center, 16);
+            d->varianceNext[i] = d->variance[i];
             continue;
         }
-        const float ex = guide[0] - d->eye[0], ey = guide[1] - d->eye[1], ez = guide[2] - d->eye[2];
-        const float distance = sqrtf(ex * ex + ey * ey + ez * ez), reach = distance * .02f + 1e-3f;
-        float sum[3] = {0, 0, 0}, total = 0;
+        /* (the variance around, 3 x 3 by a small Gaussian: one pixel's alone is too noisy to judge by) */
+        float around = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int qx = artfClampi(x + dx, 0, W - 1), qy = artfClampi((int)y + dy, 0, H - 1);
+                around += d->variance[(size_t)qy * W + (size_t)qx] * (dx == 0 && dy == 0 ? blur[0] : dx == 0 || dy == 0 ? blur[1] : .0625f);
+            }
+        const float luma = (.2126f * center[0] + .7152f * center[1]) + .0722f * center[2];
+        const float scale = 1.f / (SVGF_LIGHT * sqrtf(artfMaxf(around, 0.f)) + 1e-10f);
+        float sum[3] = {0, 0, 0}, total = 0, varianceSum = 0;
         for (int dy = -2; dy <= 2; ++dy) {
             const int qy = (int)y + dy * step;
             if (qy < 0 || qy >= H) continue;
@@ -205,21 +286,21 @@ static void spatialRow(void* user, uint32_t y, uint32_t worker) {
                 const int qx = x + dx * step;
                 if (qx < 0 || qx >= W) continue;
                 const size_t j = (size_t)qy * W + (size_t)qx;
-                const float* other = d->guide + j * 4;
                 float qn[3];
-                if (!normalOf(other, qn)) continue;
-                const float qex = other[0] - d->eye[0], qey = other[1] - d->eye[1], qez = other[2] - d->eye[2];
-                const float apart = (sqrtf(qex * qex + qey * qey + qez * qez) - distance) / reach;
-                const float facing = artfMaxf(n[0] * qn[0] + n[1] * qn[1] + n[2] * qn[2], 0), f2 = facing * facing;
-                const float weight = kernel[abs(dx)] * kernel[abs(dy)] * f2 * f2 / (1.f + apart * apart);
+                const float qDistance = placeOf(d, j, qn);
+                if (qDistance <= 0) continue;
                 const float* q = p->from + j * 4;
+                const float ql = (.2126f * q[0] + .7152f * q[1]) + .0722f * q[2];
+                const float weight = kernel[abs(dx)] * kernel[abs(dy)] * placeWeight(n, distance, qn, qDistance) * artfExp2Fast(-fabsf(ql - luma) * scale * 1.44269504f);
                 for (int k = 0; k < 3; ++k) sum[k] += q[k] * weight;
                 total += weight;
+                varianceSum += weight * weight * d->variance[j];
             }
         }
         const float inverse = total > 0 ? 1.f / total : 0.f;
         for (int k = 0; k < 3; ++k) out[k] = sum[k] * inverse;
         out[3] = center[3];
+        d->varianceNext[i] = varianceSum * inverse * inverse;
     }
 }
 
@@ -253,6 +334,10 @@ void artfDenoiserResize(ArtfDenoiser* d, int width, int height) {
     d->nextHistory = artfCalloc(1, bytes);
     d->ping = artfCalloc(1, bytes);
     d->pong = artfCalloc(1, bytes);
+    d->moments = artfCalloc((size_t)width * height * 2 + 2, 4);
+    d->nextMoments = artfCalloc((size_t)width * height * 2 + 2, 4);
+    d->variance = artfCalloc((size_t)width * height + 1, 4);
+    d->varianceNext = artfCalloc((size_t)width * height + 1, 4);
     d->first = true;
 }
 
@@ -266,6 +351,10 @@ void artfDenoiserFree(ArtfDenoiser* d) {
     artfFree(d->nextHistory);
     artfFree(d->ping);
     artfFree(d->pong);
+    artfFree(d->moments);
+    artfFree(d->nextMoments);
+    artfFree(d->variance);
+    artfFree(d->varianceNext);
     memset(d, 0, sizeof *d);
 }
 
@@ -274,13 +363,17 @@ void artfDenoiserRun(ArtfDenoiser* d, ArtfPool* pool, const ArtfFrameData* frame
     Pass p = {d, frame, d->viewProj, samples, 1, NULL, NULL, d->first, motion, motionCount};
     artfPoolRun(pool, lightRow, &p, (uint32_t)d->height);
     artfPoolRun(pool, temporalRow, &p, (uint32_t)d->height);
+    artfPoolRun(pool, varianceRow, &p, (uint32_t)d->height);
     p.from = d->nextHistory;
     p.to = d->ping;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < SVGF_PASSES; ++i) {
         p.step = 1 << i;
         artfPoolRun(pool, spatialRow, &p, (uint32_t)d->height);
         p.from = p.to;
         p.to = p.to == d->ping ? d->pong : d->ping;
+        float* v = d->variance;
+        d->variance = d->varianceNext;
+        d->varianceNext = v;
     }
     artfPoolRun(pool, finishRow, &p, (uint32_t)d->height);
     /* what this frame found is what the next one looks back on */
@@ -290,6 +383,9 @@ void artfDenoiserRun(ArtfDenoiser* d, ArtfPool* pool, const ArtfFrameData* frame
     t = d->previousGuide;
     d->previousGuide = d->guide;
     d->guide = t;
+    t = d->moments;
+    d->moments = d->nextMoments;
+    d->nextMoments = t;
     memcpy(d->viewProj, frame->viewProj, sizeof d->viewProj);
     d->first = false;
 }

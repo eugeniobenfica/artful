@@ -591,7 +591,9 @@ bool syncTrace(Vulkan* v, ArtfScene* scene) {
     if (guides && !v->denoiseBuffers[0].buffer) {
         v->vkDeviceWaitIdle(v->device);
         for (uint32_t i = 0; i < 7; ++i) {
-            if (!bufferNew(v, &v->denoiseBuffers[i], (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16, BUFFER_STORAGE | BUFFER_TRANSFER_SRC | BUFFER_TRANSFER_DST, false)) return false;
+            /* (what was gathered, and is: with the luminance's moments after) */
+            const VkDeviceSize each = i == 3 || i == 4 ? 32 : 16;
+            if (!bufferNew(v, &v->denoiseBuffers[i], (VkDeviceSize)v->sceneWidth * v->sceneHeight * each, BUFFER_STORAGE | BUFFER_TRANSFER_SRC | BUFFER_TRANSFER_DST, false)) return false;
             const DescriptorBufferInfo info = {v->denoiseBuffers[i].buffer, 0, ~(VkDeviceSize)0};
             for (int k = 0; k < SLOTS; ++k) {
                 const WriteDescriptorSet w = {ST_WRITE_DESCRIPTOR_SET, NULL, v->slots[k].set, 27 + i, 0, 1, DESCRIPTOR_STORAGE, NULL, &info, NULL};
@@ -609,14 +611,14 @@ bool syncTrace(Vulkan* v, ArtfScene* scene) {
     return true;
 }
 
-/* The frame's light, time, three passes in space and back to light; then what this frame found becomes the frame
- * before. */
+/* The frame's light, time, how much it varies, five passes in space and back to light; then what this frame found
+ * becomes the frame before. */
 void denoise(Vulkan* v, VkCommandBuffer c, Slot* s) {
     const VkFlags readWrite = ACCESS_SHADER_READ | ACCESS_SHADER_WRITE;
     const uint32_t gx = ((uint32_t)v->sceneWidth + 7) / 8, gy = ((uint32_t)v->sceneHeight + 7) / 8;
-    const VkPipeline passes[6] = {v->denoiseLight, v->denoiseTime, v->denoiseSpace[0], v->denoiseSpace[1], v->denoiseSpace[2], v->denoiseEnd};
+    const VkPipeline passes[DENOISE_PIPELINES] = {v->denoiseLight, v->denoiseTime, v->denoiseVariance, v->denoiseSpace[0], v->denoiseSpace[1], v->denoiseSpace[2], v->denoiseSpace[3], v->denoiseSpace[4], v->denoiseEnd};
     v->vkCmdBindDescriptorSets(c, 1, v->pipelineLayout, 0, 1, &s->set, 0, NULL);
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < DENOISE_PIPELINES; ++i) {
         memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_WRITE, readWrite);
         v->vkCmdBindPipeline(c, 1, passes[i]);
         v->vkCmdDispatch(c, gx, gy, 1);
@@ -625,7 +627,8 @@ void denoise(Vulkan* v, VkCommandBuffer c, Slot* s) {
     /* guide to the frame before's, what is gathered to what was */
     const BufferCopy all = {0, 0, (VkDeviceSize)v->sceneWidth * v->sceneHeight * 16};
     v->vkCmdCopyBuffer(c, v->denoiseBuffers[0].buffer, v->denoiseBuffers[2].buffer, 1, &all);
-    v->vkCmdCopyBuffer(c, v->denoiseBuffers[4].buffer, v->denoiseBuffers[3].buffer, 1, &all);
+    const BufferCopy gathered = {0, 0, (VkDeviceSize)v->sceneWidth * v->sceneHeight * 32};
+    v->vkCmdCopyBuffer(c, v->denoiseBuffers[4].buffer, v->denoiseBuffers[3].buffer, 1, &gathered);
     memoryBarrier(v, c, STAGE_TRANSFER, STAGE_COMPUTE, ACCESS_TRANSFER_WRITE, readWrite);
 }
 

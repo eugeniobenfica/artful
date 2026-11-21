@@ -5170,8 +5170,9 @@ uint32_t* artfShaderSkin(size_t* size) {
 /* ---- taking out noise: the same arithmetic as denoise.c ----
  *
  * Bindings: 22 the frame's light, and in the end the clean frame; 23 ArtfTraceFrame; 27 where the first surface is
- * and its normal; 28 its color; 29 the frame before's 27; 30 what was gathered; 31 what is gathered now; 32 and 33
- * what the filter passes hand on. Push constant: the pass's step. */
+ * and its normal; 28 its color; 29 the frame before's 27; 30 what was gathered; 31 what is gathered now (both with the
+ * luminance's moments after, a pixel's x and y, past the frame's pixels); 32 and 33 what the filter passes hand on,
+ * with how much the light varies as w. Push constant: the pass's step. */
 
 enum { D_NOISY = 22, D_GUIDE = 27, D_ALBEDO = 28, D_PREVIOUS = 29, D_HISTORY = 30, D_NEXT = 31, D_PING = 32, D_PONG = 33, D_MOTION = 37, D_SHIFT = 48 };
 
@@ -5236,6 +5237,29 @@ static SpvId vecAt(Spv* s, const Denoise* d, SpvId buffer, SpvId i) { return buf
 static void vecPut(Spv* s, const Denoise* d, SpvId buffer, SpvId i, SpvId value) {
     const SpvId idx[2] = {d->r.zero, i};
     spvStore(s, spvAccess(s, d->r.ptrStorageVec4, buffer, idx, 2), value);
+}
+
+/* A color's luminance, as denoise.c weighs it. */
+static SpvId denoiseLuma(Spv* s, SpvId c) { return ADD_F(ADD_F(MUL_F(FLOAT(.2126f), X(c)), MUL_F(FLOAT(.7152f), Y(c))), MUL_F(FLOAT(.0722f), Z(c))); }
+
+/* As placeWeight. */
+static SpvId denoisePlace(Spv* s, SpvId n, SpvId distance, SpvId qn, SpvId qDistance) {
+    SpvId reach = ADD_F(MUL_F(distance, FLOAT(.02f)), FLOAT(1e-3f)), apart = DIV_F(SUB_F(qDistance, distance), reach);
+    SpvId facing = MAX_F(DOT3(n, qn), FLOAT(0.f));
+    for (int k = 0; k < 7; ++k) facing = MUL_F(facing, facing);
+    return DIV_F(facing, ADD_F(FLOAT(1.f), MUL_F(apart, apart)));
+}
+
+/* A pixel's neighbour, dx and dy away, clamped to the frame: its index; and whether it was in the frame. */
+static SpvId denoiseNeighbour(Spv* s, const Denoise* d, int dx, int dy, SpvId* inside) {
+    SpvId ix = spvOp1(s, SPV_OP_Bitcast, s->intType, d->x), iy = spvOp1(s, SPV_OP_Bitcast, s->intType, d->y);
+    SpvId iw = spvOp1(s, SPV_OP_Bitcast, s->intType, d->width), ih = spvOp1(s, SPV_OP_Bitcast, s->intType, d->height);
+    SpvId qx = spvOp2(s, SPV_OP_IAdd, s->intType, ix, spvConstInt(s, dx)), qy = spvOp2(s, SPV_OP_IAdd, s->intType, iy, spvConstInt(s, dy));
+    SpvId zero = spvConstInt(s, 0);
+    *inside = BOTH(BOTH(spvOp2(s, 175 /* OpSGreaterThanEqual */, s->boolType, qx, zero), spvOp2(s, 177 /* OpSLessThan */, s->boolType, qx, iw)), BOTH(spvOp2(s, 175, s->boolType, qy, zero), spvOp2(s, 177, s->boolType, qy, ih)));
+    SpvId cx = spvGlsl2(s, 42 /* SMax */, s->intType, spvGlsl2(s, 39 /* SMin */, s->intType, qx, spvOp2(s, SPV_OP_ISub, s->intType, iw, spvConstInt(s, 1))), zero);
+    SpvId cy = spvGlsl2(s, 42, s->intType, spvGlsl2(s, 39, s->intType, qy, spvOp2(s, SPV_OP_ISub, s->intType, ih, spvConstInt(s, 1))), zero);
+    return ADD_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, cx), MUL_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, cy), d->width));
 }
 
 /* This frame's light over color, in ping: as lightRow. */
@@ -5360,11 +5384,60 @@ uint32_t* artfShaderDenoiseTime(size_t* size) {
     SpvId alpha = MIN_F(ADD_F(alphaBefore, MUL_F(SUB_F(coverage, alphaBefore), share)), FLOAT(.999f));
     SpvId nothing = ADD_F(FLOAT(1.f), MIN_F(coverage, FLOAT(.999f)));
     vecPut(s, &d, d.next, d.pixel, vec4Of(s, pick3(s, hasSurface, gathered, same3(s, 0.f)), PICK_F(hasSurface, ADD_F(count, alpha), nothing)));
+    /* the luminance's moments, gathered the same way */
+    SpvId plane = MUL_U(d.width, d.height);
+    SpvId momentsThen = vecAt(s, &d, d.history, ADD_U(j, plane));
+    SpvId m1 = PICK_F(taken, X(momentsThen), FLOAT(0.f)), m2 = PICK_F(taken, Y(momentsThen), FLOAT(0.f));
+    SpvId l = denoiseLuma(s, light);
+    m1 = ADD_F(m1, MUL_F(SUB_F(l, m1), share));
+    m2 = ADD_F(m2, MUL_F(SUB_F(MUL_F(l, l), m2), share));
+    vecPut(s, &d, d.next, ADD_U(d.pixel, plane), vec4Of(s, vec3Of(s, m1, m2, FLOAT(0.f)), FLOAT(0.f)));
     return denoiseEnd(s, main, global, merge, size);
 }
 
-/* One pass of the filter: from ping to pong, or the other way round, by what `flip` says; from what was
- * gathered, the first time. */
+/* How much each pixel's light varies, into ping with what was gathered: as varianceRow. */
+uint32_t* artfShaderDenoiseVariance(size_t* size) {
+    Spv b, *s = &b;
+    spvInit(s);
+    Denoise d;
+    memset(&d, 0, sizeof d);
+    SpvId global, merge;
+    SpvId main = denoiseStart(s, &d, &global, &merge);
+    SpvId plane = MUL_U(d.width, d.height);
+    SpvId guide = vecAt(s, &d, d.guide, d.pixel), gathered = vecAt(s, &d, d.next, d.pixel);
+    SpvId bits = AS_UINT(W(guide));
+    SpvId n = packedNormal(s, bits);
+    SpvId distance = spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(spvShuffle3(s, guide), d.eye));
+    SpvId count = FLOOR_F(W(gathered));
+    SpvId moments = vecAt(s, &d, d.next, ADD_U(d.pixel, plane));
+    SpvId own = MAX_F(SUB_F(Y(moments), MUL_F(X(moments), X(moments))), FLOAT(0.f));
+    /* with a short history, the moments around (5 x 5, by place and facing), made larger by how short it is */
+    SpvId m1 = FLOAT(0.f), m2 = FLOAT(0.f), total = FLOAT(0.f);
+    for (int dy = -2; dy <= 2; ++dy)
+        for (int dx = -2; dx <= 2; ++dx) {
+            SpvId inside;
+            SpvId j = denoiseNeighbour(s, &d, dx, dy, &inside);
+            SpvId other = vecAt(s, &d, d.guide, j);
+            SpvId otherBits = AS_UINT(W(other));
+            SpvId qDistance = spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(spvShuffle3(s, other), d.eye));
+            SpvId w = PICK_F(BOTH(inside, NOT_EQ(otherBits, UINT(0))), denoisePlace(s, n, distance, packedNormal(s, otherBits), qDistance), FLOAT(0.f));
+            SpvId q = vecAt(s, &d, d.next, ADD_U(j, plane));
+            m1 = ADD_F(m1, MUL_F(X(q), w));
+            m2 = ADD_F(m2, MUL_F(Y(q), w));
+            total = ADD_F(total, w);
+        }
+    SpvId inverse = PICK_F(MORE_F(total, FLOAT(0.f)), DIV_F(FLOAT(1.f), total), FLOAT(0.f));
+    m1 = MUL_F(m1, inverse);
+    m2 = MUL_F(m2, inverse);
+    SpvId around = MUL_F(MAX_F(SUB_F(m2, MUL_F(m1, m1)), FLOAT(0.f)), DIV_F(FLOAT(4.f), MAX_F(count, FLOAT(1.f))));
+    SpvId variance = PICK_F(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, count, FLOAT(4.f)), own, around);
+    variance = PICK_F(BOTH(NOT_EQ(bits, UINT(0)), MORE_F(distance, FLOAT(0.f))), variance, FLOAT(0.f));
+    vecPut(s, &d, d.ping, d.pixel, vec4Of(s, spvShuffle3(s, gathered), variance));
+    return denoiseEnd(s, main, global, merge, size);
+}
+
+/* One pass of the filter, as spatialRow: from ping to pong, or the other way round, by the pass; how much the light
+ * varies, in w. */
 uint32_t* artfShaderDenoiseSpace(size_t* size, int pass) {
     Spv b, *s = &b;
     spvInit(s);
@@ -5372,38 +5445,43 @@ uint32_t* artfShaderDenoiseSpace(size_t* size, int pass) {
     memset(&d, 0, sizeof d);
     SpvId global, merge;
     SpvId main = denoiseStart(s, &d, &global, &merge);
-    SpvId from = pass == 0 ? d.next : pass == 1 ? d.ping : d.pong, to = pass == 1 ? d.pong : d.ping;
+    SpvId from = pass % 2 ? d.pong : d.ping, to = pass % 2 ? d.ping : d.pong;
     const int step = 1 << pass;
     static const float kernel[3] = {.375f, .25f, .0625f};
     SpvId guide = vecAt(s, &d, d.guide, d.pixel), center = vecAt(s, &d, from, d.pixel);
     SpvId bits = AS_UINT(W(guide));
     SpvId n = packedNormal(s, bits);
     SpvId distance = spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(spvShuffle3(s, guide), d.eye));
-    SpvId reach = ADD_F(MUL_F(distance, FLOAT(.02f)), FLOAT(1e-3f));
-    SpvId leave = EITHER(spvOp2(s, 170 /* OpIEqual */, s->boolType, bits, UINT(0)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, FLOOR_F(W(vecAt(s, &d, d.next, d.pixel))), FLOAT(48.f)));
-    SpvId sum = same3(s, 0.f), total = FLOAT(0.f);
-    SpvId ix = spvOp1(s, SPV_OP_Bitcast, s->intType, d.x), iy = spvOp1(s, SPV_OP_Bitcast, s->intType, d.y);
-    SpvId iw = spvOp1(s, SPV_OP_Bitcast, s->intType, d.width), ih = spvOp1(s, SPV_OP_Bitcast, s->intType, d.height);
+    SpvId leave = EITHER(spvOp2(s, 170 /* OpIEqual */, s->boolType, bits, UINT(0)), NOT(MORE_F(distance, FLOAT(0.f))));
+    /* the variance around, 3 x 3 by a small Gaussian */
+    SpvId around = FLOAT(0.f);
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            SpvId inside;
+            SpvId j = denoiseNeighbour(s, &d, dx, dy, &inside);
+            around = ADD_F(around, MUL_F(W(vecAt(s, &d, from, j)), FLOAT(dx == 0 && dy == 0 ? .25f : dx == 0 || dy == 0 ? .125f : .0625f)));
+        }
+    SpvId luma = denoiseLuma(s, center);
+    SpvId scale = DIV_F(FLOAT(1.f), ADD_F(MUL_F(FLOAT(4.f), SQRT_F(MAX_F(around, FLOAT(0.f)))), FLOAT(1e-10f)));
+    SpvId sum = same3(s, 0.f), total = FLOAT(0.f), varianceSum = FLOAT(0.f);
     for (int dy = -2; dy <= 2; ++dy)
         for (int dx = -2; dx <= 2; ++dx) {
-            SpvId qx = spvOp2(s, SPV_OP_IAdd, s->intType, ix, spvConstInt(s, dx * step)), qy = spvOp2(s, SPV_OP_IAdd, s->intType, iy, spvConstInt(s, dy * step));
-            SpvId zero = spvConstInt(s, 0);
-            SpvId inside = BOTH(BOTH(spvOp2(s, 175 /* OpSGreaterThanEqual */, s->boolType, qx, zero), spvOp2(s, 177 /* OpSLessThan */, s->boolType, qx, iw)), BOTH(spvOp2(s, 175, s->boolType, qy, zero), spvOp2(s, 177, s->boolType, qy, ih)));
-            SpvId cx = spvGlsl2(s, 42 /* SMax */, s->intType, spvGlsl2(s, 39 /* SMin */, s->intType, qx, spvOp2(s, SPV_OP_ISub, s->intType, iw, spvConstInt(s, 1))), zero);
-            SpvId cy = spvGlsl2(s, 42, s->intType, spvGlsl2(s, 39, s->intType, qy, spvOp2(s, SPV_OP_ISub, s->intType, ih, spvConstInt(s, 1))), zero);
-            SpvId j = ADD_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, cx), MUL_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, cy), d.width));
+            SpvId inside;
+            SpvId j = denoiseNeighbour(s, &d, dx * step, dy * step, &inside);
             SpvId other = vecAt(s, &d, d.guide, j);
             SpvId otherBits = AS_UINT(W(other));
-            SpvId qn = packedNormal(s, otherBits);
-            SpvId apart = DIV_F(SUB_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(spvShuffle3(s, other), d.eye)), distance), reach);
-            SpvId facing = MAX_F(DOT3(n, qn), FLOAT(0.f)), f2 = MUL_F(facing, facing);
-            SpvId weight = DIV_F(MUL_F(FLOAT(kernel[abs(dx)] * kernel[abs(dy)]), MUL_F(f2, f2)), ADD_F(FLOAT(1.f), MUL_F(apart, apart)));
+            SpvId qDistance = spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(spvShuffle3(s, other), d.eye));
+            SpvId q = vecAt(s, &d, from, j);
+            SpvId apart = MUL_F(MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, ABS_F(SUB_F(denoiseLuma(s, q), luma))), scale), FLOAT(1.44269504f));
+            SpvId weight = MUL_F(MUL_F(FLOAT(kernel[abs(dx)] * kernel[abs(dy)]), denoisePlace(s, n, distance, packedNormal(s, otherBits), qDistance)), spvExp2Fast(s, apart));
             weight = PICK_F(BOTH(inside, NOT_EQ(otherBits, UINT(0))), weight, FLOAT(0.f));
-            sum = ADD_V3(sum, SCALE_V3(spvShuffle3(s, vecAt(s, &d, from, j)), weight));
+            sum = ADD_V3(sum, SCALE_V3(spvShuffle3(s, q), weight));
             total = ADD_F(total, weight);
+            varianceSum = ADD_F(varianceSum, MUL_F(MUL_F(weight, weight), W(q)));
         }
-    SpvId filtered = SCALE_V3(sum, PICK_F(MORE_F(total, FLOAT(0.f)), DIV_F(FLOAT(1.f), total), FLOAT(0.f)));
-    vecPut(s, &d, to, d.pixel, vec4Of(s, pick3(s, leave, spvShuffle3(s, center), filtered), W(center)));
+    SpvId inverse = PICK_F(MORE_F(total, FLOAT(0.f)), DIV_F(FLOAT(1.f), total), FLOAT(0.f));
+    SpvId filtered = pick3(s, leave, spvShuffle3(s, center), SCALE_V3(sum, inverse));
+    vecPut(s, &d, to, d.pixel, vec4Of(s, filtered, PICK_F(leave, W(center), MUL_F(MUL_F(varianceSum, inverse), inverse))));
     return denoiseEnd(s, main, global, merge, size);
 }
 
@@ -5415,9 +5493,10 @@ uint32_t* artfShaderDenoiseEnd(size_t* size) {
     memset(&d, 0, sizeof d);
     SpvId global, merge;
     SpvId main = denoiseStart(s, &d, &global, &merge);
-    /* three passes end in ping: next to ping, ping to pong, pong to ping */
-    SpvId from = vecAt(s, &d, d.ping, d.pixel), albedo = spvShuffle3(s, vecAt(s, &d, d.albedo, d.pixel));
-    SpvId alpha = SUB_F(W(from), FLOOR_F(W(from)));
+    /* five passes end in pong (the variance's writes ping); how many were gathered, and the coverage, are next's */
+    SpvId from = vecAt(s, &d, d.pong, d.pixel), albedo = spvShuffle3(s, vecAt(s, &d, d.albedo, d.pixel));
+    SpvId kept = W(vecAt(s, &d, d.next, d.pixel));
+    SpvId alpha = SUB_F(kept, FLOOR_F(kept));
     SpvId lit = MUL_V3(spvShuffle3(s, from), spvGlsl2(s, SPV_GLSL_FMax, s->vec3, albedo, same3(s, .02f)));
     vecPut(s, &d, d.noisy, d.pixel, vec4Of(s, SCALE_V3(lit, alpha), alpha));
     return denoiseEnd(s, main, global, merge, size);
