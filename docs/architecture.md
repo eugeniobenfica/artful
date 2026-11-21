@@ -67,8 +67,7 @@ its coat's lobe takes the coat's amount first (it builds that from `GgxBelow`, `
 anisotropy squares its strength after the multiplication (its own 1 / long alpha, then `Draw`); its fog has its own
 order (not `FogKeep`). Each could be one, for a change of the last bit in some pixels. `S_NORMALIZE` is each way's own
 (`trace.c`'s has a floor under the length, the kernels' none). The GPU follows the same formulas, with its own vectors
-(`OpDot`, `normalize`), within the tests' tolerances; Metal's shaders, made from the SPIR-V by `tools/mkmetal.py`, were
-not made again.
+(`OpDot`, `normalize`), within the tests' tolerances; Metal's and WebGPU's are the same shaders, written from the IR.
 
 Lights with a shape or a profile are not in it: `artfLightPlace` (`sceneInternal.h`, which the kernels call a lane
 at a time) and the pixel shader's `lightPlace` are still two. Written once, as shading.inc's other formulas, they gave
@@ -1176,8 +1175,7 @@ All the shaders, 3D and 2D, go through it now, and write the same words they wro
 `artful-shaders` saves are the same bytes, built by clang, and each is a sound IR there and while the tests run
 (`artfSpvCheck`); building them all takes the 60 ms it took.
 
-**Metal from the IR** (`src/shaderir/msl.c`, `irMsl`). Laid out as SPIRV-Cross lays out what `tools/mkmetal.py` makes,
-so that `metal.c` binds both alike: an argument buffer for each descriptor set at its `[[buffer(n)]]`, its resources as
+**Metal from the IR** (`src/shaderir/msl.c`, `irMsl`). Laid out as SPIRV-Cross lays out what it writes: an argument buffer for each descriptor set at its `[[buffer(n)]]`, its resources as
 the module declares them, each `bN` for binding N, a texture's sampler after it as `bNSmplr`, an array taking as many
 ids as it has; push constants after the sets; `main0`, what comes in by location in `main0_in` (integers flat without
 saying so), what goes out in `main0_out`, `gl_PerVertex`'s builtins each its own, a position that is invariant said
@@ -1186,11 +1184,23 @@ so; padding where Vulkan's offsets are past Metal's. Control is the IR's: an if 
 the continue target its block and then `continue`; a phi is a variable each edge into its block sets. Values are
 variables declared at the function's top, so that no scope hides one; pointers, textures and constants are written where
 they are used. Ray queries it does not write (Metal's backend has none). `artful-shaders dir --ir` writes each shader's
-IR and Metal; the 17 Metal runs bind as SPIRV-Cross's do, resource for resource and in their entry points
-(`tools/msl/compare.py`); all 94 it writes pass `clang++ -fsyntax-only` against a stand-in for Metal's library
+IR and Metal; all 94 it writes pass `clang++ -fsyntax-only` against a stand-in for Metal's library
 (`tools/msl/check.py`, `tools/msl/metal_stdlib`), which finds names, types and statements wrong but proves less than
-Apple's compiler, which CI runs on each of them; every shader the tests build is written as Metal too. The library
-still takes SPIRV-Cross's (`src/metal/shaders.inc`) until Apple's compiler has passed these.
+Apple's compiler, which CI runs on each of them; every shader the tests build is written as Metal too. It also says
+what each argument buffer holds (`IrMslArguments`: each resource's binding, id and kind), which is how `metal.c` fills
+them: the shaders Metal runs are these, written as the backend starts.
+
+**WGSL from the IR** (`src/shaderir/wgsl.c`, `irWgsl`). The same shape as Metal's, with what WGSL asks: no implicit
+conversion between signed and unsigned integers (each operand is cast to what its operation takes, and shifts are
+made in the type that gives the shift asked for); a texture and its sampler apart, the sampler at the binding + 128;
+no arrays of textures, so an element read by a constant index is a binding of its own (from 256 on, one sampler for
+all at 255), which is why WebGPU takes the shaders built with `ARTF_TEXTURES_UNIFORM`; atomics by type, so a buffer
+that atomics touch is declared of `atomic<u32>` and every access to it is atomic; `select` for `?:`; push constants a
+uniform buffer at binding 999; a member further on in Vulkan than WGSL would put it, words of nothing before it; and
+the uniformity analysis of derivatives turned off, as the IR samples where control is not uniform. It says what each
+shader binds (`IrWgslBindings`), which is how `webgpu.c` makes its bind groups. The 79 shaders that can be WGSL (those
+that read the texture array by an index that varies, PrimitiveId or ray queries cannot) pass naga (wgpu-native,
+`tools/wgslCheck.c`) and Tint (Chromium, `tools/web/wgslCheck.html`).
 
 ## The CPU: a tile-based GPU in software
 
@@ -1274,31 +1284,39 @@ as bytes, then made light, as before: the GPU's sampler reads them as UNORM, as 
 
 ## Metal
 
-**Never run, and not built unless asked** (`-DARTFUL_METAL=ON`). `metal.c` was written without a Mac. Everything
-below is what it is meant to do.
+**Not built unless asked** (`-DARTFUL_METAL=ON`). `metal.c` was written without a Mac; where it has run is in
+[limits](limits.md).
 
 It is plain C. Both Metal and the Objective-C runtime are opened at run time, and a message is `objc_msgSend` cast to
-what the method takes, so there is nothing to link and no Objective-C to compile. Its shaders are Vulkan's: SPIRV-Cross,
-which comes with the Vulkan SDK, translates them, and `tools/mkmetal.py` writes the result into `shaders.inc`, so the
-library takes only text. That script names each resource after its Vulkan binding first, and so gets a table from places
-in an argument buffer to bindings, which is what `arguments` fills in.
+what the method takes, so there is nothing to link and no Objective-C to compile. Its shaders are Vulkan's, made as it
+starts: `shaders.c` builds them as SPIR-V, the IR reads them back (`irFromSpirv`), `irMsl` writes them as Metal and says
+what each argument buffer holds, and Metal compiles the text. So they are the shaders of now, and `arguments` fills each
+buffer from that table: Vulkan's binding N is what Vulkan binds there. (Until phase 6.1 they were made ahead of time by
+SPIRV-Cross, and its C side was 0.4's.)
 
-That is also its first gap: shaders are made ahead of time, so a program's graphs, which Vulkan compiles when they
-appear, cannot reach it. It would need its own way from a graph to Metal's language. The others are smaller. Occlusion
-is left out, which changes no picture. A background pass would need a shader in Metal's language. Textures go up
-decoded.
-
-The larger gap is time. Its C side is 0.4's: it binds what 0.4's shaders read, and nothing since. `shaders.inc` was
-made again from today's SPIR-V, seventeen plain variants, and the table of bindings `mkmetal.py` derives came out the
-same as before, entry by entry: those variants read nothing new but the frame block, which Metal fills whole with the
-code the other backends use (where 0.4's shaders read its first 95 vec4s, these read all 178). Everything since 0.4
-that needs a binding or a variant of its own is not there: [limits](limits.md) lists it. The translation was checked
-only for form here (each source parses into one entry point, and reads only what its argument buffer declares); CI
-puts it through Apple's compiler.
+Its frame is WebGPU's (below), the plain one: the scene's buffers as Vulkan lays them out now (the materials with what
+lies past glTF's core after them, the mesh table of now), lights past the sixteen in their tiles, decals, the cull
+shader filling each mesh's draw, shadow maps, what has holes, the overlay. With argument buffers of tier 2 it reads
+textures by any index, a thousand of them; with tier 1, the shaders built with `ARTF_TEXTURES_UNIFORM`, 64. What needs
+a variant of its own, a frame in floats and all after it, probes, tracing, layers of transparency, materials in C, is
+not there, and the log says so. Textures go up decoded.
 
 Being shared, memory needs no staging, and a frame waits for the one before it, so there is one copy of everything. Metal
 has no single call for many indirect draws, so each mesh is a call: the CPU's part grows with meshes, though not with
 instances.
+
+## WebGPU
+
+**Not built unless asked** (`-DARTFUL_WEBGPU=ON`); chosen only by name. `webgpu.c` is written against the standard
+`webgpu.h`, so the same code runs on a native WebGPU (wgpu-native, linked) and in a browser (Dawn's port of `webgpu.h`
+for Emscripten, whose JavaScript calls the browser's). Its shaders are Vulkan's written as WGSL from the IR as it
+starts, each pipeline's bind group made from what its shaders bind (`IrWgslBindings`), with Vulkan's buffers at the
+same numbers; the shadow's push constants are a uniform buffer at a dynamic offset. Textures are read by constant
+indices, as many as a stage may have less two. Its frame is Metal's, with WebGPU's own ways: buffers go up by
+`wgpuQueueWriteBuffer`, the indirect draws need `indirect-first-instance`, and the frame is drawn into a texture of its
+own, then drawn onto the surface by a triangle (whose format may differ) or read back. In a browser it cannot wait:
+the adapter and the device are waited for through Emscripten's ASYNCIFY, and a frame goes to a canvas
+(`ARTF_SURFACE_WEB_CANVAS`) rather than being read back.
 
 ## A background pass
 
