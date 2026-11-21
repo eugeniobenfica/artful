@@ -159,6 +159,7 @@ int main(int argc, char** argv) {
     RUN("tracing/trace/vulkan", testTrace(ARTF_BACKEND_VULKAN));
     RUN("tracing/traceBothBackends", testTraceBothBackends());
     RUN("tracing/treesFourWays", testTreesFourWays());
+    RUN("tracing/extraTraced", testExtraTraced());
     RUN("tracing/environmentAimed/software", testEnvironmentAimed(ARTF_BACKEND_SOFTWARE));
     RUN("tracing/environmentAimed/vulkan", testEnvironmentAimed(ARTF_BACKEND_VULKAN));
     RUN("tracing/metalFurnace/software", testMetalFurnace(ARTF_BACKEND_SOFTWARE));

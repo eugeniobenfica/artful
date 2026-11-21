@@ -854,6 +854,18 @@ static V8F tracedLanes(const ArtfSoftFrame* f, int light, Lanes3 world, Lanes3 n
     return v8fLoad(out);
 }
 
+/* The same toward one of the lights past the frame's own (no size), for those that cast. */
+static V8F tracedLanesAt(const ArtfSoftFrame* f, const float* at, Lanes3 world, Lanes3 n, V8F strength, const float* drawn) {
+    _Alignas(32) float wx[8], wy[8], wz[8], nx[8], ny[8], nz[8], reach[8], out[8];
+    v8fStore(wx, world.x); v8fStore(wy, world.y); v8fStore(wz, world.z);
+    v8fStore(nx, n.x); v8fStore(ny, n.y); v8fStore(nz, n.z);
+    v8fStore(reach, strength);
+    for (int i = 0; i < 8; ++i) {
+        const float p[3] = {wx[i], wy[i], wz[i]}, normal[3] = {nx[i], ny[i], nz[i]};
+        out[i] = reach[i] > 0 ? artfTracedShadowAt(f->scene, &f->data, p, normal, at, 0.f, drawn[i]) : 1.f;
+    }
+    return v8fLoad(out);
+}
 /* Light that bounced, at eight places: artfIndirectAt's arithmetic, in the same order, eight at a time. */
 /* mirror: also, into reflected, what the same probes give toward that direction, for what a surface reflects. */
 /* Of volume `cascade` (corner, spacing, wrap: artfIndirectCascade), as cascadeAt. */
@@ -1446,7 +1458,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         Lanes3 goes = {v8fSet(L->direction[0]), v8fSet(L->direction[1]), v8fSet(L->direction[2])};
         V8F spot = v8fMul(v8fSub(v8fSub(zero, dot3(toLight, goes)), v8fSet(L->spotCut)), v8fSet(L->spotScale));
         spot = v8fMin(v8fMax(spot, zero), v8fSet(1.f));
-        if (f->shadows && index < ARTF_SHADOW_EXTRA && f->shadows->frame->extra[index][0]) spot = v8fMul(spot, shadowLanesExtra(f, index, L->position, world, n));
+        if ((float)index < frame->more[2]) spot = v8fMul(spot, tracedLanesAt(f, L->position, world, n, v8fMul(fade, spot), drawn));
+        else if (f->shadows && index < ARTF_SHADOW_EXTRA && f->shadows->frame->extra[index][0]) spot = v8fMul(spot, shadowLanesExtra(f, index, L->position, world, n));
         addLight(n, view, toLight, v8fMul(v8fMul(fade, fade), spot), L->color, shiny, &reflecting, &diffuse, &highlight);
         if (coated) addExtras(extras, n, view, toLight, v8fMul(v8fMul(fade, fade), spot), zero, zero, L->color);
     }

@@ -1718,3 +1718,51 @@ void testTreesFourWays(void) {
     artfFree(frames[0]);
     artfFree(frames[1]);
 }
+
+/* Phase 5.7, A: shadows from rays for lights past the frame's sixteen. Twenty lights far off take the frame's places;
+ * a lamp over a cube, the twenty-first, casts the cube's shadow by rays on both backends alike. */
+void testExtraTraced(void) {
+    uint32_t* lit = artfMalloc(W * H * 4);
+    uint32_t* shaded = artfMalloc(W * H * 4);
+    uint32_t* gpuFrame = artfMalloc(W * H * 4);
+    const ArtfShadowDesc none = {0, 0, false, false}, traced = {0, 0, false, true};
+    float under[3] = {0, 0, 0};
+    for (int run = 0; run < 3; ++run) {
+        /* (the CPU, the GPU, and the CPU with the lamp one of the frame's own: the same shadow) */
+        const int backend = run == 1;
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = plainScene();
+        artfSceneSetAmbient(s, artfVec3(.02f, .02f, .02f), artfVec3(.02f, .02f, .02f));
+        setCamera(s, 0, 5, 6, 0, 0, 0);
+        ArtfMaterialDesc grey = artfMaterialDefaults();
+        grey.baseColor = artfVec3(.6f, .6f, .6f);
+        addAt(s, artfSceneAddPlane(s, 20, 1), artfSceneAddMaterial(s, &grey), 0, -1, 0, 1);
+        addAt(s, artfSceneAddCube(s, 1), artfSceneAddMaterial(s, &grey), 0, 0, 0, 1);
+        for (int i = 0; i < (run == 2 ? 0 : 20); ++i) artfSceneAddLight(s, artfVec3(100.f + (float)i, 100, 0), artfVec3(1, 1, 1), 1);
+        const ArtfLight lamp = artfSceneAddLight(s, artfVec3(0, 3, 0), artfVec3(2, 2, 2), 8);
+        artfLightSetShadow(s, lamp, true);
+        artfSceneSetShadows(s, &none);
+        drawInto(r, s, lit);
+        artfSceneSetShadows(s, &traced);
+        drawInto(r, s, shaded);
+        /* (right under the cube, on the floor beside it: as the camera sees it, just in front of the cube's foot) */
+        long darker = 0;
+        for (int i = 0; i < W * H; ++i) darker += (int)(lit[i] >> 8 & 255) - (int)(shaded[i] >> 8 & 255) > 24;
+        under[run] = (float)darker / (float)(W * H);
+        if (run == 1) {
+            const double apart = differentShare(gpuFrame, shaded, 16);
+            printf("a lamp past the frame's sixteen, its shadow from rays: the GPU against the CPU %.3f%% of pixels apart\n", apart * 100);
+            CHECK(apart < .01);
+        } else if (run == 0) memcpy(gpuFrame, shaded, W * H * 4);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    printf("a lamp past the frame's sixteen: %.2f%% of the frame in its shadow from rays on the CPU, %.2f%% on the GPU; %.2f%% as one of the sixteen\n", under[0] * 100,
+           under[1] * 100, under[2] * 100);
+    CHECK(under[0] > .005f && fabsf(under[0] - under[1]) < .001f && fabsf(under[0] - under[2]) < .001f);
+    artfFree(lit);
+    artfFree(shaded);
+    artfFree(gpuFrame);
+}

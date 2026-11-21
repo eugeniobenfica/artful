@@ -222,6 +222,7 @@ void testTrace(ArtfBackend backend);
 void testTraceData(void);
 void testTraceBothBackends(void);
 void testTreesFourWays(void);
+void testExtraTraced(void);
 void testGpuLeftAlone(void);
 void testEnvironmentAimed(ArtfBackend backend);
 void testMetalFurnace(ArtfBackend backend);

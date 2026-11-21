@@ -1248,7 +1248,8 @@ void artfSceneSetBackground(ArtfScene* s, ArtfVec3 color) { s->background = colo
 /* Of the lights past the frame's own, those that cast shadows this frame, the most needed first: that ask for them, in
  * view, by how big they are against how far: their numbers, into out; how many. As many as the atlas holds. */
 static uint32_t shadowedExtras(const ArtfScene* s, const ArtfFrameData* frame, uint32_t* out) {
-    if (!s->shadows.resolution) return 0;
+    /* (with shadows from rays, those past the frame's own take rays as well: no maps) */
+    if (!s->shadows.resolution || s->shadows.traced) return 0;
     uint32_t chosen = 0, seen = 0;
     float scores[ARTF_SHADOW_EXTRA];
     for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) {
@@ -1289,10 +1290,21 @@ static uint32_t shadowedExtras(const ArtfScene* s, const ArtfFrameData* frame, u
 }
 
 uint32_t artfSceneExtraLights(const ArtfScene* s, const ArtfFrameData* frame, ArtfLightData* out) {
+    uint32_t seen = 0, count = 0;
+    if (s->shadows.traced) {
+        /* shadows from rays: those that cast first, as many as the frame's more[2] says, then the rest */
+        for (int casting = 1; casting >= 0; --casting) {
+            seen = 0;
+            for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) {
+                if (!s->lightOn[i] || seen++ < ARTF_FRAME_LIGHTS) continue;
+                if (s->lightCasts[i] == (casting != 0)) out[count++] = s->lights[i];
+            }
+        }
+        return count;
+    }
     /* those with shadows first, in the order their maps are in */
     uint32_t shadowed[ARTF_SHADOW_EXTRA];
     const uint32_t first = shadowedExtras(s, frame, shadowed);
-    uint32_t seen = 0, count = 0;
     for (uint32_t k = 0; k < first; ++k) out[count++] = s->lights[shadowed[k]];
     for (uint32_t i = 0; i < ARTF_MAX_LIGHTS; ++i) {
         if (!s->lightOn[i]) continue;
@@ -1843,6 +1855,11 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->look[1] = s->fogDensity;
     out->look[2] = s->sunSize;
     memcpy(out->aerial, s->aerial, sizeof out->aerial);
+    /* (with shadows from rays: how many of those past the frame's own cast, the first in artfSceneExtraLights' list) */
+    out->more[2] = 0;
+    if (s->shadows.traced)
+        for (uint32_t i = 0, seen = 0; i < ARTF_MAX_LIGHTS; ++i)
+            if (s->lightOn[i] && seen++ >= ARTF_FRAME_LIGHTS && s->lightCasts[i]) out->more[2] += 1.f;
     out->more[1] = s->trace.coarseReach;
     for (size_t i = 0; i < s->materialsMore.len && !(out->more[0] > 0); ++i)
         if (s->materialsMore.items[i].reactive > 0) out->more[0] = 1.f;

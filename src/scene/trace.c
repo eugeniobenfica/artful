@@ -1699,19 +1699,20 @@ static void tracedLift(const ArtfFrameData* f, const float* p, const float* n, f
 
 float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light) { return artfTracedShadowDrawn(s, f, p, n, light, NAN); }
 float artfTracedShadowDrawn(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light, float drawn) {
+    return artfTracedShadowAt(s, f, p, n, light < 0 ? NULL : f->lights[light].position, light < 0 ? f->look[2] : f->lightSizes[light], drawn);
+}
+float artfTracedShadowAt(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, const float* at, float size, float drawn) {
     float o[3];
     tracedLift(f, p, n, drawn, o);
-    const float size = light < 0 ? f->look[2] : f->lightSizes[light];
     const uint32_t rays = size > 0 ? artfMaxi((int)f->tracedRays, 1) : 1u, first = artfTracedPlace(f, p) * 4u;
     float sum = 0;
     for (uint32_t k = 0; k < rays; ++k) {
         const float* b = artfTracedBall[(first + k) & 15u];
         float to[3], limit = 3e37f;
-        if (light < 0) {
+        if (!at) {
             for (int i = 0; i < 3; ++i) to[i] = f->toSun[i] + b[i] * size;
             normalize3(to);
         } else {
-            const float* at = f->lights[light].position;
             for (int i = 0; i < 3; ++i) to[i] = at[i] + b[i] * size - o[i];
             limit = sqrtf(artfMaxf(dot3(to, to), 1e-8f));
             const float inv = 1.f / limit;

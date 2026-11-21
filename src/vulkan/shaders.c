@@ -1582,6 +1582,7 @@ static Tracer* tracerNew(void);
 static void tracerDeclare(Spv* s, Tracer* t, const Resources* r, SpvId textures, SpvId sampled, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware);
 static void tracerVariables(Tracer* t);
 static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index, SpvId drawn);
+static SpvId tracedShadowAtSpv(const Tracer* t, SpvId world, SpvId n, SpvId position, SpvId size, SpvId drawn);
 static SpvId drawnErrorSpv(Spv* s, const Resources* r, SpvId meshWord, SpvId instance);
 
 /* Which of a lamp's views a place is in, from its word, as lampShadowSpv. */
@@ -2291,6 +2292,14 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
             spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, lamp, UINT(0)), &extraCasts);
             spvStore(s, shadowed, lampShadowSpv(s, &shadows, lamp, d, d2, n, toLight, world, 0));
             spvIfEnd(s, extraCasts);
+            if (traced) {
+                /* (shadows from rays: those that cast, the first of the list, as kernels.inc's tracedLanesAt) */
+                SpvId rayCasts;
+                spvIfBegin(s, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, spvOp1(s, SPV_OP_ConvertUToF, s->floatType, li), Z(frameVec(s, &r, F_MORE))),
+                                     spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, MUL_F(fade, spot), FLOAT(0.f))), &rayCasts);
+                spvStore(s, shadowed, tracedShadowAtSpv(tracer, world, n, spvShuffle3(s, lightA), FLOAT(0.f), drawnHere));
+                spvIfEnd(s, rayCasts);
+            }
             addLight(s, &acc, &reflecting, n, view, toLight, MUL_F(MUL_F(MUL_F(fade, fade), spot), spvLoad(s, s->floatType, shadowed)), spvShuffle3(s, lightB));
             if (coats) addExtras(s, layers, n, view, toLight, MUL_F(MUL_F(MUL_F(fade, fade), spot), spvLoad(s, s->floatType, shadowed)), FLOAT(0.f), FLOAT(0.f), spvShuffle3(s, lightB));
         }
@@ -3843,14 +3852,22 @@ static SpvId drawnErrorSpv(Spv* s, const Resources* r, SpvId meshWord, SpvId ins
 }
 
 /* As artfTracedShadow: the sun, or the frame's light `index`. */
+static SpvId tracedShadowAtSpv(const Tracer* t, SpvId world, SpvId n, SpvId position, SpvId size, SpvId drawn);
 static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index, SpvId drawn) {
     Spv* s = t->s;
     const Resources* r = &t->r;
-    SpvId o = tracedLiftSpv(s, r, world, n, drawn);
     SpvId size = sun ? Z(frameVec(s, r, F_LOOK)) : frameFloatAt(s, r, ADD_U(UINT(F_LIGHT_SIZES), SHR_U(index, 2)), AND_U(index, UINT(3)));
+    SpvId position = sun ? 0 : spvShuffle3(s, frameVecAt(s, r, ADD_U(UINT(F_LIGHTS), MUL_U(index, UINT(F_LIGHT_ROWS)))));
+    return tracedShadowAtSpv(t, world, n, position, size, drawn);
+}
+/* As artfTracedShadowAt: toward position (0: the sun), of that size. */
+static SpvId tracedShadowAtSpv(const Tracer* t, SpvId world, SpvId n, SpvId position, SpvId size, SpvId drawn) {
+    Spv* s = t->s;
+    const Resources* r = &t->r;
+    const bool sun = !position;
+    SpvId o = tracedLiftSpv(s, r, world, n, drawn);
     SpvId rays = spvSelect(s, s->uintType, MORE_F(size, FLOAT(0.f)), spvGlsl2(s, SPV_GLSL_UMax, s->uintType, AS_UINT(W(frameVec(s, r, F_TRACED))), UINT(1)), UINT(1));
     SpvId first = MUL_U(tracedPlaceSpv(s, r, world), UINT(4));
-    SpvId position = sun ? 0 : spvShuffle3(s, frameVecAt(s, r, ADD_U(UINT(F_LIGHTS), MUL_U(index, UINT(F_LIGHT_ROWS)))));
     SpvId toSun = sun ? spvShuffle3(s, frameVec(s, r, F_TOSUN)) : 0;
     spvStore(s, t->tracedSum, FLOAT(0.f));
     spvStore(s, t->tracedRay, UINT(0));

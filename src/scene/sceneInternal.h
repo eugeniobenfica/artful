@@ -492,6 +492,7 @@ typedef struct ArtfFrameData {
     float aerial[4][4];
     /* 1 when a material is reactive (ArtfMaterialDesc.reactive): the instance each pixel shows goes after the frame
      * then, as when something moves; 0 else. How far the trees' cuts may be from their meshes (ArtfTrace.coarseReach).
+     * With shadows from rays, how many of the lights past the frame's own cast, the first of artfSceneExtraLights'.
      * The rest: 0. */
     float more[4];
 } ArtfFrameData;
@@ -1426,6 +1427,8 @@ uint32_t artfTracedPlace(const ArtfFrameData* f, const float* p);
 float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light);
 /* The same, for what an instance draws by a level whose error is drawn (artfDrawnError): its rays start off it by that. */
 float artfTracedShadowDrawn(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light, float drawn);
+/* The same toward a light at `at` of that size (NULL: the sun, of the frame's size): for lights past the frame's own. */
+float artfTracedShadowAt(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, const float* at, float size, float drawn);
 /* How far what an instance draws may be from its mesh, in the world: 0 for the whole mesh; a lighter level's error times
  * its scale; below 0 for a graph's cut (within distance / lodScale where it is seen). */
 ARTF_INLINE float artfDrawnError(const ArtfScene* s, const ArtfFrameData* f, uint32_t base, uint32_t drawn, float maxScale) {
