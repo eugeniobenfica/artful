@@ -69,14 +69,14 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [x] 5.2 Luzes em clusters — 0 omitidas no corredor (antes 1.846), 0,09 ms a 1080p
 - [x] 5.3 LTC para retângulos e tubos — retângulo 54–58% → 4–9% do traçado, tubo 22% → 0,5%
 - [~] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); histórico cúbico (`sharpHistory`); faltam máscaras reativa/composição
-- [~] 5.5 DAG de clusters — construção e corte (`artfDagBuild`, `artfDagCut`): sem rachaduras, menos triângulos que os 3 níveis perto e longe; falta desenhar nos dois backends e cozinhar
+- [~] 5.5 DAG de clusters — construção, corte, desenho nos dois backends (`artfSceneMeshSetClusters`) e cozimento; faltam medidas em `city`/`heavy` e erro por atributo
 - [ ] 5.6 Raios contra o corte grosso; BVH largo
 - [ ] 5.7 Luzes estocásticas, denoiser de sombra, A-SVGF
 - [ ] 5.8 Transparência por transmitância em froxels
 - [~] 5.9 Saída HDR e gama larga — `output` P3/HDR10 nos dois backends, swapchain por `VK_EXT_swapchain_colorspace`; faltam metadados HDR, scRGB e teste em tela HDR
 - [ ] 5.10 Basis Universal e Zstandard
 - [~] 5.11 Perspectiva aérea (`ArtfSkyDesc.aerial`, forma fechada, os dois backends, desenhado e traçado); faltam nuvens a 1/4
-- [~] 5.12 Materiais — texturas do KHR_materials_specular feitas; faltam as de iridescência/anisotropia/espessura, Belcour-Barla, OpenPBR, SSS
+- [~] 5.12 Materiais — texturas das extensões (especular, iridescência, anisotropia) feitas; faltam Belcour-Barla, OpenPBR, SSS
 
 ## Fase 6 — Alcance de plataforma
 - [ ] 6.1 Metal executado 📱 (depende de 4.1 passo 4 provado)

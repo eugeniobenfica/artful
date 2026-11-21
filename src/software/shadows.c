@@ -131,7 +131,7 @@ static void geometryJob(void* user, uint32_t index, uint32_t worker) {
         for (int row = 0; row < 4; ++row)
             for (int col = 0; col < 4; ++col)
                 mvp[row * 4 + col] = vm[row * 4] * w[col] + vm[row * 4 + 1] * w[4 + col] + vm[row * 4 + 2] * w[8 + col] + (col == 3 ? vm[row * 4 + 3] : 0.f);
-        for (uint32_t k = 0; k < mesh->meshletCount; ++k) {
+        for (uint32_t k = 0; k < ARTF_MESH_WHOLE_MESHLETS(mesh); ++k) {
             const ArtfMeshlet* l = &mesh->meshlets[k];
             Corner corners[ARTF_MESHLET_VERTICES];
             const float* px = mesh->positions + l->vertexOffset;

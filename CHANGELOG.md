@@ -2,10 +2,13 @@
 
 ## Unreleased
 
-- **A graph of clusters** (phase 5.5, in part: built and cut, not drawn yet): `artfDagBuild` cuts a mesh into clusters,
-  groups them, simplifies each group to half with its border held, and again a level at a time; `artfDagCut` takes
-  the clusters fine from an eye. A 73,728-triangle terrain seen from its edge at a pixel's error draws 45,492 where
-  the three levels draw all of it, and fewer from afar too, with no cracks.
+- **A graph of clusters** (phase 5.5): `artfSceneMeshSetClusters` makes a mesh a graph of clusters at every level of
+  detail, in place of its three lighter versions: each part is drawn as fine as the lod error asks where it is, on
+  both backends alike (the CPU's meshlet culling and the GPU's), with no cracks, and cooked. A 73,728-triangle
+  terrain seen from its edge at a pixel's error draws 45,492 where the three levels draw all of it, and looks the
+  same to 0.06% of pixels.
+- **Iridescence's and anisotropy's textures** (phase 5.12): `iridescenceTexture`, `iridescenceThicknessTexture` and
+  `anisotropyTexture` are read from glTF and drawn and traced on both backends.
 
 - **Probes that follow the camera** (`ArtfIndirectDesc.follow`, phase 5.1): the volume of probes is around the camera
   and moves a cell at a time, in place of a box that stays. Nothing is copied: probes are kept by their cell modulo

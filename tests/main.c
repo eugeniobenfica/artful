@@ -221,6 +221,7 @@ int main(int argc, char** argv) {
     RUN("materials/profiles", testProfiles());
     RUN("materials/moreMaterials", testMoreMaterials());
     RUN("materials/specularMaps", testSpecularMaps());
+    RUN("materials/filmMaps", testFilmMaps());
     RUN("materials/textureRoles", testTextureRoles());
     RUN("materials/highlightFlicker", testHighlightFlicker());
     RUN("files/gltfMore", testGltfMore());
@@ -249,6 +250,7 @@ int main(int argc, char** argv) {
     RUN("scale/terrainLayers", testTerrainLayers());
     RUN("scale/hlod", testHlod());
     RUN("scale/clusterDag", testClusterDag());
+    RUN("scale/clusterDraw", testClusterDraw());
     RUN("scale/hlodCooked", testHlodCooked());
     RUN("scale/skinLod", testSkinLod());
     RUN("scale/tracedSkinLod", testTracedSkinLod());

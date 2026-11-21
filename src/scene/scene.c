@@ -247,6 +247,33 @@ static void forgetMesh(ArtfScene* s, uint32_t index) {
     ++s->meshRemovals;
 }
 
+bool artfSceneMeshSetClusters(ArtfScene* s, ArtfMesh mesh) {
+    changing(s, "a mesh");
+    const uint32_t index = artfMeshIndexOf(s, mesh);
+    if (index == UINT32_MAX) return false;
+    ArtfMeshData* m = &s->meshes.items[index];
+    if (m->skin || m->isLod || m->dagBounds || m->indexCount < 3 || m->evicted) return false;
+    ArtfVertex* v = artfMalloc((size_t)m->vertexCount * sizeof *v);
+    artfMeshUnpack(m, v);
+    ArtfDag dag;
+    const bool built = artfDagBuild(v, m->vertexCount, m->indices, m->indexCount, &dag);
+    artfFree(v);
+    if (!built) return false;
+    artfMeshSetDag(m, &dag);
+    artfDagFree(&dag);
+    /* its lighter versions go: the graph holds them */
+    const uint32_t count = m->lodCount;
+    uint32_t lods[ARTF_MAX_LODS];
+    memcpy(lods, m->lods, sizeof lods);
+    m->lodCount = 0;
+    ++m->generation;
+    ++s->meshRemovals;
+    ++s->lodVersion;
+    ++s->structureVersion;
+    for (uint32_t i = 0; i < count; ++i) forgetMesh(s, lods[i]);
+    return true;
+}
+
 bool artfSceneRemoveMesh(ArtfScene* s, ArtfMesh mesh) {
     changing(s, "a mesh");
     const uint32_t index = artfMeshIndexOf(s, mesh);
@@ -529,6 +556,9 @@ void artfSceneTextureRoles(ArtfScene* s) {
         markRole(roles, count, more->sheenMap, ROLE_COLOR);
         markRole(roles, count, more->specularColorMap, ROLE_COLOR);
         markRole(roles, count, more->specularMap, ROLE_DATA);
+        markRole(roles, count, more->iridescenceMap, ROLE_DATA);
+        markRole(roles, count, more->iridescenceThicknessMap, ROLE_DATA);
+        markRole(roles, count, more->anisotropyMap, ROLE_DATA);
         markRole(roles, count, m->normalMap, ROLE_DATA);
         markRole(roles, count, m->surfaceMap, ROLE_DATA);
         markRole(roles, count, m->occlusionMap, ROLE_DATA);
@@ -800,6 +830,9 @@ static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc*
     m.sheenRoughnessMap = MAP(d->sheenRoughnessMap);
     m.specularMap = MAP(d->specularMap);
     m.specularColorMap = MAP(d->specularColorMap);
+    m.iridescenceMap = MAP(d->iridescenceMap);
+    m.iridescenceThicknessMap = MAP(d->iridescenceThicknessMap);
+    m.anisotropyMap = MAP(d->anisotropyMap);
 #undef MAP
     m.coatNormalScale = 1.f;
     m.flags = (m.coat > 0 ? ARTF_MORE_COAT : 0u) | (m.sheen[0] > 0 || m.sheen[1] > 0 || m.sheen[2] > 0 ? ARTF_MORE_SHEEN : 0u);
@@ -816,6 +849,7 @@ static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc*
     m.iridescence = artfClampf(d->iridescence, 0, 1);
     m.iridescenceIor = d->iridescenceIor >= 1.f ? d->iridescenceIor : 1.3f;
     m.iridescenceThickness = d->iridescenceThickness > 0 ? d->iridescenceThickness : 400.f;
+    m.iridescenceThicknessMin = artfClampf(d->iridescenceThicknessMin, 0, m.iridescenceThickness);
     if (m.iridescence > 0) m.flags |= ARTF_MORE_IRIDESCENCE;
     m.subsurface[0] = artfMaxf(d->subsurface.x, 0);
     m.subsurface[1] = artfMaxf(d->subsurface.y, 0);
@@ -849,6 +883,7 @@ ArtfMaterialDesc artfMaterialDefaults(void) {
     d.baseColor = artfVec3(1, 1, 1);
     d.specular = 1.f;
     d.roughness = .5f;
+    d.iridescenceThicknessMin = 100.f;
     return d;
 }
 

@@ -81,14 +81,20 @@ void artfCookPutMesh(ArtfCookBytes* b, const ArtfMeshData* m) {
     for (int k = 0; k < 3; ++k) artfCookPutFloat(b, m->offset[k]);
     for (int k = 0; k < 3; ++k) artfCookPutFloat(b, m->center[k]);
     artfCookPutFloat(b, m->radius);
-    artfCookPut32(b, (m->hasAlpha ? 1u : 0u) | (m->isLod ? 2u : 0u) | (m->colors ? 4u : 0u));
+    artfCookPut32(b, (m->hasAlpha ? 1u : 0u) | (m->isLod ? 2u : 0u) | (m->colors ? 4u : 0u) | (m->dagBounds ? 8u : 0u));
+    if (m->dagBounds) {
+        /* (a graph of clusters: all its indices, the full mesh's meshlets, and each meshlet's bounds, after the colors) */
+        artfCookPut32(b, m->dagIndexCount);
+        artfCookPut32(b, m->dagWhole);
+    }
     putArray(b, m->vertices, (size_t)m->vertexCount * sizeof *m->vertices);
-    putArray(b, m->indices, (size_t)m->indexCount * 4);
+    putArray(b, m->indices, (size_t)ARTF_MESH_ALL_INDICES(m) * 4);
     putArray(b, m->meshlets, (size_t)m->meshletCount * sizeof *m->meshlets);
     putArray(b, m->meshletVertices, (size_t)m->positionStride * 4);
-    putArray(b, m->meshletTriangles, (size_t)m->indexCount);
+    putArray(b, m->meshletTriangles, (size_t)ARTF_MESH_ALL_INDICES(m));
     putArray(b, m->positions, (size_t)m->positionStride * 3 * sizeof(float));
     if (m->colors) putArray(b, m->colors, (size_t)m->vertexCount * 4);
+    if (m->dagBounds) putArray(b, m->dagBounds, (size_t)m->meshletCount * 10 * sizeof(float));
 }
 
 bool artfCookGetMesh(ArtfCookReader* r, ArtfMeshData* m) {
@@ -104,18 +110,29 @@ bool artfCookGetMesh(ArtfCookReader* r, ArtfMeshData* m) {
     const uint32_t flags = artfCookGet32(r);
     m->hasAlpha = flags & 1;
     m->isLod = (flags & 2) != 0;
+    const bool dag = (flags & 8) != 0;
+    uint32_t all = m->indexCount;
+    if (dag) {
+        all = artfCookGet32(r);
+        m->dagWhole = artfCookGet32(r);
+        if (all < m->indexCount || all > (1u << 30) || m->dagWhole > m->meshletCount) r->failed = true;
+    }
     /* (no mesh of a file is past what memory takes: the counts are checked against what each array says it holds) */
     if (r->failed || m->vertexCount > (1u << 28) || m->indexCount > (1u << 30) || m->meshletCount > (1u << 26) || m->positionStride > (1u << 28)) {
         r->failed = true;
         return false;
     }
     m->vertices = getArray(r, (size_t)m->vertexCount * sizeof *m->vertices, false);
-    m->indices = getArray(r, (size_t)m->indexCount * 4, false);
+    m->indices = getArray(r, (size_t)all * 4, false);
     m->meshlets = getArray(r, (size_t)m->meshletCount * sizeof *m->meshlets, false);
     m->meshletVertices = getArray(r, (size_t)m->positionStride * 4, false);
-    m->meshletTriangles = getArray(r, (size_t)m->indexCount, false);
+    m->meshletTriangles = getArray(r, (size_t)all, false);
     m->positions = getArray(r, (size_t)m->positionStride * 3 * sizeof(float), true);
     if (flags & 4) m->colors = getArray(r, (size_t)m->vertexCount * 4, false);
+    if (dag) {
+        m->dagBounds = getArray(r, (size_t)m->meshletCount * 10 * sizeof(float), false);
+        m->dagIndexCount = all;
+    }
     if (r->failed) {
         artfMeshFini(m);
         memset(m, 0, sizeof *m);
@@ -124,9 +141,9 @@ bool artfCookGetMesh(ArtfCookReader* r, ArtfMeshData* m) {
     /* (what refers into the arrays must stay in them: a file is not trusted) */
     for (uint32_t i = 0; i < m->meshletCount; ++i) {
         const ArtfMeshlet* l = &m->meshlets[i];
-        if ((uint64_t)l->vertexOffset + l->vertexCount > m->positionStride || ((uint64_t)l->triangleOffset + l->triangleCount) * 3 > m->indexCount || l->vertexCount > 256) r->failed = true;
+        if ((uint64_t)l->vertexOffset + l->vertexCount > m->positionStride || ((uint64_t)l->triangleOffset + l->triangleCount) * 3 > all || l->vertexCount > 256) r->failed = true;
     }
-    for (uint32_t i = 0; i < m->indexCount && !r->failed; ++i)
+    for (uint32_t i = 0; i < all && !r->failed; ++i)
         if (m->indices[i] >= m->vertexCount) r->failed = true;
     for (uint32_t i = 0; i < m->positionStride && !r->failed; ++i)
         if (m->meshletVertices[i] >= m->vertexCount && m->vertexCount) r->failed = true;

@@ -737,6 +737,79 @@ void testSpecularMaps(void) {
     artfFree(cpuMapped[1]);
 }
 
+/* coatScene's sphere with a thin film or drawn highlights, by factors (kind 0, 2) or by textures that say as much
+ * (kind 1: the film's thickness texture at its least, 250 nm; kind 3: drawn along u, at full strength), or by checks
+ * (kind 4: the film's amount; kind 5: the highlights' strength). */
+static ArtfScene* filmScene(int kind) {
+    ArtfScene* s = coatScene(0, 0);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.5f, .05f, .05f);
+    d.roughness = .35f;
+    static uint32_t thin[16], along[16], checks[16 * 16], strong[16 * 16];
+    for (int i = 0; i < 16; ++i) {
+        thin[i] = 0xFFFF00FFu;  /* (green 0: the least thickness) */
+        along[i] = 0xFFFF80FFu; /* (red 1, green .5: along u; blue 1: full strength) */
+    }
+    for (int i = 0; i < 16 * 16; ++i) {
+        const bool on = (i / 16 / 4 + i % 16 / 4) & 1;
+        checks[i] = on ? 0xFFFFFFFFu : 0xFF00FFFFu; /* (red: the amount) */
+        strong[i] = on ? 0xFFFF80FFu : 0xFFFF8000u; /* (blue: the strength) */
+    }
+    if (kind <= 1 || kind == 4) {
+        d.iridescence = 1;
+        d.iridescenceThickness = kind == 0 ? 250.f : 550.f;
+        d.iridescenceThicknessMin = 250.f;
+        if (kind == 1) d.iridescenceThicknessMap = artfSceneAddTexture(s, thin, 4, 4, 0);
+        if (kind == 4) d.iridescenceMap = artfSceneAddTexture(s, checks, 16, 16, 0);
+    } else {
+        d.metallic = 1;
+        d.baseColor = artfVec3(.9f, .9f, .9f);
+        d.anisotropy = .9f;
+        if (kind == 3) d.anisotropyMap = artfSceneAddTexture(s, along, 4, 4, 0);
+        if (kind == 5) d.anisotropyMap = artfSceneAddTexture(s, strong, 16, 16, 0);
+    }
+    artfInstanceSetMaterial(s, s->instanceHandles.items[0], artfSceneAddMaterial(s, &d));
+    return s;
+}
+
+/* KHR_materials_iridescence's and KHR_materials_anisotropy's textures: what says as much as a factor draws as it,
+ * checks show, drawn and traced, both backends alike. */
+void testFilmMaps(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* cpu[2][2];
+    for (int i = 0; i < 4; ++i) cpu[i / 2][i % 2] = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        for (int traced = 0; traced < 2; ++traced)
+            for (int which = 0; which < 2; ++which) {
+                ArtfScene* scenes[3] = {filmScene(which * 2), filmScene(which * 2 + 1), filmScene(which + 4)};
+                const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 16, 0, true};
+                for (int k = 0; k < 3 && traced; ++k) artfSceneSetTrace(scenes[k], &paths);
+                const int frames = traced ? 16 : 1;
+                for (int k = 0; k < frames; ++k) drawInto(r, scenes[0], a);
+                for (int k = 0; k < frames; ++k) drawInto(r, scenes[1], b);
+                const double same = differentShare(a, b, traced ? 24 : 4);
+                for (int k = 0; k < frames; ++k) drawInto(r, scenes[2], a);
+                const double checkered = differentShare(a, b, 8);
+                double across = 0;
+                if (!backend) memcpy(cpu[traced][which], b, W * H * 4);
+                else across = differentShare(cpu[traced][which], b, 8);
+                printf("%s%s, %s: textures against factors %.3f%% of pixels apart; checks change %.2f%%; the GPU against the CPU %.3f%%\n", backend ? "GPU" : "CPU", traced ? ", traced" : "",
+                       which ? "drawn highlights" : "a thin film", same * 100, checkered * 100, across * 100);
+                CHECK(same < .003 && checkered > .01);
+                if (backend) CHECK(across < .01);
+                for (int k = 0; k < 3; ++k) artfSceneFree(scenes[k]);
+            }
+        artfRendererFree(r);
+    }
+    artfFree(a);
+    artfFree(b);
+    for (int i = 0; i < 4; ++i) artfFree(cpu[i / 2][i % 2]);
+}
+
 void testMoreMaterials(void) {
     uint32_t* a = artfMalloc(W * H * 4);
     uint32_t* b = artfMalloc(W * H * 4);

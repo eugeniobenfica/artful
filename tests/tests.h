@@ -160,6 +160,7 @@ void testLightShapes(void);
 void testProfiles(void);
 void testMoreMaterials(void);
 void testSpecularMaps(void);
+void testFilmMaps(void);
 void testTextureRoles(void);
 void testHighlightFlicker(void);
 /* files.c: glTF, its extensions and compressed blocks */
@@ -243,6 +244,7 @@ void testParticleForces(void);
 void testTerrainLayers(void);
 void testHlod(void);
 void testClusterDag(void);
+void testClusterDraw(void);
 void testHlodCooked(void);
 void testSkinLod(void);
 void testTracedSkinLod(void);

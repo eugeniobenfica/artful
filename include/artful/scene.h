@@ -96,6 +96,12 @@ ArtfTexture artfSceneAddPreparedTexture(ArtfScene* s, ArtfPreparedTexture* prepa
 /* Gives back a mesh, with its lighter versions, or a texture, on both backends. false, and logged, while an
  * instance or a material still uses it. A texture's place is used again; a mesh's memory is. */
 bool artfSceneRemoveMesh(ArtfScene* s, ArtfMesh mesh);
+/* A mesh as a graph of clusters at every level of detail (as Nanite's), in place of its lighter versions: each part is
+ * drawn as fine as the lod error asks where it is (artfSceneSetLodError), not the whole mesh by its nearest point, on
+ * both backends alike, with no cracks between parts. With the lod feature off, an orthographic camera, or what draws a
+ * mesh whole (shadows, sorted layers, holes cut out, rays), the full mesh is drawn. About 2.5 ms per thousand triangles,
+ * on the calling thread. false: it bends, is a level of another, is already so, or is not there. */
+bool artfSceneMeshSetClusters(ArtfScene* s, ArtfMesh mesh);
 bool artfSceneRemoveTexture(ArtfScene* s, ArtfTexture texture);
 
 /* What a scene holds, in bytes. Resident: of textures, at the mipmaps they have now; of meshes, the levels held
@@ -239,6 +245,11 @@ typedef struct ArtfMaterialDesc {
     /* The colors of a thin film over it, as on soap or oil (KHR_materials_iridescence): 0 to 1; the film's index (0:
      * 1.3) and thickness in nanometres (0: 400). */
     float iridescence, iridescenceIor, iridescenceThickness;
+    /* Their textures, as glTF's: the film's amount (red) and thickness (green, from iridescenceThicknessMin to
+     * iridescenceThickness: artfMaterialDefaults gives 100, glTF's); the drawn highlights' direction (red and green, -1
+     * to 1, turned by anisotropyRotation) and strength (blue). 0: none */
+    ArtfTexture iridescenceMap, iridescenceThicknessMap, anisotropyMap;
+    float iridescenceThicknessMin;
     /* Traced, what light keeps of each color through its inside (KHR_materials_volume): this much after this far.
      * 0: it keeps all */
     ArtfVec3 attenuation;

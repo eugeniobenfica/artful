@@ -109,7 +109,9 @@ typedef struct Slot {
 typedef struct SkinPlace { const ArtfSkinData* skin; uint32_t row; } SkinPlace;
 
 /* refused: it did not fit in the GPU's memory, and is not drawn (ARTF_EVENT_REFUSED); tried again when a mesh goes. */
-typedef struct MeshRange { uint32_t firstIndex; int32_t vertexOffset; uint32_t indexCount, colorBase; uint64_t deformVersion; uint32_t vertexLength, colorLength, generation, refused; } MeshRange;
+/* indexCount: what a whole draw takes (a graph's first level); indexLength: what was taken of the buffer */
+typedef struct MeshRange { uint32_t firstIndex; int32_t vertexOffset; uint32_t indexCount, colorBase; uint64_t deformVersion; uint32_t vertexLength, colorLength, generation, refused, indexLength; } MeshRange;
+#define MESHLET_ROWS 6 /* of the meshlet table, each: its ball, cone, range; a graph's own ball and its parent's; errors */
 
 /* Stretches of a buffer that were given back, by where they start. */
 typedef struct Span { uint32_t at, length; } Span;

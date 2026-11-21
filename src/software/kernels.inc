@@ -154,6 +154,12 @@ static void clipTriangle(GeometryContext* g, const ClipVertex* v) {
 }
 
 static inline bool meshletCulled(const ArtfSoftFrame* f, const ArtfVisible* v, const ArtfMeshlet* l) {
+    const ArtfMeshData* mesh = v->mesh;
+    if (mesh->dagBounds) {
+        /* a graph's cluster: drawn where it is as fine as asked and its parent is not (artfDagDrawn) */
+        const uint32_t k = (uint32_t)(l - mesh->meshlets);
+        if (!artfDagDrawn(mesh->dagBounds + (size_t)k * 10, k < mesh->dagWhole, v->instance->m, v->instance->maxScale, f->data.cameraPos, artfOrtho(&f->data) ? 0.f : f->data.lodScale)) return true;
+    }
     if (v->useCone && l->coneCutoff < 2.f && artfOrtho(&f->data)) {
         /* (all rays go one way: all its triangles face away when that way is inside the cone's back) */
         if (v->camera[0] * l->cone[0] + v->camera[1] * l->cone[1] + v->camera[2] * l->cone[2] >= l->coneCutoff) return true;
@@ -1117,6 +1123,27 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
             specularTint.z = v8fMul(specularTint.z, texel);
         }
     }
+    /* (a thin film's amount and thickness, and the drawn highlights' direction and strength: their textures') */
+    V8F filmAmount = v8fSet(more->iridescence), filmThickness = v8fSet(more->iridescenceThickness);
+    V8F drawnC = v8fSet(more->anisotropyDirection[0]), drawnS = v8fSet(more->anisotropyDirection[1]), drawnStrength = v8fSet(more->anisotropy);
+    if ((extraFlags & ARTF_MORE_IRIDESCENCE) && ARTF_MORE_FILM_MAPS(more)) {
+        if (more->iridescenceMap) filmAmount = v8fMul(filmAmount, SAMPLE(&textures[more->iridescenceMap], NULL).x);
+        if (more->iridescenceThicknessMap) {
+            const V8F least = v8fSet(more->iridescenceThicknessMin);
+            filmThickness = v8fAdd(least, v8fMul(v8fSub(filmThickness, least), SAMPLE(&textures[more->iridescenceThicknessMap], NULL).y));
+        }
+    }
+    if ((extraFlags & ARTF_MORE_ANISOTROPY) && more->anisotropyMap) {
+        const Lanes3 t = SAMPLE(&textures[more->anisotropyMap], NULL);
+        const V8F two = v8fSet(2.f);
+        V8F dx = v8fSub(v8fMul(t.x, two), one), dy = v8fSub(v8fMul(t.y, two), one);
+        const V8F inverse = v8fDiv(one, v8fSqrt(v8fMax(v8fAdd(v8fMul(dx, dx), v8fMul(dy, dy)), v8fSet(1e-20f))));
+        dx = v8fMul(dx, inverse);
+        dy = v8fMul(dy, inverse);
+        drawnC = v8fSub(v8fMul(v8fSet(more->anisotropyDirection[0]), dx), v8fMul(v8fSet(more->anisotropyDirection[1]), dy));
+        drawnS = v8fAdd(v8fMul(v8fSet(more->anisotropyDirection[1]), dx), v8fMul(v8fSet(more->anisotropyDirection[0]), dy));
+        drawnStrength = v8fMul(drawnStrength, t.z);
+    }
     if (extraFlags & ARTF_MORE_MAPS) {
         if (more->coatMap) coatAmount = v8fMul(coatAmount, SAMPLE(&textures[more->coatMap], NULL).x);
         if (more->coatRoughnessMap) coatRough = v8fMax(v8fMul(coatRough, SAMPLE(&textures[more->coatRoughnessMap], NULL).y), v8fSet(.045f));
@@ -1265,12 +1292,14 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         }
         if (extraFlags & ARTF_MORE_IRIDESCENCE) {
             /* a thin film's colors, as it is seen: in place of what it reflects head on */
-            _Alignas(32) float f0[3][8], cosine[8];
+            _Alignas(32) float f0[3][8], cosine[8], amount[8], thickness[8];
             v8fStore(f0[0], reflecting.f0.x); v8fStore(f0[1], reflecting.f0.y); v8fStore(f0[2], reflecting.f0.z);
             v8fStore(cosine, reflecting.lobe.ndv);
+            v8fStore(amount, filmAmount);
+            v8fStore(thickness, filmThickness);
             for (int i = 0; i < 8; ++i) {
                 float c[3] = {f0[0][i], f0[1][i], f0[2][i]};
-                artfIridescence(c, cosine[i], more->iridescence, more->iridescenceIor, more->iridescenceThickness);
+                artfIridescence(c, cosine[i], amount[i], more->iridescenceIor, thickness[i]);
                 for (int k = 0; k < 3; ++k) f0[k][i] = c[k];
             }
             reflecting.f0.x = v8fLoad(f0[0]); reflecting.f0.y = v8fLoad(f0[1]); reflecting.f0.z = v8fLoad(f0[2]);
@@ -1283,8 +1312,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
             const V8F inverse = v8fDiv(one, v8fSqrt(v8fMax(dot3(t, t), v8fSet(1e-20f))));
             t.x = v8fMul(t.x, inverse); t.y = v8fMul(t.y, inverse); t.z = v8fMul(t.z, inverse);
             const Lanes3 b = {v8fSub(v8fMul(n.y, t.z), v8fMul(n.z, t.y)), v8fSub(v8fMul(n.z, t.x), v8fMul(n.x, t.z)), v8fSub(v8fMul(n.x, t.y), v8fMul(n.y, t.x))};
-            const V8F strength = v8fSet(more->anisotropy * more->anisotropy);
-            lanesDraw(&reflecting.lobe, true, t, b, v8fSet(more->anisotropyDirection[0]), v8fSet(more->anisotropyDirection[1]), a, lanesDrawnLong(a, strength));
+            const V8F strength = v8fMul(drawnStrength, drawnStrength);
+            lanesDraw(&reflecting.lobe, true, t, b, drawnC, drawnS, a, lanesDrawnLong(a, strength));
         }
         /* what comes from all around, in the mirror direction: all a metal shows in a plain sky */
         const V8F twice = v8fMul(dot3(n, view), v8fSet(2.f));
@@ -1680,7 +1709,8 @@ static void shadeSetup(ShadeContext* s, const ArtfSoftFrame* f, const ArtfRaster
         /* (or the first of a coat's or sheen's) */
         const ArtfMaterialMore* more = &f->scene->materialsMore.items[v->instance->material];
         const uint32_t map = more->sheenMap ? more->sheenMap : more->coatMap ? more->coatMap : more->coatRoughnessMap ? more->coatRoughnessMap : more->coatNormalMap ? more->coatNormalMap : more->sheenRoughnessMap ? more->sheenRoughnessMap
-                           : more->specularColorMap ? more->specularColorMap : more->specularMap;
+                           : more->specularColorMap ? more->specularColorMap : more->specularMap ? more->specularMap : more->iridescenceMap ? more->iridescenceMap
+                           : more->iridescenceThicknessMap ? more->iridescenceThicknessMap : more->anisotropyMap;
         s->sizing = map ? &textures[map] : NULL;
     }
     s->colored = mesh->colors != NULL;

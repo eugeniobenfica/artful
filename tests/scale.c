@@ -863,3 +863,110 @@ void testClusterDag(void) {
     artfFree(ix);
     artfFree(v);
 }
+
+/* The terrain of testClusterDag, as a scene: drawn whole or as a graph of clusters. */
+static ArtfScene* terrainScene(bool clustered, bool lod) {
+    enum { N = 192 };
+    ArtfVertex* v = artfMalloc((size_t)(N + 1) * (N + 1) * sizeof *v);
+    for (int z = 0; z <= N; ++z)
+        for (int x = 0; x <= N; ++x) {
+            ArtfVertex* p = &v[z * (N + 1) + x];
+            memset(p, 0, sizeof *p);
+            p->px = (float)x * 100.f / N;
+            p->pz = (float)z * 100.f / N;
+            p->py = 1.5f * sinf(p->px * .21f) * cosf(p->pz * .17f) + .4f * sinf(p->px * 1.3f + p->pz * .9f);
+            /* (the normal of that surface) */
+            const float gx = 1.5f * .21f * cosf(p->px * .21f) * cosf(p->pz * .17f) + .4f * 1.3f * cosf(p->px * 1.3f + p->pz * .9f);
+            const float gz = -1.5f * .17f * sinf(p->px * .21f) * sinf(p->pz * .17f) + .4f * .9f * cosf(p->px * 1.3f + p->pz * .9f);
+            const float l = 1.f / sqrtf(gx * gx + 1 + gz * gz);
+            p->nx = -gx * l; p->ny = l; p->nz = -gz * l;
+            p->u = (float)x / N;
+            p->v = (float)z / N;
+            p->color = 0xFFFFFFFFu;
+        }
+    uint32_t* ix = artfMalloc((size_t)N * N * 6 * 4);
+    uint32_t n = 0;
+    for (int z = 0; z < N; ++z)
+        for (int x = 0; x < N; ++x) {
+            const uint32_t a = (uint32_t)(z * (N + 1) + x), b = a + 1, c = a + N + 1, d = c + 1;
+            ix[n++] = a; ix[n++] = c; ix[n++] = b;
+            ix[n++] = b; ix[n++] = c; ix[n++] = d;
+        }
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetFeature(s, ARTF_FEATURE_LOD, lod);
+    const ArtfMesh mesh = artfSceneAddMesh(s, v, (N + 1) * (N + 1), ix, n);
+    if (clustered) CHECK(artfSceneMeshSetClusters(s, mesh));
+    ArtfMaterialDesc grey = artfMaterialDefaults();
+    grey.baseColor = artfVec3(.5f, .45f, .4f);
+    grey.roughness = .8f;
+    artfSceneAddInstance(s, mesh, artfSceneAddMaterial(s, &grey), NULL);
+    artfSceneSetSun(s, artfVec3(-.4f, -.7f, .5f), artfVec3(2, 2, 2));
+    artfSceneSetAmbient(s, artfVec3(.2f, .25f, .3f), artfVec3(.05f, .05f, .05f));
+    artfSceneSetBackground(s, artfVec3(.4f, .5f, .7f));
+    setCamera(s, 50, 4, -2, 50, 0, 50);
+    artfFree(ix);
+    artfFree(v);
+    return s;
+}
+
+/* Phase 5.5 drawn: the graph's cut looks as the whole terrain does, within the error asked, on both backends alike;
+ * with no level of detail it is the whole; and the CPU's lanes of each width give the same bytes. */
+void testClusterDraw(void) {
+    uint32_t* whole = artfMalloc(W * H * 4);
+    uint32_t* cut = artfMalloc(W * H * 4);
+    uint32_t* cpu[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        for (int lod = 0; lod < 2; ++lod) {
+            ArtfScene* a = terrainScene(false, false);
+            ArtfScene* b = terrainScene(true, lod);
+            drawInto(r, a, whole);
+            drawInto(r, b, cut);
+            const double apart = differentShare(whole, cut, 16);
+            double across = 0;
+            if (!backend) memcpy(cpu[lod], cut, W * H * 4);
+            else across = differentShare(cpu[lod], cut, 16);
+            printf("%s, the terrain's graph%s: against the whole, %.3f%% of pixels apart; the GPU against the CPU %.3f%%\n", backend ? "GPU" : "CPU", lod ? ", cut" : " with no level of detail",
+                   apart * 100, across * 100);
+            CHECK(apart < (lod ? .01 : .001));
+            if (backend) CHECK(across < .01);
+            artfSceneFree(a);
+            artfSceneFree(b);
+        }
+        artfRendererFree(r);
+    }
+    static const ArtfSimd sets[3] = {ARTF_SIMD_AUTO, ARTF_SIMD_128, ARTF_SIMD_PORTABLE};
+    uint64_t hashes[3];
+    for (int k = 0; k < 3; ++k) {
+        ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, k == 2 ? 1 : 0, false);
+        o.simd = sets[k];
+        ArtfRenderer* r = artfRendererNew(&o);
+        ArtfScene* b = terrainScene(true, true);
+        drawInto(r, b, cut);
+        hashes[k] = hashOf(cut, (size_t)W * H);
+        artfSceneFree(b);
+        artfRendererFree(r);
+    }
+    CHECK(hashes[0] == hashes[1] && hashes[1] == hashes[2]);
+    {
+        /* cooked and read back: the same graph */
+        ArtfScene* b = terrainScene(true, true);
+        const ArtfMeshData* m = &b->meshes.items[b->instances.items[0].mesh];
+        ArtfCookBytes bytes = {0};
+        artfCookPutMesh(&bytes, m);
+        ArtfCookReader reader = {bytes.items, bytes.len, 0, false};
+        ArtfMeshData back;
+        CHECK(artfCookGetMesh(&reader, &back) && back.dagBounds && back.dagWhole == m->dagWhole && back.dagIndexCount == m->dagIndexCount && back.indexCount == m->indexCount &&
+              !memcmp(back.indices, m->indices, (size_t)m->dagIndexCount * 4) && !memcmp(back.dagBounds, m->dagBounds, (size_t)m->meshletCount * 40));
+        printf("the terrain's graph: %u meshlets, %u of the full mesh; %u indices, %u of the full mesh; cooked in %zu bytes\n", m->meshletCount, m->dagWhole, m->dagIndexCount, m->indexCount, bytes.len);
+        artfMeshFini(&back);
+        artfFree(bytes.items);
+        artfSceneFree(b);
+    }
+    artfFree(whole);
+    artfFree(cut);
+    artfFree(cpu[0]);
+    artfFree(cpu[1]);
+}

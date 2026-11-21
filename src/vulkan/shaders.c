@@ -639,8 +639,9 @@ uint32_t* artfShaderMeshletCull(size_t* size, ArtfCullPhase phase) {
     SpvId firstIndex = spvLoad(s, s->uintType, bufferUintPtr(s, &r, meshes, ADD_U(info, UINT(2)))), firstVertex = spvLoad(s, s->uintType, bufferUintPtr(s, &r, meshes, ADD_U(info, UINT(3))));
     SpvId merge;
     spvIfBegin(s, spvOp2(s, SPV_OP_ULessThan, s->boolType, i, count), &merge);
-    SpvId row = MUL_U(ADD_U(first, i), UINT(3));
+    SpvId row = MUL_U(ADD_U(first, i), UINT(6 /* vulkanInternal.h's MESHLET_ROWS */));
     SpvId sphere = bufferVec(s, &r, table, row), cone = bufferVec(s, &r, table, ADD_U(row, UINT(1))), range = bufferVec(s, &r, table, ADD_U(row, UINT(2)));
+    SpvId selfBall = bufferVec(s, &r, table, ADD_U(row, UINT(3))), parentBall = bufferVec(s, &r, table, ADD_U(row, UINT(4))), errors = bufferVec(s, &r, table, ADD_U(row, UINT(5)));
     SpvId base = MUL_U(instance, UINT(4));
     SpvId r0 = bufferVec(s, &r, r.instances, base), r1 = bufferVec(s, &r, r.instances, ADD_U(base, UINT(1)));
     SpvId r2 = bufferVec(s, &r, r.instances, ADD_U(base, UINT(2))), meta = bufferVec(s, &r, r.instances, ADD_U(base, UINT(3)));
@@ -651,6 +652,22 @@ uint32_t* artfShaderMeshletCull(size_t* size, ArtfCullPhase phase) {
     SpvId least = DOT4(frameVec(s, &r, F_PLANES), world);
     for (uint32_t p = 1; p < 5; ++p) least = MIN_F(least, DOT4(frameVec(s, &r, F_PLANES + p), world));
     SpvId seen = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, ADD_F(least, radius), FLOAT(0.f));
+    {
+        /* a graph's cluster: as fine as asked here, and its parent not (sceneInternal.h's artfDagDrawn) */
+        SpvId eye = spvShuffle3(s, frameVec(s, &r, F_CAMERA)), lodScale = Z(frameVec(s, &r, F_COUNTS)), scale = Z(meta);
+        SpvId fine[2];
+        for (int k = 0; k < 2; ++k) {
+            SpvId ball = k ? parentBall : selfBall, error = k ? Y(errors) : X(errors);
+            SpvId c4 = vec4Of(s, spvShuffle3(s, ball), FLOAT(1.f));
+            SpvId d = SUB_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(vec3Of(s, DOT4(r0, c4), DOT4(r1, c4), DOT4(r2, c4)), eye)), MUL_F(W(ball), scale));
+            fine[k] = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, error, FLOAT(1e30f)),
+                             spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, MUL_F(MUL_F(error, scale), lodScale), MAX_F(d, FLOAT(0.f))));
+        }
+        SpvId levels = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, lodScale, FLOAT(0.f)), spvOp1(s, SPV_OP_LogicalNot, s->boolType, orthoOn(s, &r)));
+        SpvId picked = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, fine[0], spvOp1(s, SPV_OP_LogicalNot, s->boolType, fine[1]));
+        SpvId drawn = spvSelect(s, s->boolType, levels, picked, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, Z(errors), FLOAT(.5f)));
+        seen = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, seen, drawn);
+    }
     /* its cone, in the world, where the instance keeps its shape */
     SpvId uniform = spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, AS_UINT(W(meta)), UINT((uint32_t)ARTF_INSTANCE_UNIFORM << 16)), UINT(0));
     SpvId axis4 = vec4Of(s, spvShuffle3(s, cone), FLOAT(0.f));
@@ -1399,6 +1416,27 @@ static SpvId specularTint(Spv* s, const SpvId* e, SpvId colorTexel, SpvId streng
     return pick3(s, hasStrength, SCALE_V3(tint, W(strengthTexel)), tint);
 }
 
+/* KHR_materials_iridescence's and KHR_materials_anisotropy's textures, as kernels.inc's: the film's amount and
+ * thickness; the drawn highlights' direction (c, sn) and strength. Each as without, where a material has none (row 8). */
+typedef struct MoreMaps { SpvId amount, thickness, c, sn, strength; } MoreMaps;
+static MoreMaps moreMapsSpv(Spv* s, const SpvId* e, SpvId filmTexel, SpvId thicknessTexel, SpvId drawnTexel) {
+    MoreMaps m;
+    SpvId hasFilm = spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(X(e[8])), UINT(0));
+    SpvId hasThickness = spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(Y(e[8])), UINT(0));
+    SpvId hasDrawn = spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(Z(e[8])), UINT(0));
+    m.amount = spvSelect(s, s->floatType, hasFilm, MUL_F(W(e[3]), X(filmTexel)), W(e[3]));
+    SpvId least = W(e[8]);
+    m.thickness = spvSelect(s, s->floatType, hasThickness, ADD_F(least, MUL_F(SUB_F(Z(e[5]), least), Y(thicknessTexel))), Z(e[5]));
+    SpvId dx = SUB_F(MUL_F(X(drawnTexel), FLOAT(2.f)), FLOAT(1.f)), dy = SUB_F(MUL_F(Y(drawnTexel), FLOAT(2.f)), FLOAT(1.f));
+    SpvId inverse = DIV_F(FLOAT(1.f), spvGlsl1(s, SPV_GLSL_Sqrt, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, ADD_F(MUL_F(dx, dx), MUL_F(dy, dy)), FLOAT(1e-20f))));
+    dx = MUL_F(dx, inverse);
+    dy = MUL_F(dy, inverse);
+    m.c = spvSelect(s, s->floatType, hasDrawn, SUB_F(MUL_F(X(e[5]), dx), MUL_F(Y(e[5]), dy)), X(e[5]));
+    m.sn = spvSelect(s, s->floatType, hasDrawn, ADD_F(MUL_F(Y(e[5]), dx), MUL_F(X(e[5]), dy)), Y(e[5]));
+    m.strength = spvSelect(s, s->floatType, hasDrawn, MUL_F(Z(e[3]), Z(drawnTexel)), Z(e[3]));
+    return m;
+}
+
 static SpvId textureAt(Spv* s, SpvId textures, SpvId sampled, SpvId index, SpvId uv) {
     spvDecorate(s, index, SPV_DECORATE_NonUniform, -1);
     SpvId slot = spvAccess(s, spvTypePointer(s, SPV_STORAGE_UniformConstant, sampled), textures, &index, 1);
@@ -1874,11 +1912,12 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     if (coats) {
         /* a dielectric's of a color, and a thin film's colors, as on the CPU */
         f0 = shaderReflects3(s, MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, textureAt(s, textures, sampled, AS_UINT(W(e[7])), uv), textureAt(s, textures, sampled, AS_UINT(W(e[6])), uv))), notMetal, albedo, metal);
-        f0 = pick3(s, MORE_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, W(e[3]), W(e[4]), Z(e[5])), f0);
+        const MoreMaps mm = moreMapsSpv(s, e, textureAt(s, textures, sampled, AS_UINT(X(e[8])), uv), textureAt(s, textures, sampled, AS_UINT(Y(e[8])), uv), textureAt(s, textures, sampled, AS_UINT(Z(e[8])), uv));
+        f0 = pick3(s, MORE_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, mm.amount, W(e[4]), mm.thickness), f0);
         reflecting.f0 = f0;
         /* highlights drawn out: the way u grows, square to the normal, turned as asked */
         SpvId t = NORMALIZE(SUB_V3(tangent, SCALE_V3(n, DOT3(n, tangent)))), bt = G_CROSS(n, t);
-        shaderDraw(s, &reflecting.lobe, MORE_HAS(ARTF_MORE_ANISOTROPY), t, bt, X(e[5]), Y(e[5]), a, shaderDrawnLong(s, a, MUL_F(Z(e[3]), Z(e[3]))));
+        shaderDraw(s, &reflecting.lobe, MORE_HAS(ARTF_MORE_ANISOTROPY), t, bt, mm.c, mm.sn, a, shaderDrawnLong(s, a, MUL_F(mm.strength, mm.strength)));
     }
     reflecting.gain = shaderGain3(s, reflecting.f0, shaderUnkept(s, ndv, rough));
     SpvId shiny = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, ADD_F(specular, metal), FLOAT(0.f));
@@ -3337,7 +3376,8 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     SpvId moreFlags = spvSelect(s, s->uintType, unlit, AND_U(AS_UINT(W(e[0])), UINT(ARTF_MORE_VOLUME)), AS_UINT(W(e[0])));
 #define T_HAS(bit) NOT_EQ(AND_U(moreFlags, UINT(bit)), UINT(0))
     f0 = shaderReflects3(s, MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, traceTexture(t, lodBase, AS_UINT(W(e[7])), uv), traceTexture(t, lodBase, AS_UINT(W(e[6])), uv))), notMetal, albedo, metal);
-    f0 = pick3(s, T_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, W(e[3]), W(e[4]), Z(e[5])), f0);
+    const MoreMaps mm = moreMapsSpv(s, e, traceTexture(t, lodBase, AS_UINT(X(e[8])), uv), traceTexture(t, lodBase, AS_UINT(Y(e[8])), uv), traceTexture(t, lodBase, AS_UINT(Z(e[8])), uv));
+    f0 = pick3(s, T_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, mm.amount, W(e[4]), mm.thickness), f0);
     SpvId gain = shaderGain3(s, f0, shaderUnkept(s, ndv, rough));
     SpvId mirror = pick3(s, shiny, MUL_V3(shaderMirror3(s, f0, SUB_F(FLOAT(1.f), rough), shaderFifth(s, ndv), FLOAT(1.f)), gain), same3(s, 0.f));
     /* highlights drawn out: the way u grows, into the world by toObject's inverse, square to the normal, turned */
@@ -3345,7 +3385,7 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     SpvId tw = SCALE_V3(ADD_V3(ADD_V3(SCALE_V3(c12, X(tangent)), SCALE_V3(c20, Y(tangent))), SCALE_V3(c01, Z(tangent))), PICK_F(LESS_F(DOT3(k0, c12), FLOAT(0.f)), FLOAT(-1.f), FLOAT(1.f)));
     SpvId ta = NORMALIZE(SUB_V3(tw, SCALE_V3(normal, DOT3(normal, tw)))), tb = G_CROSS(normal, ta);
     shaderLobe lobe = shaderLobeOf(s, rough, ndv);
-    shaderDraw(s, &lobe, T_HAS(ARTF_MORE_ANISOTROPY), ta, tb, X(e[5]), Y(e[5]), a, shaderDrawnLong(s, a, MUL_F(Z(e[3]), Z(e[3]))));
+    shaderDraw(s, &lobe, T_HAS(ARTF_MORE_ANISOTROPY), ta, tb, mm.c, mm.sn, a, shaderDrawnLong(s, a, MUL_F(mm.strength, mm.strength)));
     /* the coat and sheen, and their textures (white when none) */
     SpvId coat = PICK_F(unlit, FLOAT(0.f), MUL_F(X(e[0]), X(traceTexture(t, lodBase, AS_UINT(X(e[2])), uv))));
     SpvId coatRough = MAX_F(MUL_F(Y(e[0]), Y(traceTexture(t, lodBase, AS_UINT(Y(e[2])), uv))), FLOAT(.045f));

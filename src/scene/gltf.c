@@ -616,11 +616,15 @@ static ArtfMaterial materialOf(Loader* l, const Json* m) {
     d.iridescence = (float)numberOf(l, film, "iridescenceFactor", 0);
     d.iridescenceIor = (float)numberOf(l, film, "iridescenceIor", 1.3);
     d.iridescenceThickness = (float)numberOf(l, film, "iridescenceThicknessMaximum", 400);
+    d.iridescenceThicknessMin = (float)numberOf(l, film, "iridescenceThicknessMinimum", 100);
+    d.iridescenceMap = textureOf(l, member(l, film, "iridescenceTexture"));
+    d.iridescenceThicknessMap = textureOf(l, member(l, film, "iridescenceThicknessTexture"));
     const Json* drawn = member(l, extensions, "KHR_materials_anisotropy");
     d.anisotropy = (float)numberOf(l, drawn, "anisotropyStrength", 0);
     d.anisotropyRotation = (float)numberOf(l, drawn, "anisotropyRotation", 0);
-    if (member(l, film, "iridescenceTexture") || member(l, film, "iridescenceThicknessTexture") || member(l, drawn, "anisotropyTexture") || member(l, volume, "thicknessTexture"))
-        artfLog("artful: glTF: textures of iridescence, anisotropy or volume are left out: their factors are kept");
+    d.anisotropyMap = textureOf(l, member(l, drawn, "anisotropyTexture"));
+    /* (a volume's thickness texture stands in for how far light goes inside, for those that do not trace it: here it
+     * is traced) */
     return artfSceneAddMaterial(l->scene, &d);
 }
 

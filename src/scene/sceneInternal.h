@@ -76,6 +76,23 @@ ARTF_INLINE bool artfDagFine(const float* bounds, const float* eye, float lodSca
 }
 /* The clusters drawn from eye: how many, and which, in order, in chosen (or NULL). */
 uint32_t artfDagCut(const ArtfDag* d, const float* eye, float lodScale, uint32_t* chosen);
+/* What an instance draws of a cluster of its mesh's graph, in the world: centers by its matrix m (three rows of four),
+ * balls and errors by its largest scale; with no level of detail (lodScale 0, or an orthographic camera), the first
+ * level. The GPU's meshlet culling does the same (shaders.c). */
+ARTF_INLINE bool artfDagFineAt(const float* b, const float* m, float maxScale, const float* eye, float lodScale) {
+    if (!(b[4] < 1e30f)) return false;
+    const float cx = m[0] * b[0] + m[1] * b[1] + m[2] * b[2] + m[3], cy = m[4] * b[0] + m[5] * b[1] + m[6] * b[2] + m[7], cz = m[8] * b[0] + m[9] * b[1] + m[10] * b[2] + m[11];
+    const float dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
+    return b[4] * maxScale * lodScale <= artfMaxf(sqrtf((dx * dx + dy * dy) + dz * dz) - b[3] * maxScale, 0.f);
+}
+ARTF_INLINE bool artfDagDrawn(const float* bounds, bool first, const float* m, float maxScale, const float* eye, float lodScale) {
+    if (!(lodScale > 0)) return first;
+    return artfDagFineAt(bounds, m, maxScale, eye, lodScale) && !artfDagFineAt(bounds + 5, m, maxScale, eye, lodScale);
+}
+/* Of a mesh's meshlets, those of the full mesh: all but a graph's levels past the first. */
+#define ARTF_MESH_WHOLE_MESHLETS(m) ((m)->dagBounds ? (m)->dagWhole : (m)->meshletCount)
+/* All its indices: a graph's levels too. */
+#define ARTF_MESH_ALL_INDICES(m) ((m)->dagBounds ? (m)->dagIndexCount : (m)->indexCount)
 
 /* What a mesh that bends was, by the order of its packed vertices. */
 typedef struct ArtfSkinData {
@@ -124,6 +141,11 @@ typedef struct ArtfMeshData {
     float lodErrors[ARTF_MAX_LODS];
     uint32_t lodCount;
     bool isLod;
+    /* As a graph of clusters (artfSceneMeshSetClusters): one meshlet a cluster, those of the first level (the full mesh)
+     * first, dagWhole of them; indexCount counts only theirs, dagIndexCount all. dagBounds: of each meshlet, its own
+     * bounds and its parent's (ArtfDagCluster's self and parent). NULL: not so. */
+    float* dagBounds;
+    uint32_t dagWhole, dagIndexCount;
     /* What bends has levels apart (scale.c), each with a skin of its own: on the mesh given, those meshes; on an
      * instance's copy of it, the copies of them that instance takes in turn. home: on each such copy, the copy of the
      * whole + 1, which holds the list. The backends never see these: an instance's mesh is the level it takes. */
@@ -141,6 +163,9 @@ typedef struct ArtfMeshData {
     bool evicted;
     bool streamed;  /* it can be read again (artfSceneAddMeshStreamed) */
 } ArtfMeshData;
+
+/* As a graph's (meshBuild.c): its indices, meshlets and bounds from the graph's. */
+void artfMeshSetDag(ArtfMeshData* m, const ArtfDag* d);
 
 /* The error of a mesh's level i, as both backends choose by it: 0, always taken, where the levels before it are not
  * held. */
@@ -214,8 +239,11 @@ typedef struct ArtfMaterialMore {
     uint32_t specularMap;               /* KHR_materials_specular's: how much (alpha) */
     float absorb[3];                    /* traced, through its inside: kept is 2^-(absorb x distance) */
     uint32_t specularColorMap;          /* and of what color (as a base color's) */
+    /* KHR_materials_iridescence's and KHR_materials_anisotropy's textures, and the film's least thickness */
+    uint32_t iridescenceMap, iridescenceThicknessMap, anisotropyMap;
+    float iridescenceThicknessMin;
 } ArtfMaterialMore;
-#define ARTF_MATERIAL_MORE_ROWS 8
+#define ARTF_MATERIAL_MORE_ROWS 9
 enum {
     ARTF_MORE_COAT = 1, ARTF_MORE_SHEEN = 2, ARTF_MORE_SPECULAR = 4, ARTF_MORE_ANISOTROPY = 8, ARTF_MORE_IRIDESCENCE = 16,
     ARTF_MORE_SUBSURFACE = 32, ARTF_MORE_MAPS = 64 /* the coat's or sheen's textures */, ARTF_MORE_VOLUME = 128,
@@ -223,6 +251,7 @@ enum {
 };
 /* It needs where u and v go: a coat's normal map, or highlights drawn out. */
 #define ARTF_MORE_SPECULAR_MAPS(m) ((m)->specularMap || (m)->specularColorMap)
+#define ARTF_MORE_FILM_MAPS(m) ((m)->iridescenceMap || (m)->iridescenceThicknessMap)
 #define ARTF_MORE_TANGENT(m) ((m)->coatNormalMap || ((m)->flags & ARTF_MORE_ANISOTROPY))
 ARTF_INLINE bool artfMaterialLayered(const ArtfMaterialMore* m) { return (m->flags & ARTF_MORE_DRAWN) != 0; }
 

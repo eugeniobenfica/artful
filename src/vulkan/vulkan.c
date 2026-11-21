@@ -1840,12 +1840,12 @@ VkDeviceSize instanceBytes(const Vulkan* v) { return (VkDeviceSize)v->instanceCa
 
 /* What the shaders need of meshlets, for meshes that have many, do not bend, and are on the GPU (not removed, sent
  * away by residency, or refused for want of memory: their ranges hold nothing to read). */
-bool meshletsUsed(const Vulkan* v, const ArtfMeshData* m, size_t i) { return m->meshletCount >= MESHLET_LEAST && !m->skin && !m->removed && i < v->meshes.len && v->meshes.items[i].indexCount; }
+bool meshletsUsed(const Vulkan* v, const ArtfMeshData* m, size_t i) { return (m->meshletCount >= MESHLET_LEAST || m->dagBounds) && !m->skin && !m->removed && i < v->meshes.len && v->meshes.items[i].indexCount; }
 bool meshletsUp(Vulkan* v, const ArtfScene* scene) {
     size_t rows = 1;
     for (size_t i = 0; i < scene->meshes.len; ++i) {
         const ArtfMeshData* m = &scene->meshes.items[i];
-        if (meshletsUsed(v, m, i)) rows += (size_t)m->meshletCount * 3;
+        if (meshletsUsed(v, m, i)) rows += (size_t)m->meshletCount * MESHLET_ROWS;
     }
     const VkDeviceSize tableBytes = (VkDeviceSize)rows * 16, meshBytes = ((VkDeviceSize)scene->meshes.len + 1) * 16;
     if (tableBytes > v->meshletTable.size) {
@@ -1869,12 +1869,22 @@ bool meshletsUp(Vulkan* v, const ArtfScene* scene) {
         memcpy(meshes + i * 4, info, sizeof info);
         if (!used) continue;
         v->mostMeshlets = artfMaxi((int)v->mostMeshlets, (int)m->meshletCount);
-        for (uint32_t k = 0; k < m->meshletCount; ++k, table += 12) {
+        for (uint32_t k = 0; k < m->meshletCount; ++k, table += MESHLET_ROWS * 4) {
             const ArtfMeshlet* l = &m->meshlets[k];
             const uint32_t indices[2] = {l->triangleOffset * 3, l->triangleCount * 3};
             memcpy(table, l->center, 16);
             memcpy(table + 4, l->cone, 16);
             memcpy(table + 8, indices, 8);
+            /* a graph's cluster: its bounds and its parent's (artfDagDrawn); else always drawn, as on the first level */
+            const float* b = m->dagBounds ? m->dagBounds + (size_t)k * 10 : NULL;
+            const float none[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 3e38f};
+            if (!b) b = none;
+            memcpy(table + 12, b, 16);
+            memcpy(table + 16, b + 5, 16);
+            table[20] = b[4];
+            table[21] = b[9] < 1e30f ? b[9] : 3e38f;
+            table[22] = !m->dagBounds || k < m->dagWhole ? 1.f : 0.f;
+            table[23] = 0;
         }
         first += m->meshletCount;
     }
@@ -1921,7 +1931,7 @@ bool syncScene(Vulkan* v, ArtfScene* scene) {
             refill = refill || !m->removed;
             if (!range->indexCount) { range->generation = m->removed ? m->generation : ~m->generation; continue; }
             spanGive(&v->vertexSpans, (uint32_t)range->vertexOffset, range->vertexLength);
-            spanGive(&v->indexSpans, range->firstIndex, range->indexCount);
+            spanGive(&v->indexSpans, range->firstIndex, range->indexLength);
             spanGive(&v->colorSpans, range->colorBase, range->colorLength);
             memset(range, 0, sizeof *range);
             range->generation = m->removed ? m->generation : ~m->generation;
@@ -1948,7 +1958,7 @@ bool syncScene(Vulkan* v, ArtfScene* scene) {
                 MeshRange range = {0, 0, 0, 0, m->skin ? m->pose.applied : m->deformVersion, 0, 0, m->generation, 0};
                 if (m->vertexCount && !m->evicted) {
                     const uint32_t atVertex = spanTake(&v->vertexSpans, m->vertexCount, &v->vertexCount, (uint32_t)(v->vertices.size / sizeof(ArtfPackedVertex)));
-                    const uint32_t atIndex = atVertex == UINT32_MAX ? UINT32_MAX : spanTake(&v->indexSpans, m->indexCount, &v->indexCount, (uint32_t)(v->indices.size / 4));
+                    const uint32_t atIndex = atVertex == UINT32_MAX ? UINT32_MAX : spanTake(&v->indexSpans, ARTF_MESH_ALL_INDICES(m), &v->indexCount, (uint32_t)(v->indices.size / 4));
                     const uint32_t atColor = atIndex == UINT32_MAX || !m->colors ? 0 : spanTake(&v->colorSpans, m->vertexCount, &v->colorCount, (uint32_t)(v->colors.size / 4));
                     const bool room = atVertex != UINT32_MAX && atIndex != UINT32_MAX && atColor != UINT32_MAX;
                     if (!room && !refusing) {
@@ -1957,11 +1967,11 @@ bool syncScene(Vulkan* v, ArtfScene* scene) {
                     }
                     /* (what goes up through a staging buffer may find no memory for that either) */
                     const bool up = room && upload(v, &v->vertices, (VkDeviceSize)atVertex * sizeof(ArtfPackedVertex), m->vertices, (VkDeviceSize)m->vertexCount * sizeof(ArtfPackedVertex)) &&
-                                    upload(v, &v->indices, (VkDeviceSize)atIndex * 4, m->indices, (VkDeviceSize)m->indexCount * 4) &&
+                                    upload(v, &v->indices, (VkDeviceSize)atIndex * 4, m->indices, (VkDeviceSize)ARTF_MESH_ALL_INDICES(m) * 4) &&
                                     (!m->colors || upload(v, &v->colors, (VkDeviceSize)atColor * 4, m->colors, (VkDeviceSize)m->vertexCount * 4));
                     if (!up) {
                         if (atVertex != UINT32_MAX) spanGive(&v->vertexSpans, atVertex, m->vertexCount);
-                        if (atIndex != UINT32_MAX) spanGive(&v->indexSpans, atIndex, m->indexCount);
+                        if (atIndex != UINT32_MAX) spanGive(&v->indexSpans, atIndex, ARTF_MESH_ALL_INDICES(m));
                         if (atColor != UINT32_MAX && m->colors) spanGive(&v->colorSpans, atColor, m->vertexCount);
                         const ArtfMesh handle = artfMeshHandleOf(scene, (uint32_t)i);
                         artfEventSay(ARTF_EVENT_REFUSED, v, handle, (uint64_t)m->vertexCount * sizeof(ArtfPackedVertex) + (uint64_t)m->indexCount * 4,
@@ -1971,6 +1981,7 @@ bool syncScene(Vulkan* v, ArtfScene* scene) {
                         range.firstIndex = atIndex;
                         range.vertexOffset = (int32_t)atVertex;
                         range.indexCount = m->indexCount;
+                        range.indexLength = ARTF_MESH_ALL_INDICES(m);
                         range.colorBase = atColor;
                         range.vertexLength = m->vertexCount;
                         range.colorLength = m->colors ? m->vertexCount : 0;
@@ -1983,7 +1994,7 @@ bool syncScene(Vulkan* v, ArtfScene* scene) {
             uint64_t vertices = 0, indices = 0, colors = 1;
             for (size_t k = 0; k < scene->meshes.len; ++k) {
                 vertices += scene->meshes.items[k].vertexCount;
-                indices += scene->meshes.items[k].indexCount;
+                indices += ARTF_MESH_ALL_INDICES(&scene->meshes.items[k]);
                 if (scene->meshes.items[k].colors) colors += scene->meshes.items[k].vertexCount;
             }
             bool made = false;
@@ -3196,7 +3207,7 @@ bool meshletIdsUp(Vulkan* v, const ArtfScene* scene) {
     for (size_t i = 0; i < scene->meshes.len; ++i) {
         const ArtfMeshData* m = &scene->meshes.items[i];
         out[i] = at;
-        for (uint32_t k = 0; k < m->meshletCount; ++k)
+        for (uint32_t k = 0; k < ARTF_MESH_WHOLE_MESHLETS(m); ++k)
             for (uint32_t t = 0; t < m->meshlets[k].triangleCount; ++t) out[at + m->meshlets[k].triangleOffset + t] = k;
         at += m->indexCount / 3;
     }

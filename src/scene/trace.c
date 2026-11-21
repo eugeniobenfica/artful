@@ -745,7 +745,16 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         }
     }
     for (int i = 0; i < 3; ++i) out->f0[i] = artfShadeReflects(.04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f) * specularTint[i], notMetal, albedo[i], metal);
-    if (flags & ARTF_MORE_IRIDESCENCE) artfIridescence(out->f0, ndv, more->iridescence, more->iridescenceIor, more->iridescenceThickness);
+    if (flags & ARTF_MORE_IRIDESCENCE) {
+        /* (and its textures', as kernels.inc has them) */
+        float amount = more->iridescence, thickness = more->iridescenceThickness, texel[4];
+        if (more->iridescenceMap) { texelCone(&textures[more->iridescenceMap], lodBase, u, v, texel); amount *= texel[2]; }
+        if (more->iridescenceThicknessMap) {
+            texelCone(&textures[more->iridescenceThicknessMap], lodBase, u, v, texel);
+            thickness = more->iridescenceThicknessMin + (thickness - more->iridescenceThicknessMin) * texel[1];
+        }
+        artfIridescence(out->f0, ndv, amount, more->iridescenceIor, thickness);
+    }
     const float unkept = artfShadeUnkept(ndv, out->rough);
     for (int i = 0; i < 3; ++i) {
         out->gain[i] = artfShadeGain(out->f0[i], unkept);
@@ -771,8 +780,20 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         const float bt[3] = {nn[1] * t[2] - nn[2] * t[1], nn[2] * t[0] - nn[0] * t[2], nn[0] * t[1] - nn[1] * t[0]};
         const float alpha = out->rough * out->rough;
         /* (how long: artfShadeDrawnLong's, but for the order the strength is squared in) */
-        const float il = 1.f / (alpha + (1.f - alpha) * more->anisotropy * more->anisotropy);
-        artfShadeDraw(&out->lobe, true, (ArtfShade3){t[0], t[1], t[2]}, (ArtfShade3){bt[0], bt[1], bt[2]}, more->anisotropyDirection[0], more->anisotropyDirection[1], alpha, il);
+        float c = more->anisotropyDirection[0], sn = more->anisotropyDirection[1], strength = more->anisotropy;
+        if (more->anisotropyMap) {
+            float texel[4];
+            texelCone(&textures[more->anisotropyMap], lodBase, u, v, texel);
+            float dx = texel[2] * 2.f - 1.f, dy = texel[1] * 2.f - 1.f;
+            const float inverse = 1.f / sqrtf(artfMaxf(dx * dx + dy * dy, 1e-20f));
+            dx *= inverse;
+            dy *= inverse;
+            c = more->anisotropyDirection[0] * dx - more->anisotropyDirection[1] * dy;
+            sn = more->anisotropyDirection[1] * dx + more->anisotropyDirection[0] * dy;
+            strength *= texel[0];
+        }
+        const float il = 1.f / (alpha + (1.f - alpha) * strength * strength);
+        artfShadeDraw(&out->lobe, true, (ArtfShade3){t[0], t[1], t[2]}, (ArtfShade3){bt[0], bt[1], bt[2]}, c, sn, alpha, il);
     }
     /* a coat over all that, and sheen and what comes from under it beneath that: the coat takes what its Fresnel
      * reflects, and what is under keeps the rest, mirror included; the coat mirrors as smoothly as it is */

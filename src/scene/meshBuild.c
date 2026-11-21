@@ -166,17 +166,21 @@ static void finishMeshlet(ArtfMeshData* m, ArtfMeshlet* l) {
     l->coneCutoff = sqrtf(1.f - minDot * minDot);
 }
 
-static void buildMeshlets(ArtfMeshData* m) {
+/* breaks: the triangles where a meshlet must start (a graph's clusters), in order; NULL: none. */
+static void buildMeshletsBroken(ArtfMeshData* m, uint32_t indexCount, const uint32_t* breaks, uint32_t breakCount) {
     ARTF_VEC(ArtfMeshlet) meshlets = {0};
     ARTF_VEC(uint32_t) vertices = {0};
     ARTF_VEC(uint8_t) triangles = {0};
     uint8_t* seen = artfCalloc(m->vertexCount, 1); /* local index + 1 in the meshlet being made */
     ArtfMeshlet l = {0};
 
-    for (uint32_t i = 0; i < m->indexCount; i += 3) {
+    uint32_t nextBreak = 0;
+    for (uint32_t i = 0; i < indexCount; i += 3) {
         int fresh = 0;
         for (int c = 0; c < 3; ++c) fresh += !seen[m->indices[i + c]];
-        if (l.vertexCount + (uint32_t)fresh > ARTF_MESHLET_VERTICES || l.triangleCount == ARTF_MESHLET_TRIANGLES) {
+        bool broken = false;
+        while (breaks && nextBreak < breakCount && breaks[nextBreak] <= i / 3) broken = breaks[nextBreak++] == i / 3 && l.triangleCount;
+        if (broken || l.vertexCount + (uint32_t)fresh > ARTF_MESHLET_VERTICES || l.triangleCount == ARTF_MESHLET_TRIANGLES) {
             for (uint32_t v = 0; v < l.vertexCount; ++v) seen[vertices.items[l.vertexOffset + v]] = 0;
             artfVecPush(&meshlets, l);
             memset(&l, 0, sizeof l);
@@ -214,6 +218,36 @@ static void buildMeshlets(ArtfMeshData* m) {
         m->positions[m->positionStride + i] = p[1];
         m->positions[(size_t)m->positionStride * 2 + i] = p[2];
     }
+}
+
+static void buildMeshlets(ArtfMeshData* m) { buildMeshletsBroken(m, m->indexCount, NULL, 0); }
+
+void artfMeshSetDag(ArtfMeshData* m, const ArtfDag* d) {
+    artfFree(m->indices);
+    artfFree(m->meshlets);
+    artfFree(m->meshletVertices);
+    artfFree(m->meshletTriangles);
+    artfAlignedFree(m->positions);
+    artfFree(m->dagBounds);
+    m->indices = artfMalloc((size_t)d->indexCount * 4 + 4);
+    memcpy(m->indices, d->indices, (size_t)d->indexCount * 4);
+    uint32_t* breaks = artfMalloc((size_t)d->clusterCount * 4 + 4);
+    uint32_t whole = 0, wholeIndices = 0;
+    for (uint32_t i = 0; i < d->clusterCount; ++i) {
+        breaks[i] = d->clusters[i].indexOffset / 3;
+        if (!d->clusters[i].level) { ++whole; wholeIndices += d->clusters[i].indexCount; }
+    }
+    buildMeshletsBroken(m, d->indexCount, breaks, d->clusterCount);
+    artfFree(breaks);
+    /* (one meshlet a cluster: each holds what a meshlet can) */
+    m->dagBounds = artfMalloc((size_t)m->meshletCount * 10 * sizeof(float) + 4);
+    for (uint32_t i = 0; i < m->meshletCount && i < d->clusterCount; ++i) {
+        memcpy(m->dagBounds + (size_t)i * 10, d->clusters[i].self, 5 * sizeof(float));
+        memcpy(m->dagBounds + (size_t)i * 10 + 5, d->clusters[i].parent, 5 * sizeof(float));
+    }
+    m->dagWhole = whole;
+    m->dagIndexCount = d->indexCount;
+    m->indexCount = wholeIndices;
 }
 
 bool artfMeshBuild(ArtfMeshData* m, const ArtfVertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount, const ArtfVertexSkin* skin, const ArtfMorphTarget* targets, uint32_t targetCount) {
@@ -353,7 +387,8 @@ void artfMeshCopy(ArtfMeshData* to, const ArtfMeshData* from) {
     memset(&to->pose, 0, sizeof to->pose);
     to->pose.applied = to->deformVersion;
     to->vertices = copyOf(from->vertices, (size_t)from->vertexCount * sizeof *from->vertices);
-    to->indices = copyOf(from->indices, (size_t)from->indexCount * 4);
+    to->indices = copyOf(from->indices, (size_t)ARTF_MESH_ALL_INDICES(from) * 4);
+    to->dagBounds = from->dagBounds ? copyOf(from->dagBounds, (size_t)from->meshletCount * 10 * sizeof(float)) : NULL;
     to->meshlets = copyOf(from->meshlets, (size_t)from->meshletCount * sizeof *from->meshlets);
     to->meshletVertices = copyOf(from->meshletVertices, (size_t)from->positionStride * 4);
     const ArtfMeshlet* last = &from->meshlets[from->meshletCount - 1];
@@ -466,6 +501,7 @@ void artfMeshFini(ArtfMeshData* m) {
     artfFree(m->pose.weights);
     artfFree(m->vertices);
     artfFree(m->indices);
+    artfFree(m->dagBounds);
     artfFree(m->meshlets);
     artfFree(m->meshletVertices);
     artfFree(m->meshletTriangles);
