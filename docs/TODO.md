@@ -3,39 +3,42 @@
 Só o que resta fazer ou está incompleto no [plano](plano-de-correcao.md). O que já foi feito sai daqui: os detalhes,
 números e decisões ficam nas seções "Estado" do plano e no [CHANGELOG](../CHANGELOG.md). Atualizar a cada passo fechado.
 
-Legenda: `[~]` em parte (o que falta vem ao lado) · `[ ]` não iniciado · 📱 depende de hardware ou máquina que não está
-aqui · 🌐 depende de baixar algo (pedir antes)
+Duas listas: o que dá para fazer com o que esta máquina e a CI já têm, e o que depende de hardware, de um sistema ou de
+uma ferramenta que não está aqui. Legenda: `[~]` em parte (o que falta vem ao lado) · `[ ]` não iniciado.
 
 Branch: `unreal-parity`. Última CI conferida: run 44945833108 (21/11/2026): Windows, Android e macOS passam, com o Metal
-rodando no macOS; os fuzzers passam. O Linux cai no lavapipe do runner em `layers/layersTransmittance` (abaixo). O último
-push é o 0cf336a.
+rodando no macOS; os fuzzers passam. O Linux caía no lavapipe do runner (abaixo).
 
-## CI
+## Dá para fazer aqui
+
+### CI
 - [ ] Linux: conferir no runner se `layers/layersTransmittance` e `layersBehindSolid` (camadas na GPU, da 5.8) ainda
   caem no lavapipe dele; o lavapipe do MSYS2 roda os dois limpos, também sob validação. A causa dos outros 18 que a CI
-  pulava foi achada e corrigida (ray queries lendo a interseção committed sem acerto): a CI não pula mais nada, falta um
-  push para conferir
+  pulava foi achada e corrigida (ray queries lendo a interseção committed sem acerto), e a CI não pula mais nada
 
-## Fase 3 — Robustez e prova
-- [~] 3.3 Pré-rotação no Android — falta ver num aparelho 📱
-- [~] 3.6 Ritmo e térmica — faltam 30 min num telefone 📱
-- [~] 3.9 Linux com GPU e janela, sem máquina 📱
-
-## Fase 5 — Alcance de conteúdo
-- [~] 5.6 Reinserção na árvore — falta medir numa GPU integrada 📱
+### Fase 5 — Alcance de conteúdo
 - [~] 5.7 Gradientes da A-SVGF (CPU, no stash "A-SVGF temporal gradients") — ainda quebram com objetos em movimento e
   sombra suave: tirar dos gradientes os pixels de instâncias que se moveram e normalizar pelo ruído da amostra
-- [~] 5.9 Saída HDR — faltam metadados HDR, scRGB e teste numa tela HDR 📱
+- [~] 5.9 Saída HDR — faltam os metadados HDR e o scRGB (o teste numa tela HDR está na outra lista)
 - [~] 5.10 Basis Universal — falta transcodificar para blocos da GPU (hoje vai para pixels)
 - [~] 5.12 OpenPBR (camadas no grafo de materiais em C) — no stash "5.12 OpenPBR": API, `graph.c`, flags do material e
   rasterização da CPU feitos; faltam o traçador da CPU, os shaders da GPU (fragmento e traçador), o teste e a
   documentação
 
-## Fase 6 — Alcance de plataforma
-- [~] 6.1 Metal — rodou só na CI (Apple Paravirtual device) e só `backends/metal`; faltam os demais testes de imagem
-  nele (o quadro em floats, probes, traçado e camadas não existem no Metal), um Mac de verdade e uma janela 📱
-- [~] 6.2 WebGPU e CPU em WebAssembly — falta o Safari, nos dois caminhos 📱; o WebGPU tem só o quadro simples (sem
-  quadro em floats, probes, traçado, camadas nem materiais em C)
+### Fase 6 — Alcance de plataforma
+- [~] 6.1 Metal — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado e as camadas, e rodar nele os
+  demais testes de imagem (dá para conferir pela CI do macOS, no dispositivo virtual)
+- [~] 6.2 WebGPU — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado, as camadas e os materiais
+  em C (conferidos aqui no wgpu-native e no Chromium)
+
+## Depende de hardware ou ferramenta que não está aqui
+- [~] 3.3 Pré-rotação no Android — ver num aparelho (o gancho de teste já confere)
+- [~] 3.6 Ritmo e térmica — 30 min num telefone
+- [~] 3.9 Linux com GPU de verdade e janela — uma máquina Linux
+- [~] 5.6 Reinserção na árvore — medir numa GPU integrada
+- [~] 5.9 Saída HDR — testar numa tela HDR
+- [~] 6.1 Metal — um Mac de verdade (só rodou no dispositivo virtual da CI) e uma janela
+- [~] 6.2 WebGPU e CPU em WebAssembly — o Safari, nos dois caminhos (precisa de um Mac ou iPhone); o Firefox
 
 ## Ferramentas de verificação montadas nesta máquina
 - Validação Vulkan: camada do MSYS2 (`VK_ADD_LAYER_PATH=C:\msys64\ucrt64\bin`); a sincronização liga com
