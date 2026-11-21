@@ -7,8 +7,10 @@ o suficiente para se localizar. Atualizar a cada passo fechado.
 Legenda: `[x]` feito · `[~]` em parte (o que falta vem ao lado) · `[ ]` não iniciado · 🔒 depende de decisão do dono ·
 📱 depende de hardware ou máquina que não está aqui · 🌐 depende de baixar algo (pedir antes)
 
-Branch: `unreal-parity`. Última CI conferida: run 44764119231 (Android e Windows passam; Linux cai em `post/floats`, na GPU,
-num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O último push é anterior à 5.2.
+Branch: `unreal-parity`. Última CI conferida: run 44945833108 (21/11/2026): Windows, Android e macOS passam, com o Metal
+rodando no macOS; os fuzzers passam. O Linux cai no lavapipe do runner em `layers/layersTransmittance` (camadas na GPU, da
+5.8), que o lavapipe do MSYS2 roda limpo, como `layersBehindSolid` antes dele; a CI do Linux estava quebrada desde a 5.6
+e só agora voltou a rodar os testes. O último push é o 0cf336a.
 
 ## Fase 0 — Base reproduzível e instrumentos
 - [x] 0.1 Versionar o trabalho em andamento
