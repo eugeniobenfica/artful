@@ -16,8 +16,9 @@ jobs:
       # (lavapipe falls over, in the shader llvmpipe makes, wherever the trees are walked while the scene is drawn:
       # light that bounced gathered on the GPU, shadows and reflections from rays, and what tests them. Reproduced on
       # Windows with MSYS2's Mesa: not a read past a buffer (robustBufferAccess changes nothing), nor the stack of the
-      # walk, nor textures; not yet found. Every other test runs here; these run on the GPUs of Windows' machine.)
-      ARTFUL_SKIP: post/floats,tracing/probeReflections,scale/tracedSkinLod,tracing/traceHardware,backends/pipelinesAhead,tracing/tracedShadows,tracing/tracedReflections,tracing/tracedMoved,tracing/tracedRefit,tracing/probesGpu,tracing/probesKept
+      # walk, nor textures; not yet found. Every other test runs here; these run on the GPUs of Windows' machine. The
+      # seven after probesKept, of the same kind, came with phases 5.1 to 5.7 and were found with MSYS2's lavapipe.)
+      ARTFUL_SKIP: post/floats,tracing/probeReflections,scale/tracedSkinLod,tracing/traceHardware,backends/pipelinesAhead,tracing/tracedShadows,tracing/tracedReflections,tracing/tracedMoved,tracing/tracedRefit,tracing/probesGpu,tracing/probesKept,tracing/extraTraced,tracing/sampledLights,tracing/sampledMoving,scale/coarseRays,scale/drawnLift,tracing/probesFollow,tracing/probeCascades
     strategy:
       fail-fast: false
       matrix:

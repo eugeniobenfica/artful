@@ -16,7 +16,7 @@ the test passed there, not that it returned early). **Stable**: run, its tests p
 | Windows x64 | stable: all tests, GCC, clang, MSVC (CI) | stable: AMD Vega 8, Radeon RX 9060 XT (ray tracing hardware), windows | | stable | stable: read back and in a window |
 | Android arm64 | stable: Galaxy S25 Ultra | best effort: the S25's Adreno 830, a window and going to the background; rotation not seen (nor `preRotate`, checked here only through a test hook) | | best effort: not yet run | best effort: not yet run |
 | Linux x64 | stable: GCC and clang, sanitizers (CI) | best effort: Mesa's software Vulkan (lavapipe), no window, no GPU; light that bounced, gathered on the GPU, crashes lavapipe's compiled shader (reproduced on Windows, not yet isolated) | | best effort: not yet through CI | best effort: not yet through CI |
-| macOS | best effort: all tests pass on Apple silicon (CI, 20 November 2026: 326,689 checks, the GPU's 95 skipped), no window | | experimental: never run; its shaders, ours and SPIRV-Cross's, through Apple's compiler in CI | best effort: not yet through CI | |
+| macOS | best effort: all tests pass on Apple silicon (CI, 20 November 2026: 326,689 checks, the GPU's 95 skipped), no window | | experimental: run on CI's Apple Paravirtual device, 0.02–0.09% of pixels from the CPU (`backends/metal`); its shaders, from the IR, through Apple's compiler in CI; never in a window | best effort: not yet through CI | |
 | iOS | experimental: never built with Apple's tools | | experimental | experimental | |
 | Windows on ARM | experimental: built, never run | experimental | | experimental | experimental |
 | Android armv7, x86-64 | experimental: built, never run | experimental | | experimental | experimental |
@@ -85,7 +85,7 @@ Each of these could turn out to be a bug that users would meet. In the order to 
 | armv7 and x86-64 Android | Built with no warnings, never run. | A device or an emulator. |
 | Windows on ARM | Built with clang (MSYS2's clangarm64 headers and libraries), NEON kernels and all, with no warnings; never run. MSVC for ARM64 has not been built: it would take the portable kernels. | A Snapdragon laptop. |
 | MSVC, since 0.4 | Built and tested only by CI; this machine has no MSVC. Reading found nothing GCC-only unguarded, and clang's `-Wpedantic -Wvla` finds nothing, but MSVC's C is its own. | CI, or Visual Studio. |
-| Metal's shaders of now | `src/metal/shaders.inc` was made again on Windows (clang's artful-shaders, SPIRV-Cross 1.4.363, as CI has them); Apple's compiler has not seen it. | CI's macOS job. |
+| Metal on a real Mac | Run only on CI's paravirtual device, through `backends/metal`; never in a window, nor on a Mac's own GPU. | A Mac. |
 
 ### 2. Check what nothing here could check
 

@@ -211,20 +211,15 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   C's normals do not count: the normal is the triangle's. The triangle is in the order Artful keeps the mesh in.
 - A Vulkan device without non-uniform texture indexing reads at most 64 textures (what is beyond is white), each
   sample down a tree of ifs: its shaders are larger (the tracer's five times), and slower to build.
-- **Metal has never been run**, and is not built unless asked for (`-DARTFUL_METAL=ON`, Apple only). It was written
-  without a Mac: CI builds it on macOS and puts its shaders through Apple's compiler, and no more than that is known.
-  So it is chosen only by name, and needs Metal 3. Its shaders (`src/metal/shaders.inc`) are seventeen of Vulkan's,
-  translated ahead of time by `tools/mkmetal.py`: the plain variants only, made again from today's SPIR-V (after the
-  shading model was written once), by artful-shaders built with clang and SPIRV-Cross 1.4.363 as CI has them, with the
-  same bindings as before; on Windows, so Apple's compiler has not yet seen this version. Its C side is still 0.4's. So it reads the frame
-  block whole (`ArtfFrameData`, filled by the code both other backends use), but binds nothing that came after 0.4,
-  and leaves out: a frame in floats and all that comes after it (bloom, ambient occlusion, reflections, temporal
-  antialiasing, upscaling, depth of field, motion blur, the look), fog that light goes through, light from a picture
-  of all around and the sky, probes, lights past the sixteen, lights with a shape or a profile, soft and traced
-  shadows, decals, clear coats, sheen and the rest of `ArtfMaterialMore`, light under the surface, views, sorted
-  layers, meshlets culled on the GPU, emitters of many, the ray tracing hardware, a background pass, occlusion and
-  materials in C; and it sends textures up decoded. What it draws of what it has is meant to be Vulkan's picture, and
-  nobody has looked. Linux and macOS are built and tested by CI, Linux on a software Vulkan; iOS has not been built
+- **Metal has run only on CI's macOS runner** (an Apple Paravirtual device, 21 November 2026), and is not built unless
+  asked for (`-DARTFUL_METAL=ON`, Apple only); so it is chosen only by name. There, against the CPU, 0.02 to 0.09% of
+  pixels apart (`backends/metal`: textures and lights, a sun's shadows, what has holes, the overlay); no window has
+  shown it. Its shaders are Vulkan's, written as Metal from the IR as it starts, and its C side gives them today's
+  bindings; it draws what WebGPU draws (the plain frame) and leaves out the same, saying so: a frame in floats and all
+  that comes after it, light from all around and from probes, lights with a shape or a profile, layers of
+  transparency, tracing, materials in C, views, occlusion and a background pass; textures go up decoded. Of the image
+  tests, only `backends/metal` runs on it.
+- Linux and macOS are built and tested by CI, Linux on a software Vulkan; iOS has not been built
   with Apple's tools. Windows on ARM is built with clang (`aarch64-w64-mingw32`, the NEON kernels) and has never run;
   MSVC builds and tests only on CI (no MSVC here), and MSVC for ARM64 has not been built at all: it would take the
   portable kernels.

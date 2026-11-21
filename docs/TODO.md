@@ -55,7 +55,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [~] 4.1 IR de shaders
   - [x] passos 1–2: IR, emissor SPIR-V, todos os 103 shaders com as mesmas palavras; `irFromSpirv`, `irUses`
   - [x] passo 3: DebugInfo (`ARTFUL_SHADER_DEBUG`, `artful-shaders --debug`; por função, não por linha)
-  - [~] passo 4: emissor MSL feito (94 de 103); o compilador da Apple na CI achou dois defeitos, corrigidos; falta compilar em execução no `metal.c`
+  - [x] passo 4: emissor MSL (94 de 103), compilado em execução pelo `metal.c`; o compilador da Apple na CI passa todos
   - [x] passo 5: WGSL (Fase 6.2)
 - [x] 4.2 Grafo de quadro
   - [x] passo 1: descrição a partir do IR, `--graph`, medição
@@ -79,7 +79,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [~] 5.12 Materiais — texturas das extensões (especular, iridescência, anisotropia) feitas; Belcour-Barla feito (igual à referência do glTF a 2e-6); SSS separável feito (duas gaussianas, não Burley: patente da Disney; borda de sombra 1 → 10 px, GPU = CPU, 0,12 ms GPU em 1080p); falta OpenPBR
 
 ## Fase 6 — Alcance de plataforma
-- [ ] 6.1 Metal executado 📱 (depende de 4.1 passo 4 provado)
+- [~] 6.1 Metal executado — shaders do IR em tempo de execução (`irMsl` com a tabela do argument buffer), lado C dos bindings de hoje; rodou na CI do macOS (Apple Paravirtual device): 0,02–0,09% contra a CPU em `backends/metal`; falta rodar os demais testes de imagem nele, num Mac de verdade e numa janela
 - [~] 6.2 WebGPU (emissor WGSL e backend)
   - [x] CPU em WebAssembly com SIMD (`kernelsWasm.c`), threads em workers; suíte da CPU passa no node; `spheres` no Chromium a 3,0 ms (960×540, 16 threads); Safari não testado
   - [x] emissor WGSL (`irWgsl`): os 79 shaders que podem ser WGSL passam no naga (wgpu-native, `tools/wgslCheck.c`) e no Tint (Chromium, `tools/web/wgslCheck.html`); os de fora leem texturas por índice não uniforme (o WebGPU usará `ARTF_TEXTURES_UNIFORM`), PrimitiveId ou ray queries

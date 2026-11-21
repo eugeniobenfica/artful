@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Metal runs** (phase 6.1): its shaders are written from the IR as it starts (`irMsl` says what each argument buffer
+  holds) and its C side gives them today's bindings; on CI's macOS runner it matches the CPU (0.02 to 0.09% of pixels
+  apart). `shaders.inc` and `mkmetal.py` are gone. CI builds again on Linux, macOS and Android: NEON shifted by an
+  immediate a count that was not one, and the tests set their environment with `_putenv` everywhere.
+
 - **A WebGPU backend** (phase 6.2, `ARTFUL_WEBGPU`, chosen by name): on webgpu.h, natively (wgpu-native) and in a
   browser (Emscripten's port of Dawn's), its shaders Vulkan's, written as WGSL from the IR as it starts. The plain
   frame: textures, lights, shadow maps, what has holes, the overlay. Against the CPU, 0.02 to 0.08% of pixels apart;

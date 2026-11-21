@@ -382,7 +382,7 @@ about a second and a half each on a Vega 8. How it works is [here](docs/architec
 Adreno GPU (Android).<br>
 **Tier 2**: experimental. [CI](.github/workflows/ci.yml) builds Linux, macOS, MSVC and every Android ABI and runs
 the tests on Linux (on a software Vulkan, under validation and sanitizers), macOS (on the CPU) and MSVC; none of
-them has opened a window. iOS is written, not built. **Metal has never been run**, is built only with `-DARTFUL_METAL=ON`, and lacks most of what came after 0.4 ([limits](docs/limits.md)), so it is chosen only by name.
+them has opened a window. iOS is written, not built. Metal has run only on CI's macOS runner, where it matches the CPU; it is built only with `-DARTFUL_METAL=ON`, draws the plain frame ([limits](docs/limits.md)), and is chosen only by name.
 
 Vulkan needs version 1.2 and `drawIndirectFirstInstance`; a device without them draws on the CPU, which needs only a
 C compiler. Without non-uniform texture indexing, the shaders reach each texture by a constant index (64 at most).
@@ -511,7 +511,7 @@ many threads: `BINARYEN_CORES=1`.
 | `ARTFUL_VULKAN` | `ON` | the GPU backend; off, a lighter library, drawing on the CPU |
 | `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-render2d`, `artful-blackhole` (the window), `artful-shaders`, `artful-flip`, `artful-tests` |
 | `ARTFUL_BLACKHOLE` | top level | the black hole, `artful-blackhole` (`artful::blackhole`), a library apart; the tools and tests build it too |
-| `ARTFUL_METAL` | `OFF` | the Metal backend (Apple only): never run, and without most of what came after 0.4 |
+| `ARTFUL_METAL` | `OFF` | the Metal backend (Apple only): its shaders written from the IR as it starts; the plain frame |
 | `ARTFUL_WEBGPU` | `OFF` | the WebGPU backend, chosen by name: in a browser through Emscripten, or natively on wgpu-native (`ARTFUL_WEBGPU_LIBRARY`) |
 | `ARTFUL_CASCADE_DIR` | empty | cascade's source folder: builds the bridge to it (`artful::cascade`), its example and its tests |
 | `ARTFUL_CASCADE` | `OFF` | the same, with an installed cascade (`find_package`) |
@@ -532,11 +532,10 @@ src/software/     the CPU backend: kernels.inc is built once for each instructio
 src/vulkan/       the GPU backend: vulkanApi.h, spirv.c and the shaders in shaders.c
 src/shaderir/     the shaders as an IR, and what writes them as SPIR-V, Metal (msl.c) and WGSL (wgsl.c)
 src/webgpu/       the WebGPU backend, built only when asked: webgpu.c
-src/metal/        the GPU backend for Apple's systems, never run and built only when asked: metal.c, and shaders.inc,
-                  which is generated
+src/metal/        the GPU backend for Apple's systems, built only when asked: metal.c
 extensions/       built apart, on the public API: blackhole/ (artful-blackhole, include/artful/blackhole.h)
-tools/            artful-render, artful-render2d, artful-blackhole, artful-shaders, artful-flip (flip.c), mkmetal.py,
-                  bench.py; androidTest.sh for a device
+tools/            artful-render, artful-render2d, artful-blackhole, artful-shaders, artful-flip (flip.c),
+                  bench.py, wgslCheck.c; web/ (artful-web, serve.py); androidTest.sh for a device
 tests/            a file for each area (core.c, post.c, tracing.c...), what they share in tests.h, main.c runs them
 integrations/     bridges to other libraries, each a target of its own and named by nothing above
   cascade/        artful::cascade: include/artful/cascade.h, its example, its window tests, its APK

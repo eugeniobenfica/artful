@@ -26,9 +26,9 @@ Decided with the project's owner, for what stands between Artful and large proje
    automatic) and `artfSceneAddTextureStreamed`, for mipmaps that stay on disk. It covers textures only.
 8. ~~**Denoising.**~~ Done: `ArtfTraceDesc.denoise`, on both backends, with objects' motion and with what changes over
    surfaces that stay.
-9. **Metal.** Written, and never run. Built only with ARTFUL_METAL. It leaves out occlusion, a background pass,
-   materials in C, textures compressed on the GPU, and all of 0.3 and 0.4: the frame in floats, lights past the
-   sixteen, probes, decals, and all since ([limits](limits.md)).
+9. **Metal.** Built only with ARTFUL_METAL; run on CI's macOS runner, where it matches the CPU. Its shaders are written
+   from the IR as it starts, its C side is today's; it draws the plain frame and leaves out a frame in floats and what
+   comes after it, probes, tracing, layers, materials in C ([limits](limits.md)). WebGPU (phase 6.2) draws the same.
 10. ~~**What a frame in floats does after it.**~~ Done in 0.3: bloom, ambient occlusion, reflections, fog that light
     goes through, temporal antialiasing, depth of field; and in 0.4 four samples on the GPU too, and the fog as a grid
     that layers read.
