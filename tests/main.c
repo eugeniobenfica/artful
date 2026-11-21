@@ -142,6 +142,8 @@ int main(int argc, char** argv) {
     RUN("core/occlusion/vulkan", testOcclusion(ARTF_BACKEND_VULKAN));
     RUN("backends/gpuLeftAlone", testGpuLeftAlone());
     RUN("backends/vulkan", testVulkan());
+    RUN("backends/webgpu", testWebGpu());
+    RUN("backends/metal", testMetal());
     RUN("layers/colorData", testColorData());
     RUN("layers/layers/software", testLayers(ARTF_BACKEND_SOFTWARE));
     RUN("layers/layers/vulkan", testLayers(ARTF_BACKEND_VULKAN));

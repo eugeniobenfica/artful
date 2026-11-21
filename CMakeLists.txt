@@ -10,7 +10,8 @@ project(artful VERSION 0.4.0 DESCRIPTION "A 3D renderer in plain C11, with no de
 #   src/render/     the choice of a backend
 #   src/software/   the CPU backend: kernels.inc is built once for each instruction set
 #   src/vulkan/     the GPU backend (ARTFUL_VULKAN)
-#   src/metal/      Metal (ARTFUL_METAL, off: never run, and behind; see docs/limits.md)
+#   src/metal/      Metal (ARTFUL_METAL, off; see docs/limits.md)
+#   src/webgpu/     WebGPU (ARTFUL_WEBGPU, off: a browser through Emscripten, or wgpu-native)
 #   extensions/     what is built apart, on the library's public API: extensions/blackhole (ARTFUL_BLACKHOLE)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -30,9 +31,18 @@ option(ARTFUL_VULKAN "Draw through Vulkan where it is found at run time" ${artfu
 option(ARTFUL_BUILD_TOOLS "Build artful-render" ${artful_top})
 # The black hole, a library of its own (artful-blackhole) on the background pass; the tools and tests need it.
 option(ARTFUL_BLACKHOLE "Build artful-blackhole, the black hole behind a scene" ${artful_top})
-# Metal was written without a Mac and has never run; its shaders are made ahead of time and are behind Vulkan's.
-# Off: an Apple build draws through Vulkan (MoltenVK) or the CPU.
-option(ARTFUL_METAL "Build the Metal backend (Apple only; never run, and without what came after 0.4)" OFF)
+# Metal was written without a Mac, and runs only where CI's macOS runner lets it; its shaders are Vulkan's, written as
+# Metal as it starts. Off: an Apple build draws through Vulkan (MoltenVK) or the CPU.
+option(ARTFUL_METAL "Build the Metal backend (Apple only; its shaders written from the IR as it starts)" OFF)
+# WebGPU: in a browser through Emscripten's port of Dawn's webgpu.h (--use-port=emdawnwebgpu), or natively on a
+# webgpu.h and its library (wgpu-native: ARTFUL_WEBGPU_LIBRARY). Off: it names no library.
+option(ARTFUL_WEBGPU "Build the WebGPU backend (chosen only by name)" OFF)
+if(MINGW)
+  set(artful_webgpu_default "-l:libwgpu_native.dll.a") # (the DLL's: the static one wants the system's sockets and more)
+else()
+  set(artful_webgpu_default "wgpu_native")
+endif()
+set(ARTFUL_WEBGPU_LIBRARY "${artful_webgpu_default}" CACHE STRING "the native webgpu.h's library, for ARTFUL_WEBGPU")
 option(ARTFUL_BUILD_TESTS "Build artful-tests" ${artful_top})
 # The bridge to cascade (integrations/cascade), a target of its own: from cascade's source folder, or
 # from an installed cascade. Neither: the library is all there is, and it names no other library.
@@ -142,7 +152,23 @@ if(ARTFUL_VULKAN)
   target_sources(artful-2d PRIVATE src/2d/vulkan2d.c src/2d/shaders2d.c)
   target_compile_definitions(artful-2d PRIVATE ARTFUL_VULKAN)
 endif()
-# (never run: see src/metal/metal.c and docs/limits.md)
+# (WebGPU's and Metal's shaders are Vulkan's, built as SPIR-V and written as WGSL or Metal: the builders, without the
+# rest of Vulkan's)
+if((ARTFUL_WEBGPU OR (APPLE AND ARTFUL_METAL)) AND NOT ARTFUL_VULKAN)
+  target_sources(artful-core PRIVATE src/vulkan/spirv.c src/shaderir/ir.c src/shaderir/msl.c src/shaderir/wgsl.c)
+  target_sources(artful PRIVATE src/vulkan/shaders.c)
+endif()
+if(ARTFUL_WEBGPU)
+  target_sources(artful PRIVATE src/webgpu/webgpu.c)
+  target_compile_definitions(artful PRIVATE ARTFUL_WEBGPU)
+  if(EMSCRIPTEN)
+    target_compile_options(artful PUBLIC --use-port=emdawnwebgpu)
+    target_link_options(artful PUBLIC --use-port=emdawnwebgpu)
+  else()
+    target_link_libraries(artful PUBLIC ${ARTFUL_WEBGPU_LIBRARY})
+  endif()
+endif()
+# (run only on CI's macOS runner: see src/metal/metal.c and docs/limits.md)
 if(APPLE AND ARTFUL_METAL)
   target_sources(artful PRIVATE src/metal/metal.c)
   target_compile_definitions(artful PRIVATE ARTFUL_METAL)

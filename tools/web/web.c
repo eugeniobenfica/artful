@@ -72,7 +72,12 @@ int main(int argc, char** argv) {
     ArtfRendererOptions o = artfRendererDefaults(p->width, p->height);
     o.backend = ARTF_BACKEND_SOFTWARE;
     for (int i = 1; i < argc; ++i)
-        if (!strcmp(argv[i], "webgpu")) o.backend = ARTF_BACKEND_WEBGPU;
+        if (!strcmp(argv[i], "webgpu")) {
+            /* (straight onto the canvas: a browser cannot wait for a frame to be read back) */
+            o.backend = ARTF_BACKEND_WEBGPU;
+            o.surface.kind = ARTF_SURFACE_WEB_CANVAS;
+            o.surface.a = (void*)"#gpu";
+        }
     p->r = artfRendererNew(&o);
     if (!p->r) {
         show(NULL, 0, 0, "this browser cannot draw that way here");

@@ -85,6 +85,64 @@ void testVulkan(void) {
     artfSceneFree(s);
 }
 
+/* WebGPU (the plan's 6.2) and Metal (6.1) against the CPU: a textured scene with its lights; a sun's shadows; what
+ * has holes; the overlay; a size of its own. Where one is not built, or has no device, its test is skipped. */
+static void otherGpu(ArtfBackend backend, const char* what) {
+    ArtfRendererOptions o = options(backend, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (!gpu) { missing(what); return; }
+    printf("on %s\n", artfRendererDescription(gpu));
+    o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    ArtfScene* scenes[3] = {richScene(), shadowScene(), artfSceneNew()};
+    /* (the third: a fence of bars, cut out by alpha, over a floor) */
+    {
+        ArtfScene* s = scenes[2];
+        static uint32_t bars[32 * 32];
+        for (int i = 0; i < 32 * 32; ++i) bars[i] = (i % 32) / 4 % 2 ? 0xFFB04020u : 0x00000000u;
+        ArtfMaterialDesc fence = {artfVec3(1, 1, 1), artfSceneAddTexture(s, bars, 32, 32, 0), .3f, .5f, artfVec3(0, 0, 0), ARTF_ALPHA_MASK, .5f, 0, true};
+        addAt(s, artfSceneAddCube(s, 1.5f), artfSceneAddMaterial(s, &fence), 0, 0, 0, 1);
+        ArtfMaterialDesc floorDesc = {artfVec3(.5f, .6f, .7f), 0, 0, .8f, artfVec3(0, 0, 0)};
+        addAt(s, artfSceneAddPlane(s, 10, 1), artfSceneAddMaterial(s, &floorDesc), 0, -1, 0, 1);
+        artfSceneAddLight(s, artfVec3(1, 3, 3), artfVec3(1, 1, 1), 20.f);
+        setCamera(s, 1, 2, 5, 0, 0, 0);
+    }
+    static const char* names[3] = {"textures and lights", "a sun's shadows", "what has holes"};
+    for (int k = 0; k < 3; ++k) {
+        drawSamples(gpu, scenes[k], 2, a);
+        drawSamples(cpu, scenes[k], 1, b);
+        const double far = differentShare(a, b, 24);
+        printf("%s against the CPU, %s: %.2f%% of pixels differ by more than 24 of 255\n", artfBackendName(backend), names[k], far * 100);
+        CHECK(far < .02);
+    }
+    /* the overlay */
+    uint32_t* over = artfCalloc((size_t)W * H, 4);
+    for (int y = 10; y < 60; ++y)
+        for (int x = 10; x < 110; ++x) over[y * W + x] = 0x80800000u;
+    ArtfOverlay overlay = {over, W, H, 0, false, NULL, 0};
+    artfRendererSetOverlay(gpu, &overlay);
+    artfRendererSetOverlay(cpu, &overlay);
+    drawSamples(gpu, scenes[0], 1, a);
+    drawSamples(cpu, scenes[0], 1, b);
+    CHECK(differentShare(a, b, 24) < .02);
+    CHECK(CHANNEL(a[30 * W + 50], 16) > CHANNEL(b[30 * W + 50], 8) - 1);
+    /* a size of its own */
+    artfRendererSetOverlay(gpu, NULL);
+    artfRendererResize(gpu, 200, 120);
+    CHECK(artfRendererDraw(gpu, scenes[0]));
+    CHECK(artfRendererReadPixels(gpu, a));
+    for (int k = 0; k < 3; ++k) artfSceneFree(scenes[k]);
+    artfFree(over);
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(gpu);
+    artfRendererFree(cpu);
+}
+void testWebGpu(void) { otherGpu(ARTF_BACKEND_WEBGPU, "webgpu"); }
+void testMetal(void) { otherGpu(ARTF_BACKEND_METAL, "metal"); }
+
 /* (Without Vulkan, what follows has nothing to run on: its switches are Vulkan's, and the tests are empty.) */
 #ifdef ARTFUL_VULKAN
 /* A GPU without non-uniform texture indexing (ARTFUL_UNIFORM_TEXTURES, as one): forty textured cubes, each its own
@@ -587,7 +645,7 @@ void testPipelinesAhead(void) { missing("vulkan"); }
 int metalFailures = 0;
 void writeMetal(const IrModule* m) {
     char why[256];
-    char* metal = irMsl(m, NULL, why, sizeof why);
+    char* metal = irMsl(m, NULL, NULL, why, sizeof why);
     if (metal) artfFree(metal);
     else if (!strstr(why, "ray queries")) {
         ++metalFailures;
@@ -627,7 +685,7 @@ void testShaderIr(void) {
     }
     CHECK(named);
     /* as Metal: the entry point and what goes out, and the arithmetic */
-    char* metal = irMsl(&s->ir, NULL, why, sizeof why);
+    char* metal = irMsl(&s->ir, NULL, NULL, why, sizeof why);
     CHECK(metal && strstr(metal, "fragment main0_out main0(") && strstr(metal, "[[color(0)]]") && strstr(metal, "0.5f + 0.5f") && strstr(metal, "return out;"));
     artfFree(metal);
     /* as WGSL: the same, in its words (shaderir/wgsl.h) */

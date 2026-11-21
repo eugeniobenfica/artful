@@ -269,13 +269,11 @@ static void declareStruct(Wgsl* s, Text* out, const IrInst* t, bool atomics) {
         at = (at + ma - 1) / ma * ma;
         const uint32_t offset = memberOffset(s, t->result, i);
         if (offset != NO_VALUE && offset != at) {
-            if (offset < at || offset % ma) { fail(s, "member %u of struct %%%u is at %u in Vulkan, %u in WGSL", i, t->result, offset, at); return; }
-            /* (further on in Vulkan: aligned there, as WGSL lets a member be) */
-            uint32_t align = ma;
-            while (offset % (align * 2) == 0 && align < 256) align *= 2;
-            say(out, "    @align(%u)", align);
-            at = offset;
-        } else say(out, "    ");
+            if (offset < at || offset % ma || (offset - at) % 4) { fail(s, "member %u of struct %%%u is at %u in Vulkan, %u in WGSL", i, t->result, offset, at); return; }
+            /* (further on in Vulkan: words of nothing before it, as many as it is further) */
+            for (uint32_t k = 0; at < offset; ++k, at += 4) say(out, "    pad%u_%u: u32,\n", i, k);
+        }
+        say(out, "    ");
         const uint32_t stride = s->facts[w[i]].arrayStride;
         const IrInst* member = def(s, w[i]);
         if (stride && member && (member->op == 28 || member->op == 29)) {
@@ -600,7 +598,7 @@ static void instruction(Wgsl* s, const IrInst* i) {
             if (!isConstant(s, w[1])) { fail(s, "an array of textures read by an index that varies (ARTF_TEXTURES_UNIFORM)"); return; }
             const uint32_t k = constantValue(s, w[1]);
             s->expr[r] = format("%s_%u", valueOf(s, base), k);
-            s->sampler[r] = format("%s_%u_s", valueOf(s, base), k);
+            s->sampler[r] = format("%s_s", valueOf(s, base));
             return;
         }
         s->expr[r] = chainOf(s, i);
@@ -1032,12 +1030,13 @@ char* irWgsl(const IrModule* m, const IrWgslOptions* options, IrWgslBindings* bi
             if (many) {
                 for (uint32_t e = 0; e < 64; ++e) {
                     if (!(f->texturesUsed >> e & 1)) continue;
-                    say(&head, "@group(%u) @binding(%u) var g%u_b%u_%u: %s;\n", set, IR_WGSL_ARRAY_AT + 2 * e, set, f->binding, e, image);
-                    bound(bindings, set, IR_WGSL_ARRAY_AT + 2 * e, imageKind, f->binding, e);
-                    if (sampled) {
-                        say(&head, "@group(%u) @binding(%u) var g%u_b%u_%u_s: sampler;\n", set, IR_WGSL_ARRAY_AT + 2 * e + 1, set, f->binding, e);
-                        bound(bindings, set, IR_WGSL_ARRAY_AT + 2 * e + 1, IR_WGSL_SAMPLER, f->binding, e);
-                    }
+                    say(&head, "@group(%u) @binding(%u) var g%u_b%u_%u: %s;\n", set, IR_WGSL_ARRAY_AT + e, set, f->binding, e, image);
+                    bound(bindings, set, IR_WGSL_ARRAY_AT + e, imageKind, f->binding, e);
+                }
+                if (sampled && f->texturesUsed) {
+                    /* (one sampler for them all, as Vulkan's array has: WebGPU has few) */
+                    say(&head, "@group(%u) @binding(%u) var g%u_b%u_s: sampler;\n", set, IR_WGSL_ARRAY_AT - 1, set, f->binding);
+                    bound(bindings, set, IR_WGSL_ARRAY_AT - 1, IR_WGSL_SAMPLER, f->binding, 0);
                 }
                 s.sampler[id] = copyOf("(array)");
             } else if (element && element->op == 26) {

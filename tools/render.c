@@ -648,7 +648,7 @@ int main(int argc, char** argv) {
     HoleOptions hole = {0, 0, 74.1f, 3.44f, 0, 19.f, 1.f, .6f, 0, 0, -1.f, 1, false, 0, .9f, -1.f, -1000.f, -1000.f}; /* (the eye of the film's own pictures) */
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
-        if (!strcmp(a, "--backend") && i + 1 < argc) { ++i; o.backend = !strcmp(argv[i], "vulkan") ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE; }
+        if (!strcmp(a, "--backend") && i + 1 < argc) { ++i; o.backend = !strcmp(argv[i], "vulkan") ? ARTF_BACKEND_VULKAN : !strcmp(argv[i], "webgpu") ? ARTF_BACKEND_WEBGPU : !strcmp(argv[i], "metal") ? ARTF_BACKEND_METAL : ARTF_BACKEND_SOFTWARE; }
         else if (!strcmp(a, "--simd") && i + 1 < argc) { ++i; o.simd = !strcmp(argv[i], "portable") ? ARTF_SIMD_PORTABLE : !strcmp(argv[i], "128") ? ARTF_SIMD_128 : ARTF_SIMD_256; }
         else if (!strcmp(a, "--threads") && i + 1 < argc) o.threads = atoi(argv[++i]);
         else if (!strcmp(a, "--size") && i + 2 < argc) { o.width = atoi(argv[++i]); o.height = atoi(argv[++i]); }

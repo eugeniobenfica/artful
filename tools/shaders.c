@@ -27,10 +27,10 @@ static void finished(const IrModule* m) {
         irPrint(m, f);
         fclose(f);
     }
-    /* and as Metal: as mkmetal.py had SPIRV-Cross write it, the shadow's vertices upside down */
+    /* and as Metal: as metal.c has it written, the shadow's vertices upside down */
     char why[256];
     const IrMslOptions options = {!strcmp(current, "shadowVertex")};
-    char* metal = irMsl(m, &options, why, sizeof why);
+    char* metal = irMsl(m, &options, NULL, why, sizeof why);
     snprintf(path, sizeof path, "%s/%s.metal", folderOut, current);
     if (!metal) {
         fprintf(stderr, "%s: no Metal: %s\n", current, why);

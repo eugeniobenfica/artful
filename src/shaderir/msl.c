@@ -654,7 +654,17 @@ static const char* builtinIn(uint32_t b, const char** type) {
     }
 }
 
-char* irMsl(const IrModule* m, const IrMslOptions* options, char* why, size_t size) {
+static void argumentSaid(IrMslArguments* a, uint32_t set, uint32_t binding, uint32_t id, uint32_t kind, uint32_t count) {
+    if (!a || a->count >= IR_MSL_ARGUMENTS) return;
+    const IrMslArgument e = {set, binding, id, kind, count};
+    a->items[a->count++] = e;
+}
+
+char* irMsl(const IrModule* m, const IrMslOptions* options, IrMslArguments* arguments, char* why, size_t size) {
+    if (arguments) {
+        arguments->count = 0;
+        arguments->pushAt = -1;
+    }
     Msl s;
     memset(&s, 0, sizeof s);
     s.m = m;
@@ -827,23 +837,29 @@ char* irMsl(const IrModule* m, const IrMslOptions* options, char* why, size_t si
                 const char* image = typeName(&s, element ? element->result : type);
                 if (many) say(&head, "    array<%s, %u> b%u [[id(%u)]];\n", image, count, binding, slot);
                 else say(&head, "    %s b%u [[id(%u)]];\n", image, binding, slot);
+                argumentSaid(arguments, set, binding, slot, IR_MSL_TEXTURE, count);
                 slot += count;
                 s.expr[id] = format("spvDescriptorSet%u.b%u", set, binding);
                 if (element && element->op == 27) {
                     if (many) say(&head, "    array<sampler, %u> b%uSmplr [[id(%u)]];\n", count, binding, slot);
                     else say(&head, "    sampler b%uSmplr [[id(%u)]];\n", binding, slot);
+                    argumentSaid(arguments, set, binding, slot, IR_MSL_SAMPLER, count);
                     slot += count;
                     s.sampler[id] = format("spvDescriptorSet%u.b%uSmplr", set, binding);
                 }
             } else {
                 const char* space = storage == 2 ? "constant" : s.facts[type].nonWritable ? "const device" : "device";
+                argumentSaid(arguments, set, binding, slot, IR_MSL_BUFFER, 1);
                 say(&head, "    %s %s* b%u [[id(%u)]];\n", space, typeName(&s, type), binding, slot++);
                 s.expr[id] = format("(*spvDescriptorSet%u.b%u)", set, binding);
             }
         }
         say(&head, "};\n\n");
     }
-    if (pushId && used[pushId]) say(&sets, ", constant %s& _%u [[buffer(%u)]]", typeName(&s, pushType), pushId, setCount ? setCount : 1u);
+    if (pushId && used[pushId]) {
+        say(&sets, ", constant %s& _%u [[buffer(%u)]]", typeName(&s, pushType), pushId, setCount ? setCount : 1u);
+        if (arguments) arguments->pushAt = (int)(setCount ? setCount : 1u);
+    }
     for (size_t k = 0; k < params.len; ++k) artfVecPush(&sets, params.items[k]);
     artfVecFree(&params);
     params = sets;

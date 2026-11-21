@@ -2,7 +2,7 @@
  *
  * Laid out for webgpu.c, which binds it: what Vulkan binds at set S, binding N is @group(S) @binding(N); a texture
  * and its sampler, which Vulkan binds as one, are two, the sampler at N + IR_WGSL_SAMPLER_AT; an array of textures (WGSL
- * has none) is one texture and one sampler for each element k, at IR_WGSL_ARRAY_AT + 2k and the next, and must be read
+ * has none) is a texture for each element k read, at IR_WGSL_ARRAY_AT + k, and one sampler for all at the binding before, and must be read
  * by constant indices (built with ARTF_TEXTURES_UNIFORM); push constants are a uniform buffer at group 0, binding
  * IR_WGSL_PUSH_AT. The entry point is main. A buffer that atomics touch is an array of atomic<u32>, every access to it
  * atomic. Control is the IR's, structured, as Metal's is written (msl.h): an if from its merge, a loop from its merge
@@ -15,7 +15,7 @@
 
 #define IR_WGSL_SAMPLER_AT 128
 #define IR_WGSL_ARRAY_AT 256
-#define IR_WGSL_PUSH_AT 1000
+#define IR_WGSL_PUSH_AT 999 /* (the last binding WebGPU has) */
 
 typedef struct IrWgslOptions {
     bool flipY; /* a vertex shader's position upside down (as Metal's: msl.h) */

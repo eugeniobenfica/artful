@@ -112,36 +112,19 @@ jobs:
           name: flip-macos
           path: flip-macos.csv
           if-no-files-found: ignore
-      # (the SPIRV-Cross of the Vulkan SDK that wrote shaders.inc: another version names its variables otherwise)
-      - name: SPIRV-Cross, as in Vulkan SDK 1.4.363
-        run: |
-          git clone --depth 1 --branch vulkan-sdk-1.4.363.0 https://github.com/KhronosGroup/SPIRV-Cross ../spirv-cross
-          cmake -S ../spirv-cross -B ../spirv-cross/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_SHARED=OFF -DSPIRV_CROSS_CLI=ON
-          cmake --build ../spirv-cross/build --target spirv-cross
-      # (Metal is built only with ARTFUL_METAL, and has never run: what the library takes, and what the shaders of now
-      # would make, both through Apple's compiler. shaders.inc was last made on Windows, by artful-shaders built with
-      # MSYS2's clang and MSYS2's SPIRV-Cross of the same tag: it should be what this makes, and if it is not, that is
-      # said, not failed.)
-      - name: Metal's shaders, through Apple's compiler
-        run: |
-          mkdir spv metal taken
-          build/artful-shaders spv
-          python3 tools/mkmetal.py --extract taken
-          for f in taken/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /dev/null; done
-          cp src/metal/shaders.inc taken/shaders.inc
-          python3 tools/mkmetal.py spv ../spirv-cross/build/spirv-cross metal
-          for f in metal/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /dev/null; done
-          git diff --quiet src/metal/shaders.inc || echo "::warning::src/metal/shaders.inc is not what this SPIRV-Cross makes of the shaders of now"
-          cp taken/shaders.inc src/metal/shaders.inc
-      # (the Metal Artful writes itself, from the shaders' IR: src/shaderir/msl.c. Every shader it writes goes through
-      # Apple's compiler, and those Metal runs must bind as SPIRV-Cross's do; what it cannot write yet, ray queries, it
-      # says, and leaves out)
+      # (the Metal Artful writes itself, from the shaders' IR: src/shaderir/msl.c, what metal.c compiles as it starts.
+      # Every shader it writes goes through Apple's compiler; what it cannot write yet, ray queries, it says, and leaves
+      # out)
       - name: Metal from the IR, through Apple's compiler
         run: |
           mkdir ours
           build/artful-shaders ours --ir
           for f in ours/*.metal; do xcrun -sdk macosx metal -std=metal3.0 -c "$f" -o /dev/null || exit 1; done
-          python3 tools/msl/compare.py taken ours
+      # (Metal against the CPU, on this runner's GPU, where it has one: what backends/metal says, said again apart)
+      - name: Metal, run
+        run: |
+          build/artful-tests backends/metal shaderIr
+          system_profiler SPDisplaysDataType | head -20 || true
 
   windows:
     runs-on: windows-latest

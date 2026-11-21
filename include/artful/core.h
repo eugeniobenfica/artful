@@ -102,7 +102,8 @@ typedef enum ArtfSurfaceKind {
     ARTF_SURFACE_XLIB,    /* a: the Display*, b: the Window */
     ARTF_SURFACE_WAYLAND, /* a: the wl_display*, b: the wl_surface* */
     ARTF_SURFACE_ANDROID, /* a: the ANativeWindow* */
-    ARTF_SURFACE_METAL    /* a: the CAMetalLayer* */
+    ARTF_SURFACE_METAL,   /* a: the CAMetalLayer* */
+    ARTF_SURFACE_WEB_CANVAS /* a: a CSS selector for the page's canvas (WebGPU in a browser), "#frame" say */
 } ArtfSurfaceKind;
 
 typedef struct ArtfSurface {
