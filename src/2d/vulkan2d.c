@@ -253,7 +253,11 @@ static bool createDevice(Gpu2D* g) {
     const float priority = 1;
     const DeviceQueueCreateInfo queue = {ST_DEVICE_QUEUE_CREATE_INFO, NULL, 0, g->family, 1, &priority};
     const char* swapchain = "VK_KHR_swapchain";
-    const DeviceCreateInfo device = {ST_DEVICE_CREATE_INFO, NULL, 0, 1, &queue, 0, NULL, g->surface ? 1u : 0u, g->surface ? &swapchain : NULL, NULL};
+    /* (ARTFUL_ROBUST, as the tests set it, and as the 3D device takes it: a read past a buffer gives 0, not a fault) */
+    PhysicalDeviceFeatures features;
+    memset(&features, 0, sizeof features);
+    features.robustBufferAccess = getenv("ARTFUL_ROBUST") != NULL;
+    const DeviceCreateInfo device = {ST_DEVICE_CREATE_INFO, NULL, 0, 1, &queue, 0, NULL, g->surface ? 1u : 0u, g->surface ? &swapchain : NULL, &features};
     if (g->vkCreateDevice(g->gpu, &device, NULL, &g->device) != VK_OK) return false;
 #define X(name, result, args) *(void**)&g->name = g->vkGetDeviceProcAddr(g->device, #name);
     ARTF_VK_DEVICE_FUNCTIONS(X)

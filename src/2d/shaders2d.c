@@ -282,6 +282,19 @@ static SpvId sampleOf(Sh* h, SpvId level, SpvId nearest, SpvId u, SpvId v) {
     return vec4Of(h, out[0], out[1], out[2], out[3]);
 }
 
+/* A texture, where there is one (tex not 0xFFFFFFFF), else white: none is sampled at all, as level 0 of none would read
+ * past the texels where a scene has no texture (a width of 0, and an index of nothing: lavapipe fell over) */
+static SpvId sampleIf(Sh* h, SpvId tex, SpvId nearest, SpvId u, SpvId v) {
+    SpvId no, merge, white = vec4Of(h, FLOAT(1.f), FLOAT(1.f), FLOAT(1.f), FLOAT(1.f)); /* (made before: a phi comes first in its block) */
+    spvIfElseBegin(S, NE_U(tex, UINT(0xFFFFFFFFu)), &no, &merge);
+    SpvId got = sampleOf(h, tex, nearest, u, v), from = S->block;
+    spvBranch(S, merge);
+    spvLabel(S, no);
+    spvBranch(S, merge);
+    spvLabel(S, merge);
+    return spvPhi(S, S->vec4, got, from, white, no);
+}
+
 /* ---- shadows: as artf2DShadowSee ---- */
 
 typedef struct Map2D {
@@ -514,13 +527,13 @@ uint32_t* artf2DShaderTiles(size_t* size) {
                     SpvId u = ADD_F(X(uv), MUL_F(lx, Y(uv))), v = ADD_F(Z(uv), MUL_F(ly, W(uv)));
                     const SpvId none = UINT(0xFFFFFFFFu);
                     SpvId tex0 = AS_U(X(texRow)), tex1 = AS_U(Y(texRow)), tex2 = AS_U(Z(texRow));
-                    SpvId t0 = sampleOf(h, PICK_U(EQ_U(tex0, none), UINT(0), tex0), nearest, u, v);
+                    SpvId t0 = sampleIf(h, tex0, nearest, u, v);
                     SpvId has0 = NE_U(tex0, none);
                     SpvId tc[4];
                     for (uint32_t k = 0; k < 4; ++k) tc[k] = PICK_F(has0, spvExtract(S, S->floatType, t0, k), FLOAT(1.f));
                     SpvId kk = MUL_F(W(colorRow), cov);
                     SpvId rgba[4] = {MUL_F(MUL_F(X(colorRow), tc[0]), kk), MUL_F(MUL_F(Y(colorRow), tc[1]), kk), MUL_F(MUL_F(Z(colorRow), tc[2]), kk), MUL_F(tc[3], kk)};
-                    SpvId t2 = sampleOf(h, PICK_U(EQ_U(tex2, none), UINT(0), tex2), nearest, u, v);
+                    SpvId t2 = sampleIf(h, tex2, nearest, u, v);
                     SpvId has2 = NE_U(tex2, none);
                     SpvId ke = MUL_F(kk, tc[3]);
                     SpvId emit[3];
@@ -533,7 +546,7 @@ uint32_t* artf2DShaderTiles(size_t* size) {
                     spvIfBegin(S, shows, &showMerge);
                     {
                         /* which way it faces */
-                        SpvId t1 = sampleOf(h, PICK_U(EQ_U(tex1, none), UINT(0), tex1), nearest, u, v);
+                        SpvId t1 = sampleIf(h, tex1, nearest, u, v);
                         SpvId has1 = NE_U(tex1, none);
                         SpvId nx = X(t1), ny = NEG_F(Y(t1)), nz = MAX_F(Z(t1), FLOAT(0.f));
                         SpvId len = SQRT_F(ADD_F(ADD_F(MUL_F(nx, nx), MUL_F(ny, ny)), MUL_F(nz, nz)));

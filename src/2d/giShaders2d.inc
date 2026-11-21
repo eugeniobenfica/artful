@@ -156,8 +156,8 @@ uint32_t* artf2DShaderGiScene(size_t* size) {
                     SpvId u = ADD_F(X(uv), MUL_F(lx, Y(uv))), v = ADD_F(Z(uv), MUL_F(ly, W(uv)));
                     const SpvId none = UINT(0xFFFFFFFFu);
                     SpvId tex0 = AS_U(X(texRow)), tex2 = AS_U(Z(texRow));
-                    SpvId t0 = sampleOf(h, PICK_U(EQ_U(tex0, none), UINT(0), tex0), nearest, u, v);
-                    SpvId t2 = sampleOf(h, PICK_U(EQ_U(tex2, none), UINT(0), tex2), nearest, u, v);
+                    SpvId t0 = sampleIf(h, tex0, nearest, u, v);
+                    SpvId t2 = sampleIf(h, tex2, nearest, u, v);
                     SpvId alpha = PICK_F(NE_U(tex0, none), W(t0), FLOAT(1.f));
                     SpvId ke = MUL_F(W(colorRow), alpha);
                     SpvId emit[3];
