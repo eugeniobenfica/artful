@@ -12,8 +12,9 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 ## Dá para fazer aqui
 
 ### CI
-- [ ] Conferir a run da CI depois da correção do alinhamento das camadas (o Linux caía no AVX2 alinhado de
-  `drawLayersSorted`; a causa e a correção estão no plano)
+- [ ] A queda do Linux em `2d/vulkanFrames`, no código gerado pelo llvmpipe (não reproduz aqui; o passo de falha da
+  CI roda o teste com `ARTFUL_2D_STEP=1`, que nomeia o shader, e com `ARTFUL_ROBUST=1`). As camadas e as ray queries,
+  que caíam antes, foram corrigidas e passam na CI.
 
 ### Fase 5 — Alcance de conteúdo
 - [~] 5.9 Saída HDR — faltam os metadados HDR e o scRGB (o teste numa tela HDR está na outra lista)
