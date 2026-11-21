@@ -83,7 +83,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [~] 6.2 WebGPU (emissor WGSL e backend)
   - [x] CPU em WebAssembly com SIMD (`kernelsWasm.c`), threads em workers; suíte da CPU passa no node; `spheres` no Chromium a 3,0 ms (960×540, 16 threads); Safari não testado
   - [x] emissor WGSL (`irWgsl`): os 79 shaders que podem ser WGSL passam no naga (wgpu-native, `tools/wgslCheck.c`) e no Tint (Chromium, `tools/web/wgslCheck.html`); os de fora leem texturas por índice não uniforme (o WebGPU usará `ARTF_TEXTURES_UNIFORM`), PrimitiveId ou ray queries
-  - [ ] backend sobre `webgpu.h`
+  - [x] backend sobre `webgpu.h` (`src/webgpu/webgpu.c`, `ARTFUL_WEBGPU`): nativo no wgpu-native contra a CPU 0,02–0,08% dos pixels; no Chromium pelo port do Dawn (`emdawnwebgpu`), `spheres` em `artful-web.html?backend=webgpu`; Safari não testado
 - [x] 6.3 Caminho sem descriptor indexing — árvore de ifs por índice constante, gradientes tomados antes; nenhuma funcionalidade pedida; até 64 texturas; suíte inteira passa forçada (`ARTFUL_UNIFORM_TEXTURES`); 40 texturas iguais ao caminho normal (0,000%)
 
 ## Ferramentas de verificação montadas nesta máquina

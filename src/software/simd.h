@@ -133,7 +133,8 @@ V8_INLINE V4F v4fMax(V4F a, V4F b) { return vbslq_f32(vcgtq_f32(a, b), a, b); }
 #define v4iOr vorrq_s32
 #define v4iXor veorq_s32
 #define v4iAndNot(a, b) vbicq_s32(b, a)
-#define v4iShl vshlq_n_s32
+/* (by a register, as v4iShr: a count that is no constant, a loop's, will not go in the immediate form) */
+#define v4iShl(a, n) vshlq_s32(a, vdupq_n_s32(n))
 /* (by a register: the immediate form cannot shift by 0) */
 #define v4iShr(a, n) vreinterpretq_s32_u32(vshlq_u32(vreinterpretq_u32_s32(a), vdupq_n_s32(-(n))))
 #define v4iEq(a, b) vreinterpretq_s32_u32(vceqq_s32(a, b))

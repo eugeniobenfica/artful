@@ -117,7 +117,11 @@ int main(int argc, char** argv) {
 #ifdef ARTFUL_VULKAN
     /* (a shader's mistake reads 0 past a buffer, not a fault that takes the device and the screen down; and after a few
      * devices lost, the GPU is left alone for the rest of the run: artfVulkanDevicesLost) */
+#ifdef _WIN32
     _putenv("ARTFUL_ROBUST=1");
+#else
+    setenv("ARTFUL_ROBUST", "1", 1);
+#endif
     /* (a feature asked for is drawn on the next frame, as each test expects; testShadersAhead checks the other way) */
     artfVulkanShadersWait = true;
     artfSpvCheck = true; /* (every shader built is checked as an IR too: testShaderIr) */

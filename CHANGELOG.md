@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A WebGPU backend** (phase 6.2, `ARTFUL_WEBGPU`, chosen by name): on webgpu.h, natively (wgpu-native) and in a
+  browser (Emscripten's port of Dawn's), its shaders Vulkan's, written as WGSL from the IR as it starts. The plain
+  frame: textures, lights, shadow maps, what has holes, the overlay. Against the CPU, 0.02 to 0.08% of pixels apart;
+  the spheres in Chromium on the GPU at `artful-web.html?backend=webgpu`.
+
 - **WGSL from the shaders' IR** (phase 6.2): `irWgsl` writes WebGPU's language from the same IR as SPIR-V and Metal;
   the 79 shaders that can be WGSL pass both naga (wgpu-native) and Tint (Chromium).
 

@@ -376,7 +376,7 @@ about a second and a half each on a Vega 8. How it works is [here](docs/architec
 | **Windows** x64, MSVC | Vulkan, software | Tier 2 |
 | **Android** armv7, x86-64 | Vulkan, software | Tier 2 |
 | **iOS** | software; Metal | Tier 2 |
-| **Web** (Emscripten) | software, in WebAssembly's SIMD, on the browser's cores | Tier 2 |
+| **Web** (Emscripten) | software, in WebAssembly's SIMD, on the browser's cores; WebGPU | Tier 2 |
 
 **Tier 1**: all tests and a real window with a page over the scene, run on an AMD GPU (Windows) and an
 Adreno GPU (Android).<br>
@@ -498,8 +498,9 @@ SDK. `cmake --install build --prefix <dir>` installs it for `find_package(artful
 For a browser, with Emscripten: `emcmake cmake -S . -B build-wasm -G Ninja`, then `cmake --build build-wasm`.
 `node build-wasm/artful-tests.js` runs the tests (all of the CPU's pass, with the same pixels as on x86);
 `python tools/web/serve.py build-wasm` serves `artful-web.html`, the spheres drawn on the CPU in the page (its headers
-let the page's threads share memory). On Windows, Binaryen's optimizer may hang with many threads:
-`BINARYEN_CORES=1`.
+let the page's threads share memory); with `-DARTFUL_WEBGPU=ON`, `artful-web.html?backend=webgpu` draws them through
+WebGPU (Emscripten downloads Dawn's port of webgpu.h the first time). On Windows, Binaryen's optimizer may hang with
+many threads: `BINARYEN_CORES=1`.
 
 <details>
 <summary><b>Build options</b></summary>
@@ -511,6 +512,7 @@ let the page's threads share memory). On Windows, Binaryen's optimizer may hang 
 | `ARTFUL_BUILD_TOOLS`, `ARTFUL_BUILD_TESTS` | top level | `artful-render`, `artful-render2d`, `artful-blackhole` (the window), `artful-shaders`, `artful-flip`, `artful-tests` |
 | `ARTFUL_BLACKHOLE` | top level | the black hole, `artful-blackhole` (`artful::blackhole`), a library apart; the tools and tests build it too |
 | `ARTFUL_METAL` | `OFF` | the Metal backend (Apple only): never run, and without most of what came after 0.4 |
+| `ARTFUL_WEBGPU` | `OFF` | the WebGPU backend, chosen by name: in a browser through Emscripten, or natively on wgpu-native (`ARTFUL_WEBGPU_LIBRARY`) |
 | `ARTFUL_CASCADE_DIR` | empty | cascade's source folder: builds the bridge to it (`artful::cascade`), its example and its tests |
 | `ARTFUL_CASCADE` | `OFF` | the same, with an installed cascade (`find_package`) |
 </details>
@@ -528,6 +530,8 @@ src/scene/        scenes; meshBuild.c packs and orders meshes, simplify.c makes 
 src/render/       the choice of a backend
 src/software/     the CPU backend: kernels.inc is built once for each instruction set, on simd.h
 src/vulkan/       the GPU backend: vulkanApi.h, spirv.c and the shaders in shaders.c
+src/shaderir/     the shaders as an IR, and what writes them as SPIR-V, Metal (msl.c) and WGSL (wgsl.c)
+src/webgpu/       the WebGPU backend, built only when asked: webgpu.c
 src/metal/        the GPU backend for Apple's systems, never run and built only when asked: metal.c, and shaders.inc,
                   which is generated
 extensions/       built apart, on the public API: blackhole/ (artful-blackhole, include/artful/blackhole.h)

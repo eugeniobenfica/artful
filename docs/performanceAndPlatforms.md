@@ -145,6 +145,8 @@ SIMD (`kernelsWasm.c`, two registers of four, as NEON's), and its threads are wo
 page served with cross-origin isolation (`tools/web/serve.py`). Under node, every test of the CPU passes (328,461
 checks) with the same pixels as the portable kernels; in Chromium the spheres take 3.0 ms a frame at 960x540 on 16
 threads. Safari has WebAssembly's SIMD since 16.4 and shared memory with the same headers, but has not been tried.
+WebGPU is a backend of its own (`src/webgpu`), its shaders Vulkan's written as WGSL from the IR: it runs on
+wgpu-native and in Chromium (Dawn's port of webgpu.h, through Emscripten).
 
 ## What to do, in order
 
