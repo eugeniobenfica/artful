@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Clouds in the scene** (phase 5.11): with aerial perspective and a frame in floats, the sky's clouds are in front of
+  what is drawn too, on both backends alike: followed along a ray every 4 x 4 pixels, as far as what is drawn there, and
+  each pixel takes what is in front of it, so a tower goes up through them. 0.6 ms a frame at 1080p on the GPU.
+  `artful-render --aerial m`.
+
 - **Basis Universal and Zstandard** (phase 5.10): KTX2 files of ETC1S with BasisLZ, and of UASTC as it is or with
   Zstandard, are read (`artfSceneAddTextureKtx2`, and glTF's `KHR_texture_basisu`, also where a file requires it),
   into pixels the same as basisu's own transcoder makes, to the byte, on all 46 such files of glTF-Sample-Assets

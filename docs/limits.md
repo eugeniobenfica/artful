@@ -105,7 +105,10 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - A sky (`artfSceneSetSky`) scatters light once unless `multiple` asks for more, and then every order is taken to
   scatter alike, as Hillaire's table has it. It is a picture of all around, made again, in tens of milliseconds, when
   the sun or the clouds move: the sun drawn in it is as sharp as the picture's texels, and its clouds are as fine as
-  they are (256 across: 1.4 degrees each); they are not drawn in front of the scene, nor in fog that light goes through.
+  they are (256 across: 1.4 degrees each). With aerial perspective and a frame in floats they are also in front of what
+  is drawn, followed along a ray every 4 x 4 pixels (64 steps, from where the layer begins to what is drawn): finer than
+  that, what is drawn shows between the rays' clouds as they are read between; not in an orthographic view, over
+  layers, or in fog that light goes through.
   Their shadow is one for the whole scene, what they take of the sun over the eye, not a map over the ground. Below the
   horizon the ground is lit by the sun alone. Fog by height thins fog that light goes through, not the plain fog.
 - Lights' sizes count for the sixteen lights the frame holds. Soft shadows (`ArtfShadowDesc.soft`) take 50 reads a

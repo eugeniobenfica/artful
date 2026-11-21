@@ -1643,5 +1643,337 @@ uint32_t* artfShaderPostFinalFor(size_t* size, bool turns, const ArtfShaderDispl
     return finish(s, size);
 }
 
+
+/* ---- clouds in the scene: sky.c's artfCloudsColumn and artfCloudsAt, the same arithmetic in the same order. Binding
+ * 73: the field (ArtfScene.clouds); 74: the grid's cells (ARTF_CLOUD_CELL floats each). The column's push constant: how
+ * many columns across. ---- */
+
+/* (sky.c's own: the earth, the top of the air, the air's table, the clouds' noise and where they are) */
+enum { C_TRANS_W = 256, C_TRANS_H = 64, C_NOISE = 64, C_WEATHER = 128, C_LIGHT_STEPS = 6 };
+#define C_EARTH 6360.f
+#define C_TOP 6460.f
+#define C_HORIZON 1132.2544f
+#define C_SHAPE_KM 12.f
+#define C_DETAIL_KM 2.3f
+#define C_WEATHER_KM 60.f
+#define C_CLOUD_FAR 90.f
+
+typedef struct Clouds {
+    Post* p;
+    SpvId field, base, top, density, coverage, wind[3], unit, toSun[3], eyeR, sun[3], ambient[3];
+} Clouds;
+
+static SpvId cloudField(Spv* s, const Clouds* c, SpvId at) { return postFloat(s, c->p, c->field, at); }
+static SpvId cloudExp(Spv* s, SpvId x) { return spvExp2Fast(s, MUL_F(x, FLOAT(1.44269504f))); }
+/* (C's (int)(x + k) - k, a floor for what is above -k) */
+static SpvId cloudFloor(Spv* s, SpvId x, float k) {
+    return spvOp2(s, SPV_OP_ISub, s->intType, spvOp1(s, SPV_OP_ConvertFToS, s->intType, ADD_F(x, FLOAT(k))), spvConstInt(s, (int)k));
+}
+static SpvId cloudWrap(Spv* s, SpvId i, uint32_t mask) { return AND_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, i), UINT(mask)); }
+
+/* sky.c's noiseAt */
+static SpvId cloudNoise(Spv* s, const Clouds* c, SpvId x, SpvId y, SpvId z) {
+    SpvId ix = cloudFloor(s, x, 65536.f), iy = cloudFloor(s, y, 65536.f), iz = cloudFloor(s, z, 65536.f);
+    SpvId fx = SUB_F(x, spvOp1(s, 111 /* OpConvertSToF */, s->floatType, ix)), fy = SUB_F(y, spvOp1(s, 111 /* OpConvertSToF */, s->floatType, iy)), fz = SUB_F(z, spvOp1(s, 111 /* OpConvertSToF */, s->floatType, iz));
+    SpvId x0 = cloudWrap(s, ix, C_NOISE - 1), y0 = cloudWrap(s, iy, C_NOISE - 1), z0 = cloudWrap(s, iz, C_NOISE - 1);
+    SpvId x1 = AND_U(ADD_U(x0, UINT(1)), UINT(C_NOISE - 1)), y1 = AND_U(ADD_U(y0, UINT(1)), UINT(C_NOISE - 1)), z1 = AND_U(ADD_U(z0, UINT(1)), UINT(C_NOISE - 1));
+#define N(a, b, cc) cloudField(s, c, ADD_U(UINT(ARTF_CLOUD_NOISE), ADD_U(MUL_U(ADD_U(MUL_U(cc, UINT(C_NOISE)), b), UINT(C_NOISE)), a)))
+    SpvId n000 = N(x0, y0, z0), n100 = N(x1, y0, z0), n010 = N(x0, y1, z0), n110 = N(x1, y1, z0);
+    SpvId n001 = N(x0, y0, z1), n101 = N(x1, y0, z1), n011 = N(x0, y1, z1), n111 = N(x1, y1, z1);
+#undef N
+    SpvId a = ADD_F(n000, MUL_F(SUB_F(n100, n000), fx)), b = ADD_F(n010, MUL_F(SUB_F(n110, n010), fx));
+    SpvId cc = ADD_F(n001, MUL_F(SUB_F(n101, n001), fx)), d = ADD_F(n011, MUL_F(SUB_F(n111, n011), fx));
+    SpvId near_ = ADD_F(a, MUL_F(SUB_F(b, a), fy)), far = ADD_F(cc, MUL_F(SUB_F(d, cc), fy));
+    return ADD_F(near_, MUL_F(SUB_F(far, near_), fz));
+}
+
+/* sky.c's weatherAt */
+static SpvId cloudWeather(Spv* s, const Clouds* c, SpvId x, SpvId y) {
+    SpvId ix = cloudFloor(s, x, 65536.f), iy = cloudFloor(s, y, 65536.f);
+    SpvId fx = SUB_F(x, spvOp1(s, 111 /* OpConvertSToF */, s->floatType, ix)), fy = SUB_F(y, spvOp1(s, 111 /* OpConvertSToF */, s->floatType, iy));
+    SpvId x0 = cloudWrap(s, ix, C_WEATHER - 1), y0 = cloudWrap(s, iy, C_WEATHER - 1), x1 = AND_U(ADD_U(x0, UINT(1)), UINT(C_WEATHER - 1)), y1 = AND_U(ADD_U(y0, UINT(1)), UINT(C_WEATHER - 1));
+#define WT(a, b) cloudField(s, c, ADD_U(UINT(ARTF_CLOUD_WEATHER), ADD_U(MUL_U(b, UINT(C_WEATHER)), a)))
+    SpvId a = WT(x0, y0), b = WT(x1, y0), cc = WT(x0, y1), d = WT(x1, y1);
+#undef WT
+    SpvId top = ADD_F(a, MUL_F(SUB_F(b, a), fx)), bottom = ADD_F(cc, MUL_F(SUB_F(d, cc), fx));
+    return ADD_F(top, MUL_F(SUB_F(bottom, top), fy));
+}
+
+/* sky.c's cloudAt: what is taken at p, h above the ground, per kilometer; 0 out of them (by choices of results, not of
+ * branches: the same numbers where they are) */
+static SpvId cloudAt(Spv* s, const Clouds* c, const SpvId* q, SpvId h, bool fine) {
+    SpvId frac = DIV_F(SUB_F(h, c->base), SUB_F(c->top, c->base));
+    SpvId in = P_AND(P_MORE(frac, FLOAT(0.f)), P_LESS(frac, FLOAT(1.f)));
+    SpvId x = ADD_F(q[0], c->wind[0]), y = ADD_F(h, c->wind[1]), z = ADD_F(q[2], c->wind[2]);
+    const float wScale = (float)C_WEATHER / C_WEATHER_KM, nScale = (float)C_NOISE / C_SHAPE_KM, dScale = (float)C_NOISE / C_DETAIL_KM;
+    SpvId local = P_CLAMP(ADD_F(c->coverage, MUL_F(SUB_F(cloudWeather(s, c, MUL_F(x, FLOAT(wScale)), MUL_F(z, FLOAT(wScale))), FLOAT(.5f)), FLOAT(1.2f))), FLOAT(0.f), FLOAT(1.f));
+    in = P_AND(in, P_MORE(local, FLOAT(0.f)));
+    SpvId rise = P_CLAMP(MUL_F(frac, FLOAT(6.f)), FLOAT(0.f), FLOAT(1.f)), fall = P_CLAMP(MUL_F(SUB_F(FLOAT(1.f), frac), FLOAT(1.8f)), FLOAT(0.f), FLOAT(1.f));
+    SpvId shape = MUL_F(MUL_F(cloudNoise(s, c, MUL_F(x, FLOAT(nScale)), MUL_F(y, FLOAT(nScale)), MUL_F(z, FLOAT(nScale))), rise), MUL_F(fall, SUB_F(FLOAT(2.f), fall)));
+    SpvId d = DIV_F(SUB_F(shape, SUB_F(FLOAT(1.f), local)), MAX_F(local, FLOAT(.05f)));
+    in = P_AND(in, P_MORE(d, FLOAT(0.f)));
+    if (fine) {
+        SpvId wear = cloudNoise(s, c, ADD_F(MUL_F(x, FLOAT(dScale)), FLOAT(17.f)), MUL_F(y, FLOAT(dScale)), ADD_F(MUL_F(z, FLOAT(dScale)), FLOAT(31.f)));
+        d = SUB_F(d, MUL_F(MUL_F(SUB_F(FLOAT(1.f), wear), FLOAT(.35f)), SUB_F(FLOAT(1.f), d)));
+        in = P_AND(in, P_MORE(d, FLOAT(0.f)));
+    }
+    return PICK_F(in, MUL_F(MUL_F(MIN_F(d, FLOAT(1.f)), c->density), FLOAT(45.f)), FLOAT(0.f));
+}
+
+/* sky.c's sphereSpan (b, c and the root; ok: met) and toSphere */
+static void cloudSpan(Spv* s, const SpvId* q, const SpvId* d, float r, SpvId* near_, SpvId* far, SpvId* ok) {
+    SpvId b = ADD_F(ADD_F(MUL_F(q[0], d[0]), MUL_F(q[1], d[1])), MUL_F(q[2], d[2]));
+    SpvId cc = SUB_F(ADD_F(ADD_F(MUL_F(q[0], q[0]), MUL_F(q[1], q[1])), MUL_F(q[2], q[2])), FLOAT(r * r));
+    SpvId disc = SUB_F(MUL_F(b, b), cc);
+    *ok = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, disc, FLOAT(0.f));
+    SpvId root = SQRT_F(MAX_F(disc, FLOAT(0.f))), minusB = spvOp1(s, SPV_OP_FNegate, s->floatType, b);
+    *near_ = SUB_F(minusB, root);
+    *far = ADD_F(minusB, root);
+}
+static SpvId cloudToSphere(Spv* s, const SpvId* q, const SpvId* d, float r) {
+    SpvId near_, far, ok;
+    cloudSpan(s, q, d, r, &near_, &far, &ok);
+    return PICK_F(ok, PICK_F(P_MORE(near_, FLOAT(0.f)), near_, PICK_F(P_MORE(far, FLOAT(0.f)), far, FLOAT(-1.f))), FLOAT(-1.f));
+}
+
+/* sky.c's sunThroughTable: what the air leaves of the sun at p */
+static SpvId cloudSunThrough(Spv* s, const Clouds* c, const SpvId* q) {
+    SpvId behind = P_MORE(cloudToSphere(s, q, c->toSun, C_EARTH), FLOAT(0.f));
+    SpvId r = SQRT_F(ADD_F(ADD_F(MUL_F(q[0], q[0]), MUL_F(q[1], q[1])), MUL_F(q[2], q[2])));
+    SpvId mu = DIV_F(ADD_F(ADD_F(MUL_F(q[0], c->toSun[0]), MUL_F(q[1], c->toSun[1])), MUL_F(q[2], c->toSun[2])), r);
+    SpvId rho = SQRT_F(MAX_F(SUB_F(MUL_F(r, r), FLOAT(C_EARTH * C_EARTH)), FLOAT(0.f)));
+    SpvId minusR = spvOp1(s, SPV_OP_FNegate, s->floatType, r);
+    SpvId dd = MAX_F(ADD_F(MUL_F(minusR, mu), SQRT_F(MAX_F(ADD_F(MUL_F(MUL_F(r, r), SUB_F(MUL_F(mu, mu), FLOAT(1.f))), FLOAT(C_TOP * C_TOP)), FLOAT(0.f)))), FLOAT(0.f));
+    SpvId least = SUB_F(FLOAT(C_TOP), r), most = ADD_F(rho, FLOAT(C_HORIZON));
+    SpvId tx = DIV_F(SUB_F(dd, least), MAX_F(SUB_F(most, least), FLOAT(1e-6f))), ty = DIV_F(rho, FLOAT(C_HORIZON));
+    /* table3, bilinear */
+    SpvId x = P_CLAMP(MUL_F(tx, FLOAT((float)(C_TRANS_W - 1))), FLOAT(0.f), FLOAT((float)(C_TRANS_W - 1)));
+    SpvId y = P_CLAMP(MUL_F(ty, FLOAT((float)(C_TRANS_H - 1))), FLOAT(0.f), FLOAT((float)(C_TRANS_H - 1)));
+    SpvId x0 = spvGlsl2(s, 39 /* SMin */, s->intType, spvOp1(s, SPV_OP_ConvertFToS, s->intType, x), spvConstInt(s, C_TRANS_W - 2));
+    SpvId y0 = spvGlsl2(s, 39, s->intType, spvOp1(s, SPV_OP_ConvertFToS, s->intType, y), spvConstInt(s, C_TRANS_H - 2));
+    SpvId fx = SUB_F(x, spvOp1(s, 111 /* OpConvertSToF */, s->floatType, x0)), fy = SUB_F(y, spvOp1(s, 111 /* OpConvertSToF */, s->floatType, y0));
+    SpvId a = ADD_U(UINT(ARTF_CLOUD_TRANS), MUL_U(UINT(3), ADD_U(MUL_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, y0), UINT(C_TRANS_W)), spvOp1(s, SPV_OP_Bitcast, s->uintType, x0))));
+    SpvId bAt = ADD_U(a, UINT(3 * C_TRANS_W));
+    SpvId out[3];
+    for (int k = 0; k < 3; ++k) {
+        SpvId a0 = cloudField(s, c, ADD_U(a, UINT((uint32_t)k))), a1 = cloudField(s, c, ADD_U(a, UINT(3u + (uint32_t)k)));
+        SpvId b0 = cloudField(s, c, ADD_U(bAt, UINT((uint32_t)k))), b1 = cloudField(s, c, ADD_U(bAt, UINT(3u + (uint32_t)k)));
+        SpvId top = ADD_F(a0, MUL_F(SUB_F(a1, a0), fx)), bottom = ADD_F(b0, MUL_F(SUB_F(b1, b0), fx));
+        out[k] = PICK_F(behind, FLOAT(0.f), cloudExp(s, spvOp1(s, SPV_OP_FNegate, s->floatType, ADD_F(top, MUL_F(SUB_F(bottom, top), fy)))));
+    }
+    return vec3Of(s, out[0], out[1], out[2]);
+}
+
+static SpvId cloudHenyey(Spv* s, float g, SpvId mu) {
+    SpvId q = SUB_F(FLOAT(1.f + g * g), MUL_F(FLOAT(2.f * g), mu));
+    return DIV_F(FLOAT(.079577472f * (1.f - g * g)), MUL_F(q, SQRT_F(q)));
+}
+
+static void cloudsOf(Spv* s, Clouds* c, Post* p, SpvId field) {
+    c->p = p;
+    c->field = field;
+    SpvId at[20];
+    for (int k = 0; k < 20; ++k) at[k] = cloudField(s, c, UINT((uint32_t)k));
+    c->base = at[0];
+    c->top = at[1];
+    c->density = at[2];
+    c->coverage = at[3];
+    for (int k = 0; k < 3; ++k) {
+        c->wind[k] = at[4 + k];
+        c->toSun[k] = at[8 + k];
+        c->sun[k] = at[12 + k];
+        c->ambient[k] = at[16 + k];
+    }
+    c->unit = at[7];
+    c->eyeR = at[11];
+}
+
+/* sky.c's artfCloudJitter */
+static SpvId cloudJitter(Spv* s, SpvId i, SpvId j) {
+    SpvId h = spvOp2(s, 198 /* OpBitwiseXor */, s->uintType, MUL_U(i, UINT(0x9E3779B1u)), MUL_U(j, UINT(0x85EBCA77u)));
+    h = MUL_U(spvOp2(s, 198, s->uintType, h, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, h, UINT(15))), UINT(0x2C1B3C6Du));
+    h = spvOp2(s, 198, s->uintType, h, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, h, UINT(12)));
+    return MUL_F(TO_F(spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, h, UINT(8))), FLOAT(1.f / 16777216.f));
+}
+
+static void cloudCellStore(Spv* s, Post* p, SpvId grid, SpvId at, SpvId value) {
+    spvStore(s, spvAccess(s, p->r.ptrStorageVec4, grid, (SpvId[]){p->r.zero, at}, 2), value);
+}
+
+POST_MAIN(artfShaderPostCloudColumns)
+    SpvId field = postBuffer(s, p, p->r.floatArray, 73), grid = postBuffer(s, p, p->r.vec4Array, 74);
+    SpvId main = spvBeginMain(s);
+    SpvId ptrFn3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3), ptrFnF = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptrFnU = spvTypePointer(s, SPV_STORAGE_Function, s->uintType);
+    SpvId lightVar = spvVariable(s, ptrFn3, SPV_STORAGE_Function), leftVar = spvVariable(s, ptrFnF, SPV_STORAGE_Function), counter = spvVariable(s, ptrFnU, SPV_STORAGE_Function);
+    SpvId farVar = spvVariable(s, ptrFnF, SPV_STORAGE_Function), around = spvVariable(s, ptrFnU, SPV_STORAGE_Function);
+    postSizes(s, p);
+    SpvId columns = postPush(s, p), rows = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(ARTF_CLOUD_TILE - 1)), UINT(ARTF_CLOUD_TILE));
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, columns, rows);
+    Clouds c;
+    cloudsOf(s, &c, p, field);
+    SpvId cell = MUL_U(i, UINT(1 + ARTF_CLOUD_SLICES));
+    /* nothing, to start with */
+    cloudCellStore(s, p, grid, cell, vec4Of(s, same3(s, 0.f), FLOAT(0.f)));
+    for (int k = 0; k < ARTF_CLOUD_SLICES; ++k) cloudCellStore(s, p, grid, ADD_U(cell, UINT(1u + (uint32_t)k)), vec4Of(s, same3(s, 0.f), FLOAT(1.f)));
+    SpvId cx = ADD_F(MUL_F(TO_F(x), FLOAT((float)ARTF_CLOUD_TILE)), FLOAT(ARTF_CLOUD_TILE * .5f - .5f)), cy = ADD_F(MUL_F(TO_F(y), FLOAT((float)ARTF_CLOUD_TILE)), FLOAT(ARTF_CLOUD_TILE * .5f - .5f));
+    SpvId way = SUB_V3(postWorld(s, p, cx, cy, FLOAT(1.f)), spvShuffle3(s, frameVec(s, &p->r, F_CAMERA)));
+    SpvId length = SQRT_F(ADD_F(ADD_F(MUL_F(X(way), X(way)), MUL_F(Y(way), Y(way))), MUL_F(Z(way), Z(way))));
+    const SpvId dir[3] = {DIV_F(X(way), length), DIV_F(Y(way), length), DIV_F(Z(way), length)};
+    SpvId jitter = cloudJitter(s, x, y);
+    /* the farthest surface among the pixels around it: post.c's cloudFarthest */
+    spvStore(s, farVar, FLOAT(0.f));
+    {
+        PostLoop near_;
+        SpvId k = postLoopBegin(s, &near_, around, UINT(ARTF_CLOUD_TILE * ARTF_CLOUD_TILE * 9));
+        SpvId side = UINT(ARTF_CLOUD_TILE * 3);
+        SpvId qx = spvOp2(s, SPV_OP_ISub, s->intType, spvOp1(s, SPV_OP_Bitcast, s->intType, ADD_U(MUL_U(x, UINT(ARTF_CLOUD_TILE)), spvOp2(s, SPV_OP_UMod, s->uintType, k, side))), spvConstInt(s, ARTF_CLOUD_TILE));
+        SpvId qy = spvOp2(s, SPV_OP_ISub, s->intType, spvOp1(s, SPV_OP_Bitcast, s->intType, ADD_U(MUL_U(y, UINT(ARTF_CLOUD_TILE)), spvOp2(s, SPV_OP_UDiv, s->uintType, k, side))), spvConstInt(s, ARTF_CLOUD_TILE));
+        SpvId qxf = spvOp1(s, 111 /* OpConvertSToF */, s->floatType, qx), qyf = spvOp1(s, 111, s->floatType, qy);
+        SpvId inside = P_AND(P_AND(spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qxf, FLOAT(0.f)), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, qyf, FLOAT(0.f))), P_AND(P_LESS(qxf, p->widthF), P_LESS(qyf, p->heightF)));
+        SpvId q = ADD_U(MUL_U(P_TOU(P_CLAMP(qyf, FLOAT(0.f), SUB_F(p->heightF, FLOAT(1.f)))), p->width), P_TOU(P_CLAMP(qxf, FLOAT(0.f), SUB_F(p->widthF, FLOAT(1.f)))));
+        SpvId depth = postFloat(s, p, p->depth, q);
+        SpvId at = SUB_V3(postWorld(s, p, qxf, qyf, postAlong(s, p, depth)), spvShuffle3(s, frameVec(s, &p->r, F_CAMERA)));
+        SpvId far = SQRT_F(ADD_F(ADD_F(MUL_F(X(at), X(at)), MUL_F(Y(at), Y(at))), MUL_F(Z(at), Z(at))));
+        SpvId was = spvLoad(s, s->floatType, farVar);
+        spvStore(s, farVar, PICK_F(P_AND(inside, P_MORE(depth, FLOAT(0.f))), MAX_F(was, far), was));
+        postLoopEnd(s, &near_);
+    }
+    SpvId farthest = MUL_F(spvLoad(s, s->floatType, farVar), c.unit);
+    /* where the layer is along the ray: as artfCloudsColumn */
+    const SpvId eye[3] = {FLOAT(0.f), c.eyeR, FLOAT(0.f)};
+    SpvId a0, a1, aOk, b0, b1, bOk;
+    /* (the radii are the field's: by its values, not constants) */
+    SpvId inner = ADD_F(FLOAT(C_EARTH), c.base), outer = ADD_F(FLOAT(C_EARTH), c.top);
+    {
+        SpvId b = ADD_F(ADD_F(MUL_F(eye[0], dir[0]), MUL_F(eye[1], dir[1])), MUL_F(eye[2], dir[2]));
+        SpvId e2 = ADD_F(ADD_F(MUL_F(eye[0], eye[0]), MUL_F(eye[1], eye[1])), MUL_F(eye[2], eye[2]));
+        SpvId minusB = spvOp1(s, SPV_OP_FNegate, s->floatType, b);
+        SpvId discB = SUB_F(MUL_F(b, b), SUB_F(e2, MUL_F(outer, outer))), discA = SUB_F(MUL_F(b, b), SUB_F(e2, MUL_F(inner, inner)));
+        bOk = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, discB, FLOAT(0.f));
+        aOk = spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, discA, FLOAT(0.f));
+        SpvId rootB = SQRT_F(MAX_F(discB, FLOAT(0.f))), rootA = SQRT_F(MAX_F(discA, FLOAT(0.f)));
+        b0 = SUB_F(minusB, rootB);
+        b1 = ADD_F(minusB, rootB);
+        a0 = SUB_F(minusB, rootA);
+        a1 = ADD_F(minusB, rootA);
+    }
+    SpvId r = c.eyeR, ground = cloudToSphere(s, eye, dir, C_EARTH);
+    SpvId below = P_LESS(r, inner), within = P_LESS(r, outer);
+    SpvId groundFirst = P_AND(P_MORE(ground, FLOAT(0.f)), P_LESS(ground, a1));
+    SpvId upTo = PICK_F(P_AND(aOk, P_MORE(a0, FLOAT(0.f))), a0, b1);
+    SpvId from = PICK_F(below, a1, PICK_F(within, FLOAT(0.f), MAX_F(b0, FLOAT(0.f))));
+    SpvId to = PICK_F(below, b1, upTo);
+    SpvId valid = P_AND(bOk, P_MORE(b1, FLOAT(0.f)));
+    valid = P_AND(valid, P_NOT(P_AND(below, P_OR(P_NOT(aOk), groundFirst))));
+    valid = P_AND(valid, P_NOT(P_MORE(from, FLOAT(C_CLOUD_FAR))));
+    valid = P_AND(valid, P_MORE(farthest, from));
+    to = MIN_F(MIN_F(to, ADD_F(from, FLOAT(30.f))), farthest);
+    SpvId marching;
+    spvIfBegin(s, valid, &marching);
+    cloudCellStore(s, p, grid, cell, vec4Of(s, vec3Of(s, DIV_F(from, c.unit), DIV_F(to, c.unit), FLOAT(0.f)), FLOAT(0.f)));
+    const int steps = ARTF_CLOUD_SLICES * ARTF_CLOUD_STEPS;
+    SpvId step = DIV_F(SUB_F(to, from), FLOAT((float)steps));
+    SpvId mu = ADD_F(ADD_F(MUL_F(dir[0], c.toSun[0]), MUL_F(dir[1], c.toSun[1])), MUL_F(dir[2], c.toSun[2]));
+    SpvId phase[3];
+    for (int o = 0; o < 3; ++o) {
+        const float g = o == 0 ? 1.f : o == 1 ? .5f : .25f;
+        phase[o] = ADD_F(MUL_F(cloudHenyey(s, .8f * g, mu), FLOAT(.7f)), MUL_F(cloudHenyey(s, -.3f * g, mu), FLOAT(.3f)));
+    }
+    spvStore(s, lightVar, same3(s, 0.f));
+    spvStore(s, leftVar, FLOAT(1.f));
+    PostLoop loop;
+    SpvId slice = postLoopBegin(s, &loop, counter, UINT(ARTF_CLOUD_SLICES));
+    for (int k = 0; k < ARTF_CLOUD_STEPS; ++k) {
+        SpvId index = TO_F(ADD_U(MUL_U(slice, UINT(ARTF_CLOUD_STEPS)), UINT((uint32_t)k)));
+        SpvId t = ADD_F(from, MUL_F(ADD_F(index, jitter), step));
+        const SpvId q[3] = {ADD_F(eye[0], MUL_F(dir[0], t)), ADD_F(eye[1], MUL_F(dir[1], t)), ADD_F(eye[2], MUL_F(dir[2], t))};
+        SpvId h = SUB_F(SQRT_F(ADD_F(ADD_F(MUL_F(q[0], q[0]), MUL_F(q[1], q[1])), MUL_F(q[2], q[2]))), FLOAT(C_EARTH));
+        SpvId left = spvLoad(s, s->floatType, leftVar);
+        SpvId sigma = PICK_F(P_MORE(left, FLOAT(.005f)), cloudAt(s, &c, q, h, true), FLOAT(0.f));
+        SpvId some;
+        spvIfBegin(s, P_MORE(sigma, FLOAT(0.f)), &some);
+        {
+            /* toward the sun, in steps that grow */
+            SpvId tau = FLOAT(0.f);
+            float along = 0, sl = .06f;
+            for (int sIdx = 0; sIdx < C_LIGHT_STEPS; ++sIdx) {
+                const float atF = along + sl * .5f;
+                const SpvId qq[3] = {ADD_F(q[0], MUL_F(c.toSun[0], FLOAT(atF))), ADD_F(q[1], MUL_F(c.toSun[1], FLOAT(atF))), ADD_F(q[2], MUL_F(c.toSun[2], FLOAT(atF)))};
+                SpvId hh = SUB_F(SQRT_F(ADD_F(ADD_F(MUL_F(qq[0], qq[0]), MUL_F(qq[1], qq[1])), MUL_F(qq[2], qq[2]))), FLOAT(C_EARTH));
+                tau = ADD_F(tau, MUL_F(cloudAt(s, &c, qq, hh, sIdx < 3), FLOAT(sl)));
+                along += sl;
+                sl *= 1.8f;
+            }
+            SpvId sun = cloudSunThrough(s, &c, q);
+            SpvId powder = SUB_F(FLOAT(1.f), cloudExp(s, MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, sigma), FLOAT(.2f))));
+            SpvId edge = ADD_F(powder, MUL_F(SUB_F(FLOAT(1.f), powder), ADD_F(MUL_F(mu, FLOAT(.5f)), FLOAT(.5f))));
+            SpvId beer = FLOAT(0.f);
+            for (int o = 0; o < 3; ++o) {
+                const float share = o == 0 ? 1.f : o == 1 ? .5f : .25f;
+                beer = ADD_F(beer, MUL_F(MUL_F(FLOAT(share), cloudExp(s, MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, tau), FLOAT(share)))), phase[o]));
+            }
+            SpvId frac = DIV_F(SUB_F(h, c.base), SUB_F(c.top, c.base)), sky = ADD_F(FLOAT(.25f), MUL_F(FLOAT(.75f), frac));
+            SpvId through = cloudExp(s, MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, sigma), step)), taken = SUB_F(FLOAT(1.f), through);
+            SpvId keep, add;
+            aerialSpv(s, &p->r, DIV_F(t, c.unit), mu, &keep, &add);
+            const SpvId sunC[3] = {X(sun), Y(sun), Z(sun)}, keepC[3] = {X(keep), Y(keep), Z(keep)};
+            SpvId lightNow = spvLoad(s, s->vec3, lightVar);
+            const SpvId was[3] = {X(lightNow), Y(lightNow), Z(lightNow)};
+            SpvId got[3];
+            for (int cc = 0; cc < 3; ++cc) {
+                SpvId lit = ADD_F(MUL_F(MUL_F(MUL_F(MUL_F(c.sun[cc], FLOAT(3.14159265f)), sunC[cc]), beer), edge), MUL_F(c.ambient[cc], sky));
+                got[cc] = ADD_F(was[cc], MUL_F(MUL_F(MUL_F(left, lit), taken), keepC[cc]));
+            }
+            spvStore(s, lightVar, vec3Of(s, got[0], got[1], got[2]));
+            spvStore(s, leftVar, MUL_F(left, through));
+        }
+        spvIfEnd(s, some);
+    }
+    cloudCellStore(s, p, grid, ADD_U(cell, ADD_U(slice, UINT(1))), vec4Of(s, spvLoad(s, s->vec3, lightVar), spvLoad(s, s->floatType, leftVar)));
+    postLoopEnd(s, &loop);
+    spvIfEnd(s, marching);
+POST_FINISH()
+
+/* Each pixel with something drawn, by what is in front of it: artfCloudsAt, into the second light. Push constant: how
+ * many columns across. */
+POST_MAIN(artfShaderPostCloudApply)
+    SpvId grid = postBuffer(s, p, p->r.vec4Array, 74);
+    SpvId main = spvBeginMain(s);
+    postSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    SpvId columns = postPush(s, p), rows = spvOp2(s, SPV_OP_UDiv, s->uintType, ADD_U(p->height, UINT(ARTF_CLOUD_TILE - 1)), UINT(ARTF_CLOUD_TILE));
+    SpvId xf = TO_F(x), yf = TO_F(y);
+    SpvId depth = postFloat(s, p, p->depth, i), here = postVec4(s, p, p->light, i);
+    SpvId at = SUB_V3(postWorld(s, p, xf, yf, postAlong(s, p, depth)), spvShuffle3(s, frameVec(s, &p->r, F_CAMERA)));
+    SpvId distance = SQRT_F(ADD_F(ADD_F(MUL_F(X(at), X(at)), MUL_F(Y(at), Y(at))), MUL_F(Z(at), Z(at))));
+    SpvId fx = P_CLAMP(DIV_F(SUB_F(xf, FLOAT(ARTF_CLOUD_TILE * .5f - .5f)), FLOAT((float)ARTF_CLOUD_TILE)), FLOAT(0.f), TO_F(SUB_U(columns, UINT(1))));
+    SpvId fy = P_CLAMP(DIV_F(SUB_F(yf, FLOAT(ARTF_CLOUD_TILE * .5f - .5f)), FLOAT((float)ARTF_CLOUD_TILE)), FLOAT(0.f), TO_F(SUB_U(rows, UINT(1))));
+    SpvId x0 = P_TOU(fx), y0 = P_TOU(fy);
+    SpvId x1 = spvGlsl2(s, 38 /* UMin */, s->uintType, ADD_U(x0, UINT(1)), SUB_U(columns, UINT(1))), y1 = spvGlsl2(s, 38, s->uintType, ADD_U(y0, UINT(1)), SUB_U(rows, UINT(1)));
+    SpvId tx = SUB_F(fx, TO_F(x0)), ty = SUB_F(fy, TO_F(y0));
+    const SpvId cxs[4] = {x0, x1, x0, x1}, cys[4] = {y0, y0, y1, y1};
+    const SpvId weight[4] = {MUL_F(SUB_F(FLOAT(1.f), tx), SUB_F(FLOAT(1.f), ty)), MUL_F(tx, SUB_F(FLOAT(1.f), ty)), MUL_F(SUB_F(FLOAT(1.f), tx), ty), MUL_F(tx, ty)};
+    SpvId sum = vec4Of(s, same3(s, 0.f), FLOAT(0.f));
+    for (int n = 0; n < 4; ++n) {
+        SpvId cell = MUL_U(ADD_U(MUL_U(cys[n], columns), cxs[n]), UINT(1 + ARTF_CLOUD_SLICES));
+        SpvId span = bufferVec(s, &p->r, grid, cell);
+        SpvId has = P_AND(P_MORE(Y(span), X(span)), P_MORE(distance, X(span)));
+        SpvId z = MUL_F(MIN_F(DIV_F(SUB_F(distance, X(span)), MAX_F(SUB_F(Y(span), X(span)), FLOAT(1e-30f))), FLOAT(1.f)), FLOAT((float)ARTF_CLOUD_SLICES));
+        SpvId k1 = spvGlsl2(s, 38, s->uintType, P_TOU(MAX_F(z, FLOAT(0.f))), UINT(ARTF_CLOUD_SLICES - 1));
+        SpvId tz = SUB_F(z, TO_F(k1));
+        SpvId b = bufferVec(s, &p->r, grid, ADD_U(cell, ADD_U(k1, UINT(1))));
+        SpvId first = spvOp2(s, 170 /* OpIEqual */, s->boolType, k1, UINT(0));
+        SpvId before = bufferVec(s, &p->r, grid, ADD_U(cell, spvGlsl2(s, 41 /* UMax */, s->uintType, k1, UINT(1))));
+        SpvId aRgb = pick3(s, first, same3(s, 0.f), spvShuffle3(s, before)), aW = PICK_F(first, FLOAT(1.f), W(before));
+        SpvId hereRgb = pick3(s, has, ADD_V3(aRgb, SCALE_V3(SUB_V3(spvShuffle3(s, b), aRgb), tz)), same3(s, 0.f));
+        SpvId hereW = PICK_F(has, ADD_F(aW, MUL_F(SUB_F(W(b), aW), tz)), FLOAT(1.f));
+        sum = spvOp2(s, SPV_OP_FAdd, s->vec4, sum, spvOp2(s, SPV_OP_VectorTimesScalar, s->vec4, vec4Of(s, hereRgb, hereW), weight[n]));
+    }
+    SpvId lit = ADD_V3(SCALE_V3(spvShuffle3(s, here), W(sum)), spvShuffle3(s, sum));
+    postLightStore(s, p, p->scratch, i, vec4Of(s, pick3(s, P_MORE(depth, FLOAT(0.f)), lit, spvShuffle3(s, here)), W(here)));
+POST_FINISH()
+
 #undef POST_MAIN
 #undef POST_FINISH

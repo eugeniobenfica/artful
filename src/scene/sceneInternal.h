@@ -1150,6 +1150,10 @@ struct ArtfScene {
     float backgroundAlpha, exposure, fogDensity, sunSize;
     float fogBase, fogFalloff; /* fog by height */
     float aerial[4][4];        /* ArtfFrameData.aerial's, from artfSceneSetSky (0: none) */
+    /* The sky's clouds, kept for the scene's (artfCloudsColumn) when they and aerial perspective are on: NULL, or
+     * ARTF_CLOUD_FLOATS floats, as the GPU has them; a new generation each time they change. */
+    float* clouds;
+    uint32_t cloudsGeneration;
     float cullSize;            /* artfSceneSetCullSize's pixels */
     ArtfCamera camera;
     bool features[ARTF_FEATURE_COUNT];
@@ -1615,6 +1619,38 @@ bool artfBasisUastc(const uint8_t* blocks, size_t size, uint32_t width, uint32_t
 bool artfBasisLevels(const uint8_t* data, size_t size, uint32_t** pixels, uint32_t* offsets);
 /* Such a file as a texture to add (texture.c), on any thread: its own mipmaps when it has them all. NULL: it is not one. */
 ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size);
+/* Clouds in the scene (5.11): of each column of ARTF_CLOUD_TILE pixels square, along the ray through its middle, where
+ * the layer of clouds begins and ends (in the scene's units), and ARTF_CLOUD_SLICES slices from one to the other: at the
+ * end of each, the light the clouds have added from the eye (seen through the air) and what they leave. A pixel with
+ * something drawn takes what is in front of it (artfCloudsAt). The sky's own clouds are in its picture: there, nothing.
+ * The field (ArtfScene.clouds): parameters (ARTF_CLOUD_ROWS rows of four), then the shapes' noise (64^3), where they
+ * are (128^2) and the air's table (256 x 64 x 3). */
+#define ARTF_CLOUD_TILE 4
+#define ARTF_CLOUD_SLICES 16
+#define ARTF_CLOUD_STEPS 4 /* a slice */
+#define ARTF_CLOUD_CELL (4 * (1 + ARTF_CLOUD_SLICES))
+#define ARTF_CLOUD_ROWS 8
+#define ARTF_CLOUD_NOISE (ARTF_CLOUD_ROWS * 4)
+#define ARTF_CLOUD_WEATHER (ARTF_CLOUD_NOISE + 64 * 64 * 64)
+#define ARTF_CLOUD_TRANS (ARTF_CLOUD_WEATHER + 128 * 128)
+#define ARTF_CLOUD_FLOATS (ARTF_CLOUD_TRANS + 256 * 64 * 3)
+/* A column's cell (ARTF_CLOUD_CELL floats), along dir (of length 1, in the world) from the eye; jitter, 0 to 1: where in
+ * its first step it starts. farthest: how far the farthest surface is among the pixels that read it (its own and its
+ * neighbours', ARTF_CLOUD_TILE x 3 square), in the scene's units: the layer is followed up to there, and not at all when
+ * it begins past it (0: nothing drawn there). */
+void artfCloudsColumn(const float* field, const ArtfFrameData* f, const float* dir, float jitter, float farthest, float* out);
+/* What the clouds do to a pixel at (sx, sy) whose surface is distance away (the scene's units): the light they add, and
+ * what they leave (out[3]); between the columns around it. */
+void artfCloudsAt(const float* grid, int columns, int rows, float sx, float sy, float distance, float* out);
+/* Where in its first step a column's march starts: a hash of where it is, 0 to 1, the same on the GPU. */
+ARTF_INLINE float artfCloudJitter(uint32_t i, uint32_t j) {
+    uint32_t h = i * 0x9E3779B1u ^ j * 0x85EBCA77u;
+    h ^= h >> 15;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12;
+    return (float)(h >> 8) * (1.f / 16777216.f);
+}
+
 /* The frame's layers (ArtfFrameData.layers), for these layers in view. */
 void artfLayerRange(ArtfFrameData* frame, const ArtfLayer* layers, uint32_t count);
 

@@ -239,6 +239,7 @@ int main(int argc, char** argv) {
     RUN("sky/sky", testSky());
     RUN("sky/skyMore", testSkyMore());
     RUN("sky/aerial", testAerial());
+    RUN("sky/cloudTower", testCloudTower());
     RUN("post/lookMore", testLookMore());
     RUN("materials/sizedLights", testSizedLights());
     RUN("motion/motion", testMotion());

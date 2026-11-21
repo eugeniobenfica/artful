@@ -416,7 +416,9 @@ typedef struct ArtfSkyDesc {
      * and the sky's that it scatters toward the eye, as the sky's own air does (its Rayleigh, haze and ozone, as dense
      * as at the eye's altitude all the way: a closed form, no table), so far hills take the air's color, bluer away from
      * the sun and paler toward it. This many meters to a unit of the scene; 0: none. Drawn and traced, on both
-     * backends. */
+     * backends. With it, and a frame in floats, clouds are in the scene too: what is drawn in them or past them has the
+     * clouds in front of it over it (followed along a ray each 4 x 4 pixels, as far as what is drawn there), so that a
+     * tower goes up through them; in perspective. */
     float aerial;
 } ArtfSkyDesc;
 bool artfSceneSetSky(ArtfScene* s, const ArtfSkyDesc* desc);

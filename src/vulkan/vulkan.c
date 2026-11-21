@@ -322,6 +322,8 @@ void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* 
             else if (uses[k].set == 0 && uses[k].binding == 69) bit = 1u << (3 + 55 - 50);
             else if (uses[k].set == 0 && uses[k].binding == 71) bit = 1u << 13;
             else if (uses[k].set == 0 && uses[k].binding == 72) bit = 1u << 14;
+            else if (uses[k].set == 0 && uses[k].binding == 73) bit = 1u << 15;
+            else if (uses[k].set == 0 && uses[k].binding == 74) bit = 1u << 16;
             if (uses[k].read) *reads |= bit;
             if (uses[k].write) *writes |= bit;
         }
@@ -332,7 +334,7 @@ void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* 
 
 /* What the frame's effects need past the light, its depth and surfaces, and bloom (the frame graph's targets that
  * effects that are off leave unused: frameGraph.c). */
-uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f) {
+uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f, bool clouds) {
     const bool scaled = v->sceneWidth != v->width || v->sceneHeight != v->height, temporal = f->post[1][3] > 0;
     uint32_t n = 0;
     if (f->post[0][2] > 0) n |= NEED_OCCLUSION;
@@ -341,6 +343,7 @@ uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f) {
     if (scaled || temporal) n |= NEED_SECOND | NEED_HISTORY;
     if (f->post[2][1] > 0 && f->post[2][0] > 0) n |= NEED_SECOND;
     if (f->more[3] > 0 && temporal) n |= NEED_GATHERED;
+    if (clouds) n |= NEED_SECOND; /* (clouds in the scene: what they make of the light goes there) */
     return n;
 }
 
@@ -406,6 +409,8 @@ bool postBuffersMake(Vulkan* v) {
         bindStorage(v, &v->slots[k], 69, blur ? &v->postOcclusion : &v->postNone);
         bindStorage(v, &v->slots[k], 71, v->postLocks.buffer ? &v->postLocks : &v->postNone);
         bindStorage(v, &v->slots[k], 72, v->postGathered.buffer ? &v->postGathered : &v->postNone);
+        bindStorage(v, &v->slots[k], 73, v->cloudField.buffer ? &v->cloudField : &v->postNone);
+        bindStorage(v, &v->slots[k], 74, v->cloudGrid.buffer ? &v->cloudGrid : &v->postNone);
     }
     const GpuBuffer* const three[3] = {&v->postLight, OR_NONE(&v->postScratch), OR_NONE(&v->postHistory)};
 #undef OR_NONE
@@ -1323,6 +1328,33 @@ static void layerDraws(Vulkan* v, VkCommandBuffer c, const Slot* s, uint32_t lay
     for (uint32_t i = 0; i < layerCount; ++i) v->vkCmdDrawIndexedIndirect(c, s->layerCommands.buffer, (VkDeviceSize)i * 20, 1, 20);
 }
 
+bool cloudsSync(Vulkan* v, const ArtfScene* scene, const ArtfFrameData* frame) {
+    v->cloudsOn = false;
+    if (!scene->clouds || artfOrtho(frame) || !v->postNone.buffer) return true;
+    const uint32_t columns = ((uint32_t)v->sceneWidth + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE, rows = ((uint32_t)v->sceneHeight + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
+    const bool fieldNew = !v->cloudField.buffer, gridNew = columns != v->cloudColumns || rows != v->cloudRows || !v->cloudGrid.buffer;
+    if (fieldNew || gridNew || !v->cloudFieldHeld || v->cloudGeneration != scene->cloudsGeneration) {
+        /* (rare: when the sky or the size changes; the frames in flight read what is there) */
+        v->vkDeviceWaitIdle(v->device);
+        if (fieldNew && !bufferNew(v, &v->cloudField, (VkDeviceSize)ARTF_CLOUD_FLOATS * 4, BUFFER_STORAGE, true)) return false;
+        if (gridNew) {
+            bufferFree(v, &v->cloudGrid);
+            if (!bufferNew(v, &v->cloudGrid, (VkDeviceSize)columns * rows * ARTF_CLOUD_CELL * 4, BUFFER_STORAGE, false)) return false;
+            v->cloudColumns = columns;
+            v->cloudRows = rows;
+        }
+        memcpy(v->cloudField.mapped, scene->clouds, (size_t)ARTF_CLOUD_FLOATS * 4);
+        v->cloudGeneration = scene->cloudsGeneration;
+        v->cloudFieldHeld = true;
+        for (int k = 0; k < SLOTS; ++k) {
+            bindStorage(v, &v->slots[k], 73, &v->cloudField);
+            bindStorage(v, &v->slots[k], 74, &v->cloudGrid);
+        }
+    }
+    v->cloudsOn = true;
+    return true;
+}
+
 /* The columns of the grid of layers by transmittance, for the scene's size. */
 static uint32_t layerColumns(const Vulkan* v) {
     return (uint32_t)((v->sceneWidth + ARTF_LAYER_TILE - 1) / ARTF_LAYER_TILE) * (uint32_t)((v->sceneHeight + ARTF_LAYER_TILE - 1) / ARTF_LAYER_TILE);
@@ -1430,10 +1462,13 @@ bool pipelinesMake(Vulkan* v) {
         const DescriptorSetLayoutBinding past = {68, DESCRIPTOR_STORAGE, 1, SHADER_VERTEX, NULL}, blur = {69, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL};
         const DescriptorSetLayoutBinding locks = {71, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}; /* (upscaling's locks) */
         const DescriptorSetLayoutBinding gathered = {72, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}; /* (lights sampled, gathered) */
+        const DescriptorSetLayoutBinding cloudField = {73, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}, cloudGrid = {74, DESCRIPTOR_STORAGE, 1, SHADER_COMPUTE, NULL}; /* (clouds in the scene) */
         all[bindingCount++] = past;
         all[bindingCount++] = blur;
         all[bindingCount++] = locks;
         all[bindingCount++] = gathered;
+        all[bindingCount++] = cloudField;
+        all[bindingCount++] = cloudGrid;
     }
     if (v->rayQuery) {
         const DescriptorSetLayoutBinding top = {64, DESCRIPTOR_AS, 1, SHADER_COMPUTE | SHADER_FRAGMENT, NULL};
@@ -1601,7 +1636,7 @@ bool pipelinesMake(Vulkan* v) {
         uint32_t* (*const makers[POST_KINDS])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
                                                           artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply,
                                                           artfShaderPostMeter, artfShaderPostMotionBlur, artfShaderPostVelocity, artfShaderPostTileMost, artfShaderPostUpscale,
-                                                          artfShaderPostSharpen, artfShaderPostSampled, artfShaderPostSampledSpace};
+                                                          artfShaderPostSharpen, artfShaderPostSampled, artfShaderPostSampledSpace, artfShaderPostCloudColumns, artfShaderPostCloudApply};
         for (int i = 0; i < POST_KINDS && ok; ++i) {
             uint32_t* postCode = i == 0 ? artfShaderPostGather(&size, v->samples) : makers[i](&size);
             postAccessOf(postCode, size, &v->postReads[i], &v->postWrites[i]);
@@ -3480,7 +3515,7 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     frame.output[3] = (float)v->postFrames;
     if (v->floats) {
         /* (an effect came or went: the post buffers as they now need to be, with the device idle) */
-        const uint32_t needs = postNeedsOf(v, &frame);
+        const uint32_t needs = postNeedsOf(v, &frame, scene->clouds && !artfOrtho(&frame));
         if (needs != v->postNeeds) {
             v->vkDeviceWaitIdle(v->device);
             v->postNeeds = needs;
@@ -3655,6 +3690,7 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const bool overdraw = view == ARTF_VIEW_OVERDRAW;
     const bool sorted = layerCount && v->fragmentStores && !v->floats && (v->samples == 1 || v->sampleShading || v->depthCoverage) && scene->features[ARTF_FEATURE_LAYERS_SORTED] && !overdraw;
     if (sorted && !layerListsMake(v, scene)) return false;
+    if (v->floats && !cloudsSync(v, scene, &frame)) return false;
     if (sorted) {
         /* (one call for all of them: what they add to the lists has no order) */
         if ((VkDeviceSize)layerCount * 20 > s->layerCommands.size) {
@@ -4132,6 +4168,8 @@ void vkFree(ArtfRenderer* r) {
         if (v->layerPrefixPipeline) v->vkDestroyPipeline(v->device, v->layerPrefixPipeline, NULL);
         bufferFree(v, &v->layerCounts);
         bufferFree(v, &v->layerFragments);
+        bufferFree(v, &v->cloudField);
+        bufferFree(v, &v->cloudGrid);
         if (v->midPass) v->vkDestroyRenderPass(v->device, v->midPass, NULL);
         if (v->resolvePass) v->vkDestroyRenderPass(v->device, v->resolvePass, NULL);
         if (v->layerDepthPipeline) v->vkDestroyPipeline(v->device, v->layerDepthPipeline, NULL);

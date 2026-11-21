@@ -54,6 +54,7 @@ ArtfScene* artfSceneNew(void) {
 
 void artfSceneFree(ArtfScene* s) {
     if (!s) return;
+    artfFree(s->clouds);
     for (size_t i = 0; i < s->meshes.len; ++i) artfMeshFini(&s->meshes.items[i]);
     for (size_t i = 0; i < s->textures.len; ++i) {
         artfFree(s->textures.items[i].pixels);

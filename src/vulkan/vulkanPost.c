@@ -118,6 +118,13 @@ void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* fram
         postSwap(v, c, false);
         passMark(v, c, s, "sampled light gathered");
     } else v->gatheredValid = false;
+    if (v->cloudsOn) {
+        /* clouds in the scene: the grid, then each pixel by what is in front of it, as post.c's */
+        postStep(v, c, POST_CLOUD_COLUMNS, v->cloudColumns, v->cloudColumns * v->cloudRows);
+        postStep(v, c, POST_CLOUD_APPLY, v->cloudColumns, pixels);
+        postSwap(v, c, false);
+        passMark(v, c, s, "clouds");
+    }
     if (scaled) {
         /* (from here on, the frame's size) */
         postStep(v, c, POST_UPSCALE, (temporal && v->historyValid ? 1u : 0u) | v->lockHalf << 1, framePixels);

@@ -99,6 +99,10 @@ uint32_t* artfShaderPostFinal(size_t* size, bool turns);
 uint32_t* artfShaderPostSampled(size_t* size);
 /* And across its neighbours, as post.c's sampledSpaceRow. */
 uint32_t* artfShaderPostSampledSpace(size_t* size);
+/* Clouds in the scene (sky.c's artfCloudsColumn): a column of the grid an invocation; then each pixel by what is in front
+ * of it (artfCloudsAt). */
+uint32_t* artfShaderPostCloudColumns(size_t* size);
+uint32_t* artfShaderPostCloudApply(size_t* size);
 uint32_t* artfShaderPostFinalFor(size_t* size, bool turns, const ArtfShaderDisplay* display);
 uint32_t* artfShaderPostMeter(size_t* size); /* auto exposure, one invocation */
 uint32_t* artfShaderPostMotionBlur(size_t* size);

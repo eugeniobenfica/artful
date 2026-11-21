@@ -372,3 +372,63 @@ void testAerial(void) {
     artfFree(cpu[0]);
     artfFree(cpu[1]);
 }
+
+/* (a tower 6 km tall and 4 km away, its foot below the eye, under clouds from 1.5 km up; seen from below, looking up
+ * at it: what is drawn is mid grey, so that clouds over it show) */
+static ArtfScene* towerScene(float coverage) {
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetSun(s, artfVec3(.3f, -.8f, -.5f), artfVec3(3, 3, 3));
+    ArtfSkyDesc day = {{3, 3, 3}, 0, 0, {0, 0, 0}, 128, false, false};
+    day.aerial = 100.f;
+    day.clouds.coverage = coverage;
+    CHECK(artfSceneSetSky(s, &day));
+    ArtfMaterialDesc grey = artfMaterialDefaults();
+    grey.baseColor = artfVec3(.5f, .5f, .5f);
+    grey.emissive = artfVec3(.4f, .4f, .4f);
+    const ArtfTransform at = artfTransformTrs(artfVec3(0, 28, -40), artfQuatAxisAngle(artfVec3(0, 1, 0), 0), artfVec3(4, 60, 4));
+    artfSceneAddInstance(s, artfSceneAddCube(s, 1), artfSceneAddMaterial(s, &grey), &at);
+    setCamera(s, 0, 0, 0, 0, 22, -40);
+    return s;
+}
+
+/* Clouds in the scene (5.11): a tower goes up through them. Its foot, below the clouds, is as it is with no clouds;
+ * its top, in and above them, is covered by what is in front of it; both backends alike. */
+void testCloudTower(void) {
+    uint32_t* clear = artfMalloc(W * H * 4);
+    uint32_t* cloudy = artfMalloc(W * H * 4);
+    uint32_t* cpu = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = towerScene(0);
+        drawInto(r, s, clear);
+        artfSceneFree(s);
+        s = towerScene(.8f);
+        drawInto(r, s, cloudy);
+        artfSceneFree(s);
+        /* the tower's middle column: its foot (the bottom tenth of the frame) and its top (the top tenth) */
+        double foot = 0, top = 0;
+        for (int y = 0; y < H; ++y) {
+            const int x = W / 2;
+            const uint32_t a = clear[y * W + x], b = cloudy[y * W + x];
+            double d = 0;
+            for (int c = 0; c < 3; ++c) d += fabs((double)((a >> (8 * c)) & 255) - (double)((b >> (8 * c)) & 255));
+            if (y > H * 9 / 10) foot += d / (H / 10);
+            if (y < H / 10) top += d / (H / 10);
+        }
+        printf("%s: a tower through clouds: its foot changes by %.1f of 255 a pixel, its top by %.1f\n", backend ? "GPU" : "CPU", foot, top);
+        CHECK(foot < 2.0 && top > 20.0);
+        if (!backend) memcpy(cpu, cloudy, W * H * 4);
+        else {
+            const double apart = differentShare(cpu, cloudy, 8);
+            printf("clouds in the scene, the GPU against the CPU: %.3f%% of pixels apart\n", apart * 100);
+            CHECK(apart < .02);
+        }
+        artfRendererFree(r);
+    }
+    artfFree(clear);
+    artfFree(cloudy);
+    artfFree(cpu);
+}

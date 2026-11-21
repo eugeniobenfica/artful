@@ -419,7 +419,21 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 - **Teste (`post/displayOutput`):** o vermelho sRGB em P3 sai 234 51 35 nos dois backends. Em HDR10, o branco sai 594 (CPU) e 593 (GPU), contra 594 do PQ calculado em double para 203 nits; o vermelho sai 544 334 225, contra 545 335 225; o branco da sobreposição sobre vermelho sai branco de papel.
 - **Não feito:** metadados HDR (`VK_EXT_hdr_metadata`), scRGB em float, e o teste num monitor HDR e no Android (sem aparelho aqui). A troca de formato da swapchain não foi exercitada, porque os testes não têm janela.
 
-**Estado da 5.11: perspectiva aérea feita; nuvens a 1/4 não.**
+**Estado da 5.11: feita.** (Perspectiva aérea antes; nuvens na cena, 21/11/2026.)
+- **Nuvens na cena:** com `aerial` (que dá a escala da cena) e quadro em floats, as nuvens do céu passam a ficar também na frente do que é desenhado. São dois passes de pós-processamento, nos dois backends.
+  - **A grade:** uma coluna a cada 4×4 pixels, ou seja, um quarto da resolução em cada eixo. Cada coluna segue o raio pelo seu centro dentro da camada de nuvens: 16 fatias de 4 passos e 6 passos de luz por passo, com a mesma `cloudAt`, a mesma luz e o mesmo Beer do céu, e o ar entre elas pela perspectiva aérea. Guarda onde a camada começa e termina e, ao fim de cada fatia, a luz somada e o que sobra. A coluna só segue até a superfície mais distante entre os seus pixels e os das vizinhas, que são os que a leem. Se nada está além do começo da camada, não segue nada.
+  - **O composto:** cada pixel com algo desenhado lê as 4 colunas em volta, cada uma na fatia da sua distância, e fica `luz × resto + nuvem`. O céu continua com as nuvens da sua imagem.
+  - Para isso, `artfSceneSetSky` guarda as nuvens na cena (`ArtfScene.clouds`): parâmetros, ruído 64³, mapa de onde estão 128² e a tabela do ar, já no layout da GPU, que recebe uma cópia só quando o céu muda (binding 73). A grade é o binding 74.
+  - Na CPU, os passes são `cloudFarRow`, `cloudColumnRow` e `cloudApplyRow` (`post.c`). Na GPU, `artfShaderPostCloudColumns` e `artfShaderPostCloudApply`, com a mesma aritmética na mesma ordem.
+  - Foi preciso pedir o segundo buffer de luz (`NEED_SECOND`) quando há nuvens. Sem ele, o passe escrevia num buffer vazio e o quadro saía preto.
+- **Critério "uma torre atravessa as nuvens" (`sky/cloudTower`):** uma torre de 6 km a 4 km do olho, sob nuvens de 1,5 a 4 km. O pé dela muda 0,0/255 por pixel em relação à cena sem nuvens; o topo muda 434/255 (é coberto pelo que está na frente). GPU contra CPU: 0,000% dos pixels diferentes.
+- **Critério "montanhas distantes ganham a cor do ar":** era o da perspectiva aérea (`sky/aerial`), já feito.
+- **Custo, 1920×1080, cena `outdoors` com nuvens:** 0,59 ms na GPU e 4,8 ms na CPU. Seguir só até a superfície mais distante cortou de 0,86 ms e 8,4 ms. O `artful-render` ganhou `--aerial m`.
+- **Limites:**
+  - A resolução da grade: a borda de algo desenhado contra as nuvens fica do tamanho de uma coluna.
+  - Não vale em vista ortográfica, sobre camadas transparentes nem na névoa que a luz atravessa.
+  - Quadros de 8 bits ficam sem: as nuvens são um passe do quadro em floats.
+  - Metal não tem.
 - **Como:** `ArtfSkyDesc.aerial` (metros por unidade da cena; 0 desliga). O ar entre o olho e a superfície tira luz e soma a luz do sol e do céu que ele espalha em direção ao olho, com o Rayleigh, a névoa e o ozônio do próprio céu, na densidade da altitude do olho. É uma forma fechada, sem LUT: transmitância por cor, fase de Rayleigh e de Cornette-Shanks, e a média da imagem do céu como luz que vem de todo lado. Na CPU (pistas, uma a uma, e traçador) e na GPU (pixel shader e traçador), a conta é a mesma (`artfAerialOf`, `aerialSpv`).
 - **Teste (`sky/aerial`):** um bloco escuro a 500 m muda até 0,013; a 30 km vai de 0,44 0,41 0,38 para 0,54 0,62 0,71, perto do céu acima dele (0,59 0,64 0,71). O traçado dá o mesmo (0,54 0,62 0,71). GPU contra CPU: 0,000% dos pixels, desenhado e traçado; as pistas de cada largura dão os mesmos bytes.
 - **Limites:** a densidade não diminui com a altura ao longo do raio (para montanhas altas e distantes, o ar fica um pouco denso demais), e as nuvens não entram na perspectiva. Metal não tem.

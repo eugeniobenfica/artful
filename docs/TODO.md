@@ -75,7 +75,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [x] 5.8 Transparência por transmitância — `layers-sorted` por peso, com a transmitância de uma grade 8×8 px × 64 fatias, nos dois backends; exato para camadas paralelas; GPU 1080p 0,41 ms contra 0,87 das listas (4 amostras: 0,91 contra 1,29); memória 49 MB contra 207 (4 amostras: 174); só quadros de 8 bits, como antes
 - [~] 5.9 Saída HDR e gama larga — `output` P3/HDR10 nos dois backends, swapchain por `VK_EXT_swapchain_colorspace`; faltam metadados HDR, scRGB e teste em tela HDR
 - [x] 5.10 Basis Universal e Zstandard — Zstd (RFC 8878) e ETC1S/UASTC para pixels, idênticos ao transcodificador do basisu nos 46 KTX2 do glTF-Sample-Assets (472 níveis); `KHR_texture_basisu` no glTF; falta transcodificar para blocos da GPU
-- [~] 5.11 Perspectiva aérea (`ArtfSkyDesc.aerial`, forma fechada, os dois backends, desenhado e traçado); faltam nuvens a 1/4
+- [x] 5.11 Perspectiva aérea (`ArtfSkyDesc.aerial`, forma fechada, os dois backends, desenhado e traçado); nuvens na cena, numa grade de colunas a cada 4×4 px até o que é desenhado, compostas por profundidade (uma torre atravessa as nuvens; GPU = CPU; 0,59 ms GPU / 4,8 ms CPU em 1080p); só em quadros em floats
 - [~] 5.12 Materiais — texturas das extensões (especular, iridescência, anisotropia) feitas; faltam Belcour-Barla, OpenPBR, SSS
 
 ## Fase 6 — Alcance de plataforma

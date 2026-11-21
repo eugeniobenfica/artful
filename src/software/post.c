@@ -431,6 +431,61 @@ void artfFroxelAt(const ArtfSoftFrame* f, float sx, float sy, float w, float* ou
     for (int k = 0; k < 4; ++k) out[k] = near_[k] + (beyond[k] - near_[k]) * tz;
 }
 
+/* ---- clouds in the scene (artfCloudsColumn): a column of the grid at a time, then each pixel by what is in front of
+ * it. In perspective; the sky's own clouds are in its picture. ---- */
+
+/* (how far the farthest surface is among each column's own pixels: then among those around, that read it) */
+static void cloudFarRow(ArtfSoftPost* p, int j) {
+    const ArtfFrameData* f = &p->f->data;
+    for (int i = 0; i < p->cloudsX; ++i) {
+        float farthest = 0;
+        for (int y = j * ARTF_CLOUD_TILE; y < artfMini((j + 1) * ARTF_CLOUD_TILE, p->height); ++y)
+            for (int x = i * ARTF_CLOUD_TILE; x < artfMini((i + 1) * ARTF_CLOUD_TILE, p->width); ++x) {
+                const float depth = p->f->postDepth[(size_t)y * p->width + x];
+                if (!(depth > 0)) continue;
+                float at[3];
+                worldAt(f, p->width, p->height, (float)x, (float)y, artfDepthAlong(f, depth), at);
+                for (int k = 0; k < 3; ++k) at[k] -= f->cameraPos[k];
+                farthest = artfMaxf(farthest, sqrtf((at[0] * at[0] + at[1] * at[1]) + at[2] * at[2]));
+            }
+        p->cloudFar[(size_t)j * p->cloudsX + i] = farthest;
+    }
+}
+
+static float cloudFarthest(const ArtfSoftPost* p, int i, int j) {
+    float farthest = 0;
+    for (int y = artfMaxi(j - 1, 0); y <= artfMini(j + 1, p->cloudsY - 1); ++y)
+        for (int x = artfMaxi(i - 1, 0); x <= artfMini(i + 1, p->cloudsX - 1); ++x) farthest = artfMaxf(farthest, p->cloudFar[(size_t)y * p->cloudsX + x]);
+    return farthest;
+}
+
+static void cloudColumnRow(ArtfSoftPost* p, int j) {
+    const ArtfFrameData* f = &p->f->data;
+    for (int i = 0; i < p->cloudsX; ++i) {
+        const float cx = (float)(i * ARTF_CLOUD_TILE) + ARTF_CLOUD_TILE * .5f - .5f, cy = (float)(j * ARTF_CLOUD_TILE) + ARTF_CLOUD_TILE * .5f - .5f;
+        float dir[3];
+        worldAt(f, p->width, p->height, cx, cy, 1.f, dir);
+        for (int k = 0; k < 3; ++k) dir[k] -= f->cameraPos[k];
+        const float length = sqrtf((dir[0] * dir[0] + dir[1] * dir[1]) + dir[2] * dir[2]);
+        for (int k = 0; k < 3; ++k) dir[k] /= length;
+        artfCloudsColumn(p->f->scene->clouds, f, dir, artfCloudJitter((uint32_t)i, (uint32_t)j), cloudFarthest(p, i, j), p->clouds + ((size_t)j * p->cloudsX + i) * ARTF_CLOUD_CELL);
+    }
+}
+
+static void cloudApplyRow(ArtfSoftPost* p, int y) {
+    const ArtfFrameData* f = &p->f->data;
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        const float depth = p->f->postDepth[i];
+        if (!(depth > 0)) continue;
+        float at[3], out[4];
+        worldAt(f, p->width, p->height, (float)x, (float)y, artfDepthAlong(f, depth), at);
+        for (int k = 0; k < 3; ++k) at[k] -= f->cameraPos[k];
+        artfCloudsAt(p->clouds, p->cloudsX, p->cloudsY, (float)x, (float)y, sqrtf((at[0] * at[0] + at[1] * at[1]) + at[2] * at[2]), out);
+        for (int c = 0; c < 3; ++c) p->f->postLight[c][i] = p->f->postLight[c][i] * out[3] + out[c];
+    }
+}
+
 /* ---- temporal antialiasing ---- */
 
 /* Where the surface at a pixel was in the frame before, in pixels: by its depth and how its instance moved, or what a
@@ -1335,6 +1390,8 @@ void artfSoftPostFree(ArtfSoftPost* p) {
         p->velocity[c] = p->tileMost[c] = p->nearMost[c] = NULL;
     }
     artfFree(p->froxels);
+    artfFree(p->clouds);
+    artfFree(p->cloudFar);
     p->froxels = NULL;
     artfFree(p->cutX);
     artfFree(p->cutY);
@@ -1383,6 +1440,21 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
         p->gatheredValid = true;
         if (log) artfPassMark(log, "sampled light gathered");
     } else p->gatheredValid = false;
+    if (f->scene->clouds && !artfOrtho(d)) {
+        const int across = (p->width + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE, down = (p->height + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
+        if (across != p->cloudsX || down != p->cloudsY || !p->clouds) {
+            artfFree(p->clouds);
+            artfFree(p->cloudFar);
+            p->clouds = artfMalloc((size_t)across * down * ARTF_CLOUD_CELL * 4);
+            p->cloudFar = artfMalloc((size_t)across * down * 4);
+            p->cloudsX = across;
+            p->cloudsY = down;
+        }
+        rows(p, down, cloudFarRow);
+        rows(p, down, cloudColumnRow);
+        rows(p, p->height, cloudApplyRow);
+        if (log) artfPassMark(log, "clouds");
+    }
     const bool scaled = p->sceneW != p->frameW || p->sceneH != p->frameH;
     if (scaled) {
         /* from here on, the frame's size */

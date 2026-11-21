@@ -175,7 +175,7 @@ typedef struct ComputeKey {
 } ComputeKey;
 
 enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY, POST_METER,
-       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN, POST_SAMPLED, POST_SAMPLED_SPACE, POST_KINDS };
+       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN, POST_SAMPLED, POST_SAMPLED_SPACE, POST_CLOUD_COLUMNS, POST_CLOUD_APPLY, POST_KINDS };
 
 typedef struct Vulkan {
     ArtfRenderer base;
@@ -417,6 +417,10 @@ typedef struct Vulkan {
     GpuBuffer postBlur;             /* motion blur's velocities (binding 69): unused since they share postOcclusion */
     GpuBuffer postLocks;            /* upscaling's locks (binding 71): two floats a pixel of the frame, the halves in turn */
     GpuBuffer postGathered;         /* lights sampled, gathered (binding 72): two vec4s a pixel of the scene, the halves in turn */
+    /* clouds in the scene: the field (binding 73, ArtfScene.clouds, of that generation) and the grid's cells (74) */
+    GpuBuffer cloudField, cloudGrid;
+    uint32_t cloudGeneration, cloudColumns, cloudRows;
+    bool cloudsOn, cloudFieldHeld;
     uint32_t gatheredHalf;
     bool gatheredValid;
     bool layerSumsFresh; /* layers by transmittance: their sums were just made, and are not 0 yet */
@@ -567,7 +571,7 @@ void targetsFree(Vulkan* v);
 void writeOverlayDescriptor(Vulkan* v);
 bool hizMake(Vulkan* v);
 void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* writes);
-uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f);
+uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f, bool clouds);
 bool postBuffersMake(Vulkan* v);
 bool postTargetsMake(Vulkan* v);
 bool syncLut(Vulkan* v, const ArtfScene* scene);
@@ -705,6 +709,8 @@ bool traceBuffersSync(Vulkan* v, const ArtfScene* scene);
 bool syncTraced(Vulkan* v, ArtfScene* scene);
 bool syncTrace(Vulkan* v, ArtfScene* scene);
 void denoise(Vulkan* v, VkCommandBuffer c, Slot* s);
+/* Clouds in the scene, before a frame is recorded: their field, as the scene's, and the grid, for the scene's size. */
+bool cloudsSync(Vulkan* v, const ArtfScene* scene, const ArtfFrameData* frame);
 void passMark(Vulkan* v, VkCommandBuffer c, Slot* s, const char* name);
 void postBarrier(Vulkan* v, VkCommandBuffer c);
 void postStepWith(Vulkan* v, VkCommandBuffer c, VkPipeline pipeline, int index, uint32_t push, uint32_t count);

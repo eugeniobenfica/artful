@@ -237,6 +237,7 @@ void testEnvironment(void);
 void testSky(void);
 void testSkyMore(void);
 void testAerial(void);
+void testCloudTower(void);
 /* motion.c: what bends and moves: bones, targets, clips, motion followed, motion blur */
 void testMotion(void);
 void testSkinnedMotion(void);

@@ -23,7 +23,7 @@
  *                 [--sun x y z]: where the sun shines, as a direction; [--sky [haze]]: a sky from the sun, and
  *                 [--sky-multiple x]: light scattered more than once; [--sun-disc degrees]; [--sky-width n];
  *                 [--clouds coverage] [--cloud-base m] [--cloud-thickness m] [--cloud-density x] [--wind x y z]
- *                 [--cloud-shadow]
+ *                 [--cloud-shadow] [--aerial m]: aerial perspective, so many meters to a unit (and with it, clouds in the scene)
  *                 [--exposure-low share] [--exposure-high share]: auto exposure by a histogram;
  *                 [--exposure-speed x] [--exposure-speed-down x]
  *                 [--lift r g b] [--gamma r g b] [--gain r g b] [--grade-shadows r g b] [--grade-midtones r g b]
@@ -728,6 +728,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--cloud-thickness") && i + 1 < argc) skyMore.clouds.thickness = (float)atof(argv[++i]);
         else if (!strcmp(a, "--cloud-shadow")) skyMore.clouds.shadow = true;
         else if (!strcmp(a, "--cloud-density") && i + 1 < argc) skyMore.clouds.density = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--aerial") && i + 1 < argc) skyMore.aerial = (float)atof(argv[++i]);
         else if (!strcmp(a, "--wind") && i + 3 < argc) { skyMore.clouds.wind.x = (float)atof(argv[++i]); skyMore.clouds.wind.y = (float)atof(argv[++i]); skyMore.clouds.wind.z = (float)atof(argv[++i]); }
         else if (!strcmp(a, "--exposure-low") && i + 1 < argc) post.exposure.low = (float)atof(argv[++i]);
         else if (!strcmp(a, "--exposure-high") && i + 1 < argc) post.exposure.high = (float)atof(argv[++i]);

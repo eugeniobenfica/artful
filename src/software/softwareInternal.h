@@ -199,6 +199,9 @@ typedef struct ArtfSoftPost {
     int overlayWidth, overlayHeight, overlayStride;
     float* occlusion;
     float* froxels;      /* light the air adds up to each cell, and what it leaves of what is behind */
+    float* clouds;       /* clouds in the scene: a cell of each column (artfCloudsColumn), cloudsX x cloudsY */
+    float* cloudFar;     /* and how far the farthest surface among each column's own pixels is */
+    int cloudsX, cloudsY;
     int froxelsX, froxelsY;
     float* bloom[3];
     int bloomW[ARTF_POST_BLOOM_LEVELS], bloomH[ARTF_POST_BLOOM_LEVELS];

@@ -70,6 +70,7 @@ static const Pass passes[] = {
     {"ambient occlusion", {artfShaderPostOcclusion, artfShaderPostOcclusionBlur}, 0, 0},
     {"reflections", {artfShaderPostReflection, artfShaderPostReflectionApply}, 0, 0},
     {"sampled light gathered", {artfShaderPostSampled, artfShaderPostSampledSpace}, 0, 0},
+    {"clouds", {artfShaderPostCloudColumns, artfShaderPostCloudApply}, 0, 0},
     {"upscaling", {artfShaderPostUpscale}, 0, 0},
     {"temporal antialiasing", {artfShaderPostTemporal}, 0, 0},
     {"sharpening", {artfShaderPostSharpen}, 0, 0},

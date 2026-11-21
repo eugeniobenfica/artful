@@ -527,6 +527,125 @@ static void cloudsToward(const Sky* k, const float* d, float jitter, float* out)
     }
 }
 
+/* ---- clouds in the scene ---- */
+
+void artfCloudsColumn(const float* field, const ArtfFrameData* f, const float* dir, float jitter, float farthest, float* out) {
+    Sky k;
+    memset(&k, 0, sizeof k);
+    k.base = field[0];
+    k.top = field[1];
+    k.density = field[2];
+    k.coverage = field[3];
+    memcpy(k.wind, field + 4, 12);
+    const float unit = field[7];
+    memcpy(k.toSun, field + 8, 12);
+    k.eye[1] = field[11];
+    memcpy(k.sun, field + 12, 12);
+    memcpy(k.ambient, field + 16, 12);
+    k.noise = (float*)(field + ARTF_CLOUD_NOISE);
+    k.weather = (float*)(field + ARTF_CLOUD_WEATHER);
+    k.trans = (float*)(field + ARTF_CLOUD_TRANS);
+    out[0] = out[1] = out[2] = out[3] = 0;
+    for (int s = 0; s < ARTF_CLOUD_SLICES; ++s) {
+        float* cell = out + 4 * (1 + s);
+        cell[0] = cell[1] = cell[2] = 0;
+        cell[3] = 1.f;
+    }
+    /* where the layer is along the ray: as cloudsToward */
+    float a0, a1, b0, b1;
+    const float r = k.eye[1], inner = EARTH + k.base, outer = EARTH + k.top;
+    if (!sphereSpan(k.eye, dir, outer, &b0, &b1) || b1 <= 0) return;
+    float from, to;
+    if (r < inner) {
+        if (!sphereSpan(k.eye, dir, inner, &a0, &a1)) return;
+        const float ground = toSphere(k.eye, dir, EARTH);
+        if (ground > 0 && ground < a1) return;
+        from = a1;
+        to = b1;
+    } else if (r < outer) {
+        from = 0;
+        to = sphereSpan(k.eye, dir, inner, &a0, &a1) && a0 > 0 ? a0 : b1;
+    } else {
+        from = artfMaxf(b0, 0);
+        to = sphereSpan(k.eye, dir, inner, &a0, &a1) && a0 > 0 ? a0 : b1;
+    }
+    if (from > CLOUD_FAR || !(farthest * unit > from)) return;
+    to = artfMinf(to, farthest * unit);
+    to = artfMinf(to, from + 30.f);
+    out[0] = from / unit;
+    out[1] = to / unit;
+    const int steps = ARTF_CLOUD_SLICES * ARTF_CLOUD_STEPS;
+    const float step = (to - from) / (float)steps;
+    const float mu = dir[0] * k.toSun[0] + dir[1] * k.toSun[1] + dir[2] * k.toSun[2];
+    float phase[3];
+    for (int o = 0; o < 3; ++o) {
+        const float g = o == 0 ? 1.f : o == 1 ? .5f : .25f;
+        phase[o] = henyey(.8f * g, mu) * .7f + henyey(-.3f * g, mu) * .3f;
+    }
+    float light[3] = {0, 0, 0}, left = 1.f;
+    for (int i = 0; i < steps; ++i) {
+        const float t = from + ((float)i + jitter) * step;
+        const float p[3] = {k.eye[0] + dir[0] * t, k.eye[1] + dir[1] * t, k.eye[2] + dir[2] * t};
+        const float h = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) - EARTH;
+        const float sigma = left > .005f ? cloudAt(&k, p, h, true) : 0.f;
+        if (sigma > 0) {
+            float tau = 0, along = 0, sl = .06f;
+            for (int s = 0; s < LIGHT_STEPS; ++s) {
+                const float at = along + sl * .5f;
+                const float q[3] = {p[0] + k.toSun[0] * at, p[1] + k.toSun[1] * at, p[2] + k.toSun[2] * at};
+                tau += cloudAt(&k, q, sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]) - EARTH, s < 3) * sl;
+                along += sl;
+                sl *= 1.8f;
+            }
+            float sun[3];
+            sunThroughTable(&k, p, sun);
+            const float powder = 1.f - expOf(-sigma * .2f), edge = powder + (1.f - powder) * (mu * .5f + .5f);
+            float beer = 0;
+            for (int o = 0; o < 3; ++o) {
+                const float share = o == 0 ? 1.f : o == 1 ? .5f : .25f;
+                beer += share * expOf(-tau * share) * phase[o];
+            }
+            const float frac = (h - k.base) / (k.top - k.base), sky = .25f + .75f * frac;
+            const float through = expOf(-sigma * step), taken = 1.f - through;
+            /* (seen through the air between: what aerial perspective keeps of it) */
+            float keep[3] = {1, 1, 1}, add[3];
+            if (f->aerial[3][3] > 0) artfAerialOf(f, t / unit, mu, keep, add);
+            for (int c = 0; c < 3; ++c) light[c] += left * (k.sun[c] * 3.14159265f * sun[c] * beer * edge + k.ambient[c] * sky) * taken * keep[c];
+            left *= through;
+        }
+        if ((i + 1) % ARTF_CLOUD_STEPS == 0) {
+            float* cell = out + 4 * (1 + (i + 1) / ARTF_CLOUD_STEPS - 1);
+            for (int c = 0; c < 3; ++c) cell[c] = light[c];
+            cell[3] = left;
+        }
+    }
+}
+
+void artfCloudsAt(const float* grid, int columns, int rows, float sx, float sy, float distance, float* out) {
+    const float fx = artfClampf((sx - (ARTF_CLOUD_TILE * .5f - .5f)) / ARTF_CLOUD_TILE, 0, (float)(columns - 1));
+    const float fy = artfClampf((sy - (ARTF_CLOUD_TILE * .5f - .5f)) / ARTF_CLOUD_TILE, 0, (float)(rows - 1));
+    const int x0 = (int)fx, y0 = (int)fy, x1 = artfMini(x0 + 1, columns - 1), y1 = artfMini(y0 + 1, rows - 1);
+    const float tx = fx - (float)x0, ty = fy - (float)y0;
+    const int cx[4] = {x0, x1, x0, x1}, cy[4] = {y0, y0, y1, y1};
+    const float weight[4] = {(1.f - tx) * (1.f - ty), tx * (1.f - ty), (1.f - tx) * ty, tx * ty};
+    out[0] = out[1] = out[2] = 0;
+    out[3] = 0;
+    for (int n = 0; n < 4; ++n) {
+        /* (each column by its own span: where this distance falls in its slices, between the two around it) */
+        const float* cell = grid + ((size_t)cy[n] * columns + cx[n]) * ARTF_CLOUD_CELL;
+        float here[4] = {0, 0, 0, 1};
+        if (cell[1] > cell[0] && distance > cell[0]) {
+            const float z = artfMinf((distance - cell[0]) / (cell[1] - cell[0]), 1.f) * ARTF_CLOUD_SLICES;
+            const int k1 = artfMini((int)z, ARTF_CLOUD_SLICES - 1), k0 = k1 - 1;
+            const float tz = z - (float)k1;
+            const float* b = cell + 4 * (1 + k1);
+            const float a[4] = {k0 >= 0 ? cell[4 * (1 + k0)] : 0.f, k0 >= 0 ? cell[4 * (1 + k0) + 1] : 0.f, k0 >= 0 ? cell[4 * (1 + k0) + 2] : 0.f, k0 >= 0 ? cell[4 * (1 + k0) + 3] : 1.f};
+            for (int c = 0; c < 4; ++c) here[c] = a[c] + (b[c] - a[c]) * tz;
+        }
+        for (int c = 0; c < 4; ++c) out[c] += here[c] * weight[n];
+    }
+}
+
 /* What the clouds leave of the sun at the eye, from a few places around it: their shadow where the eye is, soft. */
 static float cloudShadow(const Sky* k) {
     if (k->toSun[1] <= 0) return 1.f;
@@ -572,7 +691,12 @@ static void skyRow(void* user, uint32_t y, uint32_t worker) {
 }
 
 bool artfSceneSetSky(ArtfScene* s, const ArtfSkyDesc* desc) {
-    if (!desc) return artfSceneSetEnvironment(s, NULL, 0, 0, 0, false);
+    if (!desc) {
+        artfFree(s->clouds);
+        s->clouds = NULL;
+        ++s->cloudsGeneration;
+        return artfSceneSetEnvironment(s, NULL, 0, 0, 0, false);
+    }
     Sky k;
     memset(&k, 0, sizeof k);
     const float haze = desc->haze > 0 ? desc->haze : 1.f;
@@ -632,6 +756,21 @@ bool artfSceneSetSky(ArtfScene* s, const ArtfSkyDesc* desc) {
     }
     artfPoolRun(pool, skyRow, &k, (uint32_t)k.height);
     artfPoolFree(pool);
+    /* the clouds, kept for the scene's own (with aerial perspective: its units are what places them) */
+    artfFree(s->clouds);
+    s->clouds = NULL;
+    ++s->cloudsGeneration;
+    if (k.coverage > 0 && desc->aerial > 0) {
+        float* c = artfCalloc(ARTF_CLOUD_FLOATS, 4);
+        const float rows[ARTF_CLOUD_ROWS][4] = {{k.base, k.top, k.density, k.coverage}, {k.wind[0], k.wind[1], k.wind[2], desc->aerial * .001f},
+                                                {k.toSun[0], k.toSun[1], k.toSun[2], k.eye[1]}, {k.sun[0], k.sun[1], k.sun[2], 0},
+                                                {k.ambient[0], k.ambient[1], k.ambient[2], 0}};
+        memcpy(c, rows, sizeof rows);
+        memcpy(c + ARTF_CLOUD_NOISE, k.noise, (size_t)NOISE * NOISE * NOISE * 4);
+        memcpy(c + ARTF_CLOUD_WEATHER, k.weather, (size_t)WEATHER * WEATHER * 4);
+        memcpy(c + ARTF_CLOUD_TRANS, k.trans, (size_t)TRANS_W * TRANS_H * 12);
+        s->clouds = c;
+    }
     /* aerial perspective: the air at the eye's altitude, the sun as it reaches the eye (before clouds), and the mean
      * of the picture all around (the sky's light, scattered the same all ways) */
     memset(s->aerial, 0, sizeof s->aerial);
