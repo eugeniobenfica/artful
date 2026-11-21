@@ -3811,7 +3811,8 @@ static SpvId tracedPlaceSpv(Spv* s, const Resources* r, SpvId p) {
 
 /* As tracedLift. */
 static SpvId tracedLiftSpv(Spv* s, const Resources* r, SpvId p, SpvId n) {
-    SpvId lift = ADD_F(reachOf(s, p), MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(p, spvShuffle3(s, frameVec(s, r, F_CAMERA)))), FLOAT(1e-3f)));
+    /* (trace.c's tracedLift: a thousandth of the distance, and the trees' cuts') */
+    SpvId lift = ADD_F(ADD_F(reachOf(s, p), MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(p, spvShuffle3(s, frameVec(s, r, F_CAMERA)))), FLOAT(1e-3f))), Y(frameVec(s, r, F_MORE)));
     return ADD_V3(p, SCALE_V3(n, lift));
 }
 

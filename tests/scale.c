@@ -970,3 +970,37 @@ void testClusterDraw(void) {
     artfFree(cpu[0]);
     artfFree(cpu[1]);
 }
+
+/* Phase 5.6: rays against the graph's cut (ArtfTraceDesc.coarse). The terrain drawn by its cut with shadows from rays
+ * that meet the trees' cut looks as the full terrain under rays that meet all of it: no surface shadows itself (rays
+ * start as far off as the cut may be from the mesh, past the thousandth of the distance); the trees hold fewer
+ * triangles. Both backends. */
+void testCoarseRays(void) {
+    uint32_t* full = artfMalloc(W * H * 4);
+    uint32_t* cut = artfMalloc(W * H * 4);
+    const ArtfShadowDesc traced = {0, 0, false, true};
+    size_t triangles[2] = {0, 0};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        for (int k = 0; k < 2; ++k) {
+            ArtfScene* s = terrainScene(k == 1, k == 1);
+            artfSceneSetShadows(s, &traced);
+            const ArtfTraceDesc rays = {.mode = ARTF_TRACE_NONE, .coarse = k ? .005f : 0.f};
+            artfSceneSetTrace(s, &rays);
+            drawInto(r, s, k ? cut : full);
+            triangles[k] = s->trace.triangles.len;
+            artfSceneFree(s);
+        }
+        long darker = 0;
+        for (int i = 0; i < W * H; ++i) darker += (int)(full[i] >> 8 & 255) - (int)(cut[i] >> 8 & 255) > 16;
+        const double apart = differentShare(full, cut, 16);
+        printf("%s: the terrain's cut under rays against the trees' cut, against the full terrain: %.3f%% of pixels apart, %.3f%% darker; the trees hold %zu triangles, %zu in full\n",
+               backend ? "GPU" : "CPU", apart * 100, darker * 100.0 / (W * H), triangles[1], triangles[0]);
+        CHECK(apart < .01 && darker < W * H / 500 && triangles[1] * 2 < triangles[0]);
+        artfRendererFree(r);
+    }
+    artfFree(full);
+    artfFree(cut);
+}

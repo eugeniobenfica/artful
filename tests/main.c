@@ -258,6 +258,7 @@ int main(int argc, char** argv) {
     RUN("scale/hlod", testHlod());
     RUN("scale/clusterDag", testClusterDag());
     RUN("scale/clusterDraw", testClusterDraw());
+    RUN("scale/coarseRays", testCoarseRays());
     RUN("scale/hlodCooked", testHlodCooked());
     RUN("scale/skinLod", testSkinLod());
     RUN("scale/tracedSkinLod", testTracedSkinLod());

@@ -328,7 +328,23 @@ bool artfTraceReinsert = true;
 /* A mesh's vertices, triangles and tree go at the end of the scene's. Its levels of detail have none: rays
  * do not care for distance (an instance drawing a level of what bends is met as its copy of the whole). */
 static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
-    const uint32_t firstVertex = (uint32_t)t->vertices.len, firstTriangle = (uint32_t)t->triangles.len, triangles = m->indexCount / 3;
+    /* (a graph of clusters, when asked: by its cut where the error is the share asked of its size) */
+    const uint32_t* source = m->indices;
+    uint32_t* cut = NULL, cutCount = 0;
+    float coarseError = 0;
+    if (m->dagBounds && t->desc.coarse > 0) {
+        coarseError = t->desc.coarse * m->radius;
+        cut = artfMalloc((size_t)ARTF_MESH_ALL_INDICES(m) * 4 + 4);
+        for (uint32_t k = 0; k < m->meshletCount; ++k) {
+            const float* b = m->dagBounds + (size_t)k * 10;
+            if (!(b[4] <= coarseError) || b[9] <= coarseError) continue;
+            const ArtfMeshlet* l = &m->meshlets[k];
+            memcpy(cut + cutCount, m->indices + (size_t)l->triangleOffset * 3, (size_t)l->triangleCount * 12);
+            cutCount += l->triangleCount * 3;
+        }
+        source = cut;
+    }
+    const uint32_t firstVertex = (uint32_t)t->vertices.len, firstTriangle = (uint32_t)t->triangles.len, triangles = cut ? cutCount / 3 : m->indexCount / 3;
     ArtfVertex* v = artfMalloc((size_t)m->vertexCount * sizeof *v);
     artfMeshUnpack(m, v);
     artfVecReserve(&t->vertices, firstVertex + m->vertexCount);
@@ -342,14 +358,15 @@ static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
     for (uint32_t i = 0; i < triangles; ++i) {
         boxEmpty(&boxes[i]);
         for (int c = 0; c < 3; ++c) {
-            const ArtfVertex* a = &v[m->indices[i * 3 + (uint32_t)c]];
+            const ArtfVertex* a = &v[source[i * 3 + (uint32_t)c]];
             Box p = {{a->px, a->py, a->pz}, {a->px, a->py, a->pz}};
             boxAdd(&boxes[i], &p);
         }
         order[i] = i;
     }
     const uint32_t root = (uint32_t)t->nodes.len, firstNode = root;
-    ArtfTraceRange range = {.firstNode = root, .firstVertex = firstVertex, .firstTriangle = firstTriangle, .triangleCount = triangles, .deformVersion = m->deformVersion};
+    ArtfTraceRange range = {.firstNode = root, .firstVertex = firstVertex, .firstTriangle = firstTriangle, .triangleCount = triangles, .deformVersion = m->deformVersion,
+                            .coarseError = coarseError};
     artfVecReserve(&t->nodes, root + 1);
     t->nodes.len = root + 1;
     NodeList list = {t->nodes.items, t->nodes.len, t->nodes.cap};
@@ -363,7 +380,7 @@ static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
         if (t->nodes.items[i].count) t->nodes.items[i].first += firstTriangle;
     artfVecReserve(&t->triangles, firstTriangle + triangles);
     for (uint32_t i = 0; i < triangles; ++i) {
-        const uint32_t* c = &m->indices[order[i] * 3];
+        const uint32_t* c = &source[order[i] * 3];
         const ArtfTraceTriangle o = {{firstVertex + c[0], firstVertex + c[1], firstVertex + c[2]}, order[i]};
         t->triangles.items[t->triangles.len++] = o;
     }
@@ -376,6 +393,7 @@ static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
     artfFree(boxes);
     artfFree(order);
     artfFree(v);
+    artfFree(cut);
 }
 
 /* New positions for a mesh a pose moved, and each box made to fit them again, from the leaves up: children
@@ -434,6 +452,7 @@ static bool invert(const float* m, float* out) {
 
 static void buildTop(ArtfScene* s) {
     ArtfTrace* t = &s->trace;
+    t->coarseReach = 0;
     const size_t count = s->instances.len;
     Box* boxes = artfMalloc((count + 1) * sizeof *boxes);
     uint32_t* order = artfMalloc((count + 1) * 4);
@@ -451,6 +470,7 @@ static void buildTop(ArtfScene* s) {
         if (!d->opacity || (d->flags & ARTF_INSTANCE_PARTICLE && !t->particles) || !invert(d->m, o.toObject)) continue;
         const uint32_t mesh = artfTracedMesh(s, d->mesh);
         o.root = t->roots.items[mesh];
+        t->coarseReach = artfMaxf(t->coarseReach, t->ranges.items[mesh].coarseError * d->maxScale);
         o.material = d->material;
         o.opacity = (float)d->opacity * (1.f / 65535.f);
         /* (what bends light must be met on the way out, too) */
@@ -621,6 +641,8 @@ void artfTraceFini(ArtfTrace* t) {
 }
 
 void artfSceneSetTrace(ArtfScene* s, const ArtfTraceDesc* desc) {
+    /* (another cut: the trees are made again) */
+    if ((desc ? desc->coarse : 0.f) != s->trace.desc.coarse) s->trace.meshRemovals = s->meshRemovals + 1;
     memset(&s->trace.desc, 0, sizeof s->trace.desc);
     if (!desc) return;
     s->trace.desc = *desc;
@@ -1662,10 +1684,12 @@ uint32_t artfTracedPlace(const ArtfFrameData* f, const float* p) {
 }
 
 /* Off the surface, along its normal: by more with distance, as what is drawn far away may be a lighter level than the
- * trees hold. */
+ * trees hold, and by as far as the trees' cuts may be from their meshes (the frame's more[1], ArtfTrace.coarseReach).
+ * (A level's own bound, distance / lodScale, would do for what has levels; for what has none it lifts too far, and
+ * which a pixel is is not known here.) The same on the GPU. */
 static void tracedLift(const ArtfFrameData* f, const float* p, const float* n, float* out) {
     const float e[3] = {p[0] - f->cameraPos[0], p[1] - f->cameraPos[1], p[2] - f->cameraPos[2]};
-    const float lift = reachOf(p) + sqrtf(dot3(e, e)) * 1e-3f;
+    const float lift = reachOf(p) + sqrtf(dot3(e, e)) * 1e-3f + f->more[1];
     for (int k = 0; k < 3; ++k) out[k] = p[k] + n[k] * lift;
 }
 

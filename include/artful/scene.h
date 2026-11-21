@@ -798,6 +798,11 @@ typedef struct ArtfTraceDesc {
     /* Rays go through the GPU's ray tracing hardware, where it has some (Vulkan's ray queries), in place of the
      * trees the compute shader walks: the same picture, and on a large scene, faster. Elsewhere it is as without. */
     bool hardware;
+    /* Rays meet a mesh made a graph of clusters (artfSceneMeshSetClusters) by its cut at this share of its size (as
+     * .002): fewer triangles for the trees to hold and walk, for what rays see of it from a distance. What is drawn and
+     * lit by rays (shadows and reflections from rays) starts its rays off the surface by as much as the two may be apart.
+     * Path traced, the surface itself is the cut's: within that share. 0: the full mesh. */
+    float coarse;
 } ArtfTraceDesc;
 
 /* NULL: drawing as ever. Meshes get what rays need the first time they are traced, on the calling thread:

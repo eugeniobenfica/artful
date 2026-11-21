@@ -1843,6 +1843,7 @@ void artfSceneFrame(const ArtfScene* s, int width, int height, ArtfFrameData* ou
     out->look[1] = s->fogDensity;
     out->look[2] = s->sunSize;
     memcpy(out->aerial, s->aerial, sizeof out->aerial);
+    out->more[1] = s->trace.coarseReach;
     for (size_t i = 0; i < s->materialsMore.len && !(out->more[0] > 0); ++i)
         if (s->materialsMore.items[i].reactive > 0) out->more[0] = 1.f;
 #undef SET3

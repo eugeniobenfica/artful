@@ -491,7 +491,8 @@ typedef struct ArtfFrameData {
      * Cornette and Shanks's (1 + g^2 - 2 g mu)^1.5; the sky's, the same all ways, and 1 when it is on (0: none). */
     float aerial[4][4];
     /* 1 when a material is reactive (ArtfMaterialDesc.reactive): the instance each pixel shows goes after the frame
-     * then, as when something moves; 0 else. The rest: 0. */
+     * then, as when something moves; 0 else. How far the trees' cuts may be from their meshes (ArtfTrace.coarseReach).
+     * The rest: 0. */
     float more[4];
 } ArtfFrameData;
 
@@ -1019,6 +1020,7 @@ uint32_t artfNormalPack(const float* n);
 typedef struct ArtfTraceRange {
     uint32_t firstNode, nodeEnd, firstVertex;
     uint32_t firstWide, wideEnd;        /* its nodes four ways */
+    float coarseError;                  /* traced by its graph's cut (ArtfTraceDesc.coarse): how far that is, in its units */
     uint32_t firstTriangle, triangleCount; /* its triangles, one after the other: for the ray tracing hardware */
     uint64_t deformVersion;
     bool moved;         /* its vertices have somewhere they were */
@@ -1034,6 +1036,7 @@ typedef struct ArtfTrace {
     ARTF_VEC(ArtfTraceWide) wide;           /* the trees rays walk: of every mesh, four ways (ArtfTraceInstance.root's) */
     ARTF_VEC(uint32_t) wideFrom;            /* of each of those, the node of nodes each child is (UINT32_MAX: none) */
     ARTF_VEC(uint32_t) wideRoots;           /* of each mesh */
+    float coarseReach;                      /* of the instances traced, the farthest a cut is from its mesh, in the world */
     ARTF_VEC(ArtfTraceNode) top;            /* over the instances */
     ARTF_VEC(ArtfTraceInstance) instances;
     ARTF_VEC(uint32_t) instanceMeshes;      /* of each of those, its mesh, */

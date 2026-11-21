@@ -248,6 +248,7 @@ void testTerrainLayers(void);
 void testHlod(void);
 void testClusterDag(void);
 void testClusterDraw(void);
+void testCoarseRays(void);
 void testHlodCooked(void);
 void testSkinLod(void);
 void testTracedSkinLod(void);

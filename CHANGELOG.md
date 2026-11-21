@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Rays against the graph's cut** (`ArtfTraceDesc.coarse`, phase 5.6): a mesh made a graph of clusters is traced by
+  its cut, and what is drawn starts its rays off the surface by as far as the cut may be from the mesh too. A terrain's trees hold 9,620 triangles where they held 73,728, with the
+  same picture. The GPU walks each mesh's tree four ways, quantized (40-48% less memory); trees are improved by
+  reinsertion after they are built.
+- **The GPU is left alone after it is lost three times** in a process (ARTFUL_KEEP_GPU to go on), so that a mistake
+  that loses it each time does not reset the driver again and again.
+
 - **A graph of clusters** (phase 5.5): `artfSceneMeshSetClusters` makes a mesh a graph of clusters at every level of
   detail, in place of its three lighter versions: each part is drawn as fine as the lod error asks where it is, on
   both backends alike (the CPU's meshlet culling and the GPU's), with no cracks, and cooked. A 73,728-triangle
