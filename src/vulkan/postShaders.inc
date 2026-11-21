@@ -518,7 +518,7 @@ uint32_t* artfShaderPostReflectionTraced(size_t* size, uint32_t maxTextures, con
         SpvId mirror = SUB_V3(v, SCALE_V3(n, MUL_F(FLOAT(2.f), vn)));
         SpvId strayed = NORMALIZE(ADD_V3(mirror, SCALE_V3(tracedBallAt(t, AND_U(point, UINT(15))), MUL_F(rough, rough))));
         spvStore(s, t->direction, pick3(s, spvOp2(s, SPV_OP_FOrdLessThanEqual, s->boolType, DOT3(strayed, n), FLOAT(0.f)), mirror, strayed));
-        spvStore(s, t->origin, tracedLiftSpv(s, &p->r, at, n));
+        spvStore(s, t->origin, tracedLiftSpv(s, &p->r, at, n, 0));
         spvStore(s, found, UINT(0));
         spvStore(s, seenVar, same3(s, 0.f));
         spvStore(s, t->step, UINT(0));

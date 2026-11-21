@@ -977,7 +977,9 @@ typedef struct ArtfTraceWide {
 ARTF_INLINE uint32_t artfWideChild(const ArtfTraceWide* w, int k) { return k == 0 ? w->child0 : k == 1 ? w->child1 : k == 2 ? w->child2 : w->child3; }
 ARTF_INLINE uint32_t artfWideByte(const ArtfTraceWide* w, int k, int j) { const int at = 6 * k + j; return w->boxes[at >> 2] >> ((at & 3) * 8) & 255u; }
 
-extern bool artfTraceReinsert; /* trace.c: reinsertion after a mesh's tree is built (tests turn it off to compare) */
+extern bool artfTraceReinsert;
+extern bool artfTracedLiftNone; /* trace.c: rays from what is drawn start off it by the reach floats need alone, not by
+                                 * the level's error (tests: to see what that prevents) */ /* trace.c: reinsertion after a mesh's tree is built (tests turn it off to compare) */
 
 typedef struct ArtfTraceVertex {
     float p[3], u;
@@ -1422,6 +1424,16 @@ extern const float artfTracedBall[16][3];
 uint32_t artfTracedPlace(const ArtfFrameData* f, const float* p);
 /* How much of a light reaches p, of normal n (toward the eye): light -1 the sun, else the frame's light. */
 float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light);
+/* The same, for what an instance draws by a level whose error is drawn (artfDrawnError): its rays start off it by that. */
+float artfTracedShadowDrawn(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light, float drawn);
+/* How far what an instance draws may be from its mesh, in the world: 0 for the whole mesh; a lighter level's error times
+ * its scale; below 0 for a graph's cut (within distance / lodScale where it is seen). */
+ARTF_INLINE float artfDrawnError(const ArtfScene* s, const ArtfFrameData* f, uint32_t base, uint32_t drawn, float maxScale) {
+    const ArtfMeshData* m = &s->meshes.items[base];
+    for (uint32_t k = 0; k < m->lodCount; ++k)
+        if (m->lods[k] == drawn) return artfMeshLevelError(m, k) * maxScale;
+    return drawn == base && m->dagBounds && f->lodScale > 0 && !artfOrtho(f) ? -1.f : 0.f;
+}
 /* What a ray from p (of normal n) along the mirror of the view v finds, strayed by rough through the ball's point
  * `point`, lit simply, into out; false when it finds nothing. */
 bool artfTracedReflection(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, const float* v, float rough, uint32_t point, float* out);

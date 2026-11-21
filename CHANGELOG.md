@@ -3,7 +3,9 @@
 ## Unreleased
 
 - **Rays against the graph's cut** (`ArtfTraceDesc.coarse`, phase 5.6): a mesh made a graph of clusters is traced by
-  its cut, and what is drawn starts its rays off the surface by as far as the cut may be from the mesh too. A terrain's trees hold 9,620 triangles where they held 73,728, with the
+  its cut. Shadows from rays start off what is drawn by how far the level each instance draws may be from its mesh
+  (and the cut), in place of a thousandth of the distance: a ball drawn at a lighter level no longer shadows itself
+  (100% of its lit pixels before, none now). A terrain's trees hold 9,620 triangles where they held 73,728, with the
   same picture. The GPU walks each mesh's tree four ways, quantized (40-48% less memory); trees are improved by
   reinsertion after they are built.
 - **The GPU is left alone after it is lost three times** in a process (ARTFUL_KEEP_GPU to go on), so that a mistake

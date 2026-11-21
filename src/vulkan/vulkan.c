@@ -2053,6 +2053,7 @@ bool syncScene(Vulkan* v, ArtfScene* scene) {
                 memcpy(&row[12 + k], &id, 4);
                 row[16 + k] = k < m->lodCount ? artfMeshLevelError(m, k) : -1.f;
             }
+            row[19] = m->dagBounds ? 1.f : 0.f; /* (a graph of clusters: shaders.c's drawnErrorSpv) */
             memcpy(out, row, sizeof row);
         }
         for (int i = 0; i < SLOTS; ++i) v->slots[i].fresh = true;

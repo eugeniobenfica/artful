@@ -70,7 +70,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [x] 5.3 LTC para retângulos e tubos — retângulo 54–58% → 4–9% do traçado, tubo 22% → 0,5%
 - [x] 5.4 Upscaler — critério atingido (grade −60%, fumaça 10 → 2 quadros); histórico cúbico (`sharpHistory`); máscara reativa (`reactive`); composição de camadas de fora
 - [x] 5.5 DAG de clusters — construção, corte, desenho nos dois backends e cozimento, junto com os 3 níveis; sem ganho em `city`/`heavy` (nada lá pede o grafo); erro por atributo de fora
-- [~] 5.6 Raios contra o corte grosso (`ArtfTraceDesc.coarse`); árvore de 4 filhos quantizada na GPU (−40–48% de memória); reinserção — falta tirar o deslocamento de 1/1000 (exige o erro do nível por instância) e medir em GPU integrada
+- [x] 5.6 Raios contra o corte grosso (`ArtfTraceDesc.coarse`); sombras saem pelo erro do nível de cada instância, sem o 1/1000 (autossombreamento 100% → 0%); árvore de 4 filhos quantizada na GPU (−40–48% de memória); reinserção — sem GPU integrada para medir
 - [ ] 5.7 Luzes estocásticas, denoiser de sombra, A-SVGF
 - [ ] 5.8 Transparência por transmitância em froxels
 - [~] 5.9 Saída HDR e gama larga — `output` P3/HDR10 nos dois backends, swapchain por `VK_EXT_swapchain_colorspace`; faltam metadados HDR, scRGB e teste em tela HDR

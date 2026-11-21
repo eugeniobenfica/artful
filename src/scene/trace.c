@@ -324,6 +324,7 @@ static uint32_t wideChild(ArtfTrace* t, uint32_t node) {
 }
 
 bool artfTraceReinsert = true;
+bool artfTracedLiftNone = false;
 
 /* A mesh's vertices, triangles and tree go at the end of the scene's. Its levels of detail have none: rays
  * do not care for distance (an instance drawing a level of what bends is met as its copy of the whole). */
@@ -1683,19 +1684,23 @@ uint32_t artfTracedPlace(const ArtfFrameData* f, const float* p) {
     return ((ix & 1u) + (iy & 1u) * 2u + f->tracedFrame) & 3u;
 }
 
-/* Off the surface, along its normal: by more with distance, as what is drawn far away may be a lighter level than the
- * trees hold, and by as far as the trees' cuts may be from their meshes (the frame's more[1], ArtfTrace.coarseReach).
- * (A level's own bound, distance / lodScale, would do for what has levels; for what has none it lifts too far, and
- * which a pixel is is not known here.) The same on the GPU. */
-static void tracedLift(const ArtfFrameData* f, const float* p, const float* n, float* out) {
+/* Off the surface, along its normal, by as much as what is drawn and what the trees hold may be apart: drawn, how far
+ * the level its instance draws may be from the mesh, in the world (artfDrawnError: 0 for the whole mesh, a level's
+ * error times the instance's scale, or below 0 for a graph's cut, which is within distance / lodScale where a pixel is);
+ * the trees' cuts, the frame's more[1] (ArtfTrace.coarseReach); and the reach floats need. Not known (NAN), as for a
+ * reflection after the frame: a thousandth of the distance, as before. The same on the GPU (tracedLiftSpv). */
+static void tracedLift(const ArtfFrameData* f, const float* p, const float* n, float drawn, float* out) {
     const float e[3] = {p[0] - f->cameraPos[0], p[1] - f->cameraPos[1], p[2] - f->cameraPos[2]};
-    const float lift = reachOf(p) + sqrtf(dot3(e, e)) * 1e-3f + f->more[1];
+    const float far = sqrtf(dot3(e, e));
+    const float level = drawn != drawn ? far * 1e-3f : drawn < 0 ? (f->lodScale > 0 ? far / f->lodScale : 0.f) : drawn;
+    const float lift = reachOf(p) + (artfTracedLiftNone ? 0.f : level) + f->more[1];
     for (int k = 0; k < 3; ++k) out[k] = p[k] + n[k] * lift;
 }
 
-float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light) {
+float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light) { return artfTracedShadowDrawn(s, f, p, n, light, NAN); }
+float artfTracedShadowDrawn(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, int light, float drawn) {
     float o[3];
-    tracedLift(f, p, n, o);
+    tracedLift(f, p, n, drawn, o);
     const float size = light < 0 ? f->look[2] : f->lightSizes[light];
     const uint32_t rays = size > 0 ? artfMaxi((int)f->tracedRays, 1) : 1u, first = artfTracedPlace(f, p) * 4u;
     float sum = 0;
@@ -1719,7 +1724,7 @@ float artfTracedShadow(const ArtfScene* s, const ArtfFrameData* f, const float* 
 
 bool artfTracedReflection(const ArtfScene* s, const ArtfFrameData* f, const float* p, const float* n, const float* v, float rough, uint32_t point, float* out) {
     float o[3], d[3], mirror[3];
-    tracedLift(f, p, n, o);
+    tracedLift(f, p, n, NAN, o);
     const float vn = dot3(v, n), stray = rough * rough;
     const float* b = artfTracedBall[point & 15u];
     for (int k = 0; k < 3; ++k) {

@@ -249,6 +249,7 @@ void testHlod(void);
 void testClusterDag(void);
 void testClusterDraw(void);
 void testCoarseRays(void);
+void testDrawnLift(void);
 void testHlodCooked(void);
 void testSkinLod(void);
 void testTracedSkinLod(void);

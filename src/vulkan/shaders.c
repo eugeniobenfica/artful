@@ -1581,7 +1581,8 @@ typedef struct Tracer Tracer;
 static Tracer* tracerNew(void);
 static void tracerDeclare(Spv* s, Tracer* t, const Resources* r, SpvId textures, SpvId sampled, const ArtfGraphData* graphs, uint32_t graphCount, bool hardware);
 static void tracerVariables(Tracer* t);
-static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index);
+static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index, SpvId drawn);
+static SpvId drawnErrorSpv(Spv* s, const Resources* r, SpvId meshWord, SpvId instance);
 
 /* Which of a lamp's views a place is in, from its word, as lampShadowSpv. */
 static SpvId lampViewSpv(Spv* s, SpvId lamp, SpvId d) {
@@ -1638,7 +1639,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         sampleMask = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, spvTypeArray(s, s->intType, 1, 0)), SPV_STORAGE_Input);
         spvDecorate(s, sampleMask, SPV_DECORATE_BuiltIn, 20 /* SampleMask */);
     }
-    if (lists || hdr || viewed) {
+    if (lists || hdr || viewed || tracer) {
         vInstance = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->uintType), SPV_STORAGE_Input);
         spvDecorate(s, vInstance, SPV_DECORATE_Location, 7);
         spvDecorate(s, vInstance, SPV_DECORATE_Flat, -1);
@@ -1647,7 +1648,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         listCounts = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 44);
         listFragments = spvResource(s, blockOf(s, r.uintArray, true), SPV_STORAGE_StorageBuffer, 45);
     }
-    if (cutout || viewed) {
+    if (cutout || viewed || tracer) {
         /* (the mesh drawn, and above it how far it is in a fade) */
         vFade = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Input, s->uintType), SPV_STORAGE_Input);
         spvDecorate(s, vFade, SPV_DECORATE_Location, 6);
@@ -2098,11 +2099,13 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     if (coats) spvStore(s, through, FLOAT(0.f));
     SpvId sunCasts;
     SpvId tracedCasts = traced ? AS_UINT(Y(frameVec(s, &r, F_TRACED))) : 0;
+    /* (how far the level this pixel's instance draws may be from its mesh: its rays start that far off) */
+    SpvId drawnHere = traced ? drawnErrorSpv(s, &r, spvLoad(s, s->uintType, vFade), spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvLoad(s, s->uintType, vInstance), UINT(~ARTF_MOTION_VECTOR))) : 0;
     if (traced) {
         /* from rays, where the sun reaches at all: as tracedLanes in kernels.inc */
         SpvId reaches = spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, DOT3(n, spvShuffle3(s, frameVec(s, &r, F_TOSUN))), FLOAT(0.f));
         spvIfBegin(s, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, tracedCasts, UINT(ARTF_TRACED_SUN)), UINT(0)), reaches), &sunCasts);
-        spvStore(s, shadowed, tracedShadowSpv(tracer, world, n, true, 0));
+        spvStore(s, shadowed, tracedShadowSpv(tracer, world, n, true, 0, drawnHere));
     } else {
         spvIfBegin(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(X(sunRow)), UINT(0)), &sunCasts);
     }
@@ -2168,7 +2171,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
             /* from rays, where the light reaches at all */
             SpvId casts = spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, spvOp2(s, SPV_OP_ShiftRightLogical, s->uintType, tracedCasts, i), UINT(1)), UINT(0));
             spvIfBegin(s, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, casts, spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, MUL_F(fade, spot), FLOAT(0.f))), &lampCasts);
-            spvStore(s, shadowed, tracedShadowSpv(tracer, world, n, false, i));
+            spvStore(s, shadowed, tracedShadowSpv(tracer, world, n, false, i, drawnHere));
             spvIfEnd(s, lampCasts);
         } else {
             SpvId lamp = AS_UINT(X(shadowRow(s, &shadows, ADD_U(UINT(S_LIGHTS), i))));
@@ -3809,18 +3812,41 @@ static SpvId tracedPlaceSpv(Spv* s, const Resources* r, SpvId p) {
     return AND_U(ADD_U(ADD_U(ix, MUL_U(iy, UINT(2))), AS_UINT(Z(frameVec(s, r, F_TRACED)))), UINT(3));
 }
 
-/* As tracedLift. */
-static SpvId tracedLiftSpv(Spv* s, const Resources* r, SpvId p, SpvId n) {
-    /* (trace.c's tracedLift: a thousandth of the distance, and the trees' cuts') */
-    SpvId lift = ADD_F(ADD_F(reachOf(s, p), MUL_F(spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(p, spvShuffle3(s, frameVec(s, r, F_CAMERA)))), FLOAT(1e-3f))), Y(frameVec(s, r, F_MORE)));
+/* As tracedLift: drawn, how far the level drawn may be from the mesh (drawnErrorSpv), or 0 when it is not known (a
+ * thousandth of the distance then, as before). */
+static SpvId tracedLiftSpv(Spv* s, const Resources* r, SpvId p, SpvId n, SpvId drawn) {
+    SpvId far = spvGlsl1(s, SPV_GLSL_Length, s->floatType, SUB_V3(p, spvShuffle3(s, frameVec(s, r, F_CAMERA))));
+    SpvId level = MUL_F(far, FLOAT(1e-3f));
+    if (drawn) {
+        SpvId lodScale = Z(frameVec(s, r, F_COUNTS));
+        SpvId cut = PICK_F(MORE_F(lodScale, FLOAT(0.f)), DIV_F(far, MAX_F(lodScale, FLOAT(1e-30f))), FLOAT(0.f));
+        level = PICK_F(LESS_F(drawn, FLOAT(0.f)), cut, drawn);
+    }
+    SpvId lift = ADD_F(ADD_F(reachOf(s, p), level), Y(frameVec(s, r, F_MORE)));
     return ADD_V3(p, SCALE_V3(n, lift));
 }
 
+/* sceneInternal.h's artfDrawnError, for the mesh a pixel's instance draws (its word, below bit 23) by the mesh table: a
+ * lighter level's error times the instance's scale, 0 for the whole, -1 for a graph's cut (row 4's w: 1 for a graph). */
+static SpvId drawnErrorSpv(Spv* s, const Resources* r, SpvId meshWord, SpvId instance) {
+    SpvId chosen = AND_U(meshWord, UINT((1u << 23) - 1));
+    SpvId meta = bufferVec(s, r, r->instances, ADD_U(MUL_U(instance, UINT(4)), UINT(3)));
+    SpvId base = AS_UINT(X(meta)), scale = Z(meta);
+    SpvId ids = bufferVec(s, r, r->meshes, ADD_U(MUL_U(base, UINT(5)), UINT(3))), errors = bufferVec(s, r, r->meshes, ADD_U(MUL_U(base, UINT(5)), UINT(4)));
+    SpvId drawn = FLOAT(0.f);
+    for (uint32_t k = 0; k < ARTF_MAX_LODS; ++k) {
+        SpvId id = AS_UINT(spvExtract(s, s->floatType, ids, k)), error = spvExtract(s, s->floatType, errors, k);
+        drawn = PICK_F(BOTH(IS_EQ(id, chosen), spvOp2(s, SPV_OP_FOrdGreaterThanEqual, s->boolType, error, FLOAT(0.f))), MUL_F(error, scale), drawn);
+    }
+    SpvId graph = BOTH(BOTH(MORE_F(W(errors), FLOAT(.5f)), IS_EQ(chosen, base)), BOTH(MORE_F(Z(frameVec(s, r, F_COUNTS)), FLOAT(0.f)), NOT(orthoOn(s, r))));
+    return PICK_F(graph, FLOAT(-1.f), drawn);
+}
+
 /* As artfTracedShadow: the sun, or the frame's light `index`. */
-static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index) {
+static SpvId tracedShadowSpv(const Tracer* t, SpvId world, SpvId n, bool sun, SpvId index, SpvId drawn) {
     Spv* s = t->s;
     const Resources* r = &t->r;
-    SpvId o = tracedLiftSpv(s, r, world, n);
+    SpvId o = tracedLiftSpv(s, r, world, n, drawn);
     SpvId size = sun ? Z(frameVec(s, r, F_LOOK)) : frameFloatAt(s, r, ADD_U(UINT(F_LIGHT_SIZES), SHR_U(index, 2)), AND_U(index, UINT(3)));
     SpvId rays = spvSelect(s, s->uintType, MORE_F(size, FLOAT(0.f)), spvGlsl2(s, SPV_GLSL_UMax, s->uintType, AS_UINT(W(frameVec(s, r, F_TRACED))), UINT(1)), UINT(1));
     SpvId first = MUL_U(tracedPlaceSpv(s, r, world), UINT(4));

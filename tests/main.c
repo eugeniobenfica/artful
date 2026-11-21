@@ -259,6 +259,7 @@ int main(int argc, char** argv) {
     RUN("scale/clusterDag", testClusterDag());
     RUN("scale/clusterDraw", testClusterDraw());
     RUN("scale/coarseRays", testCoarseRays());
+    RUN("scale/drawnLift", testDrawnLift());
     RUN("scale/hlodCooked", testHlodCooked());
     RUN("scale/skinLod", testSkinLod());
     RUN("scale/tracedSkinLod", testTracedSkinLod());

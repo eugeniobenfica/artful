@@ -1004,3 +1004,47 @@ void testCoarseRays(void) {
     artfFree(full);
     artfFree(cut);
 }
+
+/* Phase 5.6: rays from what is drawn start as far off it as the level drawn may be from the mesh (artfDrawnError), not a
+ * thousandth of the distance. A ball drawn at a lighter level under the sun, alone: it cannot shadow itself, so a pixel
+ * darker than with no shadows at all is the drawn level shadowed by the mesh the trees hold. Some lifted only by what
+ * floats need, none lifted by the level's error; both backends. */
+void testDrawnLift(void) {
+    uint32_t* plain = artfMalloc(W * H * 4);
+    uint32_t* rays = artfMalloc(W * H * 4);
+    const ArtfShadowDesc traced = {0, 0, false, true}, none = {0, 0, false, false};
+    double darker[3] = {-1, -1, -1};
+    for (int k = 0; k < 3; ++k) {
+        const bool gpu = k == 2;
+        ArtfRendererOptions o = options(gpu ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = plainScene();
+        artfSceneSetAmbient(s, artfVec3(0, 0, 0), artfVec3(0, 0, 0));
+        artfSceneSetSun(s, artfVec3(-.3f, -.4f, -1), artfVec3(2, 2, 2));
+        artfSceneSetLodError(s, 6);
+        ArtfMaterialDesc grey = artfMaterialDefaults();
+        grey.baseColor = artfVec3(.7f, .7f, .7f);
+        addAt(s, artfSceneAddSphere(s, 1, 96, 192), artfSceneAddMaterial(s, &grey), 0, 0, 0, 1);
+        setCamera(s, 0, 0, 9, 0, 0, 0);
+        artfSceneSetShadows(s, &none);
+        drawInto(r, s, plain);
+        artfSceneSetShadows(s, &traced);
+        artfTracedLiftNone = k == 0;
+        drawInto(r, s, rays);
+        artfTracedLiftNone = false;
+        long count = 0, lit = 0;
+        for (int i = 0; i < W * H; ++i) {
+            lit += (plain[i] >> 8 & 255) > 8;
+            count += (int)(plain[i] >> 8 & 255) - (int)(rays[i] >> 8 & 255) > 8;
+        }
+        darker[k] = (double)count / (double)(lit ? lit : 1);
+        artfSceneFree(s);
+        artfRendererFree(r);
+    }
+    printf("a ball drawn at a lighter level, of its lit pixels shadowed by itself: %.2f%% lifted only by what floats need, %.3f%% lifted by the level's error on the CPU, %.3f%% on the GPU\n",
+           darker[0] * 100, darker[1] * 100, darker[2] * 100);
+    CHECK(darker[0] > .01 && darker[1] < .001 && darker[2] < .001);
+    artfFree(plain);
+    artfFree(rays);
+}

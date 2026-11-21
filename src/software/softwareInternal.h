@@ -56,6 +56,7 @@ typedef struct ArtfVisible {
     bool twoSided;       /* its backs are drawn */
     uint32_t fade;       /* between two levels: how far, times 2, and 1 for the lighter one; 0: it is not */
     const ArtfMeshData* fadeFrom; /* the other level, before it goes in as an entry of its own */
+    float drawn;         /* how far what it draws may be from its mesh (artfDrawnError): its rays start that far off */
 } ArtfVisible;
 
 /* Scratch of one thread: a tile's memory. Depth and ids stay here: what leaves a tile is its color.

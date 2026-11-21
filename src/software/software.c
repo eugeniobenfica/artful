@@ -229,6 +229,12 @@ static bool placeData(const ArtfSoftFrame* f, const ArtfInstanceData* inst, size
     const uint32_t fade = artfMeshFade(scene, base, f->data.lodScale, inst->maxScale, distance, f->data.look[3], &from);
     v->fade = fade ? fade << 1 | 1 : 0;
     v->fadeFrom = fade ? &scene->meshes.items[from] : NULL;
+    v->drawn = artfDrawnError(scene, &f->data, base, (uint32_t)(v->mesh - scene->meshes.items), inst->maxScale);
+    if (fade) {
+        /* (what fades shows both levels: as far as the farther) */
+        const float other = artfDrawnError(scene, &f->data, base, from, inst->maxScale);
+        v->drawn = v->drawn < 0 || other < 0 ? -1.f : artfMaxf(v->drawn, other);
+    }
     v->inside = inside;
     v->index = (uint32_t)i;
     v->center[0] = wx;
