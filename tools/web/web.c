@@ -23,14 +23,17 @@ typedef struct Page {
     uint32_t* pixels;
     int width, height, frame;
     double spent; /* ms drawing, over the frames since it was last shown */
+    bool onCanvas; /* WebGPU: the renderer shows each frame on its canvas itself */
 } Page;
 
 /* (the frame, BGRA, into the canvas, RGBA) */
 EM_JS(void, show, (const uint8_t* rgba, int width, int height, const char* words), {
-    const canvas = document.getElementById("frame");
-    const context = canvas.getContext("2d");
-    const bytes = new Uint8ClampedArray(HEAPU8.subarray(rgba, rgba + width * height * 4)); /* (a copy: shared memory cannot be an image's) */
-    context.putImageData(new ImageData(bytes, width, height), 0, 0);
+    if (rgba) {
+        const canvas = document.getElementById("frame");
+        const context = canvas.getContext("2d");
+        const bytes = new Uint8ClampedArray(HEAPU8.subarray(rgba, rgba + width * height * 4)); /* (a copy: shared memory cannot be an image's) */
+        context.putImageData(new ImageData(bytes, width, height), 0, 0);
+    }
     if (words) document.getElementById("words").textContent = UTF8ToString(words);
 });
 
@@ -44,22 +47,26 @@ static void step(void* user) {
     c.position.z = z * cosf(a) - x * sinf(a);
     artfSceneSetCamera(p->s, &c);
     const double t0 = artfNowMs();
-    if (!artfRendererDraw(p->r, p->s) || !artfRendererReadPixels(p->r, p->pixels)) {
-        show((const uint8_t*)p->pixels, p->width, p->height, "the frame could not be drawn");
+    if (!artfRendererDraw(p->r, p->s) || (!p->onCanvas && !artfRendererReadPixels(p->r, p->pixels))) {
+        show(NULL, 0, 0, "the frame could not be drawn");
         emscripten_cancel_main_loop();
         return;
     }
     p->spent += artfNowMs() - t0;
+    char words[256];
+    const bool say = ++p->frame % 30 == 0;
+    if (say) {
+        snprintf(words, sizeof words, "%s: %.1f ms a frame (on the CPU's side%s)", artfRendererDescription(p->r), p->spent / 30.0, p->onCanvas ? "; the GPU's runs apart" : "");
+        p->spent = 0;
+    }
+    if (p->onCanvas) {
+        if (say) show(NULL, 0, 0, words);
+        return;
+    }
     const size_t n = (size_t)p->width * p->height;
     for (size_t i = 0; i < n; ++i) {
         const uint32_t v = p->pixels[i];
         p->pixels[i] = (v & 0xFF00FF00u) | (v >> 16 & 0xFFu) | (v & 0xFFu) << 16;
-    }
-    char words[256];
-    const bool say = ++p->frame % 30 == 0;
-    if (say) {
-        snprintf(words, sizeof words, "%s: %.1f ms a frame", artfRendererDescription(p->r), p->spent / 30.0);
-        p->spent = 0;
     }
     show((const uint8_t*)p->pixels, p->width, p->height, say ? words : NULL);
 }
@@ -77,6 +84,7 @@ int main(int argc, char** argv) {
             o.backend = ARTF_BACKEND_WEBGPU;
             o.surface.kind = ARTF_SURFACE_WEB_CANVAS;
             o.surface.a = (void*)"#gpu";
+            p->onCanvas = true;
         }
     p->r = artfRendererNew(&o);
     if (!p->r) {

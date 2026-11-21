@@ -1237,8 +1237,10 @@ ArtfRenderer* artfWebGpuNew(const ArtfRendererOptions* o) {
     v->queue = wgpuDeviceGetQueue(v->device);
     WGPUAdapterInfo info = WGPU_ADAPTER_INFO_INIT;
     wgpuAdapterGetInfo(v->adapter, &info);
-    snprintf(v->description, sizeof v->description, "%.*s (WebGPU)", (int)(info.device.length ? info.device.length : info.description.length),
-             info.device.length ? info.device.data : info.description.data ? info.description.data : "");
+    /* (a browser names no device: its vendor and architecture, then) */
+    if (info.device.length) snprintf(v->description, sizeof v->description, "%.*s (WebGPU)", (int)info.device.length, info.device.data);
+    else snprintf(v->description, sizeof v->description, "%.*s %.*s (WebGPU)", (int)info.vendor.length, info.vendor.data ? info.vendor.data : "", (int)info.architecture.length,
+                  info.architecture.data ? info.architecture.data : "");
     wgpuAdapterInfoFreeMembers(info);
     if (v->surface) {
         WGPUSurfaceCapabilities caps = WGPU_SURFACE_CAPABILITIES_INIT;

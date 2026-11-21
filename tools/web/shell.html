@@ -9,15 +9,22 @@
   canvas { display: block; max-width: 100%; height: auto; background: #000; }
   #words { margin-top: 8px; min-height: 1.4em; }
   a { color: #9cf; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <canvas id="frame" width="960" height="540"></canvas>
+<canvas id="gpu" width="960" height="540" hidden></canvas>
 <div id="words">starting...</div>
 <div><a href="?backend=cpu">CPU</a> · <a href="?backend=webgpu">WebGPU</a></div>
 <script>
   /* (the page's own query: which backend, as an argument to main) */
   var backend = new URLSearchParams(location.search).get("backend") || "cpu";
+  /* (WebGPU draws onto a canvas of its own: one canvas has one kind of context) */
+  if (backend === "webgpu") {
+    document.getElementById("frame").hidden = true;
+    document.getElementById("gpu").hidden = false;
+  }
   var Module = {
     arguments: [backend],
     print: function (t) { console.log(t); },
