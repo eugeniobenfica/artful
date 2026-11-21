@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Light under the surface spreads across it** (phase 5.12): with a frame in floats, a material's diffuse light and
+  what went under it are spread across the screen as far as its subsurfaceRadius, separably (Jimenez et al.), by a
+  profile of two Gaussians (not Burley's, which is patented), between pixels at about the same distance: a sharp
+  shadow's edge on skin goes from 1 pixel to 10. Both backends alike, 0.12 ms at 1080p on the GPU.
+
 - **A thin film is Belcour and Barla's** (KHR_materials_iridescence, phase 5.12): Fresnel at both of its faces with
   their phase shifts, and its colors as the eye's response to each order of the light that goes back and forth in it,
   as glTF's reference shader has it (to 2e-6), on both backends, drawn and traced. It was two beams at three

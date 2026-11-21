@@ -142,9 +142,11 @@ static void allocateTargets(Software* s, int frameWidth, int frameHeight) {
         }
         artfFree(f->postDepth);
         artfFree(f->postSurface);
+        artfFree(f->postUnder);
         artfFree(f->postInstance);
         f->postDepth = artfCalloc(pixels, 4);
         f->postSurface = artfCalloc(pixels, 4);
+        f->postUnder = artfCalloc(pixels, 4);
         f->postInstance = artfCalloc(pixels, 4);
         artfSoftPostSize(&s->post, width, height, frameWidth, frameHeight);
         s->hasPrevious = false;
@@ -915,6 +917,7 @@ static void softFree(ArtfRenderer* r) {
     for (int c = 0; c < 4; ++c) artfFree(f->postLight[c]);
     artfFree(f->postDepth);
     artfFree(f->postSurface);
+    artfFree(f->postUnder);
     artfFree(f->postInstance);
     artfMotionFree(&s->motion);
     artfSoftPostFree(&s->post);
@@ -949,7 +952,7 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
     artfDisplayNumbers(o, s->base.output, &s->post.displayInverse, &s->post.displayPeak);
     const size_t planes = (size_t)ARTF_TILE_PIXELS * 4 * f->samples;
     /* (with a frame in floats, each color has its alpha and surface after it: see storeLit) */
-    const size_t colors = f->post ? (size_t)ARTF_TILE_PIXELS * 4 * 12 : planes;
+    const size_t colors = f->post ? (size_t)ARTF_TILE_PIXELS * 4 * 16 : planes;
     for (int i = 0; i < workers; ++i) {
         f->workers[i].depth = artfAlignedMalloc(planes, 64);
         f->workers[i].ids = artfAlignedMalloc(planes, 64);

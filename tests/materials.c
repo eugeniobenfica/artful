@@ -1121,3 +1121,73 @@ void testFilmBelcour(void) {
     artfIridescence(f0, .7f, 0.f, 1.3f, 400.f);
     CHECK(f0[0] == .5f && f0[1] == .4f && f0[2] == .3f);
 }
+
+/* (a floor that light goes under, by a sharp shadow's edge: seen from above; under: its color under the surface) */
+static ArtfScene* underScene(float under) {
+    ArtfScene* s = artfSceneNew();
+    artfSceneSetSun(s, artfVec3(.3f, -1.f, 0), artfVec3(2, 2, 2));
+    const ArtfShadowDesc shadows = {1024, 20};
+    artfSceneSetShadows(s, &shadows);
+    ArtfMaterialDesc skin = artfMaterialDefaults();
+    skin.baseColor = artfVec3(.8f, .6f, .5f);
+    skin.specular = 0;
+    skin.subsurface = artfVec3(under, under * .4f, under * .3f);
+    skin.subsurfaceRadius = .15f;
+    const ArtfTransform floor = artfTransformAt(0, 0, 0, 1);
+    artfSceneAddInstance(s, artfSceneAddPlane(s, 8, 1), artfSceneAddMaterial(s, &skin), &floor);
+    ArtfMaterialDesc grey = artfMaterialDefaults();
+    const ArtfTransform wall = artfTransformTrs(artfVec3(-.5f, 1.f, 0), artfQuatAxisAngle(artfVec3(0, 1, 0), 0), artfVec3(.2f, 2.f, 4.f));
+    artfSceneAddInstance(s, artfSceneAddCube(s, 1), artfSceneAddMaterial(s, &grey), &wall);
+    setCamera(s, 0, 3, .01f, 0, 0, 0);
+    return s;
+}
+
+/* (along the middle row, how many pixels are between a shadow's two sides: past 10% of the way and short of 90%) */
+static int edgeWidth(const uint32_t* frame) {
+    const int y = H / 2;
+    float lo = 1e9f, hi = -1e9f, v[W];
+    for (int x = 0; x < W; ++x) {
+        const uint32_t p = frame[y * W + x];
+        v[x] = (float)((p >> 16 & 255) + (p >> 8 & 255) + (p & 255));
+    }
+    /* (the two sides: the right quarter is lit, the left of the middle in shadow) */
+    for (int x = W * 3 / 4; x < W; ++x) hi = fmaxf(hi, v[x]);
+    for (int x = W / 8; x < W / 3; ++x) lo = fminf(lo, v[x]);
+    int n = 0;
+    for (int x = W / 8; x < W * 7 / 8; ++x) n += v[x] > lo + (hi - lo) * .1f && v[x] < lo + (hi - lo) * .9f;
+    return n;
+}
+
+/* Light under the surface spreads across it (5.12: separable, of two Gaussians as wide as its radius on the screen):
+ * a sharp shadow's edge on a floor that light goes under is wider than on one that it does not; both backends
+ * alike. */
+void testUnderSpread(void) {
+    uint32_t* plain = artfMalloc(W * H * 4);
+    uint32_t* spread = artfMalloc(W * H * 4);
+    uint32_t* cpu = artfMalloc(W * H * 4);
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        ArtfScene* s = underScene(0);
+        drawInto(r, s, plain);
+        artfSceneFree(s);
+        s = underScene(.5f);
+        drawInto(r, s, spread);
+        artfSceneFree(s);
+        const int sharp = edgeWidth(plain), soft = edgeWidth(spread);
+        printf("%s: a shadow's edge on a floor, %d pixels wide; %d with light under the surface\n", backend ? "GPU" : "CPU", sharp, soft);
+        CHECK(soft >= sharp + 4);
+        if (!backend) memcpy(cpu, spread, W * H * 4);
+        else {
+            const double apart = differentShare(cpu, spread, 8);
+            printf("light under the surface, the GPU against the CPU: %.3f%% of pixels apart\n", apart * 100);
+            CHECK(apart < .01);
+        }
+        artfRendererFree(r);
+    }
+    artfFree(plain);
+    artfFree(spread);
+    artfFree(cpu);
+}

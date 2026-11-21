@@ -722,15 +722,17 @@ V8_INLINE V8I packSurface(Lanes3 n, V8F rough, V8F metal, V8F ambient) {
 
 /* What lighting gives eight pixels: their color, as the frame keeps it, and with a frame in floats their alpha and
  * surface too. */
-typedef struct LitOut { V8I color; V8F alpha; V8I surface; } LitOut;
+typedef struct LitOut { V8I color; V8F alpha; V8I surface, under; } LitOut;
 #define ARTF_POST_ALPHA (ARTF_TILE_PIXELS * 4)   /* from a color, in its buffer: its alpha, as a float */
 #define ARTF_POST_SURFACE (ARTF_TILE_PIXELS * 8) /* and its surface */
+#define ARTF_POST_UNDER (ARTF_TILE_PIXELS * 12)  /* and light under its surface (artfUnderWord): 0, none */
 
 V8_INLINE void storeLit(const ArtfSoftFrame* f, uint32_t* at, LitOut o) {
     v8iStore(at, o.color);
     if (f->post) {
         v8fStore((float*)(at + ARTF_POST_ALPHA), o.alpha);
         v8iStore(at + ARTF_POST_SURFACE, o.surface);
+        v8iStore(at + ARTF_POST_UNDER, o.under);
     }
 }
 
@@ -1537,6 +1539,8 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
     Lanes3 lit = {v8fAdd(v8fAdd(v8fMul(albedo.x, diffuse.x), highlight.x), own.x),
                   v8fAdd(v8fAdd(v8fMul(albedo.y, diffuse.y), highlight.y), own.y),
                   v8fAdd(v8fAdd(v8fMul(albedo.z, diffuse.z), highlight.z), own.z)};
+    /* (with light under the surface and a frame in floats: what of it spreads under the surface, diffuse) */
+    Lanes3 spread = {v8fMul(albedo.x, diffuse.x), v8fMul(albedo.y, diffuse.y), v8fMul(albedo.z, diffuse.z)};
     /* (what came from all around, for ambient occlusion: only a frame in floats reads it) */
     Lanes3 aroundLit = {zero, zero, zero};
     if (f->post || coated || viewed) {
@@ -1554,6 +1558,9 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
             lit.x = v8fAdd(lit.x, v8fMul(v8fMul(v8fSet(more->subsurface[0]), notMetal), x.under.x));
             lit.y = v8fAdd(lit.y, v8fMul(v8fMul(v8fSet(more->subsurface[1]), notMetal), x.under.y));
             lit.z = v8fAdd(lit.z, v8fMul(v8fMul(v8fSet(more->subsurface[2]), notMetal), x.under.z));
+            spread.x = v8fMul(v8fAdd(spread.x, v8fMul(v8fMul(v8fSet(more->subsurface[0]), notMetal), x.under.x)), keep);
+            spread.y = v8fMul(v8fAdd(spread.y, v8fMul(v8fMul(v8fSet(more->subsurface[1]), notMetal), x.under.y)), keep);
+            spread.z = v8fMul(v8fAdd(spread.z, v8fMul(v8fMul(v8fSet(more->subsurface[2]), notMetal), x.under.z)), keep);
         }
         lit.x = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fSub(lit.x, own.x), v8fMul(sr, sheenLight.x)), keep), v8fMul(coat, coatLight.x)), own.x);
         lit.y = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fSub(lit.y, own.y), v8fMul(sg, sheenLight.y)), keep), v8fMul(coat, coatLight.y)), own.y);
@@ -1625,6 +1632,14 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         const V8F all = v8fAdd(v8fAdd(v8fMul(lit.x, v8fSet(.3f)), v8fMul(lit.y, v8fSet(.59f))), v8fMul(lit.z, v8fSet(.11f)));
         const V8F around = v8fAdd(v8fAdd(v8fMul(aroundLit.x, v8fSet(.3f)), v8fMul(aroundLit.y, v8fSet(.59f))), v8fMul(aroundLit.z, v8fSet(.11f)));
         out.surface = packSurface(n, rough, metal, v8fDiv(v8fMul(around, airLeft), v8fMax(all, v8fSet(1e-6f))));
+        out.under = v8iSet(0);
+        if (under && !(material->flags & ARTF_MATERIAL_UNLIT)) {
+            /* light under the surface: its share of the light, and how far it goes (artfUnderWord) */
+            const V8F spreadAll = v8fAdd(v8fAdd(v8fMul(spread.x, v8fSet(.3f)), v8fMul(spread.y, v8fSet(.59f))), v8fMul(spread.z, v8fSet(.11f)));
+            const V8F share = v8fMin(v8fMax(v8fDiv(v8fMul(spreadAll, airLeft), v8fMax(all, v8fSet(1e-6f))), zero), one);
+            const V8I bits = v8iSet((int32_t)artfUnderReach(more->subsurfaceRadius));
+            out.under = v8iSelect(v8fGt(share, zero), v8iSet(0), v8iOr(bits, v8fToI(v8fAdd(v8fMul(share, v8fSet(255.f)), v8fSet(.5f)))));
+        }
         return out;
     }
     if (frame->look[0] > 0) {
@@ -1695,11 +1710,14 @@ static void batchFlush(LitBatch* b, const ArtfSoftFrame* f, uint32_t* color) {
     v8iStore(colors, lit.color);
     for (int i = 0; i < b->count; ++i) color[b->at[i]] = colors[i];
     if (f->post) {
+        _Alignas(32) uint32_t unders[8];
         v8fStore(alphas, lit.alpha);
         v8iStore(surfaces, lit.surface);
+        v8iStore(unders, lit.under);
         for (int i = 0; i < b->count; ++i) {
             ((float*)(color + ARTF_POST_ALPHA))[b->at[i]] = alphas[i];
             color[ARTF_POST_SURFACE + b->at[i]] = surfaces[i];
+            color[ARTF_POST_UNDER + b->at[i]] = unders[i];
         }
     }
     b->count = 0;
@@ -2166,6 +2184,7 @@ static void postFromBytes(uint32_t* c, int count) {
         v8iStore(c + i, pack9e5(light));
         v8fStore((float*)(c + ARTF_POST_ALPHA + i), a);
         v8iStore(c + ARTF_POST_SURFACE + i, v8iSet(0));
+        v8iStore(c + ARTF_POST_UNDER + i, v8iSet(0));
     }
 }
 
@@ -2445,6 +2464,7 @@ static void overdrawTile(const ArtfSoftFrame* f, ArtfWorker* w, int ox, int oy, 
             v8iStore(color + i, pack9e5(light));
             v8fStore((float*)(color + ARTF_POST_ALPHA + i), v8fSet(1.f));
             v8iStore(color + ARTF_POST_SURFACE + i, v8iSet(0));
+            v8iStore(color + ARTF_POST_UNDER + i, v8iSet(0));
         }
     }
 }
@@ -2651,6 +2671,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
             for (int c = 0; c < 4; ++c) memset(f->postLight[c] + row, 0, (size_t)tw * 4);
             memset(f->postDepth + row, 0, (size_t)tw * 4);
             memset(f->postSurface + row, 0, (size_t)tw * 4);
+            memset(f->postUnder + row, 0, (size_t)tw * 4);
             memset(f->postInstance + row, 0, (size_t)tw * 4);
         }
         return 1;
@@ -2679,6 +2700,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
             v8iStore(w->color + i, packed);
             v8fStore((float*)(w->color + ARTF_POST_ALPHA + i), v8fSet(a));
             v8iStore(w->color + ARTF_POST_SURFACE + i, v8iSet(0));
+            v8iStore(w->color + ARTF_POST_UNDER + i, v8iSet(0));
         }
         if (f->data.sky[3] > 0 && f->data.ground[3] > 0 && f->scene->environment) environmentFill(f, w, ox, oy, tw, th);
     } else {
@@ -2690,6 +2712,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
         if (f->post) {
             memcpy(w->color + ARTF_POST_ALPHA + k * ARTF_TILE_PIXELS, w->color + ARTF_POST_ALPHA, ARTF_TILE_PIXELS * 4);
             memcpy(w->color + ARTF_POST_SURFACE + k * ARTF_TILE_PIXELS, w->color + ARTF_POST_SURFACE, ARTF_TILE_PIXELS * 4);
+            memcpy(w->color + ARTF_POST_UNDER + k * ARTF_TILE_PIXELS, w->color + ARTF_POST_UNDER, ARTF_TILE_PIXELS * 4);
         }
     }
 
@@ -2821,6 +2844,7 @@ static uint32_t tile(ArtfSoftFrame* f, uint32_t index, uint32_t workerIndex) {
                 for (int k = 0; k < 4; ++k) memcpy(f->postLight[k] + row + x, out[k], (size_t)n * 4);
                 memcpy(f->postDepth + row + x, depth, (size_t)n * 4);
                 memcpy(f->postSurface + row + x, color + ARTF_POST_SURFACE + x, (size_t)n * 4);
+                memcpy(f->postUnder + row + x, color + ARTF_POST_UNDER + x, (size_t)n * 4);
                 if (f->motion || f->reactive) memcpy(f->postInstance + row + x, w->postInstance + y * ARTF_TILE + x, (size_t)n * 4);
             }
         }

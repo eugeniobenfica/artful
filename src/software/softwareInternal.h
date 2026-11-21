@@ -134,6 +134,7 @@ typedef struct ArtfSoftFrame {
     float* postLight[4]; /* premultiplied light, and alpha */
     float* postDepth;    /* 1 / w; 0 where nothing is */
     uint32_t* postSurface;
+    uint32_t* postUnder;    /* light under the surface (artfUnderWord); 0: none */
     uint32_t* postInstance; /* the scene's instance + 1 that shows, of what is solid; 0: none */
     const float* motion;    /* with motion followed: of each instance, from where it is to where it was (ArtfMotion) */
     bool reactive;          /* a material is reactive, with temporal antialiasing: postInstance is kept as with motion */

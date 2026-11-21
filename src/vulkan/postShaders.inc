@@ -317,6 +317,8 @@ uint32_t* artfShaderPostGather(size_t* size, int samples) {
     postLightStore(s, p, p->light, i, spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, color), at));
     SpvId word = many ? spvImageFetchSampleAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at, spvConstInt(s, 0)) : spvImageFetchAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at);
     spvStore(s, postPtr(s, p, p->surface, s->uintType, i), spvExtract(s, s->uintType, word, 0));
+    /* (light under the surface, after the instances: artfUnderReach's word; 0 from a surface of fewer words) */
+    spvStore(s, postPtr(s, p, p->surface, s->uintType, ADD_U(MUL_U(MUL_U(p->width, p->height), UINT(2)), i)), spvExtract(s, s->uintType, word, 2));
     /* (the instance that shows, after all the words: when something moved, for what follows it) */
     SpvId movedMerge;
     spvIfBegin(s, P_OR(P_MORE(Y(frameVec(s, &p->r, F_CULL)), FLOAT(0.f)), P_MORE(X(frameVec(s, &p->r, F_MORE)), FLOAT(0.f))), &movedMerge);
@@ -1974,6 +1976,65 @@ POST_MAIN(artfShaderPostCloudApply)
     SpvId lit = ADD_V3(SCALE_V3(spvShuffle3(s, here), W(sum)), spvShuffle3(s, sum));
     postLightStore(s, p, p->scratch, i, vec4Of(s, pick3(s, P_MORE(depth, FLOAT(0.f)), lit, spvShuffle3(s, here)), W(here)));
 POST_FINISH()
+
+
+/* ---- light under the surface, spread across it: post.c's underPass, along x into the second light, then along y over
+ * that, back into the light (each pixel its own: in place) with what is not spread. Plane 2 of binding 52: the words. */
+static uint32_t* postUnder(size_t* size, bool across) {
+    Spv b, *s = &b;
+    spvInit(s);
+    Post post, *p = &post;
+    postDeclare(s, p);
+    SpvId main = spvBeginMain(s);
+    postSizes(s, p);
+    SpvId i, x, y, merge;
+    postBegin(s, p, &i, &x, &y, &merge, p->width, p->height);
+    SpvId plane = MUL_U(MUL_U(p->width, p->height), UINT(2));
+    SpvId word = postUint(s, p, p->surface, ADD_U(plane, i)), depth = postFloat(s, p, p->depth, i);
+    SpvId mine;
+    spvIfBegin(s, P_AND(spvOp2(s, SPV_OP_INotEqual, s->boolType, word, UINT(0)), P_MORE(depth, FLOAT(0.f))), &mine);
+    SpvId radius = spvOp1(s, SPV_OP_Bitcast, s->floatType, AND_U(word, UINT(~255u))), share = MUL_F(TO_F(AND_U(word, UINT(255))), FLOAT(1.f / 255.f));
+    SpvId along = postAlong(s, p, depth);
+    SpvId pixels = DIV_F(MUL_F(MUL_F(MUL_F(radius, Y(frameVec(s, &p->r, F_PROJECTION))), p->heightF), FLOAT(.5f)), PICK_F(orthoOn(s, &p->r), FLOAT(1.f), along));
+    SpvId sum = same3(s, 0.f), total = FLOAT(0.f);
+    SpvId xi = spvOp1(s, SPV_OP_Bitcast, s->intType, x), yi = spvOp1(s, SPV_OP_Bitcast, s->intType, y);
+    SpvId wi = spvOp1(s, SPV_OP_Bitcast, s->intType, p->width), hi = spvOp1(s, SPV_OP_Bitcast, s->intType, p->height);
+    for (int k = -ARTF_UNDER_TAPS; k <= ARTF_UNDER_TAPS; ++k) {
+        /* (the profile at this tap, as post.c's underWeight works it out: the same floats) */
+        const float xk = (float)k * (3.f / ARTF_UNDER_TAPS), near_ = ARTF_UNDER_NEAR;
+        const float profile = (ARTF_UNDER_NEAR_SHARE / near_) * artfExp2Fast(-(xk * xk) / (2.f * near_ * near_) * 1.44269504f) + (1.f - ARTF_UNDER_NEAR_SHARE) * artfExp2Fast(-(xk * xk) * .5f * 1.44269504f);
+        SpvId step = spvOp1(s, SPV_OP_ConvertFToS, s->intType, FLOOR_F(ADD_F(MUL_F(FLOAT(xk), pixels), FLOAT(.5f))));
+        SpvId qx = across ? spvOp2(s, SPV_OP_IAdd, s->intType, xi, step) : xi, qy = across ? yi : spvOp2(s, SPV_OP_IAdd, s->intType, yi, step);
+        SpvId zero = spvConstInt(s, 0);
+        SpvId inside = P_AND(P_AND(spvOp2(s, 175 /* SGreaterThanEqual */, s->boolType, qx, zero), spvOp2(s, 175, s->boolType, qy, zero)), P_AND(spvOp2(s, 177 /* SLessThan */, s->boolType, qx, wi), spvOp2(s, 177, s->boolType, qy, hi)));
+        SpvId cx = spvGlsl2(s, 42 /* SMax */, s->intType, spvGlsl2(s, 39 /* SMin */, s->intType, qx, spvOp2(s, SPV_OP_ISub, s->intType, wi, spvConstInt(s, 1))), zero);
+        SpvId cy = spvGlsl2(s, 42, s->intType, spvGlsl2(s, 39, s->intType, qy, spvOp2(s, SPV_OP_ISub, s->intType, hi, spvConstInt(s, 1))), zero);
+        SpvId j = ADD_U(MUL_U(spvOp1(s, SPV_OP_Bitcast, s->uintType, cy), p->width), spvOp1(s, SPV_OP_Bitcast, s->uintType, cx));
+        SpvId there = postUint(s, p, p->surface, ADD_U(plane, j)), qd = postFloat(s, p, p->depth, j);
+        SpvId d = DIV_F(SUB_F(postAlong(s, p, qd), along), radius);
+        SpvId w = MUL_F(FLOAT(profile), spvExp2Fast(s, MUL_F(spvOp1(s, SPV_OP_FNegate, s->floatType, MUL_F(d, d)), FLOAT(1.44269504f))));
+        w = PICK_F(P_AND(inside, P_AND(spvOp2(s, SPV_OP_INotEqual, s->boolType, there, UINT(0)), P_MORE(qd, FLOAT(0.f)))), w, FLOAT(0.f));
+        SpvId value;
+        if (across) {
+            SpvId s2 = MUL_F(TO_F(AND_U(there, UINT(255))), FLOAT(1.f / 255.f));
+            value = SCALE_V3(SCALE_V3(spvShuffle3(s, postVec4(s, p, p->light, j)), s2), w);
+        } else value = SCALE_V3(spvShuffle3(s, postVec4(s, p, p->scratch, j)), w);
+        sum = ADD_V3(sum, value);
+        total = ADD_F(total, w);
+    }
+    SpvId inverse = DIV_F(FLOAT(1.f), MAX_F(total, FLOAT(1e-30f)));
+    SpvId here = postVec4(s, p, p->light, i);
+    if (across) postLightStore(s, p, p->scratch, i, vec4Of(s, SCALE_V3(sum, inverse), W(here)));
+    else postLightStore(s, p, p->light, i, vec4Of(s, ADD_V3(SCALE_V3(spvShuffle3(s, here), SUB_F(FLOAT(1.f), share)), SCALE_V3(sum, inverse)), W(here)));
+    spvIfEnd(s, mine);
+    spvIfEnd(s, merge);
+    spvEndMain(s);
+    spvEntryPoint(s, SPV_MODEL_GLCompute, main, &p->global, 1);
+    spvExecutionMode(s, main, 17, 64, 1, 1, 3);
+    return finish(s, size);
+}
+uint32_t* artfShaderPostUnderAcross(size_t* size) { return postUnder(size, true); }
+uint32_t* artfShaderPostUnderDown(size_t* size) { return postUnder(size, false); }
 
 #undef POST_MAIN
 #undef POST_FINISH

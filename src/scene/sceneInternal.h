@@ -1651,6 +1651,31 @@ ARTF_INLINE float artfCloudJitter(uint32_t i, uint32_t j) {
     return (float)(h >> 8) * (1.f / 16777216.f);
 }
 
+/* Light under the surface, spread across it (5.12: separable, Jimenez et al., 2015, of a profile of two Gaussians, as
+ * d'Eon and Luebke's are): of each pixel, a word, its low 8 bits how much of its light is what is spread (of 255), the
+ * rest how far it goes in the scene's units (a float's bits, its last 8 taken off); 0, none. */
+ARTF_INLINE uint32_t artfUnderReach(float radius) {
+    uint32_t bits;
+    memcpy(&bits, &radius, 4);
+    return bits & ~255u;
+}
+ARTF_INLINE float artfUnderRadius(uint32_t word) {
+    const uint32_t bits = word & ~255u;
+    float r;
+    memcpy(&r, &bits, 4);
+    return r;
+}
+/* Whether a material of the scene has light under its surface. */
+ARTF_INLINE bool artfSceneHasUnder(const ArtfScene* s) {
+    for (size_t i = 0; i < s->materialsMore.len; ++i)
+        if (s->materialsMore.items[i].flags & ARTF_MORE_SUBSURFACE) return true;
+    return false;
+}
+/* The profile's taps, each side of a pixel, and the two Gaussians: their widths (of the radius) and shares. */
+#define ARTF_UNDER_TAPS 8
+#define ARTF_UNDER_NEAR .3f
+#define ARTF_UNDER_NEAR_SHARE .6f
+
 /* The frame's layers (ArtfFrameData.layers), for these layers in view. */
 void artfLayerRange(ArtfFrameData* frame, const ArtfLayer* layers, uint32_t count);
 

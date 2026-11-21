@@ -334,7 +334,7 @@ void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* 
 
 /* What the frame's effects need past the light, its depth and surfaces, and bloom (the frame graph's targets that
  * effects that are off leave unused: frameGraph.c). */
-uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f, bool clouds) {
+uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f, bool second) {
     const bool scaled = v->sceneWidth != v->width || v->sceneHeight != v->height, temporal = f->post[1][3] > 0;
     uint32_t n = 0;
     if (f->post[0][2] > 0) n |= NEED_OCCLUSION;
@@ -343,7 +343,7 @@ uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f, bool clouds) {
     if (scaled || temporal) n |= NEED_SECOND | NEED_HISTORY;
     if (f->post[2][1] > 0 && f->post[2][0] > 0) n |= NEED_SECOND;
     if (f->more[3] > 0 && temporal) n |= NEED_GATHERED;
-    if (clouds) n |= NEED_SECOND; /* (clouds in the scene: what they make of the light goes there) */
+    if (second) n |= NEED_SECOND; /* (clouds in the scene, light under the surface: what they make of the light goes there) */
     return n;
 }
 
@@ -382,7 +382,7 @@ bool postBuffersMake(Vulkan* v) {
     /* (bloom's levels, and past them auto exposure's state; the surface's words, then the instance that shows at each
      * pixel; light, the second and the history end at the frame's size) */
     /* (light, the second and the history: four halves a pixel, postShaders.inc's postLight) */
-    const VkDeviceSize sizes[8] = {framePixels * 8, pixels * 4, pixels * 8, v->postNeeds & NEED_SECOND ? framePixels * 8 : 0, v->postNeeds & NEED_HISTORY ? framePixels * 8 : 0,
+    const VkDeviceSize sizes[8] = {framePixels * 8, pixels * 4, pixels * 12, v->postNeeds & NEED_SECOND ? framePixels * 8 : 0, v->postNeeds & NEED_HISTORY ? framePixels * 8 : 0,
                                    occlusion > blur ? occlusion : blur, v->postNeeds & NEED_FOG ? fog * 16 : 0, (bloom + 1 + v->lutRoom) * 16};
     /* (occlusion and motion blur's velocities live after the gather, the scene's light only until it: the same memory,
      * when it is large enough, with a barrier after the gather and the scene's pass waiting for what wrote it) */
@@ -445,7 +445,7 @@ bool postTargetsMake(Vulkan* v) {
     imageLeast = 0;
     if (!made) return false;
     /* (the surface word, and where motion is followed, the instance that shows + 1 or where it was) */
-    if (!imageNew(v, &v->floatSurface, v->surfaceWide ? FORMAT_R32G32_UINT : FORMAT_R32_UINT, v->sceneWidth, v->sceneHeight, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
+    if (!imageNew(v, &v->floatSurface, v->surfaceWide ? FORMAT_R32G32B32A32_UINT : FORMAT_R32_UINT, v->sceneWidth, v->sceneHeight, 1, v->samples, IMAGE_COLOR | IMAGE_SAMPLED, ASPECT_COLOR)) return false;
     return postBuffersMake(v);
 }
 
@@ -612,7 +612,7 @@ VkShaderModule shaderModule(Vulkan* v, uint32_t* code, size_t size) {
  * what is solid writes it. */
 PipelineColorBlend blendOf(const Vulkan* v, ColorBlendAttachment* pair, ColorBlendAttachment color, bool surface) {
     pair[0] = color;
-    const ColorBlendAttachment kept = {0, 0, 0, 0, 0, 0, 0, surface ? 3u : 0u};
+    const ColorBlendAttachment kept = {0, 0, 0, 0, 0, 0, 0, surface ? 15u : 0u}; /* (all of the surface's words) */
     pair[1] = kept;
     const PipelineColorBlend b = {ST_PIPELINE_COLOR_BLEND, NULL, 0, 0, 0, v->floats ? 2u : 1u, pair, {0, 0, 0, 0}};
     return b;
@@ -633,7 +633,7 @@ bool renderPassMake(const Vulkan* v, VkRenderPass* out, bool load, bool store, i
         /* (the depth buffer is not kept unless asked: on a tiler it never leaves the chip) */
         {0, FORMAT_D32, samples, load ? 0 : 1, store ? 0 : 1, 2, 1, depthFrom, store ? LAYOUT_DEPTH_READ : LAYOUT_DEPTH},
         {0, v->sceneFormat, 1, 2, 0, 2, 1, LAYOUT_UNDEFINED, colorFinal},
-        {0, wide ? FORMAT_R32G32_UINT : FORMAT_R32_UINT, samples, load ? 0 : 1, 0, 2, 1, colorFrom, colorFinal}};
+        {0, wide ? FORMAT_R32G32B32A32_UINT : FORMAT_R32_UINT, samples, load ? 0 : 1, 0, 2, 1, colorFrom, colorFinal}};
     /* (readDepth: only colors, which stay for the pass that comes next: a shader reads depth) */
     const AttachmentReference depth = {1, LAYOUT_DEPTH};
     /* (the surface is the last; with samples, only the light is resolved: the surface's first sample is read) */
@@ -1636,7 +1636,7 @@ bool pipelinesMake(Vulkan* v) {
         uint32_t* (*const makers[POST_KINDS])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
                                                           artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply,
                                                           artfShaderPostMeter, artfShaderPostMotionBlur, artfShaderPostVelocity, artfShaderPostTileMost, artfShaderPostUpscale,
-                                                          artfShaderPostSharpen, artfShaderPostSampled, artfShaderPostSampledSpace, artfShaderPostCloudColumns, artfShaderPostCloudApply};
+                                                          artfShaderPostSharpen, artfShaderPostSampled, artfShaderPostSampledSpace, artfShaderPostCloudColumns, artfShaderPostCloudApply, artfShaderPostUnderAcross, artfShaderPostUnderDown};
         for (int i = 0; i < POST_KINDS && ok; ++i) {
             uint32_t* postCode = i == 0 ? artfShaderPostGather(&size, v->samples) : makers[i](&size);
             postAccessOf(postCode, size, &v->postReads[i], &v->postWrites[i]);
@@ -3430,7 +3430,8 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const bool shapes = artfSceneShapedLights(scene);
     const Features want = {probes, walls, fogGrid, coats, softShadows, shapes, viewShaders, meshletShaders, tracedAsked, tracedAsked && v->rayQuery};
     /* the surface's second word only where motion is followed: other passes, and what is drawn in them */
-    const bool wide = v->floats && (scene->post.screen.temporal || scene->post.lens.motionBlur > 0);
+    /* (the surface's other words: the instance, for motion; light under the surface) */
+    const bool wide = v->floats && (scene->post.screen.temporal || scene->post.lens.motionBlur > 0 || artfSceneHasUnder(scene));
     if (!shadersFollow(v, scene, &want, wide, wait)) return false;
     if (v->targetsStale && !targetsRemake(v)) return false;
     if (!v->framebuffers[0]) return true;
@@ -3515,7 +3516,7 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     frame.output[3] = (float)v->postFrames;
     if (v->floats) {
         /* (an effect came or went: the post buffers as they now need to be, with the device idle) */
-        const uint32_t needs = postNeedsOf(v, &frame, scene->clouds && !artfOrtho(&frame));
+        const uint32_t needs = postNeedsOf(v, &frame, (scene->clouds && !artfOrtho(&frame)) || artfSceneHasUnder(scene));
         if (needs != v->postNeeds) {
             v->vkDeviceWaitIdle(v->device);
             v->postNeeds = needs;
@@ -3691,6 +3692,7 @@ bool vkDrawAs(Vulkan* v, ArtfScene* scene) {
     const bool sorted = layerCount && v->fragmentStores && !v->floats && (v->samples == 1 || v->sampleShading || v->depthCoverage) && scene->features[ARTF_FEATURE_LAYERS_SORTED] && !overdraw;
     if (sorted && !layerListsMake(v, scene)) return false;
     if (v->floats && !cloudsSync(v, scene, &frame)) return false;
+    v->underOn = v->floats && v->surfaceWide && artfSceneHasUnder(scene);
     if (sorted) {
         /* (one call for all of them: what they add to the lists has no order) */
         if ((VkDeviceSize)layerCount * 20 > s->layerCommands.size) {

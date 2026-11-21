@@ -164,6 +164,7 @@ void testMoreMaterials(void);
 void testSpecularMaps(void);
 void testFilmMaps(void);
 void testFilmBelcour(void);
+void testUnderSpread(void);
 void testTextureRoles(void);
 void testHighlightFlicker(void);
 /* files.c: glTF, its extensions and compressed blocks */

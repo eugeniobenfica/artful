@@ -198,6 +198,8 @@ int main(int argc, char** argv) {
     SAVE("postSampledSpace", artfShaderPostSampledSpace(&size));
     SAVE("postCloudColumns", artfShaderPostCloudColumns(&size));
     SAVE("postCloudApply", artfShaderPostCloudApply(&size));
+    SAVE("postUnderAcross", artfShaderPostUnderAcross(&size));
+    SAVE("postUnderDown", artfShaderPostUnderDown(&size));
     if (artfSpvChecksFailed) fprintf(stderr, "%d shaders' IR not sound\n", artfSpvChecksFailed);
     return failed || artfSpvChecksFailed;
 }

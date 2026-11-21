@@ -76,7 +76,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [~] 5.9 Saída HDR e gama larga — `output` P3/HDR10 nos dois backends, swapchain por `VK_EXT_swapchain_colorspace`; faltam metadados HDR, scRGB e teste em tela HDR
 - [x] 5.10 Basis Universal e Zstandard — Zstd (RFC 8878) e ETC1S/UASTC para pixels, idênticos ao transcodificador do basisu nos 46 KTX2 do glTF-Sample-Assets (472 níveis); `KHR_texture_basisu` no glTF; falta transcodificar para blocos da GPU
 - [x] 5.11 Perspectiva aérea (`ArtfSkyDesc.aerial`, forma fechada, os dois backends, desenhado e traçado); nuvens na cena, numa grade de colunas a cada 4×4 px até o que é desenhado, compostas por profundidade (uma torre atravessa as nuvens; GPU = CPU; 0,59 ms GPU / 4,8 ms CPU em 1080p); só em quadros em floats
-- [~] 5.12 Materiais — texturas das extensões (especular, iridescência, anisotropia) feitas; Belcour-Barla feito (igual à referência do glTF a 2e-6); faltam OpenPBR, SSS
+- [~] 5.12 Materiais — texturas das extensões (especular, iridescência, anisotropia) feitas; Belcour-Barla feito (igual à referência do glTF a 2e-6); SSS separável feito (duas gaussianas, não Burley: patente da Disney; borda de sombra 1 → 10 px, GPU = CPU, 0,12 ms GPU em 1080p); falta OpenPBR
 
 ## Fase 6 — Alcance de plataforma
 - [ ] 6.1 Metal executado 📱 (depende de 4.1 passo 4 provado)

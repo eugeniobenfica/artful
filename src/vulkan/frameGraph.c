@@ -67,6 +67,7 @@ static const Pass passes[] = {
     {"depth for what follows", {gather}, 0, 0},
     {"layers", {0}, T(FG_FLOAT_COLOR), T(FG_DEPTH_IMAGE)},
     {"gather", {gather}, 0, 0},
+    {"under the surface", {artfShaderPostUnderAcross, artfShaderPostUnderDown}, 0, 0},
     {"ambient occlusion", {artfShaderPostOcclusion, artfShaderPostOcclusionBlur}, 0, 0},
     {"reflections", {artfShaderPostReflection, artfShaderPostReflectionApply}, 0, 0},
     {"sampled light gathered", {artfShaderPostSampled, artfShaderPostSampledSpace}, 0, 0},

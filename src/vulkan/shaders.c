@@ -1740,7 +1740,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         froxels = spvResource(s, blockOf(s, r.vec4Array, false), SPV_STORAGE_StorageBuffer, 56);
         /* (a frame in floats: the surface beside the light, as packSurface on the CPU) */
         /* (and the instance that shows + 1, for what follows motion) */
-        outSurface = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, spvTypeVector(s, s->uintType, 2)), SPV_STORAGE_Output);
+        outSurface = spvVariable(s, spvTypePointer(s, SPV_STORAGE_Output, spvTypeVector(s, s->uintType, 4)), SPV_STORAGE_Output);
         spvDecorate(s, outSurface, SPV_DECORATE_Location, 1);
     }
     /* (what a pose bent: where it was, through the view before, from the vertex shader; w above 0 when it was bent) */
@@ -2468,6 +2468,8 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     spvIfEnd(s, anyExtra);
 
     SpvId lit = ADD_V3(ADD_V3(MUL_V3(SCALE_V3(albedo, notMetal), spvLoad(s, s->vec3, acc.diffuse)), spvLoad(s, s->vec3, acc.highlight)), emission);
+    /* (with light under the surface: what of it spreads under the surface, diffuse, as kernels.inc's spread) */
+    SpvId spread = MUL_V3(SCALE_V3(albedo, notMetal), spvLoad(s, s->vec3, acc.diffuse));
     SpvId aroundLit = ADD_V3(MUL_V3(SCALE_V3(albedo, notMetal), aroundDiffuse), aroundHighlight);
     if (coats) {
         /* sheen on the surface, and what came from under it, under the coat; the coat takes from all of it what its
@@ -2475,6 +2477,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId keepUnder = SUB_F(FLOAT(1.f), MUL_F(coatAmount, coatSeen));
         SpvId under = ADD_V3(ADD_V3(SUB_V3(lit, emission), MUL_V3(subsurface, spvLoad(s, s->vec3, coating.under))), MUL_V3(sheenColor, spvLoad(s, s->vec3, coating.sheen)));
         lit = ADD_V3(ADD_V3(SCALE_V3(under, keepUnder), SCALE_V3(spvLoad(s, s->vec3, coating.coat), coatAmount)), emission);
+        spread = SCALE_V3(ADD_V3(spread, MUL_V3(subsurface, spvLoad(s, s->vec3, coating.under))), keepUnder);
         aroundLit = ADD_V3(SCALE_V3(ADD_V3(aroundLit, MUL_V3(sheenColor, aroundSheen)), keepUnder), SCALE_V3(aroundCoat, coatAmount));
     }
     /* an unlit material: its color as it is, and its own light */
@@ -2554,8 +2557,17 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         SpvId vectorFrom = s->block;
         spvIfEnd(s, bentMerge);
         SpvId word = spvPhi(s, s->uintType, vector, vectorFrom, instanceWord, before);
-        const SpvId surfaceParts[2] = {packSurfaceSpv(s, n, rough, metal, share), word};
-        spvStore(s, outSurface, spvCompose(s, spvTypeVector(s, s->uintType, 2), surfaceParts, 2));
+        /* the third: light under the surface, its share and how far it goes (artfUnderReach) */
+        SpvId underWord = UINT(0);
+        if (coats) {
+            SpvId spreadShare = MIN_F(MAX_F(DIV_F(MUL_F(DOT3(spread, lum3), airLeft), MAX_F(DOT3(lit, lum3), FLOAT(1e-6f))), FLOAT(0.f)), FLOAT(1.f));
+            SpvId bits = spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, AS_UINT(W(e[1])), UINT(~255u));
+            SpvId has = spvOp2(s, SPV_OP_LogicalAnd, s->boolType, spvOp2(s, SPV_OP_LogicalAnd, s->boolType, MORE_HAS(ARTF_MORE_SUBSURFACE), spvOp1(s, SPV_OP_LogicalNot, s->boolType, unlit)),
+                               spvOp2(s, SPV_OP_FOrdGreaterThan, s->boolType, spreadShare, FLOAT(0.f)));
+            underWord = spvSelect(s, s->uintType, has, spvOp2(s, 197 /* OpBitwiseOr */, s->uintType, bits, spvOp1(s, SPV_OP_ConvertFToU, s->uintType, ADD_F(MUL_F(spreadShare, FLOAT(255.f)), FLOAT(.5f)))), UINT(0));
+        }
+        const SpvId surfaceParts[4] = {packSurfaceSpv(s, n, rough, metal, share), word, underWord, UINT(0)};
+        spvStore(s, outSurface, spvCompose(s, spvTypeVector(s, s->uintType, 4), surfaceParts, 4));
         spvEndMain(s);
         const SpvId all[14] = {vWorld, vNormal, vUv, vMaterial, vColor, outColor, outSurface, vOpacity, frontFacing, vFade, pixelCoord, vInstance, primitive, vPast};
         SpvId hdrInterface[14];

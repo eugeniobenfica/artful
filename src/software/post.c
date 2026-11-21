@@ -431,6 +431,64 @@ void artfFroxelAt(const ArtfSoftFrame* f, float sx, float sy, float w, float* ou
     for (int k = 0; k < 4; ++k) out[k] = near_[k] + (beyond[k] - near_[k]) * tz;
 }
 
+/* ---- light under the surface, spread across it (artfUnderReach): separable, along x into scratch, then along y over
+ * what the first pass made, back into the light with what is not spread. Each tap weighs its place by the profile (two
+ * Gaussians, as wide as the radius on the screen, and ARTF_UNDER_NEAR of it) and its distance along the view (within
+ * the radius); only what has light under its surface counts. The same on the GPU (artfShaderPostUnder). ---- */
+
+/* (a tap's weight: k of ARTF_UNDER_TAPS a side, the radius in pixels and in the scene's units, how far apart along the
+ * view) */
+static inline float underWeight(int k, float pixels, float radius, float apart) {
+    const float x = (float)k * (3.f / ARTF_UNDER_TAPS), near_ = ARTF_UNDER_NEAR;
+    const float profile = (ARTF_UNDER_NEAR_SHARE / near_) * artfExp2Fast(-(x * x) / (2.f * near_ * near_) * 1.44269504f) + (1.f - ARTF_UNDER_NEAR_SHARE) * artfExp2Fast(-(x * x) * .5f * 1.44269504f);
+    const float d = apart / radius;
+    (void)pixels;
+    return profile * artfExp2Fast(-(d * d) * 1.44269504f);
+}
+
+/* (the radius on the screen, in pixels, of what is radius across at a pixel whose depth is depth) */
+static inline float underPixels(const ArtfSoftPost* p, float radius, float depth) {
+    const ArtfFrameData* f = &p->f->data;
+    return radius * f->focalY * (float)p->height * .5f / (artfOrtho(f) ? 1.f : artfDepthAlong(f, depth));
+}
+
+static void underPass(ArtfSoftPost* p, int y, bool across) {
+    const ArtfFrameData* f = &p->f->data;
+    float* const* light = p->f->postLight;
+    for (int x = 0; x < p->width; ++x) {
+        const size_t i = (size_t)y * p->width + x;
+        const uint32_t word = p->f->postUnder[i];
+        const float depth = p->f->postDepth[i];
+        if (!word || !(depth > 0)) continue;
+        const float radius = artfUnderRadius(word), share = (float)(word & 255u) * (1.f / 255.f);
+        const float pixels = underPixels(p, radius, depth), along = artfDepthAlong(f, depth);
+        float sum[3] = {0, 0, 0}, total = 0;
+        for (int k = -ARTF_UNDER_TAPS; k <= ARTF_UNDER_TAPS; ++k) {
+            const int step = (int)floorf((float)k * (3.f / ARTF_UNDER_TAPS) * pixels + .5f);
+            const int qx = across ? x + step : x, qy = across ? y : y + step;
+            if (qx < 0 || qy < 0 || qx >= p->width || qy >= p->height) continue;
+            const size_t j = (size_t)qy * p->width + qx;
+            const uint32_t there = p->f->postUnder[j];
+            const float qd = p->f->postDepth[j];
+            if (!there || !(qd > 0)) continue;
+            const float w = underWeight(k, pixels, radius, artfDepthAlong(f, qd) - along);
+            if (across) {
+                const float s = (float)(there & 255u) * (1.f / 255.f);
+                for (int c = 0; c < 3; ++c) sum[c] += light[c][j] * s * w;
+            } else
+                for (int c = 0; c < 3; ++c) sum[c] += p->scratch[c][j] * w;
+            total += w;
+        }
+        const float inverse = 1.f / artfMaxf(total, 1e-30f);
+        if (across)
+            for (int c = 0; c < 3; ++c) p->scratch[c][i] = sum[c] * inverse;
+        else
+            for (int c = 0; c < 3; ++c) light[c][i] = light[c][i] * (1.f - share) + sum[c] * inverse;
+    }
+}
+static void underAcrossRow(ArtfSoftPost* p, int y) { underPass(p, y, true); }
+static void underDownRow(ArtfSoftPost* p, int y) { underPass(p, y, false); }
+
 /* ---- clouds in the scene (artfCloudsColumn): a column of the grid at a time, then each pixel by what is in front of
  * it. In perspective; the sky's own clouds are in its picture. ---- */
 
@@ -1409,6 +1467,11 @@ void artfSoftPostRun(ArtfSoftPost* p, ArtfSoftFrame* f, uint32_t* pixels) {
     p->mapped = false;
     const ArtfFrameData* d = &f->data;
     ArtfPassLog* log = p->log;
+    if (f->postUnder && artfSceneHasUnder(f->scene)) {
+        rows(p, p->height, underAcrossRow);
+        rows(p, p->height, underDownRow);
+        if (log) artfPassMark(log, "under the surface");
+    }
     if (d->post[0][2] > 0) {
         rows(p, p->height, occlusionRow);
         rows(p, p->height, occlusionBlurRow);

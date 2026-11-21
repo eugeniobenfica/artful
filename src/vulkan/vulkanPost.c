@@ -95,6 +95,12 @@ void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* fram
     /* (what reads the scene's light is done: occlusion and velocities may write over its memory) */
     if (v->postAliased) memoryBarrier(v, c, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_READ, ACCESS_SHADER_WRITE);
     passMark(v, c, s, "gather");
+    if (v->underOn) {
+        /* light under the surface, spread across it, as post.c's: along x into the second, then along y back */
+        postStep(v, c, POST_UNDER_ACROSS, 0, pixels);
+        postStep(v, c, POST_UNDER_DOWN, 0, pixels);
+        passMark(v, c, s, "under the surface");
+    }
     if (frame->post[0][2] > 0) {
         postStep(v, c, POST_OCCLUSION, 0, pixels);
         postStep(v, c, POST_OCCLUSION_BLUR, 0, pixels);

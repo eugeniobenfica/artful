@@ -438,7 +438,17 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
 - **Teste (`sky/aerial`):** um bloco escuro a 500 m muda até 0,013; a 30 km vai de 0,44 0,41 0,38 para 0,54 0,62 0,71, perto do céu acima dele (0,59 0,64 0,71). O traçado dá o mesmo (0,54 0,62 0,71). GPU contra CPU: 0,000% dos pixels, desenhado e traçado; as pistas de cada largura dão os mesmos bytes.
 - **Limites:** a densidade não diminui com a altura ao longo do raio (para montanhas altas e distantes, o ar fica um pouco denso demais), e as nuvens não entram na perspectiva. Metal não tem.
 
-**Estado da 5.12: texturas das extensões e Belcour-Barla feitos; OpenPBR e SSS não.**
+**Estado da 5.12: texturas das extensões, Belcour-Barla e SSS separável feitos; OpenPBR não.**
+- **SSS separável (21/11/2026):**
+  - **Patentes, verificadas antes:** a difusão normalizada de Burley é a patente US 9.659.404 da Disney, concedida em 2017, e não foi usada. Para a SSS separável de Jimenez, Jarabo e Gutierrez (2015), publicada abertamente, não achei patente. O perfil é uma soma de duas gaussianas, do tipo de d'Eon e Luebke.
+  - **Como funciona:** com quadro em floats, cada pixel de material com luz sob a superfície grava uma palavra: a parte da sua luz que é difusa mais o que passou por baixo (medida onde é iluminado, em 1/255), e o raio do material. Depois vêm dois passes: ao longo de x, para o segundo buffer de luz, e ao longo de y, de volta à luz, no lugar. Cada um tem 17 amostras, com o perfil (60% numa gaussiana de 0,3 do raio, 40% numa do raio todo, em pixels pela distância) e um peso pela distância ao longo da vista. Só entram pixels que também têm luz sob a superfície. O resultado é `luz × (1 − parte) + parte espalhada`.
+  - **Onde fica a palavra:** na GPU, é a terceira palavra do alvo de superfície, que passou de RG32 para RGBA32 (inclusive com TAA) e que agora escreve as quatro componentes (a máscara era só RG); no gather, vai para o plano 2 do `postSurface`. Na CPU, é um plano a mais por tile (`ARTF_POST_UNDER`) e na frame (`postUnder`). Os passes são `underPass` (`post.c`) e `artfShaderPostUnderAcross`/`Down`, com a mesma aritmética.
+- **Teste (`materials/underSpread`):** a borda de uma sombra nítida num piso com luz sob a superfície passa de 1 para 10 pixels de largura, nos dois backends. GPU contra CPU: 0,000% dos pixels diferentes.
+- **Custo, 1920×1080, cena `surfaces`:** 0,12 ms na GPU e 2,6 ms na CPU.
+- **Limites:**
+  - O perfil é o mesmo para todas as cores (a cor sob a superfície já tinge o que passa por baixo).
+  - Não vale sobre camadas transparentes, no traçado nem em quadros de 8 bits.
+  - O alvo de superfície mais largo custa 8 bytes por pixel a mais quando há TAA ou SSS.
 - **Belcour-Barla (21/11/2026):** o filme fino passou a ser o modelo de Belcour e Barla (2017), como no shader de referência do glTF (`iridescence.glsl` do glTF-Sample-Renderer):
   - Fresnel nas duas interfaces do filme, com a meia volta onde o índice cai. O índice de baixo vem do f0 da superfície.
   - A soma das reflexões: o termo médio mais duas ordens, cada uma pela resposta do olho (XYZ, gaussianas no espaço de Fourier) à diferença de caminho, convertida para sRGB.

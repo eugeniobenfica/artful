@@ -267,7 +267,8 @@ typedef struct ArtfMaterialDesc {
     ArtfVec3 attenuation;
     float attenuationDistance;
     /* Light that goes under the surface and comes out around where it went in, and through thin parts: skin, wax,
-     * marble. Its color (0: none), and how far it goes, in the scene's units (0: .05). */
+     * marble. Its color (0: none), and how far it goes, in the scene's units (0: .05). With a frame in floats, the
+     * surface's diffuse light is spread across it on the screen as far as that (separable, of two Gaussians). */
     ArtfVec3 subsurface;
     float subsurfaceRadius;
 } ArtfMaterialDesc;

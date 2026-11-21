@@ -125,7 +125,12 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   it, and comes through from behind as much as what it went through leaves, by the depth in the light's shadow map;
   so only the sun and the sixteen lights with shadows bring light through, and from what is first in their way, not
   from how thick the thing itself is. Traced, a ray inside toward each light finds how thick it is, and the wrap stops
-  where the surface turns from the light. Neither blurs light across the surface, as diffusion would.
+  where the surface turns from the light. With a frame in floats, drawn, its diffuse light is also spread across the
+  surface on the screen (separable, x then y, 17 taps each way): a profile of two Gaussians (d'Eon and Luebke's kind,
+  not Burley's normalized diffusion, which Disney holds a patent on), as wide as subsurfaceRadius, the same in every
+  color; the share of a pixel's light that is diffuse is measured where it is lit and kept to 1 in 255. It goes only
+  between pixels that have light under their surface and lie at about the same distance; not over layers, and not when
+  traced. With it, the surface target is four words a pixel, as it is with temporal antialiasing.
 - Lights' sizes, shapes and profiles count for the sixteen lights the frame holds. A shape is the mean of point lights
   over it (each reaching as far as a point's would), as the tracer has it: drawn, its diffuse light is Gauss's 3 x 3
   points of it, and its highlight the lobe's integral over it (linearly transformed cosines) weighted at one point, 4%

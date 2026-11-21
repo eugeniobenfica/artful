@@ -22,7 +22,7 @@
 #endif
 
 enum {
-    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_A2B10G10R10 = 64, FORMAT_A2R10G10B10 = 58, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_R32G32_UINT = 101, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
+    FORMAT_RGBA8 = 37, FORMAT_BGRA8 = 44, FORMAT_A2B10G10R10 = 64, FORMAT_A2R10G10B10 = 58, FORMAT_RGBA16_FLOAT = 97, FORMAT_R32_UINT = 98, FORMAT_R32G32_UINT = 101, FORMAT_R32G32B32A32_UINT = 107, FORMAT_D32 = 126, FORMAT_RGBA16_UNORM = 91, FORMAT_RG16_SNORM = 78, FORMAT_RG16_FLOAT = 83,
     LAYOUT_UNDEFINED = 0, LAYOUT_COLOR = 2, LAYOUT_DEPTH = 3, LAYOUT_DEPTH_READ = 4, LAYOUT_SHADER_READ = 5, LAYOUT_TRANSFER_SRC = 6, LAYOUT_TRANSFER_DST = 7, LAYOUT_PRESENT = 1000001002,
     IMAGE_TRANSFER_SRC = 1, IMAGE_TRANSFER_DST = 2, IMAGE_SAMPLED = 4, IMAGE_COLOR = 0x10, IMAGE_DEPTH = 0x20,
     BUFFER_TRANSFER_SRC = 1, BUFFER_TRANSFER_DST = 2, BUFFER_UNIFORM = 0x10, BUFFER_STORAGE = 0x20, BUFFER_INDEX = 0x40, BUFFER_VERTEX = 0x80, BUFFER_INDIRECT = 0x100,
@@ -175,7 +175,7 @@ typedef struct ComputeKey {
 } ComputeKey;
 
 enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY, POST_METER,
-       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN, POST_SAMPLED, POST_SAMPLED_SPACE, POST_CLOUD_COLUMNS, POST_CLOUD_APPLY, POST_KINDS };
+       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN, POST_SAMPLED, POST_SAMPLED_SPACE, POST_CLOUD_COLUMNS, POST_CLOUD_APPLY, POST_UNDER_ACROSS, POST_UNDER_DOWN, POST_KINDS };
 
 typedef struct Vulkan {
     ArtfRenderer base;
@@ -421,6 +421,7 @@ typedef struct Vulkan {
     GpuBuffer cloudField, cloudGrid;
     uint32_t cloudGeneration, cloudColumns, cloudRows;
     bool cloudsOn, cloudFieldHeld;
+    bool underOn; /* light under the surface, spread across it, this frame */
     uint32_t gatheredHalf;
     bool gatheredValid;
     bool layerSumsFresh; /* layers by transmittance: their sums were just made, and are not 0 yet */
@@ -571,7 +572,7 @@ void targetsFree(Vulkan* v);
 void writeOverlayDescriptor(Vulkan* v);
 bool hizMake(Vulkan* v);
 void postAccessOf(const uint32_t* code, size_t size, uint32_t* reads, uint32_t* writes);
-uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f, bool clouds);
+uint32_t postNeedsOf(const Vulkan* v, const ArtfFrameData* f, bool second);
 bool postBuffersMake(Vulkan* v);
 bool postTargetsMake(Vulkan* v);
 bool syncLut(Vulkan* v, const ArtfScene* scene);
