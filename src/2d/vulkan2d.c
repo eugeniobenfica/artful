@@ -679,10 +679,33 @@ static void imageBarrier(Gpu2D* g, VkImage image, int from, int to, VkFlags srcS
     g->vkCmdPipelineBarrier(g->commands, srcStage, dstStage, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
+/* ARTFUL_2D_STEP: each dispatch on its own, waited for and named on stderr (to tell which shader a driver falls over in) */
+static void stepped(Gpu2D* g, int pipe) {
+    static int on = -1;
+    if (on < 0) on = getenv("ARTFUL_2D_STEP") != NULL;
+    if (!on) return;
+    static const char* names[PIPES] = {"tiles", "down", "up", "finish", "reflect", "giScene", "giRows", "giColumns", "giEven", "giOdd", "giGather", "giSpread0", "giSpread1"};
+    fprintf(stderr, "2d step: %s ", names[pipe]);
+    fflush(stderr);
+    FrameSlot2D* s = &g->slots[g->slot];
+    g->vkEndCommandBuffer(g->commands);
+    const SubmitInfo submit = {ST_SUBMIT_INFO, NULL, 0, NULL, NULL, 1, &g->commands, 0, NULL};
+    g->vkResetFences(g->device, 1, &s->fence);
+    g->vkQueueSubmit(g->queue, 1, &submit, s->fence);
+    g->vkWaitForFences(g->device, 1, &s->fence, 1, UINT64_MAX);
+    fprintf(stderr, "done\n");
+    fflush(stderr);
+    g->vkResetCommandBuffer(g->commands, 0);
+    const CommandBufferBeginInfo begin = {ST_COMMAND_BUFFER_BEGIN, NULL, 1, NULL};
+    g->vkBeginCommandBuffer(g->commands, &begin);
+    g->vkCmdBindDescriptorSets(g->commands, BIND_COMPUTE, g->layout, 0, 1, &g->set, 0, NULL);
+}
+
 static void dispatch(Gpu2D* g, int pipe, const Push2D* push, uint32_t width, uint32_t height) {
     g->vkCmdBindPipeline(g->commands, BIND_COMPUTE, g->pipelines[pipe]);
     if (push) g->vkCmdPushConstants(g->commands, g->layout, SHADER_COMPUTE, 0, sizeof *push, push);
     g->vkCmdDispatch(g->commands, (width + 7) / 8, (height + 7) / 8, 1);
+    stepped(g, pipe);
 }
 
 /* A 1D dispatch: groups of 64. */
@@ -690,6 +713,7 @@ static void dispatchLine(Gpu2D* g, int pipe, const Push2D* push, uint32_t count)
     g->vkCmdBindPipeline(g->commands, BIND_COMPUTE, g->pipelines[pipe]);
     if (push) g->vkCmdPushConstants(g->commands, g->layout, SHADER_COMPUTE, 0, sizeof *push, push);
     g->vkCmdDispatch(g->commands, (count + 63) / 64, 1, 1);
+    stepped(g, pipe);
 }
 
 static void computeBarrier(Gpu2D* g) { barrier(g, STAGE_COMPUTE, STAGE_COMPUTE, ACCESS_SHADER_WRITE, ACCESS_SHADER_READ | ACCESS_SHADER_WRITE); }
@@ -988,6 +1012,7 @@ bool artf2DVulkanDraw(Gpu2D* g, const Frame2D* f, const ArtfGI2DDesc* giDesc, bo
             g->vkCmdPushConstants(cb, g->layout, SHADER_COMPUTE, 0, sizeof p, &p);
             const uint32_t rows = (uint32_t)((total + GI_ROW - 1) / GI_ROW);
             g->vkCmdDispatch(cb, rows > 1 ? GI_ROW / 64 : (uint32_t)((total + 63) / 64), rows, 1);
+            stepped(g, c & 1 ? PIPE_GI_ODD : PIPE_GI_EVEN);
         }
         computeBarrier(g);
         dispatch(g, PIPE_GI_GATHER, NULL, (uint32_t)giW, (uint32_t)giH);
