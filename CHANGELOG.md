@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **scRGB output** (`ARTF_OUTPUT_SCRGB`, phase 5.9): light itself in sRGB's primaries, 1 being 80 nits, as halves
+  (8 bytes a pixel; reading back gives twice the words), on both backends; on a surface, Vulkan's extended linear sRGB.
+  **HDR metadata**: in HDR10 and scRGB on a surface, the screen is told the peak and paper white
+  (`VK_EXT_hdr_metadata`, where the device has it).
 - **Temporal gradients for the denoiser** (A-SVGF, phase 5.7), on both backends: where the eye stood still, a pixel of
   each 3 x 3 traces again the frame before's first sample; a change counted in that pixel's own noise pulls what was
   gathered toward the light around it. Eight frames after a sun goes out, 0.28 from the truth (was 1.78); after it

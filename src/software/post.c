@@ -1236,7 +1236,7 @@ POST_INLINE void finalLight(const ArtfSoftPost* p, const FinalRow* r, int x, int
     /* grading, in ACEScct (gradeShown: after, in what is shown, by the kernels) */
     if (!(sf->data.gradeShown > 0)) artfGradeCct(&sf->data, sf->scene->lut, v);
     /* (HDR10: the curve's white at peak over paper white; light is made that much brighter again at the end) */
-    if (p->display == ARTF_DISPLAY_HDR10)
+    if (p->display == ARTF_DISPLAY_HDR10 || p->display == ARTF_DISPLAY_SCRGB)
         for (int c = 0; c < 3; ++c) v[c] *= p->displayInverse;
     if (r->exposure > 0) {
         if (r->curve == ARTF_TONE_NEUTRAL) toneNeutral(v);
@@ -1271,6 +1271,13 @@ POST_INLINE void finalOut(const ArtfSoftPost* p, int x, int y, const float* show
             }
         }
         uint32_t out;
+        if (p->display == ARTF_DISPLAY_SCRGB) {
+            /* (halves, light premultiplied as the others are: Vulkan's R16G16B16A16_SFLOAT) */
+            uint32_t* to = p->pixels + ((size_t)y * p->width + x) * 2;
+            to[0] = artfHalfOf(e[0]) | (uint32_t)artfHalfOf(e[1]) << 16;
+            to[1] = artfHalfOf(e[2]) | (uint32_t)artfHalfOf(artfClampf(a, 0, 1)) << 16;
+            return;
+        }
         if (p->display == ARTF_DISPLAY_HDR10) {
             out = (uint32_t)(artfClampf(a, 0, 1) * 3.f + .5f) << 30;
             for (int c = 0; c < 3; ++c) out |= (uint32_t)(artfClampf(e[c], 0, 1) * 1023.f + .5f) << (20 - 10 * c);

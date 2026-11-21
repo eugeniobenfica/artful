@@ -204,6 +204,12 @@ typedef struct AsBuildSizes { int sType; const void* pNext; VkDeviceSize structu
 typedef struct AsDeviceAddressInfo { int sType; const void* pNext; VkAccelerationStructureKHR structure; } AsDeviceAddressInfo;
 /* An instance in the top level: its rows, its custom index (24 bits) and mask (8), its record offset (24) and flags (8). */
 typedef struct AsInstance { float transform[12]; uint32_t customAndMask, offsetAndFlags; uint64_t reference; } AsInstance;
+/* VK_EXT_hdr_metadata: the screen the frames were made for: its primaries and white (CIE 1931 xy), its light (nits) */
+typedef struct HdrMetadata {
+    int sType; const void* pNext; float red[2], green[2], blue[2], white[2];
+    float maxLuminance, minLuminance, maxContentLightLevel, maxFrameAverageLightLevel;
+} HdrMetadata;
+enum { ST_HDR_METADATA = 1000105000 };
 typedef struct WriteDescriptorSetAs { int sType; const void* pNext; uint32_t count; const VkAccelerationStructureKHR* structures; } WriteDescriptorSetAs;
 
 #define ARTF_VK_DEVICE_FUNCTIONS(X)     X(vkGetAccelerationStructureBuildSizesKHR, void, (VkDevice, int, const AsBuildGeometryInfo*, const uint32_t*, AsBuildSizes*))     X(vkCreateAccelerationStructureKHR, VkResult, (VkDevice, const AsCreateInfo*, const void*, VkAccelerationStructureKHR*))     X(vkDestroyAccelerationStructureKHR, void, (VkDevice, VkAccelerationStructureKHR, const void*))     X(vkCmdBuildAccelerationStructuresKHR, void, (VkCommandBuffer, uint32_t, const AsBuildGeometryInfo*, const AsBuildRange* const*))     X(vkGetAccelerationStructureDeviceAddressKHR, VkDeviceAddress, (VkDevice, const AsDeviceAddressInfo*))     X(vkGetBufferDeviceAddress, VkDeviceAddress, (VkDevice, const BufferDeviceAddressInfo*)) \
@@ -218,6 +224,7 @@ typedef struct WriteDescriptorSetAs { int sType; const void* pNext; uint32_t cou
     X(vkGetSwapchainImagesKHR, VkResult, (VkDevice, VkSwapchainKHR, uint32_t*, VkImage*)) \
     X(vkAcquireNextImageKHR, VkResult, (VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence, uint32_t*)) \
     X(vkQueuePresentKHR, VkResult, (VkQueue, const PresentInfo*)) \
+    X(vkSetHdrMetadataEXT, void, (VkDevice, uint32_t, const VkSwapchainKHR*, const HdrMetadata*)) \
     X(vkAllocateMemory, VkResult, (VkDevice, const MemoryAllocateInfo*, const void*, VkDeviceMemory*)) \
     X(vkFreeMemory, void, (VkDevice, VkDeviceMemory, const void*)) \
     X(vkMapMemory, VkResult, (VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkFlags, void**)) \

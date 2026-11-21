@@ -524,6 +524,11 @@ bool targetsMake(Vulkan* v) {
         const VkResult result = artfVulkanRefuseSwapchain ? -1000000000 : v->vkCreateSwapchainKHR(v->device, &info, NULL, &made);
         if (old) v->vkDestroySwapchainKHR(v->device, old, NULL);
         v->swapchain = made;
+        if (result == VK_OK && v->hdrMetadata && v->vkSetHdrMetadataEXT && (v->display == ARTF_DISPLAY_HDR10 || v->display == ARTF_DISPLAY_SCRGB)) {
+            HdrMetadata meta;
+            artfVulkanHdrMetadata(v, &meta);
+            v->vkSetHdrMetadataEXT(v->device, 1, &made, &meta);
+        }
         if (result != VK_OK) {
             /* The window goes back with the surface: on Android, whatever comes next could not reach it otherwise. */
             artfLog("artful: the driver refused a swapchain: %d", (int)result);
@@ -3983,7 +3988,7 @@ bool vkReadPixels(ArtfRenderer* r, uint32_t* dst) {
     Vulkan* v = (Vulkan*)r;
     if (v->lost || v->swapchain || !v->frameNumber) return false; /* (what was presented is the window system's) */
     if (v->vkDeviceWaitIdle(v->device) != VK_OK) return false;
-    const size_t bytes = (size_t)v->imageWidth * v->imageHeight * 4;
+    const size_t bytes = (size_t)v->imageWidth * v->imageHeight * (v->colorFormat == FORMAT_RGBA16_FLOAT ? 8 : 4);
     if (v->readback.size < bytes) {
         bufferFree(v, &v->readback);
         if (!bufferNewFor(v, &v->readback, bytes, BUFFER_TRANSFER_DST, BUFFER_READ_BY_CPU)) {
@@ -4344,7 +4349,7 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
         features.pNext = &f12;
         v->vkGetPhysicalDeviceFeatures2(gpus[i], &features);
         /* the ray tracing hardware: both extensions, and what they need (ARTFUL_NO_RAY_QUERY: as a device without) */
-        bool rayQuery = false, deviceFault = false, nonSemantic = false, postDepth = false;
+        bool rayQuery = false, deviceFault = false, nonSemantic = false, postDepth = false, hdrMetadata = false;
         {
             ExtensionProperties* have = artfMalloc(512 * sizeof *have);
             uint32_t extensionCount = 512;
@@ -4353,9 +4358,10 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
                 for (uint32_t e = 0; e < extensionCount; ++e)
                     found |= (!strcmp(have[e].name, "VK_KHR_acceleration_structure") ? 1 : 0) | (!strcmp(have[e].name, "VK_KHR_ray_query") ? 2 : 0) | (!strcmp(have[e].name, "VK_KHR_deferred_host_operations") ? 4 : 0) |
                              (!strcmp(have[e].name, "VK_EXT_device_fault") ? 8 : 0) | (!strcmp(have[e].name, "VK_KHR_shader_non_semantic_info") ? 16 : 0) |
-                             (!strcmp(have[e].name, "VK_EXT_post_depth_coverage") ? 32 : 0);
+                             (!strcmp(have[e].name, "VK_EXT_post_depth_coverage") ? 32 : 0) | (!strcmp(have[e].name, "VK_EXT_hdr_metadata") ? 64 : 0);
             nonSemantic = (found & 16) != 0;
             postDepth = (found & 32) != 0 && !getenv("ARTFUL_NO_POST_DEPTH");
+            hdrMetadata = (found & 64) != 0;
             artfFree(have);
             if (found & 8) {
                 FaultFeatures fault = {ST_FAULT_FEATURES, NULL, 0, 0};
@@ -4409,6 +4415,7 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
             v->rayQuery = rayQuery;
             v->deviceFault = deviceFault;
             v->depthCoverage = postDepth;
+            v->hdrMetadata = hdrMetadata;
             /* (ARTFUL_SHADER_DEBUG: shaders that say which C built them, for RenderDoc: spirv.h's artfShaderDebugInfo) */
             v->shaderDebug = nonSemantic && getenv("ARTFUL_SHADER_DEBUG");
             v->sampleShading = features.features.sampleRateShading;
@@ -4431,6 +4438,18 @@ bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen) {
     return best >= 0;
 }
 
+/* What the screen is told of frames in HDR10 or scRGB (VK_EXT_hdr_metadata): the colors stay within sRGB's (Rec. 709's
+ * primaries, D65's white), as bright as the peak asked for at most, and on average about paper white. */
+void artfVulkanHdrMetadata(const Vulkan* v, HdrMetadata* m) {
+    memset(m, 0, sizeof *m);
+    m->sType = ST_HDR_METADATA;
+    const float primaries[8] = {.64f, .33f, .30f, .60f, .15f, .06f, .3127f, .3290f};
+    memcpy(m->red, primaries, sizeof primaries);
+    m->maxLuminance = m->maxContentLightLevel = v->peakLight;
+    m->minLuminance = 0.f;
+    m->maxFrameAverageLightLevel = v->paperWhite;
+}
+
 /* BGRA, as the frames in memory are; or else RGBA, as Android offers. Shaders write colors, not bytes,
  * so nothing else changes. */
 /* Another screen's (ArtfRendererOptions.output): HDR10 in 10 bits (A2B10G10R10, read back as A2R10G10B10), Display-P3 in
@@ -4441,12 +4460,17 @@ static void chooseDisplay(Vulkan* v, const SurfaceFormat* formats, uint32_t coun
     if (!v->surface) {
         v->display = v->displayWanted;
         if (v->display == ARTF_DISPLAY_HDR10) v->colorFormat = FORMAT_A2B10G10R10;
+        if (v->display == ARTF_DISPLAY_SCRGB) v->colorFormat = FORMAT_RGBA16_FLOAT;
         return;
     }
-    const int space = v->displayWanted == ARTF_DISPLAY_HDR10 ? 1000104008 /* HDR10_ST2084 */ : 1000104001 /* DISPLAY_P3_NONLINEAR */;
+    const int space = v->displayWanted == ARTF_DISPLAY_HDR10   ? 1000104008 /* HDR10_ST2084 */
+                      : v->displayWanted == ARTF_DISPLAY_SCRGB ? 1000104002 /* EXTENDED_SRGB_LINEAR */
+                                                               : 1000104001 /* DISPLAY_P3_NONLINEAR */;
     for (uint32_t i = 0; v->colorspaces && i < count; ++i) {
         const int f = formats[i].format;
-        const bool fits = v->displayWanted == ARTF_DISPLAY_HDR10 ? f == FORMAT_A2B10G10R10 || f == FORMAT_A2R10G10B10 : f == FORMAT_BGRA8 || f == FORMAT_RGBA8;
+        const bool fits = v->displayWanted == ARTF_DISPLAY_HDR10   ? f == FORMAT_A2B10G10R10 || f == FORMAT_A2R10G10B10
+                          : v->displayWanted == ARTF_DISPLAY_SCRGB ? f == FORMAT_RGBA16_FLOAT
+                                                                   : f == FORMAT_BGRA8 || f == FORMAT_RGBA8;
         if (fits && formats[i].colorSpace == space) {
             v->colorFormat = f;
             v->colorSpace = space;
@@ -4454,7 +4478,7 @@ static void chooseDisplay(Vulkan* v, const SurfaceFormat* formats, uint32_t coun
             return;
         }
     }
-    artfLog("artful: the surface does not show %s: sRGB", v->displayWanted == ARTF_DISPLAY_HDR10 ? "HDR10" : "Display-P3");
+    artfLog("artful: the surface does not show %s: sRGB", v->displayWanted == ARTF_DISPLAY_HDR10 ? "HDR10" : v->displayWanted == ARTF_DISPLAY_SCRGB ? "scRGB" : "Display-P3");
 }
 
 bool chooseFormat(Vulkan* v) {
@@ -4545,6 +4569,10 @@ bool createDevice(Vulkan* v) {
     uint32_t extensionCount = 0;
     if (v->surface) extensions[extensionCount++] = "VK_KHR_swapchain";
     if (v->depthCoverage) extensions[extensionCount++] = "VK_EXT_post_depth_coverage";
+    /* (HDR10 or scRGB on a surface: the screen is told what the frames were made for) */
+    const bool tells = v->surface && v->hdrMetadata && (v->displayWanted == ARTF_DISPLAY_HDR10 || v->displayWanted == ARTF_DISPLAY_SCRGB);
+    if (tells) extensions[extensionCount++] = "VK_EXT_hdr_metadata";
+    v->hdrMetadata = tells;
     if (v->surface && v->native.kind == ARTF_SURFACE_METAL) extensions[extensionCount++] = "VK_KHR_portability_subset";
     RayQueryFeatures query = {ST_RAY_QUERY_FEATURES, NULL, 1};
     AsFeatures as = {ST_AS_FEATURES, &query, 1, 0, 0, 0, 0};
@@ -4589,8 +4617,10 @@ ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
     v->noVsync = o->noVsync;
     v->samples = o->antialias ? 4 : 1;
     v->floats = o->hdr;
-    v->displayWanted = o->hdr && o->output >= ARTF_OUTPUT_SRGB && o->output <= ARTF_OUTPUT_HDR10 ? (int)o->output : ARTF_DISPLAY_SRGB;
+    v->displayWanted = o->hdr && o->output >= ARTF_OUTPUT_SRGB && o->output <= ARTF_OUTPUT_SCRGB ? (int)o->output : ARTF_DISPLAY_SRGB;
     artfDisplayNumbers(o, (ArtfOutput)v->displayWanted, &v->displayInverse, &v->displayPeak);
+    v->paperWhite = o->paperWhiteNits > 0 ? o->paperWhiteNits : 203.f;
+    v->peakLight = artfMaxf(o->peakNits > 0 ? o->peakNits : 1000.f, v->paperWhite);
     v->renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
     v->preRotate = o->preRotate;
     v->base.renderScale = v->base.renderScaleMost = v->renderScale;

@@ -119,8 +119,10 @@ static void allocateTargets(Software* s, int frameWidth, int frameHeight) {
     f->tilesX = (width + ARTF_TILE - 1) / ARTF_TILE;
     f->tilesY = (height + ARTF_TILE - 1) / ARTF_TILE;
     const size_t tiles = (size_t)f->tilesX * f->tilesY;
-    s->pixels = artfAlignedMalloc((size_t)frameWidth * frameHeight * 4, 64);
-    memset(s->pixels, 0, (size_t)frameWidth * frameHeight * 4);
+    /* (scRGB: two words a pixel; the tiles still write one where they write, and the last pass writes both) */
+    const size_t frameBytes = (size_t)frameWidth * frameHeight * 4 * (size_t)artfOutputWords(s->base.output);
+    s->pixels = artfAlignedMalloc(frameBytes, 64);
+    memset(s->pixels, 0, frameBytes);
     f->pixels = s->pixels;
     for (int i = 0; i < ARTF_CHUNKS; ++i) {
         artfFree(f->chunks[i].heads);
@@ -863,7 +865,7 @@ static bool softDraw(ArtfRenderer* r, ArtfScene* scene) {
 
 static bool softReadPixels(ArtfRenderer* r, uint32_t* dst) {
     Software* s = (Software*)r;
-    memcpy(dst, s->pixels, (size_t)s->frameW * s->frameH * 4);
+    memcpy(dst, s->pixels, (size_t)s->frameW * s->frameH * 4 * (size_t)artfOutputWords(s->base.output));
     return true;
 }
 
@@ -969,7 +971,7 @@ ArtfRenderer* artfSoftwareNew(const ArtfRendererOptions* o) {
     s->base.renderScale = s->base.renderScaleMost = s->renderScale;
     s->post.pool = s->pool;
     s->post.kernels = s->kernels;
-    s->base.output = o->hdr && o->output >= ARTF_OUTPUT_SRGB && o->output <= ARTF_OUTPUT_HDR10 ? o->output : ARTF_OUTPUT_SRGB;
+    s->base.output = o->hdr && o->output >= ARTF_OUTPUT_SRGB && o->output <= ARTF_OUTPUT_SCRGB ? o->output : ARTF_OUTPUT_SRGB;
     s->post.display = (int)s->base.output;
     artfDisplayNumbers(o, s->base.output, &s->post.displayInverse, &s->post.displayPeak);
     const size_t planes = (size_t)ARTF_TILE_PIXELS * 4 * f->samples;

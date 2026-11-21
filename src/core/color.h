@@ -56,9 +56,10 @@ ARTF_INLINE float artfSrgbEncode(float light) {
 }
 
 /* From light as sRGB shows it (Rec. 709's primaries, 0 to 1) to what a screen takes, 0 to 1 (ArtfOutput, as ARTF_DISPLAY_):
- * Display-P3's primaries and sRGB's curve; or Rec. 2020's and PQ, light of 1 being peak (nits / 10000). The GPU's
- * (shaders.c's displaySpv) does the same arithmetic in the same order. */
-enum { ARTF_DISPLAY_SRGB, ARTF_DISPLAY_P3, ARTF_DISPLAY_HDR10 };
+ * Display-P3's primaries and sRGB's curve; or Rec. 2020's and PQ, light of 1 being peak (nits / 10000); or scRGB,
+ * light itself in Rec. 709's primaries, 1 being 80 nits (peak: nits / 80). The GPU's (shaders.c's displaySpv) does the
+ * same arithmetic in the same order. */
+enum { ARTF_DISPLAY_SRGB, ARTF_DISPLAY_P3, ARTF_DISPLAY_HDR10, ARTF_DISPLAY_SCRGB };
 ARTF_INLINE float artfPq(float y) {
     if (!(y > 0)) return 0.f;
     const float p = artfExp2Fast(artfLog2Fast(artfMinf(y, 1.f)) * .1593017578125f);
@@ -67,11 +68,33 @@ ARTF_INLINE float artfPq(float y) {
 ARTF_INLINE void artfDisplayEncode(int kind, float peak, const float* light, float* out) {
     static const float p3[3][3] = {{.82246197f, .17753803f, 0.f}, {.03319420f, .96680580f, 0.f}, {.01708263f, .07239744f, .91051993f}};
     static const float bt2020[3][3] = {{.62740390f, .32928304f, .04331307f}, {.06909729f, .91954040f, .01136232f}, {.01639144f, .08801331f, .89559525f}};
+    if (kind == ARTF_DISPLAY_SCRGB) {
+        for (int c = 0; c < 3; ++c) out[c] = artfMaxf(light[c], 0.f) * peak;
+        return;
+    }
     const float(*m)[3] = kind == ARTF_DISPLAY_HDR10 ? bt2020 : p3;
     for (int c = 0; c < 3; ++c) {
         const float v = (m[c][0] * light[0] + m[c][1] * light[1]) + m[c][2] * light[2];
         out[c] = kind == ARTF_DISPLAY_HDR10 ? artfPq(artfMaxf(v, 0.f) * peak) : artfSrgbEncode(artfClampf(v, 0.f, 1.f));
     }
+}
+
+/* A float as a half, rounded to the nearest (ties to even), as a GPU writes one to a float16 target; past the largest
+ * half, the largest; not a number: 0. */
+ARTF_INLINE uint16_t artfHalfOf(float f) {
+    if (!(f == f)) return 0;
+    uint32_t b;
+    memcpy(&b, &f, 4);
+    const uint32_t sign = (b >> 16) & 0x8000u, rest = b & 0x7FFFFFFFu;
+    if (rest >= 0x477FF000u) return (uint16_t)(sign | 0x7BFFu); /* (65520 and over: would round past the largest) */
+    if (rest < 0x38800000u) {                                     /* (below the smallest normal half: a subnormal) */
+        if (rest < 0x33000000u) return (uint16_t)sign;
+        const uint32_t man = (rest & 0x7FFFFFu) | 0x800000u, shift = 126u - (rest >> 23);
+        const uint32_t h = man >> shift, left = man & ((1u << shift) - 1u), mid = 1u << (shift - 1u);
+        return (uint16_t)(sign | (h + (left > mid || (left == mid && (h & 1u)))));
+    }
+    const uint32_t h = ((rest >> 13) - 0x1C000u), left = rest & 0x1FFFu;
+    return (uint16_t)(sign | (h + (left > 0x1000u || (left == 0x1000u && (h & 1u)))));
 }
 
 #endif

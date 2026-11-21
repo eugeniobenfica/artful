@@ -17,7 +17,6 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
   que caíam antes, foram corrigidas e passam na CI.
 
 ### Fase 5 — Alcance de conteúdo
-- [~] 5.9 Saída HDR — faltam os metadados HDR e o scRGB (o teste numa tela HDR está na outra lista)
 - [~] 5.10 Basis Universal — falta transcodificar para blocos da GPU (hoje vai para pixels)
 - [~] 5.12 OpenPBR (camadas no grafo de materiais em C) — no stash "5.12 OpenPBR": API, `graph.c`, flags do material e
   rasterização da CPU feitos; faltam o traçador da CPU, os shaders da GPU (fragmento e traçador), o teste e a
@@ -34,7 +33,7 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 - [~] 3.6 Ritmo e térmica — 30 min num telefone
 - [~] 3.9 Linux com GPU de verdade e janela — uma máquina Linux
 - [~] 5.6 Reinserção na árvore — medir numa GPU integrada
-- [~] 5.9 Saída HDR — testar numa tela HDR
+- [~] 5.9 Saída HDR — testar numa tela HDR (HDR10 e scRGB, com os metadados) e o Display-P3 de 10 bits no Android
 - [~] 6.1 Metal — um Mac de verdade (só rodou no dispositivo virtual da CI) e uma janela
 - [~] 6.2 WebGPU e CPU em WebAssembly — o Safari, nos dois caminhos (precisa de um Mac ou iPhone); o Firefox
 

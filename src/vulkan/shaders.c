@@ -2929,6 +2929,7 @@ static void backgroundDeclare(Spv* s, BackgroundResources* r, bool writeBloom) {
 static SpvId backgroundVec(Spv* s, const BackgroundResources* r, uint32_t i) {
     const SpvId idx[2] = {r->zero, spvConstUint(s, i)};
     return spvLoad(s, s->vec4, spvAccess(s, r->ptrUniformVec4, r->block, idx, 2));
+    if (kind == ARTF_DISPLAY_SCRGB) return SCALE_V3(spvGlsl2(s, SPV_GLSL_FMax, s->vec3, light, same3(s, 0.f)), FLOAT(peak));
 }
 static SpvId backgroundVecAt(Spv* s, const BackgroundResources* r, SpvId i) {
     const SpvId idx[2] = {r->zero, i};

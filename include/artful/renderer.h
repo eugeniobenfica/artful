@@ -41,7 +41,11 @@ typedef enum ArtfOutput {
     ARTF_OUTPUT_DISPLAY_P3, /* Display-P3: its wider primaries, with sRGB's curve; 8 bits a color */
     /* Rec. 2020's primaries and PQ (SMPTE ST 2084), 10 bits a color: a pixel read back is then A2 R10 G10 B10, alpha in
      * its top 2 bits and blue in its lowest 10 (Vulkan's A2R10G10B10) */
-    ARTF_OUTPUT_HDR10
+    ARTF_OUTPUT_HDR10,
+    /* scRGB (Windows' HDR): light itself, in sRGB's primaries, 1 being 80 nits, as halves (16-bit floats). A pixel is
+     * then 8 bytes, two words: red in the first's low half and green in its high half, blue and alpha so in the
+     * second (Vulkan's R16G16B16A16_SFLOAT); artfRendererReadPixels and artfRendererPixels give twice the words */
+    ARTF_OUTPUT_SCRGB
 } ArtfOutput;
 
 typedef struct ArtfRendererOptions {
@@ -78,11 +82,12 @@ typedef struct ArtfRendererOptions {
     /* With hdr: what the frame is made for (ArtfOutput); without hdr it is sRGB. The picture keeps its look: what an
      * sRGB screen would show, in the screen's own colors, and the overlay over it as on an sRGB screen (in HDR10, its
      * white at paper white). Vulkan with a surface makes it where the surface offers it (VK_EXT_swapchain_colorspace),
-     * else sRGB, and so does Metal: artfRendererOutput says which. No HDR metadata is sent to the screen yet. */
+     * else sRGB, and so does Metal: artfRendererOutput says which. In HDR10 and scRGB on a surface, the screen is told
+     * the peak and paper white below (VK_EXT_hdr_metadata, where the device has it). */
     ArtfOutput output;
-    /* HDR10: the brightest the screen shows, in nits (0: 1000), and white paper's light, which the overlay's white and
-     * light of 1 under no tone curve are (0: 203). The tone curve is stretched to peak / paper white, so that light
-     * the curve leaves alone stays as bright as on paper. */
+    /* HDR10 and scRGB: the brightest the screen shows, in nits (0: 1000), and white paper's light, which the overlay's
+     * white and light of 1 under no tone curve are (0: 203). The tone curve is stretched to peak / paper white, so that
+     * light the curve leaves alone stays as bright as on paper. */
     float peakNits, paperWhiteNits;
 } ArtfRendererOptions;
 
@@ -134,9 +139,10 @@ bool artfRendererDraw(ArtfRenderer* r, ArtfScene* scene);
  * frame: for a picture that must show the feature from the first frame that can. Software: nothing to wait for. */
 void artfRendererWarm(ArtfRenderer* r);
 
-/* The last frame in dst, width * height BGRA pixels (after waiting for it, on a GPU). */
+/* The last frame in dst, width * height BGRA pixels (after waiting for it, on a GPU); in scRGB, width * height * 2
+ * words (ARTF_OUTPUT_SCRGB). */
 bool artfRendererReadPixels(ArtfRenderer* r, uint32_t* dst);
-/* The software backend's frame, width * height BGRA pixels, valid until the next draw or resize;
+/* The software backend's frame, width * height BGRA pixels (scRGB: twice the words), valid until the next draw or resize;
  * NULL for the others. Handing this to a presenter costs no copy. */
 uint32_t* artfRendererPixels(ArtfRenderer* r);
 

@@ -213,6 +213,8 @@ typedef struct Vulkan {
      * (artfDisplayNumbers); whether the instance has VK_EXT_swapchain_colorspace */
     int displayWanted, display;
     float displayInverse, displayPeak;
+    float paperWhite, peakLight; /* (nits, for VK_EXT_hdr_metadata) */
+    bool hdrMetadata;            /* the device has VK_EXT_hdr_metadata, and it is on (HDR10 or scRGB on a surface) */
     bool colorspaces;
     VkSwapchainKHR swapchain;
     uint32_t imageCount;
@@ -724,5 +726,8 @@ uint32_t postPhysical(const Vulkan* v, uint32_t mask);
 void rolesBind(Vulkan* v, VkCommandBuffer c, int point);
 void postSwap(Vulkan* v, VkCommandBuffer c, bool keep);
 void postRecord(Vulkan* v, VkCommandBuffer c, Slot* s, const ArtfFrameData* frame, uint32_t image);
+
+/* What the screen is told of frames in HDR10 or scRGB (VK_EXT_hdr_metadata). */
+void artfVulkanHdrMetadata(const Vulkan* v, HdrMetadata* m);
 
 #endif

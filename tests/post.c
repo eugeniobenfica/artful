@@ -1180,10 +1180,18 @@ static int pqCode(double nits) {
     return (int)(pow((.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 78.84375) * 1023.0 + .5);
 }
 
+/* A half (16-bit float) as a float. */
+static float halfValue(uint32_t h) {
+    const int e = (int)(h >> 10 & 31), m = (int)(h & 1023);
+    const float v = e == 0 ? (float)m * (1.f / 16777216.f) : ldexpf(1.f + (float)m / 1024.f, e - 15);
+    return h & 0x8000u ? -v : v;
+}
+
 /* Frames made for other screens (ArtfRendererOptions.output): sRGB's red in Display-P3 is 234 51 35; in HDR10 white is
- * paper white (203 nits) and red Rec. 2020's share of it; an overlay's white is paper white over it; both backends. */
+ * paper white (203 nits) and red Rec. 2020's share of it; in scRGB, white is paper white over 80 nits and red only red;
+ * an overlay's white is paper white over it; both backends. */
 void testDisplayOutput(void) {
-    uint32_t* frame = artfMalloc(W * H * 4);
+    uint32_t* frame = artfMalloc(W * H * 8); /* (scRGB: two words a pixel) */
     uint32_t* overlay = artfMalloc(W * H * 4);
     for (int i = 0; i < W * H; ++i) overlay[i] = i % W >= W / 2 ? 0xFFFFFFFFu : 0;
     /* what HDR10 should give: red is (.6274, .0691, .0164) of white in Rec. 2020 */
@@ -1228,6 +1236,39 @@ void testDisplayOutput(void) {
             artfSceneFree(s);
             artfRendererFree(r);
         }
+    }
+    /* scRGB: halves, 1 being 80 nits; white is paper white, 203 / 80 */
+    float scrgb[2][7];
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        o.hdr = true;
+        o.output = ARTF_OUTPUT_SCRGB;
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) break;
+        CHECK(artfRendererOutput(r) == ARTF_OUTPUT_SCRGB);
+        ArtfScene* s = artfSceneNew();
+        setCamera(s, 0, 0, 3, 0, 0, 0);
+        artfSceneSetBackground(s, artfVec3(1, 0, 0));
+        const size_t at = (size_t)(H / 2) * W + W / 4, right = (size_t)(H / 2) * W + W * 3 / 4;
+        drawInto(r, s, frame);
+        float* g = scrgb[backend];
+        g[0] = halfValue(frame[at * 2] & 0xFFFFu), g[1] = halfValue(frame[at * 2] >> 16), g[2] = halfValue(frame[at * 2 + 1] & 0xFFFFu);
+        g[3] = halfValue(frame[at * 2 + 1] >> 16);
+        artfSceneSetBackground(s, artfVec3(1, 1, 1));
+        drawInto(r, s, frame);
+        g[4] = halfValue(frame[at * 2 + 1] & 0xFFFFu);
+        const ArtfOverlay over = {overlay, W, H, 0, false, NULL, 0};
+        artfSceneSetBackground(s, artfVec3(1, 0, 0));
+        artfRendererSetOverlay(r, &over);
+        drawInto(r, s, frame);
+        artfRendererSetOverlay(r, NULL);
+        g[5] = halfValue(frame[right * 2] >> 16), g[6] = halfValue(frame[right * 2 + 1] >> 16);
+        printf("%s, scRGB: red %.4f %.4f %.4f alpha %.3f, white %.4f (%.4f), the overlay's white over red: green %.4f alpha %.3f\n", backend ? "GPU" : "CPU", g[0], g[1],
+               g[2], g[3], g[4], 203.0 / 80, g[5], g[6]);
+        CHECK(fabsf(g[0] - 203.f / 80) < .01f && g[1] < .001f && g[2] < .001f && g[3] == 1.f);
+        CHECK(fabsf(g[4] - 203.f / 80) < .01f && fabsf(g[5] - 203.f / 80) < .01f && g[6] == 1.f);
+        artfSceneFree(s);
+        artfRendererFree(r);
     }
     {
         /* without hdr, sRGB all the same */

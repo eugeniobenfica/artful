@@ -35,12 +35,15 @@ struct ArtfRenderer {
 };
 
 /* ArtfRendererOptions.output's numbers: light is divided by inverse's inverse (peak over paper white) before the tone
- * curve, and peak is in PQ's units (nits / 10000). */
+ * curve, and peak is in the output's units (HDR10, PQ's: nits / 10000; scRGB: nits / 80). */
 ARTF_INLINE void artfDisplayNumbers(const ArtfRendererOptions* o, ArtfOutput output, float* inverse, float* peak) {
     const float most = o->peakNits > 0 ? o->peakNits : 1000.f, paper = o->paperWhiteNits > 0 ? o->paperWhiteNits : 203.f;
-    *inverse = output == ARTF_OUTPUT_HDR10 ? paper / artfMaxf(most, paper) : 1.f;
-    *peak = output == ARTF_OUTPUT_HDR10 ? artfMaxf(most, paper) * 1e-4f : 1.f;
+    const bool high = output == ARTF_OUTPUT_HDR10 || output == ARTF_OUTPUT_SCRGB;
+    *inverse = high ? paper / artfMaxf(most, paper) : 1.f;
+    *peak = output == ARTF_OUTPUT_HDR10 ? artfMaxf(most, paper) * 1e-4f : output == ARTF_OUTPUT_SCRGB ? artfMaxf(most, paper) / 80.f : 1.f;
 }
+/* The words of a pixel of a frame made for this output: two in scRGB, else one. */
+ARTF_INLINE int artfOutputWords(ArtfOutput output) { return output == ARTF_OUTPUT_SCRGB ? 2 : 1; }
 
 /* The passes of a frame and what each took, as the CPU's clock sees them: each mark ends the pass it names, which
  * started where the one before ended. */

@@ -1547,7 +1547,7 @@ uint32_t* artfShaderPostFinalFor(size_t* size, bool turns, const ArtfShaderDispl
     SpvId shownSpace = P_MORE(W(frameVec(s, &p->r, F_CULL)), FLOAT(0.f));
     v = gradeCct(s, p, v, shownSpace);
     /* (HDR10: the curve's white at peak over paper white, as post.c's finalLight) */
-    if (kind == ARTF_DISPLAY_HDR10) v = SCALE_V3(v, FLOAT(display->inverse));
+    if (kind == ARTF_DISPLAY_HDR10 || kind == ARTF_DISPLAY_SCRGB) v = SCALE_V3(v, FLOAT(display->inverse));
     /* the curves: ACES's fit, Khronos's neutral, Reinhard's, none */
     SpvId vc[5];
     const float numbers[5] = {2.51f, .03f, 2.43f, .59f, .14f};
