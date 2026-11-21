@@ -43,15 +43,12 @@ jobs:
           ARTFUL_SINGLE_DRAW=1 build/artful-tests
           ARTFUL_FEATURES=+occlusion build/artful-tests
           ARTFUL_FEATURES=-lod,-cones build/artful-tests
-      # (where the tests fall over here and not on MSYS2's lavapipe: the layers of 5.8 on this Mesa, under gdb; and what
-      # this lavapipe offers)
+      # (where the tests fall over here and not on MSYS2's lavapipe: under gdb, with a backtrace)
       - name: Where it fell over
         if: failure()
         run: |
-          vulkaninfo 2>/dev/null | grep -iE "driverInfo|apiVersion|post_depth|sampleRateShading|fragmentStoresAndAtomics" | head -12 || true
-          gdb -batch -ex run -ex bt -ex "info registers rip" -ex 'x/12i $pc-24' --args build/artful-tests --exact layers/layersBehindSolid 2>&1 | grep -v "^\[" | tail -40
-          ARTFUL_NO_POST_DEPTH=1 build/artful-tests --exact layers/layersBehindSolid || echo "fell over without post-depth coverage too"
-          LP_NATIVE_VECTOR_WIDTH=128 build/artful-tests --exact layers/layersBehindSolid || echo "fell over with 128-bit vectors too"
+          vulkaninfo 2>/dev/null | grep -iE "driverInfo|apiVersion" | head -4 || true
+          gdb -batch -ex run -ex bt -ex "info registers rip" --args build/artful-tests 2d/ 2>&1 | grep -vE "^\[(New|Thread)" | tail -40
       # (what FLIP measured of each comparison here, to set thresholds by it: docs/plano-de-correcao.md, 0.4)
       - uses: actions/upload-artifact@v4
         if: always()
