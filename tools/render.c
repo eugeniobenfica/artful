@@ -922,6 +922,11 @@ int main(int argc, char** argv) {
             }
         printf("%u meshes as graphs of clusters in %.1f ms\n", made, artfNowMs() - c0);
     }
+    if (getenv("ARTFUL_TREE_BYTES") && trace.mode != ARTF_TRACE_NONE) {
+        artfSceneTraceSync(s);
+        printf("trees: %zu nodes of two (%.2f MB), %zu of four (%.2f MB), %zu triangles\n", s->trace.nodes.len, (double)s->trace.nodes.len * sizeof(ArtfTraceNode) / 1048576.0,
+               s->trace.wide.len, (double)s->trace.wide.len * sizeof(ArtfTraceWide) / 1048576.0, s->trace.triangles.len);
+    }
     ArtfEmitter emitter = 0;
     if (particles) {
         ArtfEmitterDesc e;

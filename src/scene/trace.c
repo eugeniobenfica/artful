@@ -106,6 +106,225 @@ static void buildNode(NodeList* nodes, uint32_t at, const Box* boxes, uint32_t* 
     buildNode(nodes, children + 1, boxes, order, mid, first + count - mid, depth + 1);
 }
 
+/* ---- reinsertion (Bittner, Hapala and Havran, 2013): after the build, the nodes that cost the most are taken out
+ * and put back where the surface area grows least, which the build's greedy cuts could not see ---- */
+
+typedef struct Re {
+    Box box;
+    uint32_t left, right, parent; /* left UINT32_MAX: a leaf */
+    uint32_t first, count;
+} Re;
+typedef struct ReTree { Re* n; uint32_t root; } ReTree;
+typedef struct ReWay { float induced; uint32_t node; } ReWay;
+
+static Box reUnion(const Box* a, const Box* b) {
+    Box u = *a;
+    boxAdd(&u, b);
+    return u;
+}
+static void reFitUp(ReTree* r, uint32_t at) {
+    for (; at != UINT32_MAX; at = r->n[at].parent) r->n[at].box = reUnion(&r->n[r->n[at].left].box, &r->n[r->n[at].right].box);
+}
+/* The sum of the inner nodes' areas: what a ray pays, as the surface area heuristic has it. */
+static double reCost(const ReTree* r, uint32_t at) {
+    const Re* n = &r->n[at];
+    return n->left == UINT32_MAX ? 0.0 : (double)boxArea(&n->box) + reCost(r, n->left) + reCost(r, n->right);
+}
+static uint32_t reDepth(const ReTree* r, uint32_t at) {
+    const Re* n = &r->n[at];
+    if (n->left == UINT32_MAX) return 1;
+    const uint32_t a = reDepth(r, n->left), b = reDepth(r, n->right);
+    return 1 + (a > b ? a : b);
+}
+/* Where node goes with the least growth: the best sibling, by branch and bound from the root. */
+static uint32_t reBest(const ReTree* r, const Box* b, ReWay* heap) {
+    const float own = boxArea(b);
+    float best = 3e38f;
+    uint32_t bestAt = r->root, size = 0;
+    heap[size++] = (ReWay){0.f, r->root};
+    while (size) {
+        /* (the least induced cost first) */
+        uint32_t pick = 0;
+        for (uint32_t i = 1; i < size; ++i)
+            if (heap[i].induced < heap[pick].induced) pick = i;
+        const ReWay w = heap[pick];
+        heap[pick] = heap[--size];
+        if (w.induced + own >= best) continue;
+        const Box u = reUnion(&r->n[w.node].box, b);
+        const float direct = boxArea(&u), cost = w.induced + direct;
+        if (cost < best) { best = cost; bestAt = w.node; }
+        const Re* n = &r->n[w.node];
+        const float below = cost - boxArea(&n->box);
+        if (n->left != UINT32_MAX && below + own < best && size + 2 < 4096) {
+            heap[size++] = (ReWay){below, n->left};
+            heap[size++] = (ReWay){below, n->right};
+        }
+    }
+    return bestAt;
+}
+static int compareReAreas(const void* a, const void* b) {
+    const float x = ((const float*)a)[0], y = ((const float*)b)[0];
+    if (x != y) return x > y ? -1 : 1;
+    const uint32_t i = ((const uint32_t*)a)[1], j = ((const uint32_t*)b)[1];
+    return i < j ? -1 : i > j;
+}
+static void reEmit(const ReTree* r, uint32_t node, NodeList* out, uint32_t at) {
+    const Re* n = &r->n[node];
+    ArtfTraceNode* o = &out->items[at];
+    memcpy(o->lo, n->box.lo, 12);
+    memcpy(o->hi, n->box.hi, 12);
+    if (n->left == UINT32_MAX) {
+        o->first = n->first;
+        o->count = n->count;
+        return;
+    }
+    const uint32_t children = (uint32_t)out->len;
+    out->len += 2;
+    o = &out->items[at];
+    o->first = children;
+    o->count = 0;
+    reEmit(r, n->left, out, children);
+    reEmit(r, n->right, out, children + 1);
+}
+
+/* The tree from root to the end of nodes, made better where it can be; as it was if that would make it deeper than
+ * the walks' stacks allow. Each pass takes out the largest hundredth of the nodes, two passes. */
+static void reinsert(NodeList* nodes, uint32_t root) {
+    const uint32_t count = (uint32_t)nodes->len - root;
+    if (count < 7) return;
+    ReTree r = {artfMalloc((size_t)count * sizeof(Re)), 0};
+    for (uint32_t i = 0; i < count; ++i) {
+        const ArtfTraceNode* n = &nodes->items[root + i];
+        memcpy(r.n[i].box.lo, n->lo, 12);
+        memcpy(r.n[i].box.hi, n->hi, 12);
+        r.n[i].left = n->count ? UINT32_MAX : n->first - root;
+        r.n[i].right = n->count ? UINT32_MAX : n->first + 1 - root;
+        r.n[i].first = n->first;
+        r.n[i].count = n->count;
+        r.n[i].parent = UINT32_MAX;
+    }
+    for (uint32_t i = 0; i < count; ++i)
+        if (r.n[i].left != UINT32_MAX) r.n[r.n[i].left].parent = r.n[r.n[i].right].parent = i;
+    const double before = reCost(&r, 0);
+    float(*order)[2] = artfMalloc((size_t)count * sizeof *order);
+    ReWay* heap = artfMalloc(4096 * sizeof *heap);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (uint32_t i = 0; i < count; ++i) {
+            order[i][0] = boxArea(&r.n[i].box);
+            memcpy(&order[i][1], &i, 4);
+        }
+        qsort(order, count, sizeof *order, compareReAreas);
+        const uint32_t taken = count / 100 + 1;
+        for (uint32_t k = 0; k < taken; ++k) {
+            uint32_t node;
+            memcpy(&node, &order[k][1], 4);
+            const uint32_t parent = r.n[node].parent;
+            if (parent == UINT32_MAX || r.n[parent].parent == UINT32_MAX) continue; /* (the root and its children stay) */
+            /* out: its sibling takes its parent's place */
+            const uint32_t sibling = r.n[parent].left == node ? r.n[parent].right : r.n[parent].left, grand = r.n[parent].parent;
+            if (r.n[grand].left == parent) r.n[grand].left = sibling;
+            else r.n[grand].right = sibling;
+            r.n[sibling].parent = grand;
+            reFitUp(&r, grand);
+            /* in: beside the best sibling, the freed parent between */
+            const uint32_t to = reBest(&r, &r.n[node].box, heap), above = r.n[to].parent;
+            r.n[parent].left = to;
+            r.n[parent].right = node;
+            r.n[parent].parent = above;
+            r.n[to].parent = r.n[node].parent = parent;
+            if (above == UINT32_MAX) r.root = parent;
+            else if (r.n[above].left == to) r.n[above].left = parent;
+            else r.n[above].right = parent;
+            reFitUp(&r, parent);
+        }
+    }
+    const double after = reCost(&r, r.root);
+    if (after < before && reDepth(&r, r.root) <= MAX_DEPTH) {
+        nodes->len = root + 1;
+        reEmit(&r, r.root, nodes, root);
+    }
+    artfFree(heap);
+    artfFree(order);
+    artfFree(r.n);
+}
+
+/* ---- the trees four ways (ArtfTraceWide) ---- */
+
+/* A node's box, and each child's in 8 bits of it: low rounded down, high up, so that lo + q x scale holds it. */
+static void wideBoxes(const ArtfTrace* t, ArtfTraceWide* w, const uint32_t* from) {
+    Box all;
+    boxEmpty(&all);
+    for (int k = 0; k < 4; ++k) {
+        if (from[k] == UINT32_MAX) continue;
+        const ArtfTraceNode* c = &t->nodes.items[from[k]];
+        Box b;
+        memcpy(b.lo, c->lo, 12);
+        memcpy(b.hi, c->hi, 12);
+        boxAdd(&all, &b);
+    }
+    uint8_t bytes[24];
+    for (int k = 0; k < 4; ++k) {
+        bytes[6 * k] = bytes[6 * k + 1] = bytes[6 * k + 2] = 255; /* (none: a box that holds nothing) */
+        bytes[6 * k + 3] = bytes[6 * k + 4] = bytes[6 * k + 5] = 0;
+    }
+    for (int a = 0; a < 3; ++a) {
+        const float extent = all.hi[a] - all.lo[a];
+        /* (a hair wider than 255 steps, so the last holds the high side as floats round) */
+        const float scale = extent > 0 ? extent * (1.f / 254.f) : 1e-30f;
+        w->lo[a] = all.lo[a];
+        w->scale[a] = scale;
+        for (int k = 0; k < 4; ++k) {
+            if (from[k] == UINT32_MAX) continue;
+            const ArtfTraceNode* c = &t->nodes.items[from[k]];
+            int lo = artfClampi((int)floorf((c->lo[a] - all.lo[a]) / scale), 0, 255), hi = artfClampi((int)ceilf((c->hi[a] - all.lo[a]) / scale), 0, 255);
+            while (lo > 0 && all.lo[a] + (float)lo * scale > c->lo[a]) --lo;
+            while (hi < 255 && all.lo[a] + (float)hi * scale < c->hi[a]) ++hi;
+            bytes[6 * k + a] = (uint8_t)lo;
+            bytes[6 * k + 3 + a] = (uint8_t)hi;
+        }
+    }
+    memcpy(w->boxes, bytes, 24);
+}
+
+/* A node of nodes as a child: a leaf's triangles, or a node four ways made from it (and from its children's). */
+static uint32_t wideChild(ArtfTrace* t, uint32_t node);
+
+/* A node four ways from a node of nodes: its children, each of whose own children takes its place where it has some
+ * (so two levels at once, by the tree's shape alone: refitting keeps it). */
+static uint32_t wideNode(ArtfTrace* t, uint32_t node) {
+    const ArtfTraceNode* n = &t->nodes.items[node];
+    uint32_t from[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX}, count = 0;
+    if (n->count) from[count++] = node;
+    else
+        for (uint32_t c = 0; c < 2; ++c) {
+            const ArtfTraceNode* child = &t->nodes.items[n->first + c];
+            if (child->count) from[count++] = n->first + c;
+            else { from[count++] = child->first; from[count++] = child->first + 1; }
+        }
+    const uint32_t at = (uint32_t)t->wide.len;
+    ArtfTraceWide w;
+    memset(&w, 0, sizeof w);
+    artfVecPush(&t->wide, w);
+    for (int k = 0; k < 4; ++k) artfVecPush(&t->wideFrom, from[k]);
+    uint32_t refs[4];
+    for (int k = 0; k < 4; ++k) refs[k] = from[k] == UINT32_MAX ? ARTF_WIDE_NONE : wideChild(t, from[k]);
+    ArtfTraceWide* made = &t->wide.items[at];
+    made->child0 = refs[0];
+    made->child1 = refs[1];
+    made->child2 = refs[2];
+    made->child3 = refs[3];
+    wideBoxes(t, made, from);
+    return at;
+}
+
+static uint32_t wideChild(ArtfTrace* t, uint32_t node) {
+    const ArtfTraceNode* n = &t->nodes.items[node];
+    if (n->count) return ARTF_WIDE_LEAF | (n->count - 1) << 28 | n->first;
+    return wideNode(t, node);
+}
+
+bool artfTraceReinsert = true;
+
 /* A mesh's vertices, triangles and tree go at the end of the scene's. Its levels of detail have none: rays
  * do not care for distance (an instance drawing a level of what bends is met as its copy of the whole). */
 static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
@@ -130,11 +349,12 @@ static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
         order[i] = i;
     }
     const uint32_t root = (uint32_t)t->nodes.len, firstNode = root;
-    ArtfTraceRange range = {root, 0, firstVertex, firstTriangle, triangles, m->deformVersion};
+    ArtfTraceRange range = {.firstNode = root, .firstVertex = firstVertex, .firstTriangle = firstTriangle, .triangleCount = triangles, .deformVersion = m->deformVersion};
     artfVecReserve(&t->nodes, root + 1);
     t->nodes.len = root + 1;
     NodeList list = {t->nodes.items, t->nodes.len, t->nodes.cap};
     buildNode(&list, root, boxes, order, 0, triangles, 0);
+    if (artfTraceReinsert) reinsert(&list, root);
     t->nodes.items = list.items;
     t->nodes.len = list.len;
     t->nodes.cap = list.cap;
@@ -149,6 +369,9 @@ static void addMesh(ArtfTrace* t, const ArtfMeshData* m) {
     }
     artfVecPush(&t->roots, root);
     range.nodeEnd = (uint32_t)t->nodes.len;
+    range.firstWide = (uint32_t)t->wide.len;
+    artfVecPush(&t->wideRoots, wideNode(t, root));
+    range.wideEnd = (uint32_t)t->wide.len;
     artfVecPush(&t->ranges, range);
     artfFree(boxes);
     artfFree(order);
@@ -190,6 +413,8 @@ static void refit(ArtfTrace* t, const ArtfMeshData* m, ArtfTraceRange* range) {
         memcpy(n->lo, b.lo, sizeof n->lo);
         memcpy(n->hi, b.hi, sizeof n->hi);
     }
+    /* (four ways: the same shape, its boxes from the nodes' again) */
+    for (uint32_t i = range->firstWide; i < range->wideEnd; ++i) wideBoxes(t, &t->wide.items[i], &t->wideFrom.items[(size_t)i * 4]);
     range->deformVersion = m->deformVersion;
 }
 
@@ -231,6 +456,7 @@ static void buildTop(ArtfScene* s) {
         /* (what bends light must be met on the way out, too) */
         o.twoSided = (s->materials.items[d->material].flags & ARTF_MATERIAL_DOUBLE || s->materials.items[d->material].ior > 0 ? 1u : 0u) | t->ranges.items[mesh].firstTriangle << 1;
         const ArtfTraceNode* root = &t->nodes.items[o.root];
+        o.root = t->wideRoots.items[mesh]; /* (rays walk the tree four ways) */
         Box b;
         boxEmpty(&b);
         for (int corner = 0; corner < 8; ++corner) {
@@ -317,12 +543,14 @@ static void traceSync(ArtfScene* s, bool forPick) {
     if (t->meshRemovals != s->meshRemovals) {
         t->meshRemovals = s->meshRemovals;
         t->nodes.len = t->triangles.len = t->vertices.len = t->roots.len = t->ranges.len = 0;
+        t->wide.len = t->wideFrom.len = t->wideRoots.len = 0;
     }
     while (t->roots.len < s->meshes.len) {
         const ArtfMeshData* m = &s->meshes.items[t->roots.len];
         if (m->isLod || m->removed) {
             const ArtfTraceRange none = {0, 0, 0, 0};
             artfVecPush(&t->roots, 0);
+            artfVecPush(&t->wideRoots, 0);
             artfVecPush(&t->ranges, none);
         } else {
             addMesh(t, m);
@@ -376,6 +604,9 @@ void artfSceneTraceSync(ArtfScene* s) { traceSync(s, false); }
 
 void artfTraceFini(ArtfTrace* t) {
     artfVecFree(&t->nodes);
+    artfVecFree(&t->wide);
+    artfVecFree(&t->wideFrom);
+    artfVecFree(&t->wideRoots);
     artfVecFree(&t->triangles);
     artfVecFree(&t->vertices);
     artfVecFree(&t->roots);
@@ -465,7 +696,8 @@ static inline void inverseOf(const float* d, float* inv) {
 static void hitMesh(const ArtfTrace* t, const ArtfTraceInstance* inst, uint32_t index, const float* o, const float* d, bool bothSides, Hit* best) {
     float inv[3];
     inverseOf(d, inv);
-    uint32_t stack[ARTF_TRACE_STACK], depth = 0, at = inst->root;
+    /* (the CPU walks the tree of two: ArtfTraceInstance.root is the GPU's, four ways; the same nearest surface) */
+    uint32_t stack[ARTF_TRACE_STACK], depth = 0, at = t->roots.items[t->instanceMeshes.items[index]];
     for (;;) {
         const ArtfTraceNode* n = &t->nodes.items[at];
         if (n->count) {

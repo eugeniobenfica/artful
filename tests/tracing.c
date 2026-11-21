@@ -1655,3 +1655,66 @@ void testProbeCascades(void) {
         artfFree(probes[k]);
     }
 }
+
+/* The sum of a mesh tree's inner nodes' areas over its root's: what a ray pays, as the surface area heuristic says. */
+static double treeCost(const ArtfTrace* t, uint32_t mesh) {
+    const ArtfTraceRange* r = &t->ranges.items[mesh];
+    const ArtfTraceNode* root = &t->nodes.items[r->firstNode];
+    double rootArea = 0, sum = 0;
+    for (uint32_t i = r->firstNode; i < r->nodeEnd; ++i) {
+        const ArtfTraceNode* n = &t->nodes.items[i];
+        const double dx = n->hi[0] - n->lo[0], dy = n->hi[1] - n->lo[1], dz = n->hi[2] - n->lo[2], area = dx * dy + dy * dz + dz * dx;
+        if (n == root) rootArea = area;
+        if (!n->count) sum += area;
+    }
+    return sum / rootArea;
+}
+
+/* Phase 5.6: the trees rays walk. Reinsertion makes a sphere's tree cheaper by the surface area heuristic and leaves
+ * the picture as it was; the tree four ways takes less memory, and each child's box in 8 bits holds its node's. */
+void testTreesFourWays(void) {
+    double cost[2];
+    uint32_t* frames[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    size_t twoBytes = 0, fourBytes = 0;
+    for (int re = 0; re < 2; ++re) {
+        artfTraceReinsert = re != 0;
+        ArtfScene* s = plainScene();
+        artfSceneSetSun(s, artfVec3(-.4f, -1, -.3f), artfVec3(2, 2, 2));
+        const ArtfMesh ball = artfSceneAddSphere(s, 1, 96, 192);
+        addAt(s, ball, whiteMaterial(s), 0, 0, 0, 1);
+        addAt(s, artfSceneAddCube(s, 1), whiteMaterial(s), 0, -1.5f, 0, 4);
+        const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 4, 2, false};
+        artfSceneSetTrace(s, &paths);
+        artfSceneTraceSync(s);
+        const ArtfTrace* t = &s->trace;
+        const uint32_t mesh = artfMeshIndexOf(s, ball);
+        cost[re] = treeCost(t, mesh);
+        twoBytes = t->nodes.len * sizeof(ArtfTraceNode);
+        fourBytes = t->wide.len * sizeof(ArtfTraceWide);
+        /* each child's box in 8 bits holds the node it stands for */
+        bool holds = true;
+        for (size_t i = 0; i < t->wide.len; ++i) {
+            const ArtfTraceWide* w = &t->wide.items[i];
+            for (int k = 0; k < 4; ++k) {
+                const uint32_t from = t->wideFrom.items[i * 4 + (size_t)k];
+                if (from == UINT32_MAX) continue;
+                const ArtfTraceNode* n = &t->nodes.items[from];
+                for (int a = 0; a < 3; ++a)
+                    holds = holds && w->lo[a] + (float)artfWideByte(w, k, a) * w->scale[a] <= n->lo[a] && w->lo[a] + (float)artfWideByte(w, k, 3 + a) * w->scale[a] >= n->hi[a];
+            }
+        }
+        CHECK(holds);
+        ArtfRendererOptions o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        drawFrames(r, s, 4, frames[re]);
+        artfRendererFree(r);
+        artfSceneFree(s);
+    }
+    artfTraceReinsert = true;
+    const double apart = differentShare(frames[0], frames[1], 8);
+    printf("a sphere's tree: by the surface area heuristic %.2f, %.2f after reinsertion; %.0f KB in nodes of two, %.0f KB of four; the picture %.3f%% of pixels apart\n", cost[0], cost[1],
+           (double)twoBytes / 1024.0, (double)fourBytes / 1024.0, apart * 100);
+    CHECK(cost[1] < cost[0] && fourBytes * 10 < twoBytes * 7 && apart < .001);
+    artfFree(frames[0]);
+    artfFree(frames[1]);
+}

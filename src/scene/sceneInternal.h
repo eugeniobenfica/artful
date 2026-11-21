@@ -957,6 +957,27 @@ typedef struct ArtfTraceNode {
     uint32_t count;
 } ArtfTraceNode;
 
+/* A node of a mesh's tree as rays walk it (phase 5.6): four ways, from two levels of the tree above (ArtfTraceNode's,
+ * which stays for refitting), so a quarter of the nodes, each twice as large. Its box, and its children's boxes in 8
+ * bits of it (low rounded down, high rounded up: lo + q x scale holds each); each child is ARTF_WIDE_NONE, an inner
+ * node's index, or a leaf: ARTF_WIDE_LEAF | (its count - 1) << 28 | its first triangle. Four vec4s on the GPU: lo and
+ * child 0; scale and child 1; the boxes' first 16 bytes; their last 8, and children 2 and 3. */
+#define ARTF_WIDE_NONE 0xFFFFFFFFu
+#define ARTF_WIDE_LEAF 0x80000000u
+#define ARTF_TRACE_WIDE_STACK 64 /* what a walk of these keeps: three of four children a level, twenty levels deep */
+typedef struct ArtfTraceWide {
+    float lo[3];
+    uint32_t child0;
+    float scale[3];
+    uint32_t child1;
+    uint32_t boxes[6]; /* bytes: child k's low x, y, z and high x, y, z from 6k */
+    uint32_t child2, child3;
+} ArtfTraceWide;
+ARTF_INLINE uint32_t artfWideChild(const ArtfTraceWide* w, int k) { return k == 0 ? w->child0 : k == 1 ? w->child1 : k == 2 ? w->child2 : w->child3; }
+ARTF_INLINE uint32_t artfWideByte(const ArtfTraceWide* w, int k, int j) { const int at = 6 * k + j; return w->boxes[at >> 2] >> ((at & 3) * 8) & 255u; }
+
+extern bool artfTraceReinsert; /* trace.c: reinsertion after a mesh's tree is built (tests turn it off to compare) */
+
 typedef struct ArtfTraceVertex {
     float p[3], u;
     float n[3], v;
@@ -997,6 +1018,7 @@ uint32_t artfNormalPack(const float* n);
 
 typedef struct ArtfTraceRange {
     uint32_t firstNode, nodeEnd, firstVertex;
+    uint32_t firstWide, wideEnd;        /* its nodes four ways */
     uint32_t firstTriangle, triangleCount; /* its triangles, one after the other: for the ray tracing hardware */
     uint64_t deformVersion;
     bool moved;         /* its vertices have somewhere they were */
@@ -1009,6 +1031,9 @@ typedef struct ArtfTrace {
     ARTF_VEC(ArtfTraceTriangle) triangles;
     ARTF_VEC(ArtfTraceVertex) vertices;
     ARTF_VEC(uint32_t) roots;               /* of each mesh */
+    ARTF_VEC(ArtfTraceWide) wide;           /* the trees rays walk: of every mesh, four ways (ArtfTraceInstance.root's) */
+    ARTF_VEC(uint32_t) wideFrom;            /* of each of those, the node of nodes each child is (UINT32_MAX: none) */
+    ARTF_VEC(uint32_t) wideRoots;           /* of each mesh */
     ARTF_VEC(ArtfTraceNode) top;            /* over the instances */
     ARTF_VEC(ArtfTraceInstance) instances;
     ARTF_VEC(uint32_t) instanceMeshes;      /* of each of those, its mesh, */

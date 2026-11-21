@@ -674,6 +674,8 @@ bool createInstance(Vulkan* v);
 bool chooseDevice(Vulkan* v, PhysicalDeviceProperties* chosen);
 bool chooseFormat(Vulkan* v);
 void lose(Vulkan* v, VkResult result);
+#define ARTF_VULKAN_LOSSES_MOST 3
+extern uint32_t artfVulkanDevicesLost;
 bool createDevice(Vulkan* v);
 bool syncEnvironment(Vulkan* v, const ArtfScene* scene);
 bool rtBufferNew(Vulkan* v, GpuBuffer* b, VkDeviceSize size, VkFlags usage, bool written);

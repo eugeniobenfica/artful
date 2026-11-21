@@ -3097,21 +3097,25 @@ static void popNode(const Tracer* t, Loop* l, SpvId stack, SpvId depth, SpvId at
 
 static SpvId vertexVec(const Tracer* t, SpvId index, uint32_t row) { Spv* s = t->s; return bufferVec(s, &t->r, t->vertices, ADD_U(MUL_U(index, UINT(3)), UINT(row))); }
 
-/* As hitMesh. */
+/* As hitMesh: the tree four ways (ArtfTraceWide), each node's children on the stack, the farthest first. */
 static void hitMesh(const Tracer* t, SpvId instance, SpvId root, SpvId twoSided, SpvId o, SpvId d) {
     Spv* s = t->s;
     SpvId inv = inverseOf(s, d);
-    spvStore(s, t->depth2, UINT(0));
-    spvStore(s, t->at2, root);
+    spvStore(s, stackAt(t, t->stack2, UINT(0)), root);
+    spvStore(s, t->depth2, UINT(1));
+    /* (at most so many nodes and leaves: a tree that is not one, by a mistake, ends the walk, not the device) */
+    spvStore(s, t->at2, UINT(0));
     Loop nodes;
     loopOpen(s, &nodes);
-    loopWhile(s, &nodes, spvConstBool(s, true));
-    SpvId base = MUL_U(LOAD_U(t->at2), UINT(2));
-    SpvId first = AS_UINT(W(bufferVec(s, &t->r, t->nodes, base))), count = AS_UINT(W(bufferVec(s, &t->r, t->nodes, ADD_U(base, UINT(1)))));
-    spvStore(s, t->pop2, UINT(1));
-    SpvId isLeaf = NOT_EQ(count, UINT(0)), merge;
+    loopWhile(s, &nodes, BOTH(NOT_EQ(LOAD_U(t->depth2), UINT(0)), LESS_U(LOAD_U(t->at2), UINT(1u << 16))));
+    spvStore(s, t->at2, ADD_U(LOAD_U(t->at2), UINT(1)));
+    SpvId top = SUB_U(LOAD_U(t->depth2), UINT(1));
+    spvStore(s, t->depth2, top);
+    SpvId ref = LOAD_U(stackAt(t, t->stack2, top));
+    SpvId isLeaf = NOT_EQ(AND_U(ref, UINT(ARTF_WIDE_LEAF)), UINT(0)), merge;
     spvIfBegin(s, isLeaf, &merge);
     {
+        SpvId first = AND_U(ref, UINT(0x0FFFFFFFu)), count = ADD_U(AND_U(SHR_U(ref, 28), UINT(7)), UINT(1));
         spvStore(s, t->leaf2, first);
         Loop tris;
         SpvId end = ADD_U(first, count);
@@ -3143,9 +3147,42 @@ static void hitMesh(const Tracer* t, SpvId instance, SpvId root, SpvId twoSided,
     }
     spvIfEnd(s, merge);
     spvIfBegin(s, NOT(isLeaf), &merge);
-    visitChildren(t, t->nodes, first, o, inv, t->stack2, t->depth2, t->at2, t->pop2);
+    {
+        SpvId base = MUL_U(ref, UINT(4));
+        SpvId r0 = bufferVec(s, &t->r, t->nodes, base), r1 = bufferVec(s, &t->r, t->nodes, ADD_U(base, UINT(1)));
+        SpvId r2 = bufferVec(s, &t->r, t->nodes, ADD_U(base, UINT(2))), r3 = bufferVec(s, &t->r, t->nodes, ADD_U(base, UINT(3)));
+        SpvId lo = spvShuffle3(s, r0), scale = spvShuffle3(s, r1);
+        const SpvId words[6] = {AS_UINT(X(r2)), AS_UINT(Y(r2)), AS_UINT(Z(r2)), AS_UINT(W(r2)), AS_UINT(X(r3)), AS_UINT(Y(r3))};
+        SpvId refs[4] = {AS_UINT(W(r0)), AS_UINT(W(r1)), AS_UINT(Z(r3)), AS_UINT(W(r3))}, enter[4];
+        SpvId limit = LOAD_F(t->bestT);
+        for (int k = 0; k < 4; ++k) {
+            SpvId q[6];
+            for (int j = 0; j < 6; ++j) {
+                const int at = 6 * k + j;
+                q[j] = TO_F(AND_U(SHR_U(words[at >> 2], (uint32_t)((at & 3) * 8)), UINT(255)));
+            }
+            SpvId clo = ADD_V3(lo, MUL_V3(vec3Of(s, q[0], q[1], q[2]), scale)), chi = ADD_V3(lo, MUL_V3(vec3Of(s, q[3], q[4], q[5]), scale));
+            SpvId e = boxEnter(s, vec4Of(s, clo, FLOAT(0.f)), vec4Of(s, chi, FLOAT(0.f)), o, inv, limit);
+            enter[k] = PICK_F(IS_EQ(refs[k], UINT(ARTF_WIDE_NONE)), FLOAT(FAR_AWAY), e);
+        }
+        /* (the farthest first, as trace.c's hitMesh sorts them) */
+        static const int pairs[5][2] = {{0, 1}, {2, 3}, {0, 2}, {1, 3}, {1, 2}};
+        for (int p = 0; p < 5; ++p) {
+            const int x = pairs[p][0], y = pairs[p][1];
+            SpvId swap = LESS_F(enter[x], enter[y]);
+            SpvId ex = PICK_F(swap, enter[y], enter[x]), ey = PICK_F(swap, enter[x], enter[y]);
+            SpvId rx = spvSelect(s, s->uintType, swap, refs[y], refs[x]), ry = spvSelect(s, s->uintType, swap, refs[x], refs[y]);
+            enter[x] = ex; enter[y] = ey; refs[x] = rx; refs[y] = ry;
+        }
+        for (int k = 0; k < 4; ++k) {
+            SpvId depth = LOAD_U(t->depth2), pushed;
+            spvIfBegin(s, BOTH(LESS_F(enter[k], FLOAT(FAR_AWAY)), LESS_U(depth, UINT(ARTF_TRACE_WIDE_STACK))), &pushed);
+            spvStore(s, stackAt(t, t->stack2, depth), refs[k]);
+            spvStore(s, t->depth2, ADD_U(depth, UINT(1)));
+            spvIfEnd(s, pushed);
+        }
+    }
     spvIfEnd(s, merge);
-    popNode(t, &nodes, t->stack2, t->depth2, t->at2, t->pop2);
     loopClose(s, &nodes);
 }
 
@@ -3736,7 +3773,7 @@ static void tracerVariables(Tracer* t) {
     Spv* s = t->s;
     SpvId ptrStack = spvTypePointer(s, SPV_STORAGE_Function, spvTypeArray(s, s->uintType, ARTF_TRACE_STACK, 0)), ptrUint = t->ptrFnUint;
     SpvId ptrFloat = spvTypePointer(s, SPV_STORAGE_Function, s->floatType), ptrVec3 = spvTypePointer(s, SPV_STORAGE_Function, s->vec3);
-    t->stack = VAR(ptrStack); t->stack2 = VAR(ptrStack);
+    t->stack = VAR(ptrStack); t->stack2 = VAR(spvTypePointer(s, SPV_STORAGE_Function, spvTypeArray(s, s->uintType, ARTF_TRACE_WIDE_STACK, 0)));
     t->depth = VAR(ptrUint); t->at = VAR(ptrUint); t->pop = VAR(ptrUint); t->leaf = VAR(ptrUint);
     t->depth2 = VAR(ptrUint); t->at2 = VAR(ptrUint); t->pop2 = VAR(ptrUint); t->leaf2 = VAR(ptrUint);
     t->bestT = VAR(ptrFloat); t->bestU = VAR(ptrFloat); t->bestV = VAR(ptrFloat);
@@ -3859,7 +3896,7 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     t->ptrFnUint = ptrUint;
 
     SpvId main = spvBeginMain(s);
-    t->stack = VAR(ptrStack); t->stack2 = VAR(ptrStack);
+    t->stack = VAR(ptrStack); t->stack2 = VAR(spvTypePointer(s, SPV_STORAGE_Function, spvTypeArray(s, s->uintType, ARTF_TRACE_WIDE_STACK, 0)));
     t->depth = VAR(ptrUint); t->at = VAR(ptrUint); t->pop = VAR(ptrUint); t->leaf = VAR(ptrUint);
     t->depth2 = VAR(ptrUint); t->at2 = VAR(ptrUint); t->pop2 = VAR(ptrUint); t->leaf2 = VAR(ptrUint);
     t->bestT = VAR(ptrFloat); t->bestU = VAR(ptrFloat); t->bestV = VAR(ptrFloat);

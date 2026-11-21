@@ -8,6 +8,7 @@
 #include "tests.h"
 #ifdef ARTFUL_VULKAN
 #include "vulkan/spirv.h"
+extern uint32_t artfVulkanDevicesLost; /* (vulkan.c: real device losses; past 3 the GPU is left alone) */
 extern int metalFailures;
 void writeMetal(const IrModule* m);
 #endif
@@ -114,6 +115,9 @@ int main(int argc, char** argv) {
         words = argv + 1;
     }
 #ifdef ARTFUL_VULKAN
+    /* (a shader's mistake reads 0 past a buffer, not a fault that takes the device and the screen down; and after a few
+     * devices lost, the GPU is left alone for the rest of the run: artfVulkanDevicesLost) */
+    _putenv("ARTFUL_ROBUST=1");
     /* (a feature asked for is drawn on the next frame, as each test expects; testShadersAhead checks the other way) */
     artfVulkanShadersWait = true;
     artfSpvCheck = true; /* (every shader built is checked as an IR too: testShaderIr) */
@@ -136,6 +140,7 @@ int main(int argc, char** argv) {
     RUN("core/occlusion/software", testOcclusion(ARTF_BACKEND_SOFTWARE));
     RUN("core/occlusionUnderOverlay", testOcclusionUnderOverlay());
     RUN("core/occlusion/vulkan", testOcclusion(ARTF_BACKEND_VULKAN));
+    RUN("backends/gpuLeftAlone", testGpuLeftAlone());
     RUN("backends/vulkan", testVulkan());
     RUN("layers/colorData", testColorData());
     RUN("layers/layers/software", testLayers(ARTF_BACKEND_SOFTWARE));
@@ -153,6 +158,7 @@ int main(int argc, char** argv) {
     RUN("tracing/trace/software", testTrace(ARTF_BACKEND_SOFTWARE));
     RUN("tracing/trace/vulkan", testTrace(ARTF_BACKEND_VULKAN));
     RUN("tracing/traceBothBackends", testTraceBothBackends());
+    RUN("tracing/treesFourWays", testTreesFourWays());
     RUN("tracing/environmentAimed/software", testEnvironmentAimed(ARTF_BACKEND_SOFTWARE));
     RUN("tracing/environmentAimed/vulkan", testEnvironmentAimed(ARTF_BACKEND_VULKAN));
     RUN("tracing/metalFurnace/software", testMetalFurnace(ARTF_BACKEND_SOFTWARE));
@@ -329,6 +335,10 @@ int main(int argc, char** argv) {
 #endif
     flipSummary();
     if (skippedTests) printf("skipped, for what is not here:\n%s\n", skippedNames);
+#ifdef ARTFUL_VULKAN
+    if (artfVulkanDevicesLost)
+        printf("THE GPU WAS LOST %u TIMES%s\n", artfVulkanDevicesLost, artfVulkanDevicesLost >= 3 ? ": what came after ran without it" : "");
+#endif
     printf("%d checks, %d failures, %d skipped\n", checks, failures, skippedTests);
     if (failures) return 1;
     return exact && skippedTests ? 77 : 0;

@@ -673,7 +673,7 @@ static bool syncTrace(Metal* v, ArtfScene* scene) {
     const bool otherScene = v->traceScene != scene->id;
 #define UP(buffer, binding, list, count) do { const size_t bytes = (count) * sizeof *(list); if (!bufferRoom(v, buffer, bytes, binding)) return false; memcpy((buffer)->mapped, list, bytes); } while (0)
     if (otherScene || v->traceMeshVersion != t->meshVersion) {
-        UP(&v->traceNodes, 17, t->nodes.items, t->nodes.len);
+        UP(&v->traceNodes, 17, t->wide.items, t->wide.len);
         UP(&v->traceTriangles, 18, t->triangles.items, t->triangles.len);
         UP(&v->traceVertices, 19, t->vertices.items, t->vertices.len);
         v->traceMeshVersion = t->meshVersion;

@@ -4376,8 +4376,14 @@ bool chooseFormat(Vulkan* v) {
 /* The device is lost (result: what said so): nothing more is drawn. Where VK_EXT_device_fault is on, the driver is
  * asked why, and what it says goes to the log and to ARTF_EVENT_DEVICE_LOST: its words, each place on the GPU that was
  * at fault (read, written, run) and the vendor's codes. */
+/* Devices the driver said were lost in this process (not those a test made up): past ARTF_VULKAN_LOSSES_MOST, no more
+ * renderers on the GPU (artfVulkanNew), so that what loses it each time does not reset the driver again and again:
+ * a few resets in a row can leave Windows unable to bring the screen back. ARTFUL_KEEP_GPU: no such limit. */
+uint32_t artfVulkanDevicesLost = 0;
+
 void lose(Vulkan* v, VkResult result) {
     v->lost = true;
+    if (result == -4 /* VK_ERROR_DEVICE_LOST */) ++artfVulkanDevicesLost;
     if (result != -4 /* VK_ERROR_DEVICE_LOST */ || !v->deviceFault || !v->vkGetDeviceFaultInfoEXT || v->base.lostWhy[0]) return;
     FaultCounts counts = {ST_FAULT_COUNTS, NULL, 0, 0, 0};
     if (v->vkGetDeviceFaultInfoEXT(v->device, &counts, NULL) < 0) return;
@@ -4420,6 +4426,9 @@ bool createDevice(Vulkan* v) {
     features.sType = ST_PHYSICAL_DEVICE_FEATURES2;
     features.pNext = &f12;
     features.features.multiDrawIndirect = v->multiDraw;
+    /* (ARTFUL_ROBUST, as the tests set it: a read past a buffer gives 0, not a fault, so a shader's mistake does not
+     * take the device down) */
+    features.features.robustBufferAccess = getenv("ARTFUL_ROBUST") != NULL;
     features.features.textureCompressionETC2 = v->takesEtc;
     features.features.textureCompressionASTC_LDR = v->takesAstc;
     features.features.textureCompressionBC = v->takesBc;
@@ -4462,6 +4471,10 @@ bool createDevice(Vulkan* v) {
 }
 
 ArtfRenderer* artfVulkanNew(const ArtfRendererOptions* o) {
+    if (artfVulkanDevicesLost >= ARTF_VULKAN_LOSSES_MOST && !getenv("ARTFUL_KEEP_GPU")) {
+        artfLog("artful: the GPU was lost %u times in this process: no renderer on it again (ARTFUL_KEEP_GPU: go on)", artfVulkanDevicesLost);
+        return NULL;
+    }
     Vulkan* v = ARTF_NEW(Vulkan);
     v->base.vt = &vkTable;
     v->base.backend = ARTF_BACKEND_VULKAN;

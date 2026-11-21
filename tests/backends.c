@@ -734,3 +734,25 @@ void testFramePasses(void) {
         artfRendererFree(r);
     }
 }
+
+#ifdef ARTFUL_VULKAN
+extern uint32_t artfVulkanDevicesLost;
+#endif
+/* After a few devices the driver lost, no renderer is made on the GPU again in the process: Vulkan by name gives none,
+ * and the automatic choice the CPU. (Without making the GPU lose anything: the count is set.) */
+void testGpuLeftAlone(void) {
+#ifdef ARTFUL_VULKAN
+    const uint32_t was = artfVulkanDevicesLost;
+    artfVulkanDevicesLost = 3;
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* r = artfRendererNew(&o);
+    CHECK(!r);
+    o.backend = ARTF_BACKEND_AUTO;
+    r = artfRendererNew(&o);
+    CHECK(r && artfRendererBackend(r) == ARTF_BACKEND_SOFTWARE);
+    artfRendererFree(r);
+    artfVulkanDevicesLost = was;
+#else
+    missing("no Vulkan in this build");
+#endif
+}

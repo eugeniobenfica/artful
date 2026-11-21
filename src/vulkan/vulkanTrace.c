@@ -218,7 +218,7 @@ uint64_t artfVulkanBottomLevels[2];
 /* The trees' lengths, as they are on the GPU: when they are the same, only poses changed them. */
 bool traceLayoutSame(const Vulkan* v, const ArtfScene* scene) {
     const ArtfTrace* t = &scene->trace;
-    return v->traceUp && v->traceScene == scene->id && v->traceRemovals == t->meshRemovals && v->traceLengths[0] == t->nodes.len && v->traceLengths[1] == t->triangles.len &&
+    return v->traceUp && v->traceScene == scene->id && v->traceRemovals == t->meshRemovals && v->traceLengths[0] == t->wide.len && v->traceLengths[1] == t->triangles.len &&
            v->traceLengths[2] == t->vertices.len && v->traceLengths[3] == t->ranges.len;
 }
 
@@ -236,8 +236,8 @@ bool traceMovedUp(Vulkan* v, Slot* s, const ArtfScene* scene) {
         if (up->deform == r->deformVersion && up->moved == r->moved) continue;
         up->deform = r->deformVersion;
         up->moved = r->moved;
-        if (r->nodeEnd > r->firstNode) {
-            const BufferCopy n = {bytes, (VkDeviceSize)r->firstNode * sizeof(ArtfTraceNode), (VkDeviceSize)(r->nodeEnd - r->firstNode) * sizeof(ArtfTraceNode)};
+        if (r->wideEnd > r->firstWide) {
+            const BufferCopy n = {bytes, (VkDeviceSize)r->firstWide * sizeof(ArtfTraceWide), (VkDeviceSize)(r->wideEnd - r->firstWide) * sizeof(ArtfTraceWide)};
             artfVecPush(&v->traceCopies[0], n);
             bytes += n.size;
         }
@@ -256,7 +256,7 @@ bool traceMovedUp(Vulkan* v, Slot* s, const ArtfScene* scene) {
         bufferFree(v, &s->traceStaging);
         if (!bufferNew(v, &s->traceStaging, bytes + bytes / 2, BUFFER_TRANSFER_SRC, true)) return false;
     }
-    const char* from[2] = {(const char*)t->nodes.items, (const char*)t->vertices.items};
+    const char* from[2] = {(const char*)t->wide.items, (const char*)t->vertices.items};
     for (int k = 0; k < 2; ++k)
         for (size_t i = 0; i < v->traceCopies[k].len; ++i) {
             const BufferCopy* b = &v->traceCopies[k].items[i];
@@ -306,7 +306,11 @@ bool slotMeshSync(Vulkan* v, Slot* s, VkCommandBuffer c, const ArtfScene* scene,
         for (uint32_t m = 0; m < v->rtBottomCount; ++m) {
             RtBottom* b = &v->rtBottoms[m];
             const ArtfTraceRange* r = m < meshes ? &t->ranges.items[m] : NULL;
-            if (!r || !r->triangleCount || m >= scene->meshes.len) {
+            /* (a range past the arrays would have the device read what is not there: it is not built) */
+            const bool within = r && m < scene->meshes.len && (uint64_t)r->firstTriangle + r->triangleCount <= t->triangles.len &&
+                                (uint64_t)r->firstVertex + scene->meshes.items[m].vertexCount <= t->vertices.len;
+            if (r && r->triangleCount && !within) artfLog("artful: mesh %u's triangles are not where tracing says: not traced by the hardware", m);
+            if (!r || !r->triangleCount || !within) {
                 if (b->structure) {
                     rtRelease(v, b);
                     released = true;
@@ -539,12 +543,12 @@ bool traceBuffersSync(Vulkan* v, const ArtfScene* scene) {
     const ArtfTrace* t = &scene->trace;
     if ((v->traceScene != scene->id || v->traceMeshVersion != t->meshVersion) && !traceLayoutSame(v, scene)) {
         v->vkDeviceWaitIdle(v->device);
-        if (!traceBuffer(v, &v->traceNodes, 17, t->nodes.items, t->nodes.len * sizeof *t->nodes.items, false)) return false;
+        if (!traceBuffer(v, &v->traceNodes, 17, t->wide.items, t->wide.len * sizeof *t->wide.items, false)) return false;
         if (!traceBuffer(v, &v->traceTriangles, 18, t->triangles.items, t->triangles.len * sizeof *t->triangles.items, false)) return false;
         if (!traceBuffer(v, &v->traceVertices, 19, t->vertices.items, t->vertices.len * sizeof *t->vertices.items, v->rayQuery)) return false;
         v->traceMeshVersion = t->meshVersion;
         v->traceRemovals = t->meshRemovals;
-        v->traceLengths[0] = t->nodes.len;
+        v->traceLengths[0] = t->wide.len;
         v->traceLengths[1] = t->triangles.len;
         v->traceLengths[2] = t->vertices.len;
         v->traceLengths[3] = t->ranges.len;
