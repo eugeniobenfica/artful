@@ -47,7 +47,8 @@ jobs:
       - name: Where it fell over
         if: failure()
         run: |
-          vulkaninfo 2>/dev/null | grep -iE "driverInfo|apiVersion" | head -4 || true
+          set +e
+          vulkaninfo 2>/dev/null | grep -iE "driverInfo|apiVersion" | head -4
           for t in 2d/vulkan 2d/vulkanFrames; do build/artful-tests --exact $t > /dev/null 2>&1; echo "$t alone: exit $?"; done
           ARTFUL_ROBUST=1 build/artful-tests --exact 2d/vulkanFrames > /dev/null 2>&1; echo "2d/vulkanFrames with robustBufferAccess: exit $?"
           ARTFUL_2D_STEP=1 gdb -batch -ex run -ex bt -ex 'x/6i $pc' -ex 'info registers' -ex 'thread apply all bt 3' --args build/artful-tests --exact 2d/vulkanFrames > gdb.txt 2>&1 || true
