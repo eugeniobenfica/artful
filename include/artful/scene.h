@@ -199,7 +199,9 @@ ArtfTexture artfSceneAddTexture(ArtfScene* s, const uint32_t* pixels, int width,
 
 /* A KTX2 file's blocks, with their mipmaps: BC1, BC3, BC7, ETC2 and ASTC 4 x 4. A GPU that takes the format reads
  * them as they are. Elsewhere, and on the CPU, they are turned into pixels, which BC7 and ASTC cannot be yet: they
- * draw grey there, and it is logged. No supercompression. 0: it could not be read. */
+ * draw grey there, and it is logged. Or Basis Universal's (KHR_texture_basisu): ETC1S with BasisLZ, or UASTC 4 x 4 as
+ * it is or with Zstandard, made into pixels as its reference transcoder makes them, with its own mipmaps when it has
+ * them all. One image: not arrays, cube maps or video. 0: it could not be read. */
 ArtfTexture artfSceneAddTextureKtx2(ArtfScene* s, const void* data, size_t size);
 
 typedef enum ArtfAlphaMode {

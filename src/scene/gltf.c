@@ -502,8 +502,8 @@ static ArtfTexture textureOf(Loader* l, const Json* info) {
     if (!info) return 0;
     const Json* texture = element(l, l->textures, (uint32_t)indexOf(l, info, "index"));
     int64_t image = indexOf(l, texture, "source");
-    /* (KHR_texture_basisu, when there is no plain image beside it: a KTX2 file, read when it holds a format that
-     * can be, not Basis's own) */
+    /* (KHR_texture_basisu, when there is no plain image beside it: a KTX2 file of Basis Universal's, or of blocks that
+     * are read as they are) */
     if (image < 0) image = indexOf(l, member(l, member(l, texture, "extensions"), "KHR_texture_basisu"), "source");
     if (image < 0 || image >= l->imageCount) {
         if (texture) artfLog("artful: glTF: a texture with no image it can read");
@@ -1382,7 +1382,7 @@ static bool openJson(Loader* l, const char* text, size_t size) {
                 !stringIs(e, "EXT_meshopt_compression") && !stringIs(e, "KHR_materials_unlit") && !stringIs(e, "KHR_materials_ior") &&
                 !stringIs(e, "KHR_materials_transmission") && !stringIs(e, "KHR_materials_clearcoat") && !stringIs(e, "KHR_materials_sheen") &&
                 !stringIs(e, "KHR_materials_specular") && !stringIs(e, "KHR_materials_volume") && !stringIs(e, "KHR_materials_iridescence") &&
-                !stringIs(e, "KHR_materials_anisotropy")) {
+                !stringIs(e, "KHR_materials_anisotropy") && !stringIs(e, "KHR_texture_basisu")) {
                 artfLog("artful: glTF: the file requires %.*s, which cannot be read here", e->kind == J_STRING ? (int)e->length : 0, e->text);
                 return 0;
             }
@@ -1593,7 +1593,11 @@ static void prepareOne(void* user, uint32_t index, uint32_t worker) {
     if (index < l->imageCount) {
         const uint8_t* data = w->imageData[index];
         const size_t size = w->imageSize[index];
-        if (data && !(size > 12 && !memcmp((const char*)data + 1, "KTX 20", 6))) {
+        const bool ktx2 = data && size > 80 && !memcmp((const char*)data + 1, "KTX 20", 6);
+        if (ktx2 && !(data[12] | data[13] | data[14] | data[15])) {
+            /* (Basis Universal's: made into pixels here, on every core, as images are) */
+            l->preparedImages[index] = artfPrepareTextureBasis(data, size);
+        } else if (data && !ktx2) {
             int width = 0, height = 0;
             uint32_t* pixels = artfImageDecode(data, size, &width, &height);
             if (pixels) l->preparedImages[index] = artfPrepareTextureAs(pixels, width, height, 0, w->imageRoles[index] == 1);

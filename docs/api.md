@@ -75,7 +75,7 @@ Decided (plan 1.4): source compatibility, not binary.
 | `artfSceneAddEmitter`, `artfEmitterStep`, `artfEmitterSet`, `artfEmitterBurst`, `artfSceneRemoveEmitter` | Particles: fire, smoke, sparks; with a wind that swirls, a ground they bounce on, and spin. `parallel`: a hundred thousand and more, moved where they are drawn, by a compute shader on the GPU. |
 | `artfSceneAddDecal`, `artfDecalSet`, `artfSceneRemoveDecal` | A picture laid over what is drawn, through a box. |
 | `artfSceneAddTexture`, `artfImageDecode` | Pixels, and PNG or JPEG to pixels. |
-| `artfSceneAddTextureKtx2` | A KTX2 file, compressed as it is. |
+| `artfSceneAddTextureKtx2` | A KTX2 file, compressed as it is; or Basis Universal's (ETC1S, UASTC, Zstandard), into pixels. |
 | `artfPrepareMesh`, `artfPrepareTexture`, `artfSceneAddPreparedMesh`, `artfSceneAddPreparedTexture` | The slow part on your own thread. |
 | `artfSceneRemoveMesh`, `artfSceneRemoveTexture`, `artfSceneMemory` | Giving memory back, and how much is used. |
 | `artfSceneSetResidency`, `artfTextureSetResidentMip` | Who decides what stays on the GPU: you, you with help, or Artful. |

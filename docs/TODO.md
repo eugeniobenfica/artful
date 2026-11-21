@@ -74,7 +74,7 @@ num efeito ainda não identificado no lavapipe; macOS com `scale/skinLod`). O ú
 - [~] 5.7 Luzes estocásticas — sombras por raio para todas as luzes; amostragem (`sampled`) com custo constante; denoiser (acúmulo temporal + 5×5): 0,2–0,4% dos pixels fora, FLIP 0,06–0,09 contra todas as luzes, também com a câmera em movimento; ReSTIR temporal testado e descartado (piora com o acumulador); filtro da SVGF (momentos, variância, 5 passes à-trous) nos dois denoisers do traçador, com erro menor em todos os testes (0,91 contra 1,13 com 4 amostras); gradientes da A-SVGF (CPU, em stash) ainda quebram com objetos em movimento e sombra suave
 - [x] 5.8 Transparência por transmitância — `layers-sorted` por peso, com a transmitância de uma grade 8×8 px × 64 fatias, nos dois backends; exato para camadas paralelas; GPU 1080p 0,41 ms contra 0,87 das listas (4 amostras: 0,91 contra 1,29); memória 49 MB contra 207 (4 amostras: 174); só quadros de 8 bits, como antes
 - [~] 5.9 Saída HDR e gama larga — `output` P3/HDR10 nos dois backends, swapchain por `VK_EXT_swapchain_colorspace`; faltam metadados HDR, scRGB e teste em tela HDR
-- [ ] 5.10 Basis Universal e Zstandard
+- [x] 5.10 Basis Universal e Zstandard — Zstd (RFC 8878) e ETC1S/UASTC para pixels, idênticos ao transcodificador do basisu nos 46 KTX2 do glTF-Sample-Assets (472 níveis); `KHR_texture_basisu` no glTF; falta transcodificar para blocos da GPU
 - [~] 5.11 Perspectiva aérea (`ArtfSkyDesc.aerial`, forma fechada, os dois backends, desenhado e traçado); faltam nuvens a 1/4
 - [~] 5.12 Materiais — texturas das extensões (especular, iridescência, anisotropia) feitas; faltam Belcour-Barla, OpenPBR, SSS
 

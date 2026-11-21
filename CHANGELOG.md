@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Basis Universal and Zstandard** (phase 5.10): KTX2 files of ETC1S with BasisLZ, and of UASTC as it is or with
+  Zstandard, are read (`artfSceneAddTextureKtx2`, and glTF's `KHR_texture_basisu`, also where a file requires it),
+  into pixels the same as basisu's own transcoder makes, to the byte, on all 46 such files of glTF-Sample-Assets
+  (472 levels). They are made on all cores as a glTF's images are. They are not transcoded to a GPU's blocks.
+
 - **Layers by transmittance** (`layers-sorted`, phase 5.8): layers go by weight, each surface weighed by what the layers in
   front of it leave of it, from a grid along the view, in place of each pixel's list of eight. Every surface of every
   layer shows, as many as there are, and the order they come in changes nothing: in integers, the same on both

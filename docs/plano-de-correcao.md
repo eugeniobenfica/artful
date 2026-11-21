@@ -391,6 +391,27 @@ Cada item entra atrás de uma opção (`ARTF_FEATURE_*` ou campo de descrição)
     Na CPU fica perto das listas: 2,6 contra 2,5 ms e 4,7 contra 4,5 ms.
 - **Não feito:** quadro em floats (as camadas seguem inteiras, como antes); vista ortográfica (as fatias seguem o w da perspectiva, então lá há uma só); e as reflexões traçadas sobre camadas continuam como eram.
 
+**Estado da 5.10: feita** (os arquivos viram pixels; transcodificar para BC7/ASTC na GPU fica de fora).
+- **Zstandard (`src/scene/zstd.c`), escrito a partir da RFC 8878.**
+  - Cobre quadros e blocos crus, RLE e comprimidos: literais por Huffman (com pesos em FSE e 4 fluxos) e sequências por FSE (tabelas predefinidas, RLE, descritas e repetidas), com os offsets repetidos.
+  - Cada leitura é conferida contra o arquivo, e cada escrita contra o tamanho esperado.
+  - Não suporta dicionários e não confere o checksum.
+- **Basis Universal (`src/scene/basis.c`), lendo para pixels:**
+  - **UASTC 4×4:** os 19 modos, as partições comuns a BC7 e ASTC, os endpoints em grupos de base 3 e 5 com a desquantização do ASTC, e os pesos com âncoras e dois planos.
+  - **ETC1S com BasisLZ:** os codebooks de endpoints e seletores, as tabelas de Huffman canônicas, a predição de endpoints em grupos 2×2 com repetição, o histórico de seletores com runs, as cores do ETC1, e o alfa tirado do verde da segunda fatia.
+  - As tabelas próprias do UASTC e o layout do ETC1S vêm da especificação e do transcodificador da Binomial (Apache 2.0, creditados no arquivo). As do ASTC e do BC7 vêm das especificações da Khronos e da Microsoft. O código é próprio.
+- **Integração:** `artfSceneAddTextureKtx2` aceita `vkFormat` 0 (modelo de cor 163 ou 166 no DFD). O glTF passa a aceitar `KHR_texture_basisu` em `extensionsRequired` e prepara essas texturas em todos os núcleos, como faz com as imagens. Com a cadeia de mipmaps completa, ficam os níveis do arquivo; senão, os níveis são feitos a partir do maior.
+- **Critério** (os arquivos `KHR_texture_basisu` do corpus carregam e coincidem com a saída do transcodificador de referência):
+  - O corpus foram os 4 modelos `glTF-KTX-BasisU` do glTF-Sample-Assets: FlightHelmet, StainedGlassLamp, ChronographWatch e AnisotropyBarnLamp. São 46 arquivos KTX2: 18 em ETC1S e 28 em UASTC com Zstd.
+  - A referência foi o transcodificador do basisu 1.60, compilado do código-fonte, transcodificando para RGBA32.
+  - Resultado: os 46 arquivos coincidem byte a byte em todos os 472 níveis, inclusive o alfa.
+  - Os modelos carregam e aparecem com as texturas; o FlightHelmet, com 15 texturas de 2048², carrega em 130–150 ms.
+  - Nada disso entra no repositório (54 MB). Entram dois arquivos pequenos feitos pelo basisu, um em ETC1S com alfa e outro em UASTC+Zstd, de 30×22 com mipmaps, e o hash da saída da referência para cada um (`files/basis`). Esse teste também tenta todas as versões truncadas e todas com um byte trocado, sem ler fora do arquivo.
+- **Não feito:**
+  - Transcodificar para os blocos da GPU (ETC1S para BC1/ETC1, UASTC para BC7/ASTC): na memória a textura ocupa o mesmo que um PNG.
+  - UASTC HDR, XUASTC e XUBC7 (basisu 2.x).
+  - Arrays, cube maps e vídeo.
+
 **Estado da 5.9: em parte.**
 - **API:** `ArtfRendererOptions.output` (`ARTF_OUTPUT_SRGB`, `_DISPLAY_P3`, `_HDR10`), com `peakNits` (padrão 1000) e `paperWhiteNits` (padrão 203); `artfRendererOutput` diz o que de fato saiu. Exige `hdr`; sem ele, sRGB.
 - **Como:** a imagem mantém o aspecto que teria numa tela sRGB. A passagem final decodifica o sRGB e converte: Display-P3 (primárias P3, curva sRGB, 8 bits) ou HDR10 (primárias Rec. 2020, PQ, 10 bits, A2R10G10B10 na leitura). Em HDR10 a curva de tom é esticada até pico/branco de papel, então o que a curva não comprime fica com o brilho do papel. A sobreposição é convertida do mesmo jeito (o branco dela vira o branco de papel) e composta no espaço da saída, como a sRGB é composta em sRGB. A conta é a mesma na CPU (`artfDisplayEncode`) e na GPU (`displaySpv`).

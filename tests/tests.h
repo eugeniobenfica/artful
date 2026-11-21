@@ -168,6 +168,7 @@ void testHighlightFlicker(void);
 /* files.c: glTF, its extensions and compressed blocks */
 void testBlocks(void);
 void testBlockDecoders(void);
+void testBasis(void);
 void testGltfSparse(void);
 void testGltfExtensions(void);
 void testGltfMeshopt(void);

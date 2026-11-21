@@ -444,6 +444,33 @@ uint8_t* artfTextureEncode(const ArtfTextureData* t, bool etc, uint32_t* format,
 static uint32_t read32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t read64(const uint8_t* p) { return read32(p) | (uint64_t)read32(p + 4) << 32; }
 
+ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size) {
+    const uint8_t* d = data;
+    uint32_t* pixels;
+    uint32_t offsets[16];
+    if (size < 80 || !artfBasisLevels(d, size, &pixels, offsets)) {
+        artfLog("artful: a KTX2 file of Basis Universal's that cannot be read here (ETC1S or UASTC 4 x 4, one image, no video)");
+        return NULL;
+    }
+    const uint32_t width = read32(d + 20), height = read32(d + 24), levels = read32(d + 40) ? read32(d + 40) : 1;
+    /* (its own mipmaps when it has them all; else, made here from the largest) */
+    uint32_t whole = 1;
+    for (uint32_t w = width, h = height; w > 1 || h > 1; w = w > 1 ? w / 2 : 1, h = h > 1 ? h / 2 : 1) ++whole;
+    if (levels != whole) {
+        ArtfPreparedTexture* made = artfPrepareTexture(pixels, (int)width, (int)height, 0);
+        artfFree(pixels);
+        return made;
+    }
+    ArtfTextureData t;
+    memset(&t, 0, sizeof t);
+    t.width = (int)width;
+    t.height = (int)height;
+    t.mipCount = (int)levels;
+    t.pixels = pixels;
+    memcpy(t.offsets, offsets, sizeof(uint32_t) * levels);
+    return artfPreparedTextureOf(&t);
+}
+
 /* sRGB formats are the same blocks: Artful reads colors as sRGB itself, as it does all bytes. */
 static uint32_t knownFormat(uint32_t f) {
     switch (f) {
@@ -466,6 +493,7 @@ ArtfTexture artfSceneAddTextureKtx2(ArtfScene* s, const void* data, size_t size)
     }
     const uint32_t vkFormat = read32(d + 12), width = read32(d + 20), height = read32(d + 24), depth = read32(d + 28), layers = read32(d + 32), faces = read32(d + 36);
     uint32_t levels = read32(d + 40);
+    if (!vkFormat) return artfSceneAddPreparedTexture(s, artfPrepareTextureBasis(data, size));
     const uint32_t scheme = read32(d + 44);
     if (!levels) levels = 1;
     const uint32_t format = knownFormat(vkFormat);

@@ -1606,6 +1606,15 @@ ARTF_INLINE uint32_t artfLayerResolve(const uint32_t* sums) {
     for (int k = 0; k < 3; ++k) out |= (uint32_t)artfMinf((float)sums[k] * scale + .5f, 255.f) << (16 - 8 * k);
     return out;
 }
+/* Zstandard (RFC 8878, zstd.c): the frames of src, into dst; false unless they are that and make exactly dstSize bytes. */
+bool artfZstdDecode(const uint8_t* src, size_t srcSize, uint8_t* dst, size_t dstSize);
+/* Basis Universal (basis.c): a level of UASTC blocks (16 bytes each, 4 x 4 texels), into width x height pixels. */
+bool artfBasisUastc(const uint8_t* blocks, size_t size, uint32_t width, uint32_t height, uint32_t* out);
+/* A KTX2 file of Basis Universal's (ETC1S with BasisLZ, or UASTC, raw or with Zstandard): its levels, the largest first,
+ * into *pixels (artfMalloc'd), each at offsets[level] pixels; false when it is not one, or not whole. */
+bool artfBasisLevels(const uint8_t* data, size_t size, uint32_t** pixels, uint32_t* offsets);
+/* Such a file as a texture to add (texture.c), on any thread: its own mipmaps when it has them all. NULL: it is not one. */
+ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size);
 /* The frame's layers (ArtfFrameData.layers), for these layers in view. */
 void artfLayerRange(ArtfFrameData* frame, const ArtfLayer* layers, uint32_t count);
 
