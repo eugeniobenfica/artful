@@ -302,7 +302,17 @@ typedef enum ArtfGraphOutput {
     ARTF_OUT_ROUGHNESS,
     ARTF_OUT_METALLIC,
     ARTF_OUT_ALPHA,     /* with ARTF_ALPHA_BLEND */
-    ARTF_OUT_NORMAL     /* in the world */
+    ARTF_OUT_NORMAL,    /* in the world */
+    /* Layers, as OpenPBR has them, over the base, each as far as its weight (what the material says where not set):
+     * a coat, fuzz (sheen), the specular layer's color, a thin film, and light under the surface. A material whose
+     * graph sets one has that layer, as if it had asked for it. */
+    ARTF_OUT_COAT,              /* x: coat_weight, 0 to 1 */
+    ARTF_OUT_COAT_ROUGHNESS,    /* x */
+    ARTF_OUT_FUZZ,              /* fuzz_color times fuzz_weight */
+    ARTF_OUT_FUZZ_ROUGHNESS,    /* x */
+    ARTF_OUT_SPECULAR,          /* specular_color times specular_weight: what a dielectric reflects head on, over .04 */
+    ARTF_OUT_THIN_FILM,         /* x: thin_film_weight, 0 to 1; y: thin_film_thickness, in nanometres */
+    ARTF_OUT_SUBSURFACE         /* subsurface_color times subsurface_weight: light under the surface */
 } ArtfGraphOutput;
 
 ArtfGraph* artfGraphNew(void);

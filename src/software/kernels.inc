@@ -1206,8 +1206,12 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
 #undef SAMPLE
 #undef MAP_LEVEL
 
-    /* a material of the program's own, pixel by pixel */
+    /* a material of the program's own, pixel by pixel; and what it says of the layers (specular: below 0, as the material
+     * says) */
     Lanes3 own = {v8fSet(material->emissive[0]), v8fSet(material->emissive[1]), v8fSet(material->emissive[2])};
+    Lanes3 underColor = {v8fSet(more->subsurface[0]), v8fSet(more->subsurface[1]), v8fSet(more->subsurface[2])};
+    Lanes3 ownSpecular = {v8fSet(-1.f), v8fSet(-1.f), v8fSet(-1.f)};
+    bool graphSpecular = false;
     if (material->graph) {
         _Alignas(32) ArtfGraphLanes io;
         v8fStore(io.u, u); v8fStore(io.v, v);
@@ -1218,6 +1222,10 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         v8fStore(io.color[0], albedo.x); v8fStore(io.color[1], albedo.y); v8fStore(io.color[2], albedo.z);
         v8fStore(io.emissive[0], own.x); v8fStore(io.emissive[1], own.y); v8fStore(io.emissive[2], own.z);
         v8fStore(io.roughness, rough); v8fStore(io.metallic, metal); v8fStore(io.alpha, one);
+        for (int i = 0; i < 8; ++i) {
+            io.coat[i] = io.coatRough[i] = io.fuzzRough[i] = io.film[i] = io.filmThickness[i] = -1.f;
+            for (int k = 0; k < 3; ++k) io.fuzz[k][i] = io.specular[k][i] = io.under[k][i] = -1.f;
+        }
         for (int i = 0; i < 8; ++i) {
             const float at[3] = {io.world[0][i], io.world[1][i], io.world[2][i]};
             float eye[3];
@@ -1232,6 +1240,20 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         albedo.x = v8fLoad(io.color[0]); albedo.y = v8fLoad(io.color[1]); albedo.z = v8fLoad(io.color[2]);
         rough = v8fLoad(io.roughness); metal = v8fLoad(io.metallic); alpha = v8fMul(alpha, v8fLoad(io.alpha));
         own.x = v8fLoad(io.emissive[0]); own.y = v8fLoad(io.emissive[1]); own.z = v8fLoad(io.emissive[2]);
+        /* the layers it sets (OpenPBR's), in place of the material's */
+#define GRAPH_LAYER(was, lanes) do { const V8F got = v8fLoad(lanes); was = v8fSelect(v8fLt(got, zero), got, was); } while (0)
+        GRAPH_LAYER(coatAmount, io.coat);
+        GRAPH_LAYER(coatRough, io.coatRough);
+        GRAPH_LAYER(sheenRough, io.fuzzRough);
+        GRAPH_LAYER(sheenColor.x, io.fuzz[0]); GRAPH_LAYER(sheenColor.y, io.fuzz[1]); GRAPH_LAYER(sheenColor.z, io.fuzz[2]);
+        GRAPH_LAYER(filmAmount, io.film);
+        GRAPH_LAYER(filmThickness, io.filmThickness);
+        graphSpecular = v8iSigns(v8fLt(v8fLoad(io.specular[0]), zero)) != 0xFF;
+        if (graphSpecular) {
+            ownSpecular.x = v8fLoad(io.specular[0]); ownSpecular.y = v8fLoad(io.specular[1]); ownSpecular.z = v8fLoad(io.specular[2]);
+        }
+        GRAPH_LAYER(underColor.x, io.under[0]); GRAPH_LAYER(underColor.y, io.under[1]); GRAPH_LAYER(underColor.z, io.under[2]);
+#undef GRAPH_LAYER
     }
 
     /* decals over it, in the order they were added: not on what blends */
@@ -1319,9 +1341,18 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         reflecting.f0.z = lanesReflects(dielectric, notMetal, albedo.z, metal);
         if (extraFlags & ARTF_MORE_SPECULAR) {
             /* (a dielectric's of a color: KHR_materials_specular) */
-            reflecting.f0.x = lanesReflects(v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[0])), specularTint.x), notMetal, albedo.x, metal);
-            reflecting.f0.y = lanesReflects(v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[1])), specularTint.y), notMetal, albedo.y, metal);
-            reflecting.f0.z = lanesReflects(v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[2])), specularTint.z), notMetal, albedo.z, metal);
+            /* (or the graph's specular layer, where it sets it) */
+            V8F sx = v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[0])), specularTint.x), sy = v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[1])), specularTint.y);
+            V8F sz = v8fMul(v8fMul(dielectric, v8fSet(more->specularColor[2])), specularTint.z);
+            if (graphSpecular) {
+                const V8I mine = v8fLt(ownSpecular.x, zero);
+                sx = v8fSelect(mine, v8fMul(dielectric, ownSpecular.x), sx);
+                sy = v8fSelect(mine, v8fMul(dielectric, ownSpecular.y), sy);
+                sz = v8fSelect(mine, v8fMul(dielectric, ownSpecular.z), sz);
+            }
+            reflecting.f0.x = lanesReflects(sx, notMetal, albedo.x, metal);
+            reflecting.f0.y = lanesReflects(sy, notMetal, albedo.y, metal);
+            reflecting.f0.z = lanesReflects(sz, notMetal, albedo.z, metal);
         }
         if (extraFlags & ARTF_MORE_IRIDESCENCE) {
             /* a thin film's colors, as it is seen: in place of what it reflects head on */
@@ -1555,12 +1586,12 @@ V8_INLINE LitOut lightLanesAs(const ArtfSoftFrame* f, const ArtfFrameData* frame
         const V8F sr = v8fMul(sheenColor.x, notMetal), sg = v8fMul(sheenColor.y, notMetal), sb = v8fMul(sheenColor.z, notMetal);
         const Lanes3 coatLight = x.coatLight, sheenLight = x.sheenLight;
         if (under) {
-            lit.x = v8fAdd(lit.x, v8fMul(v8fMul(v8fSet(more->subsurface[0]), notMetal), x.under.x));
-            lit.y = v8fAdd(lit.y, v8fMul(v8fMul(v8fSet(more->subsurface[1]), notMetal), x.under.y));
-            lit.z = v8fAdd(lit.z, v8fMul(v8fMul(v8fSet(more->subsurface[2]), notMetal), x.under.z));
-            spread.x = v8fMul(v8fAdd(spread.x, v8fMul(v8fMul(v8fSet(more->subsurface[0]), notMetal), x.under.x)), keep);
-            spread.y = v8fMul(v8fAdd(spread.y, v8fMul(v8fMul(v8fSet(more->subsurface[1]), notMetal), x.under.y)), keep);
-            spread.z = v8fMul(v8fAdd(spread.z, v8fMul(v8fMul(v8fSet(more->subsurface[2]), notMetal), x.under.z)), keep);
+            lit.x = v8fAdd(lit.x, v8fMul(v8fMul(underColor.x, notMetal), x.under.x));
+            lit.y = v8fAdd(lit.y, v8fMul(v8fMul(underColor.y, notMetal), x.under.y));
+            lit.z = v8fAdd(lit.z, v8fMul(v8fMul(underColor.z, notMetal), x.under.z));
+            spread.x = v8fMul(v8fAdd(spread.x, v8fMul(v8fMul(underColor.x, notMetal), x.under.x)), keep);
+            spread.y = v8fMul(v8fAdd(spread.y, v8fMul(v8fMul(underColor.y, notMetal), x.under.y)), keep);
+            spread.z = v8fMul(v8fAdd(spread.z, v8fMul(v8fMul(underColor.z, notMetal), x.under.z)), keep);
         }
         lit.x = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fSub(lit.x, own.x), v8fMul(sr, sheenLight.x)), keep), v8fMul(coat, coatLight.x)), own.x);
         lit.y = v8fAdd(v8fAdd(v8fMul(v8fAdd(v8fSub(lit.y, own.y), v8fMul(sg, sheenLight.y)), keep), v8fMul(coat, coatLight.y)), own.y);

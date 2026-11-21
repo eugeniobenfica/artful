@@ -810,6 +810,82 @@ void testFilmMaps(void) {
     for (int i = 0; i < 4; ++i) artfFree(cpu[i / 2][i % 2]);
 }
 
+/* OpenPBR's layers from a graph (ARTF_OUT_COAT...): kind 0, the material's own; 1, a graph that says the same; 2, a
+ * graph whose coat goes in stripes. */
+static ArtfScene* openPbrScene(int kind) {
+    ArtfScene* s = coatScene(0, 0);
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.5f, .15f, .05f);
+    d.roughness = .6f;
+    if (kind == 0) {
+        d.clearcoat = .8f;
+        d.clearcoatRoughness = .2f;
+        d.sheen = artfVec3(.3f, .2f, .1f);
+        d.sheenRoughness = .5f;
+        d.specularColor = artfVec3(1.f, .5f, .25f);
+        d.iridescence = .7f;
+        d.iridescenceThickness = 400.f;
+        d.subsurface = artfVec3(.2f, .1f, .05f);
+    } else {
+        ArtfGraph* g = artfGraphNew();
+        ArtfExpr coat = artfExprNumber(g, .8f);
+        if (kind == 2) {
+            /* (stripes along u: none, then all) */
+            ArtfExpr u = artfExprX(g, artfExprUv(g));
+            coat = artfExprFloor(g, artfExprMul(g, artfExprFract(g, artfExprMul(g, u, artfExprNumber(g, 8))), artfExprNumber(g, 2)));
+        }
+        artfGraphSetOutput(g, ARTF_OUT_COAT, coat);
+        artfGraphSetOutput(g, ARTF_OUT_COAT_ROUGHNESS, artfExprNumber(g, .2f));
+        artfGraphSetOutput(g, ARTF_OUT_FUZZ, artfExprConst(g, .3f, .2f, .1f, 1));
+        artfGraphSetOutput(g, ARTF_OUT_FUZZ_ROUGHNESS, artfExprNumber(g, .5f));
+        artfGraphSetOutput(g, ARTF_OUT_SPECULAR, artfExprConst(g, 1.f, .5f, .25f, 1));
+        artfGraphSetOutput(g, ARTF_OUT_THIN_FILM, artfExprConst(g, .7f, 400.f, 0, 0));
+        artfGraphSetOutput(g, ARTF_OUT_SUBSURFACE, artfExprConst(g, .2f, .1f, .05f, 1));
+        d.graph = artfSceneAddGraph(s, g);
+        artfGraphFree(g);
+    }
+    artfInstanceSetMaterial(s, s->instanceHandles.items[0], artfSceneAddMaterial(s, &d));
+    return s;
+}
+
+/* OpenPBR's layers in a material of the program's own: a graph that sets a coat, fuzz, the specular color, a thin film
+ * and light under the surface draws as the material that has them, drawn and traced, both backends alike; a coat in
+ * stripes shows. */
+void testOpenPbr(void) {
+    uint32_t* a = artfMalloc(W * H * 4);
+    uint32_t* b = artfMalloc(W * H * 4);
+    uint32_t* cpu[2] = {artfMalloc(W * H * 4), artfMalloc(W * H * 4)};
+    for (int backend = 0; backend < 2; ++backend) {
+        ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+        ArtfRenderer* r = artfRendererNew(&o);
+        if (!r) continue;
+        for (int traced = 0; traced < 2; ++traced) {
+            ArtfScene* scenes[3] = {openPbrScene(0), openPbrScene(1), openPbrScene(2)};
+            const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 16, 0, true};
+            for (int k = 0; k < 3 && traced; ++k) artfSceneSetTrace(scenes[k], &paths);
+            const int frames = traced ? 16 : 1;
+            for (int k = 0; k < frames; ++k) drawInto(r, scenes[0], a);
+            for (int k = 0; k < frames; ++k) drawInto(r, scenes[1], b);
+            const double same = differentShare(a, b, traced ? 24 : 4);
+            for (int k = 0; k < frames; ++k) drawInto(r, scenes[2], a);
+            const double striped = differentShare(a, b, 8);
+            double across = 0;
+            if (!backend) memcpy(cpu[traced], b, W * H * 4);
+            else across = differentShare(cpu[traced], b, 8);
+            printf("%s%s: the graph's layers against the material's %.3f%% of pixels apart; a coat in stripes changes %.2f%%; the GPU against the CPU %.3f%%\n",
+                   backend ? "GPU" : "CPU", traced ? ", traced" : "", same * 100, striped * 100, across * 100);
+            CHECK(same < .003 && striped > .01);
+            if (backend) CHECK(across < .01);
+            for (int k = 0; k < 3; ++k) artfSceneFree(scenes[k]);
+        }
+        artfRendererFree(r);
+    }
+    artfFree(a);
+    artfFree(b);
+    artfFree(cpu[0]);
+    artfFree(cpu[1]);
+}
+
 void testMoreMaterials(void) {
     uint32_t* a = artfMalloc(W * H * 4);
     uint32_t* b = artfMalloc(W * H * 4);

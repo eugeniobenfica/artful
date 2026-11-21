@@ -917,7 +917,11 @@ typedef struct Accumulators { SpvId diffuse, highlight; } Accumulators;
 /* ---- materials of the program's own ---- */
 
 /* The variables a graph writes: what the material said goes in, and what it makes of that comes out. */
-typedef struct GraphVars { SpvId color, emissive, normal, rough, metal, alpha; } GraphVars;
+/* And the layers it may set (OpenPBR's, ARTF_OUT_COAT on), each below 0 where it does not: as the material says. */
+typedef struct GraphVars {
+    SpvId color, emissive, normal, rough, metal, alpha;
+    SpvId coat, coatRough, fuzz, fuzzRough, specular, film, filmThickness, under;
+} GraphVars;
 
 typedef struct GraphInputs { SpvId uv, world, normal, toEye, base, row; bool fragment; } GraphInputs; /* row: where the material's rows start */
 
@@ -1001,6 +1005,56 @@ static void emitGraph(Spv* s, const Resources* r, const ArtfGraphData* g, const 
     if (o[ARTF_OUT_METALLIC]) spvStore(s, out->metal, spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, spvExtract(s, s->floatType, regs[o[ARTF_OUT_METALLIC]], 0), spvConstFloat(s, 0.f)), spvConstFloat(s, 1.f)));
     if (o[ARTF_OUT_ALPHA]) spvStore(s, out->alpha, spvExtract(s, s->floatType, regs[o[ARTF_OUT_ALPHA]], 0));
     if (o[ARTF_OUT_NORMAL]) spvStore(s, out->normal, spvGlsl1(s, SPV_GLSL_Normalize, s->vec3, spvShuffle3(s, regs[o[ARTF_OUT_NORMAL]])));
+    if (!out->coat) return;
+    /* the layers, held as graph.c holds them */
+#define G_X(k) spvExtract(s, s->floatType, regs[o[k]], 0)
+#define G_CLAMP(v, lo, hi) spvGlsl2(s, SPV_GLSL_FMin, s->floatType, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, v, spvConstFloat(s, lo)), spvConstFloat(s, hi))
+    const SpvId none3 = vec3Of(s, spvConstFloat(s, 0.f), spvConstFloat(s, 0.f), spvConstFloat(s, 0.f));
+    if (o[ARTF_OUT_COAT]) spvStore(s, out->coat, G_CLAMP(G_X(ARTF_OUT_COAT), 0.f, 1.f));
+    if (o[ARTF_OUT_COAT_ROUGHNESS]) spvStore(s, out->coatRough, G_CLAMP(G_X(ARTF_OUT_COAT_ROUGHNESS), .045f, 1.f));
+    if (o[ARTF_OUT_FUZZ_ROUGHNESS]) spvStore(s, out->fuzzRough, G_CLAMP(G_X(ARTF_OUT_FUZZ_ROUGHNESS), .07f, 1.f));
+    if (o[ARTF_OUT_THIN_FILM]) {
+        spvStore(s, out->film, G_CLAMP(G_X(ARTF_OUT_THIN_FILM), 0.f, 1.f));
+        spvStore(s, out->filmThickness, spvGlsl2(s, SPV_GLSL_FMax, s->floatType, spvExtract(s, s->floatType, regs[o[ARTF_OUT_THIN_FILM]], 1), spvConstFloat(s, 0.f)));
+    }
+    if (o[ARTF_OUT_FUZZ]) spvStore(s, out->fuzz, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, regs[o[ARTF_OUT_FUZZ]]), none3));
+    if (o[ARTF_OUT_SPECULAR])
+        spvStore(s, out->specular, spvGlsl2(s, SPV_GLSL_FMin, s->vec3, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, regs[o[ARTF_OUT_SPECULAR]]), none3),
+                                            vec3Of(s, spvConstFloat(s, 25.f), spvConstFloat(s, 25.f), spvConstFloat(s, 25.f))));
+    if (o[ARTF_OUT_SUBSURFACE]) spvStore(s, out->under, spvGlsl2(s, SPV_GLSL_FMax, s->vec3, spvShuffle3(s, regs[o[ARTF_OUT_SUBSURFACE]]), none3));
+#undef G_X
+#undef G_CLAMP
+}
+
+/* Before a graph: its layers as the material says (below 0). */
+static void graphLayersStart(Spv* s, const GraphVars* out) {
+    if (!out->coat) return;
+    const SpvId no = spvConstFloat(s, -1.f), no3 = vec3Of(s, no, no, no);
+    spvStore(s, out->coat, no), spvStore(s, out->coatRough, no), spvStore(s, out->fuzzRough, no), spvStore(s, out->film, no);
+    spvStore(s, out->filmThickness, no), spvStore(s, out->fuzz, no3), spvStore(s, out->specular, no3), spvStore(s, out->under, no3);
+}
+/* After it: what it set, else what the material said (kernels.inc's GRAPH_LAYER). */
+static SpvId graphLayer(Spv* s, SpvId var, SpvId was) {
+    const SpvId got = spvLoad(s, s->floatType, var);
+    return spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, got, spvConstFloat(s, 0.f)), was, got);
+}
+static SpvId graphLayer3(Spv* s, SpvId var, SpvId was) {
+    const SpvId got = spvLoad(s, s->vec3, var);
+    SpvId c[3];
+    for (uint32_t k = 0; k < 3; ++k) {
+        const SpvId g = spvExtract(s, s->floatType, got, k);
+        c[k] = spvSelect(s, s->floatType, spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, g, spvConstFloat(s, 0.f)), spvExtract(s, s->floatType, was, k), g);
+    }
+    return vec3Of(s, c[0], c[1], c[2]);
+}
+/* The specular layer: the graph's color over .04 where it set one (its red not below 0), else the material's. */
+static SpvId graphSpecular(Spv* s, SpvId var, SpvId dielectric, SpvId was) {
+    const SpvId got = spvLoad(s, s->vec3, var);
+    const SpvId mine = spvOp2(s, SPV_OP_FOrdLessThan, s->boolType, spvExtract(s, s->floatType, got, 0), spvConstFloat(s, 0.f));
+    const SpvId own = spvOp2(s, SPV_OP_FMul, s->vec3, dielectric, got);
+    SpvId c[3];
+    for (uint32_t k = 0; k < 3; ++k) c[k] = spvSelect(s, s->floatType, mine, spvExtract(s, s->floatType, was, k), spvExtract(s, s->floatType, own, k));
+    return vec3Of(s, c[0], c[1], c[2]);
 }
 
 /* The graph of a material: one branch for each in the scene. */
@@ -1802,8 +1856,16 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId ptrFnFloat = spvTypePointer(s, SPV_STORAGE_Function, s->floatType);
     SpvId shadowed = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
     SpvId lightsSeen = viewed ? spvVariable(s, ptrFnFloat, SPV_STORAGE_Function) : 0; /* (in a view: how many lights reach it) */
-    const GraphVars own = {spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function),
-                           spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function)};
+    GraphVars own = {spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function), spvVariable(s, ptrFn3, SPV_STORAGE_Function),
+                     spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), spvVariable(s, ptrFnFloat, SPV_STORAGE_Function),
+                     0, 0, 0, 0, 0, 0, 0, 0};
+    if (coats && cutout && graphCount) {
+        /* (the layers a graph may set: where a material has them) */
+        own.coat = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), own.coatRough = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
+        own.fuzzRough = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), own.film = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function);
+        own.filmThickness = spvVariable(s, ptrFnFloat, SPV_STORAGE_Function), own.fuzz = spvVariable(s, ptrFn3, SPV_STORAGE_Function);
+        own.specular = spvVariable(s, ptrFn3, SPV_STORAGE_Function), own.under = spvVariable(s, ptrFn3, SPV_STORAGE_Function);
+    }
     SpvId counter = spvVariable(s, ptrFnUint, SPV_STORAGE_Function);
     /* (lights sampled: the one taken, its weight, and the sums as they are drawn) */
     SpvId sampledCode = traced ? spvVariable(s, ptrFnUint, SPV_STORAGE_Function) : 0, sampledWeight = traced ? spvVariable(s, ptrFnFloat, SPV_STORAGE_Function) : 0;
@@ -1944,7 +2006,14 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
         spvStore(s, own.metal, metal);
         spvStore(s, own.alpha, FLOAT(1.f));
         const GraphInputs inputs = {uv, world, n, view, albedo, material, true};
+        graphLayersStart(s, &own);
         emitGraphs(s, &r, graphs, graphCount, AS_UINT(W(m4)), &inputs, &own, textures, sampled);
+        if (own.coat) {
+            coatAmount = graphLayer(s, own.coat, coatAmount);
+            coatRough = graphLayer(s, own.coatRough, coatRough);
+            sheenRough = graphLayer(s, own.fuzzRough, sheenRough);
+            sheenColor = graphLayer3(s, own.fuzz, sheenColor);
+        }
         albedo = spvLoad(s, s->vec3, own.color);
         emission = spvLoad(s, s->vec3, own.emissive);
         n = spvLoad(s, s->vec3, own.normal);
@@ -2040,8 +2109,14 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
 #define MORE_HAS(bit) spvOp2(s, SPV_OP_INotEqual, s->boolType, spvOp2(s, SPV_OP_BitwiseAnd, s->uintType, moreFlags, UINT(bit)), UINT(0))
     if (coats) {
         /* a dielectric's of a color, and a thin film's colors, as on the CPU */
-        f0 = shaderReflects3(s, MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, textureAt(s, textures, sampled, AS_UINT(W(e[7])), uv), textureAt(s, textures, sampled, AS_UINT(W(e[6])), uv))), notMetal, albedo, metal);
-        const MoreMaps mm = moreMapsSpv(s, e, textureAt(s, textures, sampled, AS_UINT(X(e[8])), uv), textureAt(s, textures, sampled, AS_UINT(Y(e[8])), uv), textureAt(s, textures, sampled, AS_UINT(Z(e[8])), uv));
+        SpvId tinted = MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, textureAt(s, textures, sampled, AS_UINT(W(e[7])), uv), textureAt(s, textures, sampled, AS_UINT(W(e[6])), uv)));
+        if (own.coat) tinted = graphSpecular(s, own.specular, dielectric, tinted);
+        f0 = shaderReflects3(s, tinted, notMetal, albedo, metal);
+        MoreMaps mm = moreMapsSpv(s, e, textureAt(s, textures, sampled, AS_UINT(X(e[8])), uv), textureAt(s, textures, sampled, AS_UINT(Y(e[8])), uv), textureAt(s, textures, sampled, AS_UINT(Z(e[8])), uv));
+        if (own.coat) {
+            mm.amount = graphLayer(s, own.film, mm.amount);
+            mm.thickness = graphLayer(s, own.filmThickness, mm.thickness);
+        }
         f0 = pick3(s, MORE_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, mm.amount, W(e[4]), mm.thickness), f0);
         reflecting.f0 = f0;
         /* highlights drawn out: the way u grows, square to the normal, turned as asked */
@@ -2195,7 +2270,7 @@ uint32_t* artfShaderSceneFragment(size_t* size, uint32_t maxTextures, bool cutou
     SpvId coatSeen = 0, aroundCoat = 0, aroundSheen = 0, subsurface = 0, reach = 0;
     if (coats) {
         sheenColor = SCALE_V3(sheenColor, notMetal);
-        subsurface = SCALE_V3(spvShuffle3(s, e[6]), notMetal);
+        subsurface = SCALE_V3(own.coat ? graphLayer3(s, own.under, spvShuffle3(s, e[6])) : spvShuffle3(s, e[6]), notMetal);
         reach = DIV_F(FLOAT(1.44269504f), W(e[1]));
         coatN = pick3(s, spvOp2(s, SPV_OP_INotEqual, s->boolType, AS_UINT(Z(e[2])), UINT(0)), coatN, n);
         coating.coatN = coatN;
@@ -2854,6 +2929,7 @@ static SpvId pqSpv(Spv* s, SpvId y) {
 static SpvId displaySpv(Spv* s, int kind, float peak, SpvId light) {
     static const float p3[3][3] = {{.82246197f, .17753803f, 0.f}, {.03319420f, .96680580f, 0.f}, {.01708263f, .07239744f, .91051993f}};
     static const float bt2020[3][3] = {{.62740390f, .32928304f, .04331307f}, {.06909729f, .91954040f, .01136232f}, {.01639144f, .08801331f, .89559525f}};
+    if (kind == ARTF_DISPLAY_SCRGB) return SCALE_V3(spvGlsl2(s, SPV_GLSL_FMax, s->vec3, light, same3(s, 0.f)), FLOAT(peak));
     const float(*m)[3] = kind == ARTF_DISPLAY_HDR10 ? bt2020 : p3;
     SpvId out[3];
     for (int c = 0; c < 3; ++c) {
@@ -2929,7 +3005,6 @@ static void backgroundDeclare(Spv* s, BackgroundResources* r, bool writeBloom) {
 static SpvId backgroundVec(Spv* s, const BackgroundResources* r, uint32_t i) {
     const SpvId idx[2] = {r->zero, spvConstUint(s, i)};
     return spvLoad(s, s->vec4, spvAccess(s, r->ptrUniformVec4, r->block, idx, 2));
-    if (kind == ARTF_DISPLAY_SCRGB) return SCALE_V3(spvGlsl2(s, SPV_GLSL_FMax, s->vec3, light, same3(s, 0.f)), FLOAT(peak));
 }
 static SpvId backgroundVecAt(Spv* s, const BackgroundResources* r, SpvId i) {
     const SpvId idx[2] = {r->zero, i};
@@ -3650,6 +3725,7 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
         spvStore(s, t->own.metal, metal);
         spvStore(s, t->own.alpha, FLOAT(1.f));
         const GraphInputs inputs = {uv, ADD_V3(origin, SCALE_V3(d, LOAD_F(t->bestT))), normal, spvOp1(s, SPV_OP_FNegate, s->vec3, d), albedo, material};
+        graphLayersStart(s, &t->own);
         emitGraphs(s, &t->r, t->graphs, t->graphCount, AS_UINT(W(m4)), &inputs, &t->own, t->textures, t->sampledType);
         albedo = LOAD_V3(t->own.color);
         emission = LOAD_V3(t->own.emissive);
@@ -3680,8 +3756,16 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     for (uint32_t k = 0; k < ARTF_MATERIAL_MORE_ROWS; ++k) e[k] = bufferVec(s, &t->r, t->r.materials, ADD_U(at, UINT(k)));
     SpvId moreFlags = spvSelect(s, s->uintType, unlit, AND_U(AS_UINT(W(e[0])), UINT(ARTF_MORE_VOLUME)), AS_UINT(W(e[0])));
 #define T_HAS(bit) NOT_EQ(AND_U(moreFlags, UINT(bit)), UINT(0))
-    f0 = shaderReflects3(s, MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, traceTexture(t, lodBase, AS_UINT(W(e[7])), uv), traceTexture(t, lodBase, AS_UINT(W(e[6])), uv))), notMetal, albedo, metal);
-    const MoreMaps mm = moreMapsSpv(s, e, traceTexture(t, lodBase, AS_UINT(X(e[8])), uv), traceTexture(t, lodBase, AS_UINT(Y(e[8])), uv), traceTexture(t, lodBase, AS_UINT(Z(e[8])), uv));
+    /* (the layers a graph set: as in the pixel shader) */
+    const bool graphed = t->own.coat != 0;
+    SpvId tinted = MUL_V3(MUL_V3(dielectric, spvShuffle3(s, e[4])), specularTint(s, e, traceTexture(t, lodBase, AS_UINT(W(e[7])), uv), traceTexture(t, lodBase, AS_UINT(W(e[6])), uv)));
+    if (graphed) tinted = graphSpecular(s, t->own.specular, dielectric, tinted);
+    f0 = shaderReflects3(s, tinted, notMetal, albedo, metal);
+    MoreMaps mm = moreMapsSpv(s, e, traceTexture(t, lodBase, AS_UINT(X(e[8])), uv), traceTexture(t, lodBase, AS_UINT(Y(e[8])), uv), traceTexture(t, lodBase, AS_UINT(Z(e[8])), uv));
+    if (graphed) {
+        mm.amount = graphLayer(s, t->own.film, mm.amount);
+        mm.thickness = graphLayer(s, t->own.filmThickness, mm.thickness);
+    }
     f0 = pick3(s, T_HAS(ARTF_MORE_IRIDESCENCE), shaderIridescence(s, f0, ndv, mm.amount, W(e[4]), mm.thickness), f0);
     SpvId gain = shaderGain3(s, f0, shaderUnkept(s, ndv, rough));
     SpvId mirror = pick3(s, shiny, MUL_V3(shaderMirror3(s, f0, SUB_F(FLOAT(1.f), rough), shaderFifth(s, ndv), FLOAT(1.f)), gain), same3(s, 0.f));
@@ -3692,11 +3776,20 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
     shaderLobe lobe = shaderLobeOf(s, rough, ndv);
     shaderDraw(s, &lobe, T_HAS(ARTF_MORE_ANISOTROPY), ta, tb, mm.c, mm.sn, a, shaderDrawnLong(s, a, MUL_F(mm.strength, mm.strength)));
     /* the coat and sheen, and their textures (white when none) */
-    SpvId coat = PICK_F(unlit, FLOAT(0.f), MUL_F(X(e[0]), X(traceTexture(t, lodBase, AS_UINT(X(e[2])), uv))));
+    SpvId coatOwn = MUL_F(X(e[0]), X(traceTexture(t, lodBase, AS_UINT(X(e[2])), uv)));
     SpvId coatRough = MAX_F(MUL_F(Y(e[0]), Y(traceTexture(t, lodBase, AS_UINT(Y(e[2])), uv))), FLOAT(.045f));
     SpvId sheenRough = MAX_F(MUL_F(Z(e[0]), W(traceTexture(t, lodBase, AS_UINT(X(e[3])), uv))), FLOAT(.07f));
     SpvId sheenTexel = spvShuffle3(s, traceTexture(t, lodBase, AS_UINT(W(e[2])), uv));
-    SpvId sheenColor = pick3(s, unlit, same3(s, 0.f), MUL_V3(spvShuffle3(s, e[1]), srgbDecode3(s, sheenTexel)));
+    SpvId sheenOwn = MUL_V3(spvShuffle3(s, e[1]), srgbDecode3(s, sheenTexel)), underOwn = spvShuffle3(s, e[6]);
+    if (graphed) {
+        coatOwn = graphLayer(s, t->own.coat, coatOwn);
+        coatRough = graphLayer(s, t->own.coatRough, coatRough);
+        sheenRough = graphLayer(s, t->own.fuzzRough, sheenRough);
+        sheenOwn = graphLayer3(s, t->own.fuzz, sheenOwn);
+        underOwn = graphLayer3(s, t->own.under, underOwn);
+    }
+    SpvId coat = PICK_F(unlit, FLOAT(0.f), coatOwn);
+    SpvId sheenColor = pick3(s, unlit, same3(s, 0.f), sheenOwn);
     SpvId coatBumps = traceTexture(t, lodBase, AS_UINT(Z(e[2])), uv);
     SpvId cx = MUL_F(SUB_F(MUL_F(X(coatBumps), FLOAT(2.f)), FLOAT(1.f)), Y(e[3])), cy = MUL_F(SUB_F(FLOAT(1.f), MUL_F(Y(coatBumps), FLOAT(2.f))), Y(e[3])), cz = SUB_F(MUL_F(Z(coatBumps), FLOAT(2.f)), FLOAT(1.f));
     SpvId co = ADD_V3(ADD_V3(SCALE_V3(tangent, cx), SCALE_V3(bitangent, cy)), SCALE_V3(plainOn, cz));
@@ -3712,7 +3805,7 @@ static Met surfaceAt(const Tracer* t, SpvId origin, SpvId d, SpvId cone) {
                       {lobe, specular, f0, gain},
                       coat, under, SCALE_V3(sheenColor, MUL_F(notMetal, under)),
                       {shaderLobeOf(s, coatRough, coatNv), FLOAT(1.f), same3(s, .04f)},
-                      moreFlags, coatNormal, DIV_F(FLOAT(1.f), MUL_F(sheenRough, sheenRough)), pick3(s, unlit, same3(s, 0.f), SCALE_V3(spvShuffle3(s, e[6]), MUL_F(notMetal, under))),
+                      moreFlags, coatNormal, DIV_F(FLOAT(1.f), MUL_F(sheenRough, sheenRough)), pick3(s, unlit, same3(s, 0.f), SCALE_V3(underOwn, MUL_F(notMetal, under))),
                       DIV_F(FLOAT(1.44269504f), W(e[1])), spvShuffle3(s, e[7])};
 #undef T_HAS
     return more;
@@ -4051,6 +4144,10 @@ static void tracerVariables(Tracer* t) {
     t->tracedSum = VAR(ptrFloat); t->tracedRay = VAR(ptrUint);
     t->own.color = VAR(ptrVec3); t->own.emissive = VAR(ptrVec3); t->own.normal = VAR(ptrVec3);
     t->own.rough = VAR(ptrFloat); t->own.metal = VAR(ptrFloat); t->own.alpha = VAR(ptrFloat);
+    if (t->graphCount) {
+        t->own.coat = VAR(ptrFloat); t->own.coatRough = VAR(ptrFloat); t->own.fuzzRough = VAR(ptrFloat); t->own.film = VAR(ptrFloat);
+        t->own.filmThickness = VAR(ptrFloat); t->own.fuzz = VAR(ptrVec3); t->own.specular = VAR(ptrVec3); t->own.under = VAR(ptrVec3);
+    }
     if (t->hardware) t->query = VAR(spvTypePointer(s, SPV_STORAGE_Function, spvTypeOpaque(s, 4472 /* OpTypeRayQueryKHR */)));
 }
 
@@ -4215,6 +4312,10 @@ uint32_t* artfShaderTrace(size_t* size, uint32_t maxTextures, const ArtfGraphDat
     if (guides) { t->firstLum = VAR(ptrFloat); t->gradLum = VAR(ptrFloat); t->gradBits = VAR(ptrUint); t->gradPlace = VAR(ptrVec3); }
     t->own.color = VAR(ptrVec3); t->own.emissive = VAR(ptrVec3); t->own.normal = VAR(ptrVec3);
     t->own.rough = VAR(ptrFloat); t->own.metal = VAR(ptrFloat); t->own.alpha = VAR(ptrFloat);
+    if (t->graphCount) {
+        t->own.coat = VAR(ptrFloat); t->own.coatRough = VAR(ptrFloat); t->own.fuzzRough = VAR(ptrFloat); t->own.film = VAR(ptrFloat);
+        t->own.filmThickness = VAR(ptrFloat); t->own.fuzz = VAR(ptrVec3); t->own.specular = VAR(ptrVec3); t->own.under = VAR(ptrVec3);
+    }
     if (more) { t->alongVar = VAR(ptrFloat); t->acrossVar = VAR(ptrFloat); }
     if (hardware) t->query = VAR(spvTypePointer(s, SPV_STORAGE_Function, spvTypeOpaque(s, 4472 /* OpTypeRayQueryKHR */)));
 

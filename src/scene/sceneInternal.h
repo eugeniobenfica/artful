@@ -282,7 +282,7 @@ ARTF_INLINE bool artfMaterialLayered(const ArtfMaterialMore* m) { return (m->fla
 
 /* A material of the program's own: steps on four floats, each reading those before it (graph.c). */
 #define ARTF_GRAPH_NODES 256
-#define ARTF_GRAPH_OUTPUTS 6
+#define ARTF_GRAPH_OUTPUTS 13
 
 enum {
     ARTF_OP_CONST, ARTF_OP_UV, ARTF_OP_POSITION, ARTF_OP_NORMAL, ARTF_OP_TO_EYE, ARTF_OP_BASE, ARTF_OP_PARAM, ARTF_OP_TEXTURE,
@@ -307,14 +307,25 @@ typedef struct ArtfGraphInput {
 } ArtfGraphInput;
 
 /* In: what the material says. Out: what the graph made of it. */
+/* A graph's layers (ARTF_OUT_COAT on): below 0, as the material says. */
+typedef struct ArtfGraphLayers {
+    float coat, coatRough, fuzz[3], fuzzRough, specular[3], film, filmThickness, under[3];
+} ArtfGraphLayers;
+ARTF_INLINE void artfGraphLayersNone(ArtfGraphLayers* l) {
+    float* f = &l->coat;
+    for (size_t i = 0; i < sizeof *l / sizeof(float); ++i) f[i] = -1.f;
+}
 typedef struct ArtfGraphResult {
     float color[3], emissive[3], normal[3], roughness, metallic, alpha;
+    ArtfGraphLayers layers;
 } ArtfGraphResult;
 
 /* Both, for eight pixels side by side: they go in as their last four rows of inputs, and out in the rest. */
 typedef struct ArtfGraphLanes {
     float u[8], v[8], world[3][8], normalIn[3][8], toEye[3][8], base[3][8];
     float color[3][8], emissive[3][8], normal[3][8], roughness[8], metallic[8], alpha[8];
+    /* the layers, as ArtfGraphLayers: below 0, as the material says */
+    float coat[8], coatRough[8], fuzz[3][8], fuzzRough[8], specular[3][8], film[8], filmThickness[8], under[3][8];
 } ArtfGraphLanes;
 
 /* A point light has no direction: its cone then lets all through. */

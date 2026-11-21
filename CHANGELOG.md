@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **OpenPBR's layers in a material of your own** (phase 5.12): a graph can set a coat, fuzz, the specular color, a thin
+  film and light under the surface (`ARTF_OUT_COAT` to `ARTF_OUT_SUBSURFACE`), each where it says so and the material's
+  elsewhere, drawn and traced, on both backends.
 - **scRGB output** (`ARTF_OUTPUT_SCRGB`, phase 5.9): light itself in sRGB's primaries, 1 being 80 nits, as halves
   (8 bytes a pixel; reading back gives twice the words), on both backends; on a surface, Vulkan's extended linear sRGB.
   **HDR metadata**: in HDR10 and scRGB on a surface, the screen is told the peak and paper white

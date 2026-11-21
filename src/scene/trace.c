@@ -943,6 +943,9 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
     float graphAlpha = 1.f;
     float emissive[3];
     memcpy(emissive, m->emissive, 12);
+    /* the layers a graph sets (OpenPBR's): below 0, as the material says */
+    ArtfGraphLayers layers;
+    artfGraphLayersNone(&layers);
     if (m->graph) {
         /* (where it is in the world: from the ray that got here) */
         ArtfGraphInput in;
@@ -961,7 +964,9 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
         result.roughness = out->rough;
         result.metallic = metal;
         result.alpha = 1.f;
+        result.layers = layers;
         artfGraphRun(s, &s->graphs.items[m->graph - 1], m, &in, &result);
+        layers = result.layers;
         memcpy(albedo, result.color, 12);
         memcpy(emissive, result.emissive, 12);
         memcpy(out->normal, result.normal, 12);
@@ -999,7 +1004,11 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
             for (int i = 0; i < 3; ++i) specularTint[i] *= texel[3];
         }
     }
-    for (int i = 0; i < 3; ++i) out->f0[i] = artfShadeReflects(.04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f) * specularTint[i], notMetal, albedo[i], metal);
+    for (int i = 0; i < 3; ++i) {
+        float tinted = .04f * m->specular * (flags & ARTF_MORE_SPECULAR ? more->specularColor[i] : 1.f) * specularTint[i];
+        if ((flags & ARTF_MORE_SPECULAR) && !(layers.specular[0] < 0)) tinted = .04f * m->specular * layers.specular[i]; /* (the graph's) */
+        out->f0[i] = artfShadeReflects(tinted, notMetal, albedo[i], metal);
+    }
     if (flags & ARTF_MORE_IRIDESCENCE) {
         /* (and its textures', as kernels.inc has them) */
         float amount = more->iridescence, thickness = more->iridescenceThickness, texel[4];
@@ -1008,6 +1017,8 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
             texelCone(&textures[more->iridescenceThicknessMap], lodBase, u, v, texel);
             thickness = more->iridescenceThicknessMin + (thickness - more->iridescenceThicknessMin) * texel[1];
         }
+        if (!(layers.film < 0)) amount = layers.film;
+        if (!(layers.filmThickness < 0)) thickness = layers.filmThickness;
         artfIridescence(out->f0, ndv, amount, more->iridescenceIor, thickness);
     }
     const float unkept = artfShadeUnkept(ndv, out->rough);
@@ -1080,6 +1091,15 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
                 for (int i = 0; i < 3; ++i) out->coatNormal[i] = out->front ? cn[i] : -cn[i];
             }
         }
+        /* (the graph's, where it set them) */
+        float under[3] = {more->subsurface[0], more->subsurface[1], more->subsurface[2]};
+        if (!(layers.coat < 0)) coat = layers.coat;
+        if (!(layers.coatRough < 0)) coatRough = layers.coatRough;
+        if (!(layers.fuzzRough < 0)) sheenRough = layers.fuzzRough;
+        for (int i = 0; i < 3; ++i) {
+            if (!(layers.fuzz[i] < 0)) sheen[i] = layers.fuzz[i];
+            if (!(layers.under[i] < 0)) under[i] = layers.under[i];
+        }
         const float coatNv = artfMaxf(-dot3(out->coatNormal, d), 1e-4f), coatFar = artfShadeFifthInRow(coatNv);
         out->coat = coat;
         out->coatLobe = artfShadeLobeOf(coatRough, coatNv);
@@ -1091,7 +1111,7 @@ static void surfaceAt(const ArtfScene* s, const Hit* h, const float* origin, con
             out->albedo[i] *= out->under;
             out->mirror[i] = out->mirror[i] * out->under + coat * coatMirror;
             out->sheen[i] = flags & ARTF_MORE_SHEEN ? sheen[i] * notMetal * out->under : 0.f;
-            out->subsurface[i] = flags & ARTF_MORE_SUBSURFACE ? more->subsurface[i] * notMetal * out->under : 0.f;
+            out->subsurface[i] = flags & ARTF_MORE_SUBSURFACE ? under[i] * notMetal * out->under : 0.f;
         }
         out->shiny = true;
     }

@@ -167,6 +167,7 @@ void testMoreMaterials(void);
 void testSpecularMaps(void);
 void testFilmMaps(void);
 void testFilmBelcour(void);
+void testOpenPbr(void);
 void testUnderSpread(void);
 void testTextureRoles(void);
 void testHighlightFlicker(void);

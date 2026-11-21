@@ -18,9 +18,6 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 
 ### Fase 5 — Alcance de conteúdo
 - [~] 5.10 Basis Universal — falta transcodificar para blocos da GPU (hoje vai para pixels)
-- [~] 5.12 OpenPBR (camadas no grafo de materiais em C) — no stash "5.12 OpenPBR": API, `graph.c`, flags do material e
-  rasterização da CPU feitos; faltam o traçador da CPU, os shaders da GPU (fragmento e traçador), o teste e a
-  documentação
 
 ### Fase 6 — Alcance de plataforma
 - [~] 6.1 Metal — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado e as camadas, e rodar nele os

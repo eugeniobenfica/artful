@@ -854,6 +854,15 @@ static ArtfMaterialMore materialMore(const ArtfScene* s, const ArtfMaterialDesc*
     m.subsurface[2] = artfMaxf(d->subsurface.z, 0);
     m.subsurfaceRadius = d->subsurfaceRadius > 0 ? d->subsurfaceRadius : .05f;
     if (m.subsurface[0] > 0 || m.subsurface[1] > 0 || m.subsurface[2] > 0) m.flags |= ARTF_MORE_SUBSURFACE;
+    if (d->graph && d->graph <= s->graphs.len) {
+        /* (the layers its graph sets: OpenPBR's, as if the material had asked for them) */
+        const uint32_t* o = s->graphs.items[d->graph - 1].outputs;
+        if (o[ARTF_OUT_COAT]) m.flags |= ARTF_MORE_COAT;
+        if (o[ARTF_OUT_FUZZ]) m.flags |= ARTF_MORE_SHEEN;
+        if (o[ARTF_OUT_SPECULAR]) m.flags |= ARTF_MORE_SPECULAR;
+        if (o[ARTF_OUT_THIN_FILM]) m.flags |= ARTF_MORE_IRIDESCENCE;
+        if (o[ARTF_OUT_SUBSURFACE]) m.flags |= ARTF_MORE_SUBSURFACE;
+    }
     if (d->attenuationDistance > 0 && (d->attenuation.x > 0 || d->attenuation.y > 0 || d->attenuation.z > 0)) {
         /* (what is kept after a distance: 2^(log2(color) x distance / theirs)) */
         const float c[3] = {d->attenuation.x, d->attenuation.y, d->attenuation.z};

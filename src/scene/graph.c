@@ -171,8 +171,24 @@ ARTF_FORCE_INLINE void runLanes(const ArtfScene* s, const ArtfGraphData* g, cons
 #define OUTPUT(which) (g->outputs[which] ? r[g->outputs[which]] : NULL)
     float (*color)[8] = OUTPUT(ARTF_OUT_COLOR), (*emissive)[8] = OUTPUT(ARTF_OUT_EMISSIVE), (*rough)[8] = OUTPUT(ARTF_OUT_ROUGHNESS);
     float (*metal)[8] = OUTPUT(ARTF_OUT_METALLIC), (*alpha)[8] = OUTPUT(ARTF_OUT_ALPHA), (*normal)[8] = OUTPUT(ARTF_OUT_NORMAL);
+    float (*coat)[8] = OUTPUT(ARTF_OUT_COAT), (*coatRough)[8] = OUTPUT(ARTF_OUT_COAT_ROUGHNESS), (*fuzz)[8] = OUTPUT(ARTF_OUT_FUZZ);
+    float (*fuzzRough)[8] = OUTPUT(ARTF_OUT_FUZZ_ROUGHNESS), (*specular)[8] = OUTPUT(ARTF_OUT_SPECULAR), (*film)[8] = OUTPUT(ARTF_OUT_THIN_FILM);
+    float (*under)[8] = OUTPUT(ARTF_OUT_SUBSURFACE);
 #undef OUTPUT
     for (int l = 0; l < lanes; ++l) {
+        /* the layers: as the material's own are held */
+        if (coat) io->coat[l] = artfClampf(coat[0][l], 0, 1);
+        if (coatRough) io->coatRough[l] = artfClampf(coatRough[0][l], .045f, 1.f);
+        if (fuzzRough) io->fuzzRough[l] = artfClampf(fuzzRough[0][l], .07f, 1.f);
+        if (film) {
+            io->film[l] = artfClampf(film[0][l], 0, 1);
+            io->filmThickness[l] = artfMaxf(film[1][l], 0);
+        }
+        for (int k = 0; k < 3; ++k) {
+            if (fuzz) io->fuzz[k][l] = artfMaxf(fuzz[k][l], 0);
+            if (specular) io->specular[k][l] = artfClampf(specular[k][l], 0, 25.f);
+            if (under) io->under[k][l] = artfMaxf(under[k][l], 0);
+        }
         for (int k = 0; k < 3; ++k) {
             if (color) io->color[k][l] = color[k][l];
             if (emissive) io->emissive[k][l] = emissive[k][l];
@@ -206,7 +222,28 @@ void artfGraphRun(const ArtfScene* s, const ArtfGraphData* g, const ArtfMaterial
     io.roughness[0] = out->roughness;
     io.metallic[0] = out->metallic;
     io.alpha[0] = out->alpha;
+    const ArtfGraphLayers* l = &out->layers;
+    io.coat[0] = l->coat;
+    io.coatRough[0] = l->coatRough;
+    io.fuzzRough[0] = l->fuzzRough;
+    io.film[0] = l->film;
+    io.filmThickness[0] = l->filmThickness;
+    for (int k = 0; k < 3; ++k) {
+        io.fuzz[k][0] = l->fuzz[k];
+        io.specular[k][0] = l->specular[k];
+        io.under[k][0] = l->under[k];
+    }
     runLanes(s, g, m, &io, 1);
+    out->layers.coat = io.coat[0];
+    out->layers.coatRough = io.coatRough[0];
+    out->layers.fuzzRough = io.fuzzRough[0];
+    out->layers.film = io.film[0];
+    out->layers.filmThickness = io.filmThickness[0];
+    for (int k = 0; k < 3; ++k) {
+        out->layers.fuzz[k] = io.fuzz[k][0];
+        out->layers.specular[k] = io.specular[k][0];
+        out->layers.under[k] = io.under[k][0];
+    }
     for (int k = 0; k < 3; ++k) {
         out->color[k] = io.color[k][0];
         out->emissive[k] = io.emissive[k][0];

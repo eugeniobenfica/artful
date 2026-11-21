@@ -240,6 +240,7 @@ int main(int argc, char** argv) {
     RUN("materials/specularMaps", testSpecularMaps());
     RUN("materials/filmMaps", testFilmMaps());
     RUN("materials/filmBelcour", testFilmBelcour());
+    RUN("materials/openPbr", testOpenPbr());
     RUN("materials/underSpread", testUnderSpread());
     RUN("materials/textureRoles", testTextureRoles());
     RUN("materials/highlightFlicker", testHighlightFlicker());
