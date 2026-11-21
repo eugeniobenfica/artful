@@ -11,17 +11,14 @@ rodando no macOS; os fuzzers passam. O Linux cai no lavapipe do runner em `layer
 push é o 0cf336a.
 
 ## CI
-- [ ] Linux: `layers/layersTransmittance` (camadas na GPU, da 5.8) dá segfault no lavapipe do runner, como
-  `layersBehindSolid` (já pulado); o lavapipe do MSYS2 roda os dois limpos, também sob validação. Achar a causa ou pular
-  com o motivo
-- [~] lavapipe: 18 testes pulados por `ARTFUL_SKIP` (os que percorrem as árvores enquanto a cena é desenhada: probes na
-  GPU, sombras e reflexos por raios); a causa não foi achada (não é leitura fora do buffer, pilha nem textura)
+- [ ] Linux: conferir no runner se `layers/layersTransmittance` e `layersBehindSolid` (camadas na GPU, da 5.8) ainda
+  caem no lavapipe dele; o lavapipe do MSYS2 roda os dois limpos, também sob validação. A causa dos outros 18 que a CI
+  pulava foi achada e corrigida (ray queries lendo a interseção committed sem acerto): a CI não pula mais nada, falta um
+  push para conferir
 
 ## Fase 3 — Robustez e prova
-- [~] 3.1 Fuzzing — faltam as 24 h por alvo; o fuzz do HDR já pediu 2 GB numa run (falta de memória), não reproduzido
 - [~] 3.3 Pré-rotação no Android — falta ver num aparelho 📱
 - [~] 3.6 Ritmo e térmica — faltam 30 min num telefone 📱
-- [~] 3.8 Ensaio longo — repetir as 4 h com a suspensão do Windows desligada
 - [~] 3.9 Linux com GPU e janela, sem máquina 📱
 
 ## Fase 5 — Alcance de conteúdo

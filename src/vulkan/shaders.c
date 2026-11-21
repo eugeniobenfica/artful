@@ -3436,19 +3436,31 @@ static void closestHardware(const Tracer* t, SpvId o, SpvId d, SpvId limit, bool
     SpvId committed = spvConstInt(s, 1);
     SpvId kind = spvNewId(s);
     spvEmit(&s->code, 4479 /* OpRayQueryGetIntersectionTypeKHR */, SPV_WORDS(s->uintType, kind, t->query, committed));
-    SpvId hitT = spvNewId(s), instance = spvNewId(s), primitive = spvNewId(s), bary = spvNewId(s);
-    spvEmit(&s->code, 6018 /* OpRayQueryGetIntersectionTKHR */, SPV_WORDS(s->floatType, hitT, t->query, committed));
-    spvEmit(&s->code, 6020 /* OpRayQueryGetIntersectionInstanceIdKHR */, SPV_WORDS(s->intType, instance, t->query, committed));
-    spvEmit(&s->code, 6023 /* OpRayQueryGetIntersectionPrimitiveIndexKHR */, SPV_WORDS(s->intType, primitive, t->query, committed));
-    spvEmit(&s->code, 6024 /* OpRayQueryGetIntersectionBarycentricsKHR */, SPV_WORDS(s->vec2, bary, t->query, committed));
-    SpvId hit = NOT_EQ(kind, UINT(0));
-    spvStore(s, t->bestT, PICK_F(hit, hitT, limit));
-    spvStore(s, t->bestU, spvExtract(s, s->floatType, bary, 0));
-    spvStore(s, t->bestV, spvExtract(s, s->floatType, bary, 1));
-    spvStore(s, t->bestInstance, spvSelect(s, s->uintType, hit, spvOp1(s, SPV_OP_Bitcast, s->uintType, instance), UINT(0xFFFFFFFFu)));
-    /* (the mesh's first triangle from the instance's table, past the custom index's 24 bits: bit 0 is its sides) */
-    SpvId meta = bufferVec(s, &t->r, t->instances, ADD_U(MUL_U(spvSelect(s, s->uintType, hit, spvOp1(s, SPV_OP_Bitcast, s->uintType, instance), UINT(0)), UINT(4)), UINT(3)));
-    spvStore(s, t->bestTriangle, ADD_U(SHR_U(AS_UINT(W(meta)), 1), spvOp1(s, SPV_OP_Bitcast, s->uintType, primitive)));
+    /* what was met, only where something was: the specification leaves the committed intersection's T, instance and the
+     * rest undefined where there is none, and lavapipe reads them through an instance of nothing, and falls over */
+    spvStore(s, t->bestT, limit);
+    spvStore(s, t->bestU, FLOAT(0.f));
+    spvStore(s, t->bestV, FLOAT(0.f));
+    spvStore(s, t->bestInstance, UINT(0xFFFFFFFFu));
+    spvStore(s, t->bestTriangle, UINT(0));
+    SpvId merge;
+    spvIfBegin(s, NOT_EQ(kind, UINT(0)), &merge);
+    {
+        SpvId hitT = spvNewId(s), instance = spvNewId(s), primitive = spvNewId(s), bary = spvNewId(s);
+        spvEmit(&s->code, 6018 /* OpRayQueryGetIntersectionTKHR */, SPV_WORDS(s->floatType, hitT, t->query, committed));
+        spvEmit(&s->code, 6020 /* OpRayQueryGetIntersectionInstanceIdKHR */, SPV_WORDS(s->intType, instance, t->query, committed));
+        spvEmit(&s->code, 6023 /* OpRayQueryGetIntersectionPrimitiveIndexKHR */, SPV_WORDS(s->intType, primitive, t->query, committed));
+        spvEmit(&s->code, 6024 /* OpRayQueryGetIntersectionBarycentricsKHR */, SPV_WORDS(s->vec2, bary, t->query, committed));
+        SpvId which = spvOp1(s, SPV_OP_Bitcast, s->uintType, instance);
+        spvStore(s, t->bestT, hitT);
+        spvStore(s, t->bestU, spvExtract(s, s->floatType, bary, 0));
+        spvStore(s, t->bestV, spvExtract(s, s->floatType, bary, 1));
+        spvStore(s, t->bestInstance, which);
+        /* (the mesh's first triangle from the instance's table, past the custom index's 24 bits: bit 0 is its sides) */
+        SpvId meta = bufferVec(s, &t->r, t->instances, ADD_U(MUL_U(which, UINT(4)), UINT(3)));
+        spvStore(s, t->bestTriangle, ADD_U(SHR_U(AS_UINT(W(meta)), 1), spvOp1(s, SPV_OP_Bitcast, s->uintType, primitive)));
+    }
+    spvIfEnd(s, merge);
 }
 
 /* As closest: leaves what it found in bestT and the others. */

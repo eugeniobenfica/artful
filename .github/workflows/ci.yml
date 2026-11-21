@@ -13,13 +13,10 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     env:
-      # (lavapipe falls over, in the shader llvmpipe makes, wherever the trees are walked while the scene is drawn:
-      # light that bounced gathered on the GPU, shadows and reflections from rays, and what tests them. Reproduced on
-      # Windows with MSYS2's Mesa: not a read past a buffer (robustBufferAccess changes nothing), nor the stack of the
-      # walk, nor textures; not yet found. Every other test runs here; these run on the GPUs of Windows' machine. The
-      # seven after probesKept, of the same kind, came with phases 5.1 to 5.7 and were found with MSYS2's lavapipe;
-      # layersBehindSolid (5.8) falls over only in this runner's Mesa: MSYS2's runs it clean, under validation too.)
-      ARTFUL_SKIP: post/floats,tracing/probeReflections,scale/tracedSkinLod,tracing/traceHardware,backends/pipelinesAhead,tracing/tracedShadows,tracing/tracedReflections,tracing/tracedMoved,tracing/tracedRefit,tracing/probesGpu,tracing/probesKept,tracing/extraTraced,tracing/sampledLights,tracing/sampledMoving,scale/coarseRays,scale/drawnLift,tracing/probesFollow,tracing/probeCascades,layers/layersBehindSolid
+      # (nothing is skipped: what fell over in lavapipe, wherever rays were followed while the scene was drawn, was the
+      # shaders reading a ray query's committed intersection where there was none, which lavapipe reads through an
+      # instance of nothing; they read it only where something was met now)
+      ARTFUL_SKIP: ""
     strategy:
       fail-fast: false
       matrix:
