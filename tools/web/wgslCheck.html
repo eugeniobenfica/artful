@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WGSL check</title>
+<style>
+  body { margin: 0; padding: 16px; background: #111; color: #ddd; font: 13px ui-monospace, monospace; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<pre id="out">checking...</pre>
+<script>
+/* artful's shaders as WGSL (artful-shaders folder --ir writes them), put through this browser's compiler: the files
+   named in wgsl/list.txt, beside this page. Each one's messages, and a count at the end (window.result). */
+(async () => {
+  const out = document.getElementById("out");
+  const lines = [];
+  const say = (t) => { lines.push(t); out.textContent = lines.join("\n"); };
+  if (!navigator.gpu) { say("no WebGPU here"); window.result = {error: "no WebGPU"}; return; }
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice();
+  const names = (await (await fetch("wgsl/list.txt")).text()).split("\n").map((n) => n.trim()).filter(Boolean);
+  let refused = 0;
+  for (const name of names) {
+    const code = await (await fetch("wgsl/" + name)).text();
+    const module = device.createShaderModule({code});
+    const info = await module.getCompilationInfo();
+    const errors = info.messages.filter((m) => m.type === "error");
+    if (errors.length) {
+      ++refused;
+      say(name + ": refused");
+      for (const m of errors) say("  " + m.lineNum + ":" + m.linePos + " " + m.message);
+    }
+  }
+  say(names.length + " files, " + refused + " refused");
+  window.result = {files: names.length, refused};
+})();
+</script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 /* artful-shaders — writes the GPU's shaders to a folder, for spirv-val and spirv-dis.
  *
- *   artful-shaders folder [--ir]: and each one's IR as text (name.ir), and as Metal (name.metal, shaderir/msl.h)
+ *   artful-shaders folder [--ir]: and each one's IR as text (name.ir), as Metal (name.metal, shaderir/msl.h) and as
+ *   WGSL (name.wgsl, shaderir/wgsl.h)
  *   artful-shaders folder --debug: with debugging information, pointing at the C that builds each (irDebugInfo) */
 #include "scene/sceneInternal.h"
 #include "vulkan/shaders.h"
@@ -8,6 +9,7 @@
 #include "2d/vulkan2d.h"
 #include "vulkan/spirv.h"
 #include "shaderir/msl.h"
+#include "shaderir/wgsl.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -41,6 +43,21 @@ static void finished(const IrModule* m) {
         fclose(f);
     }
     artfFree(metal);
+    /* and as WGSL, the same way up */
+    const IrWgslOptions wgslOptions = {!strcmp(current, "shadowVertex")};
+    char* wgsl = irWgsl(m, &wgslOptions, NULL, why, sizeof why);
+    snprintf(path, sizeof path, "%s/%s.wgsl", folderOut, current);
+    if (!wgsl) {
+        fprintf(stderr, "%s: no WGSL: %s\n", current, why);
+        remove(path);
+        return;
+    }
+    f = fopen(path, "w");
+    if (f) {
+        fputs(wgsl, f);
+        fclose(f);
+    }
+    artfFree(wgsl);
 }
 
 static int save(const char* folder, const char* name, uint32_t* code, size_t size) {

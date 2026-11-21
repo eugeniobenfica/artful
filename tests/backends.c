@@ -579,6 +579,7 @@ void testPipelinesAhead(void) { missing("vulkan"); }
 #ifdef ARTFUL_VULKAN
 #include "shaderir/ir.h"
 #include "shaderir/msl.h"
+#include "shaderir/wgsl.h"
 #include "vulkan/shaders.h"
 #include "vulkan/spirv.h"
 
@@ -629,6 +630,10 @@ void testShaderIr(void) {
     char* metal = irMsl(&s->ir, NULL, why, sizeof why);
     CHECK(metal && strstr(metal, "fragment main0_out main0(") && strstr(metal, "[[color(0)]]") && strstr(metal, "0.5f + 0.5f") && strstr(metal, "return out;"));
     artfFree(metal);
+    /* as WGSL: the same, in its words (shaderir/wgsl.h) */
+    char* wgsl = irWgsl(&s->ir, NULL, NULL, why, sizeof why);
+    CHECK(wgsl && strstr(wgsl, "@fragment") && strstr(wgsl, "@location(0) m_") && strstr(wgsl, "0.5f + 0.5f") && strstr(wgsl, "return o;"));
+    artfFree(wgsl);
     /* written again from the IR: the same words, and their header */
     size_t words;
     uint32_t* code = irSpirv(&s->ir, &words);

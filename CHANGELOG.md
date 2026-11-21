@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **WGSL from the shaders' IR** (phase 6.2): `irWgsl` writes WebGPU's language from the same IR as SPIR-V and Metal;
+  the 79 shaders that can be WGSL pass both naga (wgpu-native) and Tint (Chromium).
+
 - **The CPU backend in a browser** (phase 6.2): with Emscripten, its kernels use WebAssembly's SIMD and its threads
   are workers; every CPU test passes under node with the same pixels as on x86, and `artful-web.html` draws the
   spheres in Chromium in 3.0 ms a frame at 960x540.

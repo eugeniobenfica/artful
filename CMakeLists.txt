@@ -136,7 +136,7 @@ endif()
 
 if(ARTFUL_VULKAN)
   # (the SPIR-V writer is the core's: the 3D library and the 2D one both build their shaders with it)
-  target_sources(artful-core PRIVATE src/vulkan/spirv.c src/shaderir/ir.c src/shaderir/msl.c)
+  target_sources(artful-core PRIVATE src/vulkan/spirv.c src/shaderir/ir.c src/shaderir/msl.c src/shaderir/wgsl.c)
   target_sources(artful PRIVATE src/vulkan/vulkan.c src/vulkan/vulkanTrace.c src/vulkan/vulkanPost.c src/vulkan/shaders.c src/vulkan/frameGraph.c)
   target_compile_definitions(artful PRIVATE ARTFUL_VULKAN)
   target_sources(artful-2d PRIVATE src/2d/vulkan2d.c src/2d/shaders2d.c)
