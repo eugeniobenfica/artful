@@ -85,8 +85,47 @@ void testVulkan(void) {
     artfSceneFree(s);
 }
 
+/* What WebGPU and Metal draw past the plain frame, each a scene against the CPU's (the plan's 6.1 and 6.2): kept by
+ * which backend has it yet. */
+typedef ArtfScene* (*FeatureScene)(void);
+
+/* A material of the program's own: waves by position and roughness by depth, on a sun's scene. */
+static ArtfScene* graphFeatureScene(void) {
+    ArtfScene* s = shadowScene();
+    ArtfGraph* g = artfGraphNew();
+    ArtfExpr p = artfExprPosition(g);
+    ArtfExpr wave = artfExprSin(g, artfExprAdd(g, artfExprMul(g, artfExprX(g, p), artfExprNumber(g, 3)), artfExprParam(g, 0)));
+    artfGraphSetOutput(g, ARTF_OUT_COLOR, artfExprMix(g, artfExprConst(g, .1f, .2f, .8f, 1), artfExprConst(g, .9f, .7f, .1f, 1), artfExprAdd(g, artfExprMul(g, wave, artfExprNumber(g, .5f)), artfExprNumber(g, .5f))));
+    artfGraphSetOutput(g, ARTF_OUT_ROUGHNESS, artfExprFract(g, artfExprZ(g, p)));
+    ArtfMaterialDesc d = {artfVec3(1, 1, 1), 0, 0, 1, artfVec3(0, 0, 0)};
+    d.graph = artfSceneAddGraph(s, g);
+    artfGraphFree(g);
+    const ArtfMaterial m = artfSceneAddMaterial(s, &d);
+    artfInstanceSetMaterial(s, 1, m);
+    artfMaterialSetParam(s, m, 0, 1.f, 0, 0, 0);
+    return s;
+}
+
+static void otherGpuFeatures(ArtfRenderer* gpu, ArtfRenderer* cpu, ArtfBackend backend, uint32_t* a, uint32_t* b) {
+    static const struct { const char* name; FeatureScene make; bool webgpu, metal; } features[] = {
+        {"a material of its own", graphFeatureScene, true, false},
+        {"layers of transparency", layeredScene, true, false},
+    };
+    for (size_t k = 0; k < ARTF_COUNT(features); ++k) {
+        if (!(backend == ARTF_BACKEND_WEBGPU ? features[k].webgpu : features[k].metal)) continue;
+        ArtfScene* s = features[k].make();
+        drawSamples(gpu, s, 2, a);
+        drawSamples(cpu, s, 1, b);
+        const double far = differentShare(a, b, 24);
+        printf("%s against the CPU, %s: %.2f%% of pixels differ by more than 24 of 255\n", artfBackendName(backend), features[k].name, far * 100);
+        CHECK(far < .02);
+        artfSceneFree(s);
+    }
+}
+
 /* WebGPU (the plan's 6.2) and Metal (6.1) against the CPU: a textured scene with its lights; a sun's shadows; what
- * has holes; the overlay; a size of its own. Where one is not built, or has no device, its test is skipped. */
+ * has holes; the overlay; a size of its own; and what each draws past that (otherGpuFeatures). Where one is not built,
+ * or has no device, its test is skipped. */
 static void otherGpu(ArtfBackend backend, const char* what) {
     ArtfRendererOptions o = options(backend, 0, false);
     ArtfRenderer* gpu = artfRendererNew(&o);
@@ -117,6 +156,7 @@ static void otherGpu(ArtfBackend backend, const char* what) {
         printf("%s against the CPU, %s: %.2f%% of pixels differ by more than 24 of 255\n", artfBackendName(backend), names[k], far * 100);
         CHECK(far < .02);
     }
+    otherGpuFeatures(gpu, cpu, backend, a, b);
     /* the overlay */
     uint32_t* over = artfCalloc((size_t)W * H, 4);
     for (int y = 10; y < 60; ++y)

@@ -9,8 +9,9 @@
  * Its frame is Metal's (metal.c), the plain one: the scene's buffers go up as they change; each instance in view is
  * found by the cull shader, which fills each mesh's indirect draw; shadows from maps; then the scene, what has holes,
  * and the overlay, into a texture of its own, copied to the surface where there is one and read back where asked.
- * What it leaves out, it says in the log: a frame in floats and what follows it, light from all around and from
- * probes, layers of transparency, tracing, materials in C and views. */
+ * Materials of the program's own are branches of the cutout pipeline's pixel shader, made again when the scene's
+ * change. What it leaves out, it says in the log: a frame in floats and what follows it, light from all around and
+ * from probes, layers of transparency, tracing and views. */
 #include "render/rendererInternal.h"
 #include "scene/sceneInternal.h"
 #include "shaderir/ir.h"
@@ -64,10 +65,14 @@ typedef struct WebGpu {
     int shadowWidth, shadowHeight;
     WGPUSampler linear, nearest;
     Program cull, scene, cutout, overlayDraw, shadow, shadowHoles, blit;
+    Program layerDepth, layer, particle; /* (of the cutout's shader: a layer's depth alone, then it at that depth, blended) */
     uint64_t stamp; /* the resources' version: bind groups are made again when it moves */
     double cpuMs;
     uint64_t frameNumber;
-    bool warnedLayers, warnedTrace, warnedGraphs, warnedFloats, warnedView;
+    bool warnedTrace, warnedFloats, warnedView;
+    ARTF_VEC(ArtfLayer) layers; /* (scratch: what shows what is behind it, in view, far to near) */
+    uint64_t graphScene;  /* the scene, and how many of its materials of its own, the cutout pipeline was made for */
+    uint32_t graphCount;
 
     Gpu empty, emptyWritable, frame, shadowData, push, instances, visible, indirect, materials, meshTable, vertices, indices, colors;
     Gpu shadowList, shadowCommands, meshletMeshes, meshletState, extraLights, tileLights, decals;
@@ -481,6 +486,44 @@ static bool blitMake(WebGpu* v) {
     return p->render != NULL;
 }
 
+/* The pipeline of what has holes, and of materials of the program's own (their graphs, one branch each). */
+static bool cutoutMake(WebGpu* v, const ArtfGraphData* graphs, uint32_t count) {
+    size_t size = 0;
+    IrWgslBindings a, b;
+    b.count = 0;
+    uint32_t* code = artfShaderSceneVertex(&size, false);
+    char* vt = wgslOf(code, size, false, &a);
+    code = artfShaderSceneFragment(&size, v->maxTextures | ARTF_TEXTURES_UNIFORM, true, graphs, count, 0, 0);
+    char* ft = wgslOf(code, size, false, &b);
+    if (!vt || !ft) {
+        artfFree(vt);
+        artfFree(ft);
+        return false;
+    }
+    v->cutout.bindings = a;
+    bindingsJoin(&v->cutout.bindings, &b);
+    /* (the same shader four times, as Vulkan's cutoutPipelinesCreate: what has holes; a layer's depth alone; the layer at
+     * that depth, blended; particles, a quad each, blended at once) */
+    Program* const programs[4] = {&v->cutout, &v->layerDepth, &v->layer, &v->particle};
+    const RenderState states[4] = {{WGPUCompareFunction_Greater, true, false, true, true, false, WGPUCullMode_None, 0},
+                                   {WGPUCompareFunction_Greater, true, false, false, true, false, WGPUCullMode_None, 0},
+                                   {WGPUCompareFunction_Equal, false, true, true, true, false, WGPUCullMode_None, 0},
+                                   {WGPUCompareFunction_Greater, true, true, true, true, false, WGPUCullMode_None, 0}};
+    bool ok = true;
+    for (int k = 0; k < 4 && ok; ++k) {
+        programs[k]->bindings = v->cutout.bindings;
+        const size_t vl = strlen(vt) + 1, fl = strlen(ft) + 1;
+        char* vc = artfMalloc(vl);
+        char* fc = artfMalloc(fl);
+        memcpy(vc, vt, vl);
+        memcpy(fc, ft, fl);
+        ok = renderMake(v, programs[k], vc, fc, &states[k]);
+    }
+    artfFree(vt);
+    artfFree(ft);
+    return ok;
+}
+
 static bool pipelinesMake(WebGpu* v) {
     WGPUSamplerDescriptor sd = WGPU_SAMPLER_DESCRIPTOR_INIT;
     sd.addressModeU = sd.addressModeV = WGPUAddressMode_Repeat;
@@ -509,7 +552,7 @@ static bool pipelinesMake(WebGpu* v) {
         if (!renderMake(v, program, vt, ft, &st)) return false; \
     } while (0)
     RENDER(&v->scene, artfShaderSceneVertex(&size, false), false, artfShaderSceneFragment(&size, textures, false, NULL, 0, 0, 0), {WGPUCompareFunction_Greater, true, false, true, true, false, WGPUCullMode_Back, 0});
-    RENDER(&v->cutout, artfShaderSceneVertex(&size, false), false, artfShaderSceneFragment(&size, textures, true, NULL, 0, 0, 0), {WGPUCompareFunction_Greater, true, false, true, true, false, WGPUCullMode_None, 0});
+    if (!cutoutMake(v, NULL, 0)) return false;
     RENDER(&v->overlayDraw, artfShaderOverlayVertex(&size), false, artfShaderOverlayFragment(&size, false), {WGPUCompareFunction_Always, false, true, true, false, false, WGPUCullMode_None, 0});
     RENDER(&v->shadow, artfShaderShadowVertex(&size), true, (uint32_t*)NULL, {WGPUCompareFunction_Less, true, false, false, true, true, WGPUCullMode_None, 0});
     RENDER(&v->shadowHoles, artfShaderShadowVertex(&size), true, artfShaderShadowFragment(&size, textures), {WGPUCompareFunction_Less, true, false, false, true, true, WGPUCullMode_None, 0});
@@ -898,16 +941,30 @@ static void drawShadows(WebGpu* v, WGPUCommandEncoder c, const ArtfShadowFrame* 
     wgpuRenderPassEncoderRelease(e);
 }
 
+static void programFree(Program* p);
+
+/* The scene's materials of their own: the cutout pipeline made again for them when they are not those it has. */
+static bool graphsSync(WebGpu* v, const ArtfScene* scene) {
+    const uint32_t count = (uint32_t)scene->graphs.len;
+    if (count == v->graphCount && (!count || v->graphScene == scene->id)) return true;
+    programFree(&v->cutout);
+    programFree(&v->layerDepth);
+    programFree(&v->layer);
+    programFree(&v->particle);
+    if (!cutoutMake(v, scene->graphs.items, count)) return false;
+    v->graphCount = count;
+    v->graphScene = scene->id;
+    return true;
+}
+
 static bool frameDraw(WebGpu* v, ArtfScene* scene) {
     if (v->targetsStale && !targetsMake(v)) return false;
     if (!v->frameTexture) return true; /* (a window with no size) */
 #define ONCE(flag, ...) do { if (!v->flag) { v->flag = true; artfLog(__VA_ARGS__); } } while (0)
-    if (scene->graphs.len) ONCE(warnedGraphs, "artful: WebGPU does not run materials written in C yet: they show their plain values");
     if (scene->trace.desc.mode != ARTF_TRACE_NONE) ONCE(warnedTrace, "artful: WebGPU does not trace: the scene is drawn");
-    if (scene->translucentCount) ONCE(warnedLayers, "artful: WebGPU does not draw layers of transparency yet: they are left out");
     if (v->base.view) ONCE(warnedView, "artful: WebGPU shows no views but the frame");
 #undef ONCE
-    if (!syncScene(v, scene)) return false;
+    if (!syncScene(v, scene) || !graphsSync(v, scene)) return false;
     ArtfFrameData frame;
     artfSceneFrame(scene, v->width, v->height, &frame);
     frame.output[0] = (float)v->width;
@@ -924,6 +981,25 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
     bufferPut(v, &v->decals, 0, v->decalScratch, (size_t)decals * sizeof(ArtfDecalData));
     if (!syncLights(v, scene, &frame)) return false;
     artfSceneResidencyStep(scene, &frame, v->height);
+    /* what shows what is behind it, far to near: each its instance and mesh, after what the cull writes (as Vulkan's) */
+    uint32_t layerCount = 0;
+    if (scene->translucentCount && scene->instances.len) {
+        artfVecReserve(&v->layers, scene->translucentCount);
+        layerCount = artfSceneLayers(scene, &frame, v->layers.items);
+        artfLayerRange(&frame, v->layers.items, layerCount);
+        if (layerCount) {
+            if (!v->listScratch || v->listScratchSize < (size_t)layerCount * 2) {
+                artfFree(v->listScratch);
+                v->listScratchSize = (size_t)layerCount * 2;
+                v->listScratch = artfMalloc(v->listScratchSize * 4);
+            }
+            for (uint32_t i = 0; i < layerCount; ++i) {
+                v->listScratch[i * 2] = v->layers.items[i].instance;
+                v->listScratch[i * 2 + 1] = v->layers.items[i].mesh;
+            }
+            bufferPut(v, &v->visible, (uint64_t)layersAt(v) * 8, v->listScratch, (size_t)layerCount * 8);
+        }
+    }
     bufferPut(v, &v->frame, 0, &frame, sizeof frame);
     uploadOverlay(v);
 
@@ -998,6 +1074,26 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
         if (cutouts) {
             use(v, e, &v->cutout, 0);
             drawCommands(v, e, v->indirect.buffer, meshCount * 2, meshCount);
+        }
+        /* the layers, far to near: each its depth alone, then itself at that depth; particles of one quad, at once */
+        for (uint32_t i = 0; i < layerCount; ++i) {
+            const MeshRange* m = &v->meshes.items[v->layers.items[i].mesh];
+            if (!m->indexCount) continue;
+            const bool particle = (scene->instances.items[v->layers.items[i].instance].flags & ARTF_INSTANCE_PARTICLE) != 0;
+            if (particle) {
+                uint32_t end = i + 1;
+                while (end < layerCount && v->layers.items[end].mesh == v->layers.items[i].mesh &&
+                       (scene->instances.items[v->layers.items[end].instance].flags & ARTF_INSTANCE_PARTICLE))
+                    ++end;
+                use(v, e, &v->particle, 0);
+                wgpuRenderPassEncoderDrawIndexed(e, m->indexCount, end - i, m->firstIndex, m->vertexOffset, layersAt(v) + i);
+                i = end - 1;
+                continue;
+            }
+            use(v, e, &v->layerDepth, 0);
+            wgpuRenderPassEncoderDrawIndexed(e, m->indexCount, 1, m->firstIndex, m->vertexOffset, layersAt(v) + i);
+            use(v, e, &v->layer, 0);
+            wgpuRenderPassEncoderDrawIndexed(e, m->indexCount, 1, m->firstIndex, m->vertexOffset, layersAt(v) + i);
         }
     }
     if (v->overlayPixels && v->overlayUsable) {
@@ -1141,7 +1237,7 @@ static void webgpuFree(ArtfRenderer* r) {
     Gpu* buffers[] = {&v->empty, &v->emptyWritable, &v->frame, &v->shadowData, &v->push, &v->instances, &v->visible, &v->indirect, &v->materials, &v->meshTable, &v->vertices,
                       &v->indices, &v->colors, &v->shadowList, &v->shadowCommands, &v->meshletMeshes, &v->meshletState, &v->extraLights, &v->tileLights, &v->decals};
     for (size_t i = 0; i < ARTF_COUNT(buffers); ++i) bufferFree(buffers[i]);
-    Program* programs[] = {&v->cull, &v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->blit};
+    Program* programs[] = {&v->cull, &v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->blit, &v->layerDepth, &v->layer, &v->particle};
     for (size_t i = 0; i < ARTF_COUNT(programs); ++i) programFree(programs[i]);
     if (v->linear) wgpuSamplerRelease(v->linear);
     if (v->nearest) wgpuSamplerRelease(v->nearest);
@@ -1155,6 +1251,7 @@ static void webgpuFree(ArtfRenderer* r) {
     artfFree(v->listScratch);
     artfFree(v->decalScratch);
     artfVecFree(&v->meshes);
+    artfVecFree(&v->layers);
     artfVecFree(&v->textures);
     artfVecFree(&v->textureViews);
     artfVecFree(&v->textureMarks);
