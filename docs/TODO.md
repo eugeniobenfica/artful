@@ -12,12 +12,10 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 ## Dá para fazer aqui
 
 ### CI
-- [ ] Conferir a run da CI depois da correção do `scale/drawnLift` no modo `-lod` (o Linux passou do 2D: a suíte chega
-  ao fim nos quatro modos, e só esse teste, que dependia do nível de detalhe ligado, falhou em um)
+- [ ] Conferir na CI do Linux a etapa Memory (ASan e UBSan a `-O1`) e os fuzzers (os testes nos quatro modos já passam,
+  `scale/drawnLift` no `-lod` inclusive)
 
 ### Fase 6 — Alcance de plataforma
-- [ ] 6.1 Metal — conferir na CI do macOS as vistas, o pass de fundo e as quatro amostras com movimento (feitos como
-  no WebGPU, que passa em tudo; o Metal só compila aqui)
 
 ## Depende de hardware ou ferramenta que não está aqui
 - [~] 3.3 Pré-rotação no Android — ver num aparelho (o gancho de teste já confere)

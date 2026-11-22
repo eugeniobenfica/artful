@@ -216,7 +216,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   asked for (`-DARTFUL_METAL=ON`, Apple only); so it is chosen only by name. It draws what WebGPU draws, as WebGPU does
   (below), and leaves out the same: there, against the CPU, 0.00 to 0.38% of pixels apart in every case
   (`backends/metal`, `backends/metalFloats`). With four samples, the surface's words are an RGBA32Uint of four
-  samples, as on Vulkan. No window has shown it, and no real Mac has run it.
+  samples, as on Vulkan; views and a background pass, as WebGPU's. No window has shown it, and no real Mac has run it.
 - Linux and macOS are built and tested by CI, Linux on a software Vulkan; iOS has not been built
   with Apple's tools. Windows on ARM is built with clang (`aarch64-w64-mingw32`, the NEON kernels) and has never run;
   MSVC builds and tests only on CI (no MSVC here), and MSVC for ARM64 has not been built at all: it would take the
