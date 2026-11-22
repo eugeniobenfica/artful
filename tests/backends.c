@@ -194,12 +194,13 @@ static void otherGpuFloats(ArtfBackend backend, const char* what) {
     uint32_t* a = artfMalloc((size_t)W * H * 4);
     uint32_t* b = artfMalloc((size_t)W * H * 4);
     uint32_t* plain = artfMalloc((size_t)W * H * 4);
-    static const struct { const char* name; ArtfPostDesc post; int frames; bool moving, layered; double most; } cases[] = {
-        {"as it is", {0}, 1, false, false, .03},
-        {"bloom, ambient occlusion, reflections, depth of field", {.lens.bloom = .2f, .screen.occlusion = 1, .screen.reflections = 1, .lens.focus = 6, .lens.aperture = 6}, 1, false, false, .03},
-        {"temporal antialiasing and motion blur, a ball moving", {.lens.bloom = .3f, .screen.temporal = true, .lens.motionBlur = .5f}, 6, true, false, .05},
-        {"auto exposure", {.exposure.automatic = true, .exposure.speed = 1}, 4, false, false, .03},
-        {"layers", {.lens.bloom = .1f}, 1, false, true, .03},
+    static const struct { const char* name; ArtfPostDesc post; int frames; bool moving, layered, fog; double most; } cases[] = {
+        {"as it is", {0}, 1, false, false, false, .03},
+        {"bloom, ambient occlusion, reflections, depth of field", {.lens.bloom = .2f, .screen.occlusion = 1, .screen.reflections = 1, .lens.focus = 6, .lens.aperture = 6}, 1, false, false, false, .03},
+        {"temporal antialiasing and motion blur, a ball moving", {.lens.bloom = .3f, .screen.temporal = true, .lens.motionBlur = .5f}, 6, true, false, false, .05},
+        {"auto exposure", {.exposure.automatic = true, .exposure.speed = 1}, 4, false, false, false, .03},
+        {"fog that light goes through", {.screen.volumetric = 1, .screen.scattering = .4f}, 1, false, false, true, .03},
+        {"layers", {.lens.bloom = .1f}, 1, false, true, false, .03},
     };
     for (size_t k = 0; k < ARTF_COUNT(cases); ++k) {
         ArtfRenderer* both[2] = {gpu, cpu};
@@ -209,6 +210,7 @@ static void otherGpuFloats(ArtfBackend backend, const char* what) {
             ArtfInstance ball = 0;
             if (cases[k].moving) ball = addAt(s, artfSceneAddSphere(s, .5f, 16, 24), whiteMaterial(s), 0, 0, 0, 1);
             artfSceneSetPost(s, &cases[k].post);
+            if (cases[k].fog) artfSceneSetFog(s, artfVec3(.5f, .5f, .55f), .03f);
             for (int f = 0; f < cases[k].frames; ++f) {
                 if (ball) {
                     const ArtfTransform t = artfTransformAt(.2f * (float)f, 0, 0, 1);
@@ -227,6 +229,28 @@ static void otherGpuFloats(ArtfBackend backend, const char* what) {
         CHECK(apart < cases[k].most && changed > .01);
     }
     artfFree(plain);
+    /* drawn at half the frame's size and made whole (with temporal antialiasing), as the CPU does */
+    artfRendererFree(gpu);
+    artfRendererFree(cpu);
+    o = options(backend, 0, false);
+    o.hdr = true;
+    o.renderScale = .5f;
+    gpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    cpu = artfRendererNew(&o);
+    ArtfRenderer* both[2] = {gpu, cpu};
+    uint32_t* into[2] = {a, b};
+    for (int r = 0; r < 2 && gpu; ++r) {
+        ArtfScene* s = bleedScene();
+        const ArtfPostDesc temporal = {.screen.temporal = true};
+        artfSceneSetPost(s, &temporal);
+        for (int f = 0; f < 6; ++f) CHECK(artfRendererDraw(both[r], s));
+        CHECK(artfRendererReadPixels(both[r], into[r]));
+        artfSceneFree(s);
+    }
+    const double scaled = differentShare(a, b, 16);
+    printf("%s in floats against the CPU, drawn at half its size: %.2f%% of pixels apart by more than 16 of 255\n", artfBackendName(backend), scaled * 100);
+    CHECK(scaled < .03);
     artfFree(a);
     artfFree(b);
     artfRendererFree(gpu);

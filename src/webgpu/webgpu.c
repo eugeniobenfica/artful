@@ -88,7 +88,11 @@ typedef struct WebGpu {
     ArtfMotion motion;
     uint32_t* pushes;                /* (this frame's post passes' push constants, each at its stride) */
     uint32_t pushCount, maxGroups;
-    bool warnedFog, warnedScale, warnedWide, warnedLarge;
+    bool warnedWide, warnedLarge;
+    bool froxels;                    /* fog that light goes through: its grid, read by what is drawn */
+    int sceneWidth, sceneHeight;     /* (in floats with renderScale: the scene's size, the frame's after upscaling) */
+    float scale;
+    Program fogBehind;               /* the fog over what is behind (the background) */
     uint64_t stamp; /* the resources' version: bind groups are made again when it moves */
     double cpuMs;
     uint64_t frameNumber;
@@ -278,7 +282,7 @@ static Gpu* bufferAt(WebGpu* v, uint32_t source, bool writable) {
     case 63: return &v->decals;
     case 50: case 51: case 52: case 53: case 54: case 55: case 56: case 57: return &v->post[source - 50];
     case 69: return v->postNeeds & 2 /* NEED_BLUR */ ? &v->post[5] : &v->empty;
-    case 71: return &v->postLocks;
+    case 71: return v->postLocks.buffer ? &v->postLocks : &v->emptyWritable;
     case 72: return &v->postGathered;
     case 73: return &v->cloudField;
     case 74: return &v->cloudGrid;
@@ -441,6 +445,7 @@ typedef struct RenderState {
     WGPUTextureFormat target; /* (0: the frame's) */
     WGPUTextureFormat surface; /* (in floats: the surface words' target, written by what is solid; 0: none) */
     bool surfaceWrite;
+    bool fog; /* (blended as fog over what is behind: light * what is left + added * what shows of it, alpha kept) */
 } RenderState;
 
 static bool renderMake(WebGpu* v, Program* p, char* vertexText, char* fragmentText, const RenderState* st) {
@@ -489,6 +494,12 @@ static bool renderMake(WebGpu* v, Program* p, char* vertexText, char* fragmentTe
     blend.color.srcFactor = blend.alpha.srcFactor = WGPUBlendFactor_One;
     blend.color.dstFactor = blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
     blend.color.operation = blend.alpha.operation = WGPUBlendOperation_Add;
+    if (st->fog) {
+        blend.color.srcFactor = WGPUBlendFactor_DstAlpha;
+        blend.color.dstFactor = WGPUBlendFactor_SrcAlpha;
+        blend.alpha.srcFactor = WGPUBlendFactor_Zero;
+        blend.alpha.dstFactor = WGPUBlendFactor_One;
+    }
     WGPUColorTargetState targets[2] = {WGPU_COLOR_TARGET_STATE_INIT, WGPU_COLOR_TARGET_STATE_INIT};
     WGPUColorTargetState* const target = &targets[0];
     target->format = st->target ? st->target : WGPUTextureFormat_BGRA8Unorm;
@@ -574,7 +585,7 @@ static void programFree(Program* p);
  * own, one branch each), what has holes, a layer's depth alone, the layer at that depth blended, and particles. In
  * floats, each also writes the surface words (what is solid only), and with wide, the vertices' motion. */
 static bool scenePrograms(WebGpu* v, const ArtfGraphData* graphs, uint32_t count) {
-    const uint32_t variant = v->floats ? ARTF_SHADER_FLOATS : 0, textures = v->maxTextures | ARTF_TEXTURES_UNIFORM;
+    const uint32_t variant = (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u), textures = v->maxTextures | ARTF_TEXTURES_UNIFORM;
     const WGPUTextureFormat light = v->floats ? WGPUTextureFormat_RGBA16Float : 0;
     const WGPUTextureFormat surface = !v->floats ? 0 : v->wide ? WGPUTextureFormat_RGBA32Uint : WGPUTextureFormat_R32Uint;
     size_t size = 0;
@@ -612,6 +623,18 @@ static bool scenePrograms(WebGpu* v, const ArtfGraphData* graphs, uint32_t count
         ok = renderMake(v, programs[k], vc, fc, &states[k]);
     }
     for (int k = 0; k < 3; ++k) artfFree(text[k]);
+    if (ok && v->floats && !v->fogBehind.render) {
+        /* (the fog over what is behind: in the scene's pass, a triangle over it, no depth written) */
+        code = artfShaderOverlayVertex(&size);
+        char* vt = wgslOf(code, size, false, &a);
+        code = artfShaderFogBackdrop(&size);
+        b.count = 0;
+        char* ft = wgslOf(code, size, false, &b);
+        v->fogBehind.bindings = a;
+        bindingsJoin(&v->fogBehind.bindings, &b);
+        const RenderState st = {WGPUCompareFunction_Always, false, true, true, false, false, WGPUCullMode_None, light, surface, false, true};
+        ok = vt && ft && renderMake(v, &v->fogBehind, vt, ft, &st);
+    }
     return ok;
 }
 
@@ -680,12 +703,15 @@ static bool targetsMake(WebGpu* v) {
     v->targetsStale = false;
     if (v->width <= 0 || v->height <= 0) return true;
     v->frameTexture = textureNew(v, WGPUTextureFormat_BGRA8Unorm, v->width, v->height, 1, 1, WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_TextureBinding);
-    v->depthTexture = textureNew(v, WGPUTextureFormat_Depth32Float, v->width, v->height, 1, v->samples, WGPUTextureUsage_RenderAttachment | (v->floats ? WGPUTextureUsage_TextureBinding : 0));
+    /* (with renderScale, in floats, the scene is drawn smaller, and made whole at the frame's size after it) */
+    v->sceneWidth = v->floats ? artfMaxi((int)((float)v->width * v->scale + .5f), 1) : v->width;
+    v->sceneHeight = v->floats ? artfMaxi((int)((float)v->height * v->scale + .5f), 1) : v->height;
+    v->depthTexture = textureNew(v, WGPUTextureFormat_Depth32Float, v->sceneWidth, v->sceneHeight, 1, v->samples, WGPUTextureUsage_RenderAttachment | (v->floats ? WGPUTextureUsage_TextureBinding : 0));
     if (v->floats) {
         /* the light (resolved, where there are samples, into one that the gather reads) and the surface words */
-        v->floatColor = textureNew(v, WGPUTextureFormat_RGBA16Float, v->width, v->height, 1, 1, WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding);
-        if (v->samples > 1) v->floatSamples = textureNew(v, WGPUTextureFormat_RGBA16Float, v->width, v->height, 1, v->samples, WGPUTextureUsage_RenderAttachment);
-        v->floatSurface = textureNew(v, v->wide ? WGPUTextureFormat_RGBA32Uint : WGPUTextureFormat_R32Uint, v->width, v->height, 1, v->samples, WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding);
+        v->floatColor = textureNew(v, WGPUTextureFormat_RGBA16Float, v->sceneWidth, v->sceneHeight, 1, 1, WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding);
+        if (v->samples > 1) v->floatSamples = textureNew(v, WGPUTextureFormat_RGBA16Float, v->sceneWidth, v->sceneHeight, 1, v->samples, WGPUTextureUsage_RenderAttachment);
+        v->floatSurface = textureNew(v, v->wide ? WGPUTextureFormat_RGBA32Uint : WGPUTextureFormat_R32Uint, v->sceneWidth, v->sceneHeight, 1, v->samples, WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding);
         v->floatColorView = viewOf(v->floatColor);
         v->floatSamplesView = viewOf(v->floatSamples);
         v->floatSurfaceView = viewOf(v->floatSurface);
@@ -1052,11 +1078,13 @@ static void drawShadows(WebGpu* v, WGPUCommandEncoder c, const ArtfShadowFrame* 
  * were made for. */
 static bool graphsSync(WebGpu* v, const ArtfScene* scene) {
     const uint32_t count = (uint32_t)scene->graphs.len;
-    if (v->programsMade && count == v->graphCount && (!count || v->graphScene == scene->id) && v->madeWide == v->wide) return true;
+    const uint32_t variant = v->froxels ? 1u : 0u;
+    if (v->programsMade && count == v->graphCount && (!count || v->graphScene == scene->id) && v->madeWide == v->wide && v->madeVariant == variant) return true;
     if (!scenePrograms(v, scene->graphs.items, count)) return false;
     v->graphCount = count;
     v->graphScene = scene->id;
     v->madeWide = v->wide;
+    v->madeVariant = variant;
     v->programsMade = true;
     return true;
 }
@@ -1071,13 +1099,13 @@ enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_F
 #define PUSH_POST_AT ARTF_SHADOW_VIEWS /* (the post passes' push constants come after the shadow views') */
 #define PUSH_POST_MOST 64
 
-static uint32_t postNeedsOf(const ArtfFrameData* f, bool second) {
+static uint32_t postNeedsOf(const ArtfFrameData* f, bool second, bool scaled) {
     const bool temporal = f->post[1][3] > 0;
     uint32_t n = 0;
     if (f->post[0][2] > 0) n |= NEED_OCCLUSION;
     if (f->motionBlur > 0) n |= NEED_BLUR | NEED_SECOND;
     if (f->post[1][1] > 0 && f->look[1] > 0) n |= NEED_FOG;
-    if (temporal) n |= NEED_SECOND | NEED_HISTORY;
+    if (scaled || temporal) n |= NEED_SECOND | NEED_HISTORY;
     if (f->post[2][1] > 0 && f->post[2][0] > 0) n |= NEED_SECOND;
     if (f->more[3] > 0 && temporal) n |= NEED_GATHERED;
     if (second) n |= NEED_SECOND;
@@ -1086,8 +1114,8 @@ static uint32_t postNeedsOf(const ArtfFrameData* f, bool second) {
 
 /* The post passes' buffers, as the effects that are on need them (postBuffersMake's sizes). */
 static bool postBuffersMake(WebGpu* v) {
-    const uint64_t pixels = (uint64_t)v->width * v->height;
-    const uint64_t fog = (uint64_t)((v->width + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ((v->height + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ARTF_FROXEL_SLICES;
+    const uint64_t pixels = (uint64_t)v->sceneWidth * v->sceneHeight, framePixels = (uint64_t)v->width * v->height;
+    const uint64_t fog = (uint64_t)((v->sceneWidth + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ((v->sceneHeight + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ARTF_FROXEL_SLICES;
     uint64_t bloom = 0;
     uint32_t w = (uint32_t)v->width, h = (uint32_t)v->height;
     for (int l = 0; l < 6; ++l) {
@@ -1100,13 +1128,16 @@ static bool postBuffersMake(WebGpu* v) {
     }
     for (int i = 0; i < 8; ++i) bufferFree(&v->post[i]);
     bufferFree(&v->postGathered);
+    bufferFree(&v->postLocks);
     const uint64_t tiles = (uint64_t)((v->width + 15) / 16) * ((v->height + 15) / 16);
-    const uint64_t occlusion = v->postNeeds & NEED_OCCLUSION ? pixels * 4 : 0, blur = v->postNeeds & NEED_BLUR ? (pixels + tiles * 2) * 8 : 0;
-    const uint64_t sizes[8] = {pixels * 8, pixels * 4, pixels * 12, v->postNeeds & NEED_SECOND ? pixels * 8 : 0, v->postNeeds & NEED_HISTORY ? pixels * 8 : 0,
+    const uint64_t occlusion = v->postNeeds & NEED_OCCLUSION ? pixels * 4 : 0, blur = v->postNeeds & NEED_BLUR ? (framePixels + tiles * 2) * 8 : 0;
+    const uint64_t sizes[8] = {framePixels * 8, pixels * 4, pixels * 12, v->postNeeds & NEED_SECOND ? framePixels * 8 : 0, v->postNeeds & NEED_HISTORY ? framePixels * 8 : 0,
                                occlusion > blur ? occlusion : blur, v->postNeeds & NEED_FOG ? fog * 16 : 0, (bloom + 1 + v->lutRoom) * 16};
     for (int i = 0; i < 8; ++i)
         if (sizes[i] && !bufferNew(v, &v->post[i], sizes[i], STORAGE_ALL)) return false;
     if (v->postNeeds & NEED_GATHERED && !bufferNew(v, &v->postGathered, pixels * 64, STORAGE_ALL)) return false;
+    /* (upscaling's locks, with a history and the scene drawn smaller) */
+    if (v->postNeeds & NEED_HISTORY && pixels != framePixels && !bufferNew(v, &v->postLocks, framePixels * 8, STORAGE_ALL)) return false;
     v->role[0] = 0, v->role[1] = 1, v->role[2] = 2;
     v->historyValid = v->exposureValid = v->hasPrevious = v->gatheredValid = false;
     v->lutVersion = 0;
@@ -1140,8 +1171,8 @@ static bool syncLut(WebGpu* v, const ArtfScene* scene) {
 
 /* Clouds in the scene: their field and grid (cloudsSync). */
 static bool cloudsSync(WebGpu* v, const ArtfScene* scene, uint64_t* generation, uint32_t* columns, uint32_t* rows) {
-    *columns = ((uint32_t)v->width + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
-    *rows = ((uint32_t)v->height + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
+    *columns = ((uint32_t)v->sceneWidth + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
+    *rows = ((uint32_t)v->sceneHeight + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
     const uint64_t grid = (uint64_t)*columns * *rows * ARTF_CLOUD_CELL * 4;
     if (!v->cloudField.buffer && !bufferNew(v, &v->cloudField, (uint64_t)ARTF_CLOUD_FLOATS * 4, STORAGE_ALL)) return false;
     if (v->cloudGrid.size != grid) {
@@ -1227,7 +1258,8 @@ static void postSwap(WebGpu* v, bool keep) {
 
 /* The post passes, in post.c's order (postRecord, at the frame's own size: no upscaling here). */
 static void postChain(WebGpu* v, WGPUCommandEncoder c, const ArtfFrameData* frame, bool under, bool clouds, uint32_t cloudColumns, uint32_t cloudRows) {
-    const uint32_t pixels = (uint32_t)v->width * (uint32_t)v->height;
+    const uint32_t pixels = (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight, framePixels = (uint32_t)v->width * (uint32_t)v->height;
+    const bool scaled = pixels != framePixels;
     WGPUComputePassEncoder e = wgpuCommandEncoderBeginComputePass(c, NULL);
     v->role[0] = v->role[2] ? 0 : 1;
     v->role[1] = (uint8_t)(3 - v->role[0] - v->role[2]);
@@ -1258,25 +1290,30 @@ static void postChain(WebGpu* v, WGPUCommandEncoder c, const ArtfFrameData* fram
         postStep(v, e, POST_CLOUD_APPLY, cloudColumns, pixels);
         postSwap(v, false);
     }
-    if (temporal) {
+    if (scaled) {
+        /* (from here on, the frame's size) */
+        postStep(v, e, POST_UPSCALE, (temporal && v->historyValid ? 1u : 0u) | v->lockHalf << 1, framePixels);
+        v->lockHalf ^= 1;
+        postSwap(v, temporal);
+    } else if (temporal) {
         postStep(v, e, POST_TEMPORAL, v->historyValid ? 1u : 0u, pixels);
         postSwap(v, true);
     }
     v->historyValid = temporal;
-    if (frame->output[2] > 0 && temporal) {
-        postStep(v, e, POST_SHARPEN, 0, pixels);
+    if (frame->output[2] > 0 && (scaled || temporal)) {
+        postStep(v, e, POST_SHARPEN, 0, framePixels);
         postSwap(v, false);
     }
     if (frame->post[2][1] > 0 && frame->post[2][0] > 0) {
-        postStep(v, e, POST_FOCUS, 0, pixels);
+        postStep(v, e, POST_FOCUS, 0, framePixels);
         postSwap(v, false);
     }
     if (frame->motionBlur > 0) {
         const uint32_t tiles = (((uint32_t)v->width + 15) / 16) * (((uint32_t)v->height + 15) / 16);
-        postStep(v, e, POST_VELOCITY, 0, pixels);
+        postStep(v, e, POST_VELOCITY, 0, framePixels);
         postStep(v, e, POST_TILE_MOST, 0, tiles);
         postStep(v, e, POST_TILE_MOST, 1, tiles);
-        postStep(v, e, POST_MOTION_BLUR, 0, pixels);
+        postStep(v, e, POST_MOTION_BLUR, 0, framePixels);
         postSwap(v, false);
     }
     if (frame->grade[0][1] > 0) {
@@ -1294,7 +1331,7 @@ static void postChain(WebGpu* v, WGPUCommandEncoder c, const ArtfFrameData* fram
 /* The gather's depth alone, between what is solid and the layers (their depth is not what comes after reads). */
 static void gatherDepth(WebGpu* v, WGPUCommandEncoder c) {
     WGPUComputePassEncoder e = wgpuCommandEncoderBeginComputePass(c, NULL);
-    postStep(v, e, POST_GATHER, 1, (uint32_t)v->width * (uint32_t)v->height);
+    postStep(v, e, POST_GATHER, 1, (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight);
     wgpuComputePassEncoderEnd(e);
     wgpuComputePassEncoderRelease(e);
 }
@@ -1338,16 +1375,22 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
         v->wide = wide;
         v->targetsStale = true;
     }
+    if (v->floats && v->base.renderScale != v->scale) {
+        /* (pacing: the scene's targets at another size) */
+        v->scale = v->base.renderScale;
+        v->targetsStale = true;
+    }
     if (v->targetsStale && !targetsMake(v)) return false;
     if (!v->frameTexture) return true; /* (a window with no size) */
 #define ONCE(flag, ...) do { if (!v->flag) { v->flag = true; artfLog(__VA_ARGS__); } } while (0)
     if (scene->trace.desc.mode != ARTF_TRACE_NONE) ONCE(warnedTrace, "artful: WebGPU does not trace: the scene is drawn");
     if (v->base.view) ONCE(warnedView, "artful: WebGPU shows no views but the frame");
 #undef ONCE
+    v->froxels = v->floats && scene->post.screen.volumetric > 0 && scene->fogDensity > 0;
     if (!syncScene(v, scene) || !graphsSync(v, scene)) return false;
     if (v->floats && !v->posts[0].compute) return false;
     ArtfFrameData frame;
-    artfSceneFrame(scene, v->width, v->height, &frame);
+    artfSceneFrame(scene, v->sceneWidth, v->sceneHeight, &frame);
     frame.output[0] = (float)v->width;
     frame.output[1] = (float)v->height;
     /* (what is left out here: light from all around and from probes, lights' shapes, rays) */
@@ -1365,18 +1408,9 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
             frame.post[1][3] = 0; /* (temporal antialiasing and motion blur follow motion: wide) */
             frame.motionBlur = 0;
         }
-        if (frame.post[1][1] > 0 && frame.look[1] > 0 && !v->warnedFog) {
-            v->warnedFog = true;
-            artfLog("artful: WebGPU has no fog that light goes through yet: plain fog");
-        }
-        frame.post[1][1] = 0;
-        if (v->base.renderScale > 0 && v->base.renderScale < 1.f && !v->warnedScale) {
-            v->warnedScale = true;
-            artfLog("artful: WebGPU draws the scene at the frame's size");
-        }
         clouds = scene->clouds && !artfOrtho(&frame);
         under = v->wide && artfSceneHasUnder(scene);
-        const uint32_t needs = postNeedsOf(&frame, clouds || under);
+        const uint32_t needs = postNeedsOf(&frame, clouds || under, v->sceneWidth != v->width || v->sceneHeight != v->height);
         if (needs != v->postNeeds) {
             v->postNeeds = needs;
             if (!postBuffersMake(v)) return false;
@@ -1390,7 +1424,7 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
         if (v->hasPrevious) memcpy(frame.previous, v->previous, sizeof v->previous);
         memcpy(v->previous, now, sizeof now);
         v->hasPrevious = true;
-        if (frame.post[1][3] > 0) artfFrameJitter(&frame, v->postFrames++, v->width, v->height);
+        if (frame.post[1][3] > 0) artfFrameJitter(&frame, v->postFrames++, v->sceneWidth, v->sceneHeight);
         frame.grade2[2][3] = (float)(v->grainFrames++ & 0xFFFFFu);
         frame.traced &= ~(uint32_t)ARTF_TRACED_REFLECTIONS;
         if (frame.post[1][3] > 0 || frame.motionBlur > 0) {
@@ -1407,11 +1441,11 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
         }
     }
     if (!v->decalScratch) v->decalScratch = artfMalloc(ARTF_MAX_DECALS * sizeof(ArtfDecalData));
-    const uint32_t decals = artfSceneDecals(scene, &frame, v->height, v->decalScratch);
+    const uint32_t decals = artfSceneDecals(scene, &frame, v->sceneHeight, v->decalScratch);
     frame.indirect[1][3] = (float)decals;
     bufferPut(v, &v->decals, 0, v->decalScratch, (size_t)decals * sizeof(ArtfDecalData));
     if (!syncLights(v, scene, &frame)) return false;
-    artfSceneResidencyStep(scene, &frame, v->height);
+    artfSceneResidencyStep(scene, &frame, v->sceneHeight);
     /* what shows what is behind it, far to near: each its instance and mesh, after what the cull writes (as Vulkan's) */
     uint32_t layerCount = 0;
     if (scene->translucentCount && scene->instances.len) {
@@ -1477,6 +1511,14 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
         wgpuComputePassEncoderRelease(e);
     }
     if (shadowViews && instanceCount) drawShadows(v, c, &shadows, shadowViews);
+    const bool fogGrid = v->froxels && frame.post[1][1] > 0 && frame.look[1] > 0;
+    if (fogGrid) {
+        /* fog that light goes through: its grid, from the sun's maps, for what is drawn to read */
+        WGPUComputePassEncoder g = wgpuCommandEncoderBeginComputePass(c, NULL);
+        postStep(v, g, POST_FROXELS, 0, (uint32_t)((v->sceneWidth + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * (uint32_t)((v->sceneHeight + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE));
+        wgpuComputePassEncoderEnd(g);
+        wgpuComputePassEncoderRelease(g);
+    }
 
     WGPURenderPassColorAttachment colors[2] = {WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT, WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT};
     WGPURenderPassColorAttachment* const color = &colors[0];
@@ -1512,6 +1554,10 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
     pass.colorAttachments = colors;
     pass.depthStencilAttachment = &depth;
     WGPURenderPassEncoder e = wgpuCommandEncoderBeginRenderPass(c, &pass);
+    if (fogGrid && v->fogBehind.render) {
+        use(v, e, &v->fogBehind, 0);
+        wgpuRenderPassEncoderDraw(e, 3, 1, 0, 0);
+    }
     if (instanceCount) {
         wgpuRenderPassEncoderSetVertexBuffer(e, 0, v->vertices.buffer, 0, v->vertices.size);
         wgpuRenderPassEncoderSetIndexBuffer(e, v->indices.buffer, WGPUIndexFormat_Uint32, 0, v->indices.size);
@@ -1708,7 +1754,7 @@ static void webgpuFree(ArtfRenderer* r) {
     Gpu* buffers[] = {&v->empty, &v->emptyWritable, &v->frame, &v->shadowData, &v->push, &v->instances, &v->visible, &v->indirect, &v->materials, &v->meshTable, &v->vertices,
                       &v->indices, &v->colors, &v->shadowList, &v->shadowCommands, &v->meshletMeshes, &v->meshletState, &v->extraLights, &v->tileLights, &v->decals};
     for (size_t i = 0; i < ARTF_COUNT(buffers); ++i) bufferFree(buffers[i]);
-    Program* programs[] = {&v->cull, &v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->blit, &v->layerDepth, &v->layer, &v->particle, &v->final, &v->overlayFloats};
+    Program* programs[] = {&v->cull, &v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->blit, &v->layerDepth, &v->layer, &v->particle, &v->final, &v->overlayFloats, &v->fogBehind};
     for (size_t i = 0; i < ARTF_COUNT(programs); ++i) programFree(programs[i]);
     for (int k = 0; k < POST_KINDS; ++k) programFree(&v->posts[k]);
     for (int k = 0; k < 8; ++k) bufferFree(&v->post[k]);
@@ -1771,6 +1817,8 @@ ArtfRenderer* artfWebGpuNew(const ArtfRendererOptions* o) {
     v->height = o->height;
     v->samples = o->antialias ? 4 : 1;
     v->floats = o->hdr;
+    v->scale = v->base.renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
+    v->base.renderScaleMost = v->scale;
     v->pushes = artfCalloc((size_t)PUSH_POST_MOST * PUSH_STRIDE, 1);
     v->meshesUp = ~(size_t)0;
     v->targetsStale = true;
