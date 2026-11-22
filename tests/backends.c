@@ -207,6 +207,22 @@ static void otherGpu(ArtfBackend backend, const char* what) {
         CHECK(far < .02);
     }
     otherGpuFeatures(gpu, cpu, backend, a, b);
+    if (backend == ARTF_BACKEND_WEBGPU) {
+        /* traced: paths, sixteen frames; and with the filter */
+        for (int filtered = 0; filtered < 2; ++filtered) {
+            ArtfScene* s = coatFeatureScene();
+            const ArtfTraceDesc paths = {ARTF_TRACE_PATHS, 1, 16, 0, filtered != 0};
+            artfSceneSetTrace(s, &paths);
+            for (int f = 0; f < 16; ++f) CHECK(artfRendererDraw(gpu, s));
+            CHECK(artfRendererReadPixels(gpu, a));
+            for (int f = 0; f < 16; ++f) CHECK(artfRendererDraw(cpu, s));
+            CHECK(artfRendererReadPixels(cpu, b));
+            const double far = differentShare(a, b, 24);
+            printf("%s against the CPU, traced%s: %.2f%% of pixels differ by more than 24 of 255\n", artfBackendName(backend), filtered ? " with the filter" : "", far * 100);
+            CHECK(far < .02);
+            artfSceneFree(s);
+        }
+    }
     /* the overlay */
     uint32_t* over = artfCalloc((size_t)W * H, 4);
     for (int y = 10; y < 60; ++y)

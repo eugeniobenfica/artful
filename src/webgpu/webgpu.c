@@ -97,6 +97,14 @@ typedef struct WebGpu {
     Gpu environment;                 /* light from all around (binding 49), and what draws it behind the scene */
     uint64_t environmentVersion, environmentScene;
     Program environmentBehind;
+    /* tracing (ArtfTraceDesc): the trees (17 to 21), what is gathered (22), the frame's rays (23), the filter's buffers
+     * (27 to 33, 48) and how objects moved (37) */
+    Gpu traceNodes, traceTriangles, traceVertices, traceTop, traceInstances, traceSum, traceFrameUbo, denoiseBuffers[7], denoiseShift, traceMotion;
+    Program trace, denoisePasses[9], traceShow;
+    uint64_t traceScene, traceMeshVersion, traceTopVersion, traceKey, traceProgramScene;
+    uint32_t traceDone, traceFrames, traceProgramKey;
+    bool denoiseFirst, warnedTraceHardware;
+    float tracePrevious[16];
     uint64_t stamp; /* the resources' version: bind groups are made again when it moves */
     double cpuMs;
     uint64_t frameNumber;
@@ -284,6 +292,16 @@ static Gpu* bufferAt(WebGpu* v, uint32_t source, bool writable) {
     case 60: return &v->extraLights;
     case 61: return &v->tileLights;
     case 63: return &v->decals;
+    case 17: return &v->traceNodes;
+    case 18: return &v->traceTriangles;
+    case 19: return &v->traceVertices;
+    case 20: return &v->traceTop;
+    case 21: return &v->traceInstances;
+    case 22: return &v->traceSum;
+    case 23: return &v->traceFrameUbo;
+    case 27: case 28: case 29: case 30: case 31: case 32: case 33: return &v->denoiseBuffers[source - 27];
+    case 37: return &v->traceMotion;
+    case 48: return &v->denoiseShift;
     case 49: return &v->environment;
     case 50: case 51: case 52: case 53: case 54: case 55: case 56: case 57: return &v->post[source - 50];
     case 69: return v->postNeeds & 2 /* NEED_BLUR */ ? &v->post[5] : &v->empty;
@@ -1092,6 +1110,8 @@ static bool syncEnvironment(WebGpu* v, const ArtfScene* scene) {
     return true;
 }
 
+static bool traceShowMake(WebGpu* v);
+
 static bool environmentBehindMake(WebGpu* v) {
     size_t size = 0;
     IrWgslBindings a, b;
@@ -1118,7 +1138,8 @@ static bool graphsSync(WebGpu* v, const ArtfScene* scene) {
     v->graphCount = count;
     v->graphScene = scene->id;
     programFree(&v->environmentBehind);
-    if (!environmentBehindMake(v)) return false;
+    programFree(&v->traceShow);
+    if (!environmentBehindMake(v) || !traceShowMake(v)) return false;
     v->madeWide = v->wide;
     v->madeVariant = variant;
     v->programsMade = true;
@@ -1364,6 +1385,130 @@ static void postChain(WebGpu* v, WGPUCommandEncoder c, const ArtfFrameData* fram
     wgpuComputePassEncoderRelease(e);
 }
 
+/* ---- tracing: the scene's trees on the GPU, walked by the trace shader (no ray tracing hardware), as Vulkan's ---- */
+
+/* A buffer as large as what goes into it, made again (and every group with it) when it is not. */
+static bool bufferHold(WebGpu* v, Gpu* g, const void* data, size_t bytes, WGPUBufferUsage usage) {
+    if (!g->buffer || g->size < bytes) {
+        bufferFree(g);
+        if (!bufferNew(v, g, bytes > 32 ? (uint64_t)bytes + bytes / 2 : 64, usage)) return false;
+        ++v->stamp;
+    }
+    if (data && bytes) bufferPut(v, g, 0, data, bytes);
+    return true;
+}
+
+/* What rays walk and what tracing gathers into, as the scene's trees are now (vulkanTrace.c's syncTrace). */
+static bool traceSync(WebGpu* v, ArtfScene* scene, bool guides) {
+    artfSceneTraceSync(scene);
+    const ArtfTrace* t = &scene->trace;
+    if (v->traceScene != scene->id || v->traceMeshVersion != t->meshVersion || scene->deforming.len) {
+        /* (what bones bend moves the trees' nodes and vertices: those go up again each frame) */
+        if (!bufferHold(v, &v->traceNodes, t->wide.items, t->wide.len * sizeof *t->wide.items, STORAGE) ||
+            !bufferHold(v, &v->traceTriangles, t->triangles.items, t->triangles.len * sizeof *t->triangles.items, STORAGE) ||
+            !bufferHold(v, &v->traceVertices, t->vertices.items, t->vertices.len * sizeof *t->vertices.items, STORAGE))
+            return false;
+        v->traceMeshVersion = t->meshVersion;
+    }
+    if (v->traceScene != scene->id || v->traceTopVersion != t->topVersion) {
+        if (!bufferHold(v, &v->traceTop, t->top.items, t->top.len * sizeof *t->top.items, STORAGE) ||
+            !bufferHold(v, &v->traceInstances, t->instances.items, (t->instances.len + 1) * sizeof *t->instances.items, STORAGE))
+            return false;
+        v->traceTopVersion = t->topVersion;
+    }
+    v->traceScene = scene->id;
+    const uint64_t pixels = (uint64_t)v->sceneWidth * v->sceneHeight;
+    if (v->traceSum.size < pixels * 16) {
+        bufferFree(&v->traceSum);
+        if (!bufferNew(v, &v->traceSum, pixels * 16, STORAGE_ALL)) return false;
+        v->traceDone = 0;
+        ++v->stamp;
+    }
+    if (!v->traceFrameUbo.buffer && !bufferNew(v, &v->traceFrameUbo, sizeof(ArtfTraceFrame), UNIFORM)) return false;
+    if (guides && v->denoiseBuffers[0].size < pixels * 16) {
+        for (uint32_t i = 0; i < 7; ++i) {
+            bufferFree(&v->denoiseBuffers[i]);
+            if (!bufferNew(v, &v->denoiseBuffers[i], pixels * (i == 3 || i == 4 ? 32 : 16), STORAGE_ALL)) return false;
+        }
+        bufferFree(&v->denoiseShift);
+        if (!bufferNew(v, &v->denoiseShift, pixels * 16, STORAGE_ALL)) return false;
+        v->denoiseFirst = true;
+        ++v->stamp;
+    }
+    if (guides && !bufferHold(v, &v->traceMotion, t->motion.items, (t->motion.len + 12) * 4, STORAGE)) return false;
+    return true;
+}
+
+/* The trace shader for the scene's materials of their own, the filter's guides and what it reads past glTF's core;
+ * the filter's passes, when first asked. */
+static bool tracePrograms(WebGpu* v, const ArtfScene* scene, bool guides, bool more) {
+    const uint32_t count = (uint32_t)scene->graphs.len;
+    const uint32_t key = count << 2 | (guides ? 1u : 0u) | (more ? 2u : 0u);
+    if (!v->trace.compute || key != v->traceProgramKey || (count && v->traceProgramScene != scene->id)) {
+        programFree(&v->trace);
+        size_t size = 0;
+        uint32_t* code = artfShaderTrace(&size, v->maxTextures | ARTF_TEXTURES_UNIFORM, scene->graphs.items, count, guides, false, more);
+        char* text = wgslOf(code, size, false, &v->trace.bindings);
+        if (!computeMake(v, &v->trace, text)) {
+            artfLog("artful: WebGPU's trace shader could not be made");
+            return false;
+        }
+        v->traceProgramKey = key;
+        v->traceProgramScene = scene->id;
+    }
+    if (guides && !v->denoisePasses[0].compute) {
+        for (int i = 0; i < 9; ++i) {
+            size_t size = 0;
+            uint32_t* code = i == 0 ? artfShaderDenoiseLight(&size) : i == 1 ? artfShaderDenoiseTime(&size) : i == 2 ? artfShaderDenoiseVariance(&size)
+                             : i < 8 ? artfShaderDenoiseSpace(&size, i - 3) : artfShaderDenoiseEnd(&size);
+            char* text = wgslOf(code, size, false, &v->denoisePasses[i].bindings);
+            if (!computeMake(v, &v->denoisePasses[i], text)) return false;
+        }
+    }
+    return true;
+}
+
+/* The trace's dispatch, and the filter's passes after it (vulkanTrace.c's denoise). */
+static void traceRecord(WebGpu* v, WGPUCommandEncoder c, bool clear, bool adding, bool denoise) {
+    const uint64_t pixels = (uint64_t)v->sceneWidth * v->sceneHeight;
+    if (clear) wgpuCommandEncoderClearBuffer(c, v->traceSum.buffer, 0, pixels * 16);
+    if (!adding) return;
+    const uint32_t gx = ((uint32_t)v->sceneWidth + 7) / 8, gy = ((uint32_t)v->sceneHeight + 7) / 8;
+    WGPUComputePassEncoder e = wgpuCommandEncoderBeginComputePass(c, NULL);
+    wgpuComputePassEncoderSetPipeline(e, v->trace.compute);
+    wgpuComputePassEncoderSetBindGroup(e, 0, groupOf(v, &v->trace), 0, NULL);
+    wgpuComputePassEncoderDispatchWorkgroups(e, gx, gy, 1);
+    for (int i = 0; denoise && i < 9; ++i) {
+        wgpuComputePassEncoderSetPipeline(e, v->denoisePasses[i].compute);
+        wgpuComputePassEncoderSetBindGroup(e, 0, groupOf(v, &v->denoisePasses[i]), 0, NULL);
+        wgpuComputePassEncoderDispatchWorkgroups(e, gx, gy, 1);
+    }
+    wgpuComputePassEncoderEnd(e);
+    wgpuComputePassEncoderRelease(e);
+    if (denoise) {
+        /* guide to the frame before's, what is gathered to what was */
+        wgpuCommandEncoderCopyBufferToBuffer(c, v->denoiseBuffers[0].buffer, 0, v->denoiseBuffers[2].buffer, 0, pixels * 16);
+        wgpuCommandEncoderCopyBufferToBuffer(c, v->denoiseBuffers[4].buffer, 0, v->denoiseBuffers[3].buffer, 0, pixels * 32);
+    }
+}
+
+/* What shows what tracing gathered, in the scene's pass (as the scene's own: its targets are theirs). */
+static bool traceShowMake(WebGpu* v) {
+    size_t size = 0;
+    IrWgslBindings a, b;
+    uint32_t* code = artfShaderOverlayVertex(&size);
+    char* vt = wgslOf(code, size, false, &a);
+    code = artfShaderTraceShow(&size, v->floats);
+    b.count = 0;
+    char* ft = wgslOf(code, size, false, &b);
+    v->traceShow.bindings = a;
+    bindingsJoin(&v->traceShow.bindings, &b);
+    const WGPUTextureFormat light = v->floats ? WGPUTextureFormat_RGBA16Float : 0;
+    const WGPUTextureFormat surface = !v->floats ? 0 : v->wide ? WGPUTextureFormat_RGBA32Uint : WGPUTextureFormat_R32Uint;
+    const RenderState st = {WGPUCompareFunction_Always, false, false, true, false, false, WGPUCullMode_None, light, surface, false, false};
+    return vt && ft && renderMake(v, &v->traceShow, vt, ft, &st);
+}
+
 /* The gather's depth alone, between what is solid and the layers (their depth is not what comes after reads). */
 static void gatherDepth(WebGpu* v, WGPUCommandEncoder c) {
     WGPUComputePassEncoder e = wgpuCommandEncoderBeginComputePass(c, NULL);
@@ -1419,7 +1564,8 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
     if (v->targetsStale && !targetsMake(v)) return false;
     if (!v->frameTexture) return true; /* (a window with no size) */
 #define ONCE(flag, ...) do { if (!v->flag) { v->flag = true; artfLog(__VA_ARGS__); } } while (0)
-    if (scene->trace.desc.mode != ARTF_TRACE_NONE) ONCE(warnedTrace, "artful: WebGPU does not trace: the scene is drawn");
+    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !v->base.view;
+    if (tracing && scene->trace.desc.hardware) ONCE(warnedTraceHardware, "artful: WebGPU traces through the scene's trees: it has no ray tracing hardware");
     if (v->base.view) ONCE(warnedView, "artful: WebGPU shows no views but the frame");
 #undef ONCE
     v->froxels = v->floats && scene->post.screen.volumetric > 0 && scene->fogDensity > 0;
@@ -1434,9 +1580,10 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
     artfSceneFrame(scene, v->sceneWidth, v->sceneHeight, &frame);
     frame.output[0] = (float)v->width;
     frame.output[1] = (float)v->height;
-    /* (what is left out here: light from probes, rays) */
+    /* (what is left out here: light from probes, rays while drawing) */
     memset(frame.indirect, 0, sizeof frame.indirect);
     frame.traced = frame.tracedCasts = 0;
+    if (tracing) frame.post[1][1] = 0; /* (fog that light goes through is drawn, not traced) */
     v->pushCount = 0;
     bool clouds = false, under = false;
     uint32_t cloudColumns = 0, cloudRows = 0;
@@ -1487,7 +1634,7 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
     artfSceneResidencyStep(scene, &frame, v->sceneHeight);
     /* what shows what is behind it, far to near: each its instance and mesh, after what the cull writes (as Vulkan's) */
     uint32_t layerCount = 0;
-    if (scene->translucentCount && scene->instances.len) {
+    if (scene->translucentCount && scene->instances.len && !tracing) {
         artfVecReserve(&v->layers, scene->translucentCount);
         layerCount = artfSceneLayers(scene, &frame, v->layers.items);
         artfLayerRange(&frame, v->layers.items, layerCount);
@@ -1514,7 +1661,7 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
 
     ArtfShadowFrame shadows;
     memset(&shadows, 0, sizeof shadows);
-    const uint32_t shadowViews = artfSceneShadowFrame(scene, &frame, &shadows);
+    const uint32_t shadowViews = tracing ? 0 : artfSceneShadowFrame(scene, &frame, &shadows);
     bufferPut(v, &v->shadowData, 0, &shadows, sizeof shadows);
     if (shadowViews) {
         const int width = (int)shadows.sun[2] * ARTF_SHADOW_ATLAS_COLUMNS, height = (int)shadows.sun[3];
@@ -1541,11 +1688,43 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
         ++v->stamp;
     }
 
-    const uint32_t meshCount = (uint32_t)v->meshes.len, instanceCount = (uint32_t)scene->instances.len;
+    const uint32_t meshCount = (uint32_t)v->meshes.len, instanceCount = tracing ? 0 : (uint32_t)scene->instances.len;
+    bool traceClear = false, traceShown = false;
+    uint32_t traceAdding = 0;
+    if (tracing) {
+        /* what tracing gathers (vulkan.c's): from the start when what it sees changed, unless the filter finds what holds */
+        const ArtfTraceDesc* d = &scene->trace.desc;
+        const bool more = scene->moreMaterials > 0 || artfSceneShapedLights(scene);
+        if (!traceSync(v, scene, d->denoise) || !tracePrograms(v, scene, d->denoise, more)) return false;
+        const uint64_t key = artfSceneTraceKey(scene, &frame);
+        if (key != v->traceKey || !v->traceDone) {
+            traceClear = !d->denoise;
+            v->traceDone = 0;
+            v->traceKey = key;
+        }
+        traceAdding = (uint32_t)d->samples;
+        if (d->maxSamples > 0) traceAdding = v->traceDone >= (uint32_t)d->maxSamples ? 0 : (uint32_t)artfMini(d->samples, d->maxSamples - (int)v->traceDone);
+        if (d->denoise && traceAdding) traceClear = true;
+        ArtfTraceFrame* traced = artfMalloc(sizeof *traced);
+        artfSceneTraceFrame(scene, &frame, v->sceneWidth, v->sceneHeight, d->denoise ? v->traceFrames : v->traceDone, traced);
+        traced->pad[0] = d->denoise ? 1 : v->traceDone + traceAdding;
+        traced->pad[1] = (v->denoiseFirst ? 1u : 0u) | (d->denoise && !v->denoiseFirst && !memcmp(v->tracePrevious, frame.viewProj, sizeof v->tracePrevious) ? 2u : 0u);
+        memcpy(traced->previous, v->tracePrevious, sizeof traced->previous);
+        bufferPut(v, &v->traceFrameUbo, 0, traced, sizeof *traced);
+        artfFree(traced);
+        v->traceDone += traceAdding;
+        if (d->denoise && traceAdding) {
+            v->traceFrames += traceAdding;
+            v->denoiseFirst = false;
+            memcpy(v->tracePrevious, frame.viewProj, sizeof v->tracePrevious);
+        }
+        traceShown = v->traceDone || d->denoise;
+    }
     const bool cutouts = scene->cutoutCount != 0 || scene->features[ARTF_FEATURE_LOD_FADE];
     if (instanceCount) bufferPut(v, &v->indirect, 0, v->templateCpu, (size_t)meshCount * 80);
 
     WGPUCommandEncoder c = wgpuDeviceCreateCommandEncoder(v->device, NULL);
+    if (tracing) traceRecord(v, c, traceClear, traceAdding != 0, scene->trace.desc.denoise);
     if (instanceCount) {
         WGPUComputePassEncoder e = wgpuCommandEncoderBeginComputePass(c, NULL);
         wgpuComputePassEncoderSetPipeline(e, v->cull.compute);
@@ -1604,6 +1783,10 @@ static bool frameDraw(WebGpu* v, ArtfScene* scene) {
     }
     if (fogGrid && v->fogBehind.render) {
         use(v, e, &v->fogBehind, 0);
+        wgpuRenderPassEncoderDraw(e, 3, 1, 0, 0);
+    }
+    if (traceShown && v->traceShow.render) {
+        use(v, e, &v->traceShow, 0);
         wgpuRenderPassEncoderDraw(e, 3, 1, 0, 0);
     }
     if (instanceCount) {
@@ -1802,7 +1985,7 @@ static void webgpuFree(ArtfRenderer* r) {
     Gpu* buffers[] = {&v->empty, &v->emptyWritable, &v->frame, &v->shadowData, &v->push, &v->instances, &v->visible, &v->indirect, &v->materials, &v->meshTable, &v->vertices,
                       &v->indices, &v->colors, &v->shadowList, &v->shadowCommands, &v->meshletMeshes, &v->meshletState, &v->extraLights, &v->tileLights, &v->decals};
     for (size_t i = 0; i < ARTF_COUNT(buffers); ++i) bufferFree(buffers[i]);
-    Program* programs[] = {&v->cull, &v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->blit, &v->layerDepth, &v->layer, &v->particle, &v->final, &v->overlayFloats, &v->fogBehind, &v->environmentBehind};
+    Program* programs[] = {&v->cull, &v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->blit, &v->layerDepth, &v->layer, &v->particle, &v->final, &v->overlayFloats, &v->fogBehind, &v->environmentBehind, &v->trace, &v->traceShow};
     for (size_t i = 0; i < ARTF_COUNT(programs); ++i) programFree(programs[i]);
     for (int k = 0; k < POST_KINDS; ++k) programFree(&v->posts[k]);
     for (int k = 0; k < 8; ++k) bufferFree(&v->post[k]);
@@ -1811,6 +1994,10 @@ static void webgpuFree(ArtfRenderer* r) {
     bufferFree(&v->cloudField);
     bufferFree(&v->cloudGrid);
     bufferFree(&v->environment);
+    for (int k = 0; k < 9; ++k) programFree(&v->denoisePasses[k]);
+    Gpu* traced[] = {&v->traceNodes, &v->traceTriangles, &v->traceVertices, &v->traceTop, &v->traceInstances, &v->traceSum, &v->traceFrameUbo, &v->denoiseShift, &v->traceMotion};
+    for (size_t k = 0; k < ARTF_COUNT(traced); ++k) bufferFree(traced[k]);
+    for (int k = 0; k < 7; ++k) bufferFree(&v->denoiseBuffers[k]);
     artfMotionFree(&v->motion);
     artfFree(v->pushes);
     if (v->linear) wgpuSamplerRelease(v->linear);
