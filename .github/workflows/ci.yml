@@ -71,8 +71,9 @@ jobs:
           mkdir shaders && build/artful-shaders shaders
           for f in shaders/*.spv; do spirv-val --target-env vulkan1.2 "$f"; done
       - name: Memory
+        # (at -O1: the whole suite twice under the sanitizers, on llvmpipe, within the job's hours)
         run: |
-          cmake -S . -B build-asan -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=float-cast-overflow"
+          cmake -S . -B build-asan -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_C_FLAGS=-O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=float-cast-overflow"
           cmake --build build-asan --target artful-tests
           build-asan/artful-tests
           ARTFUL_FEATURES=+occlusion build-asan/artful-tests
