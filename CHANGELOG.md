@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixed:** the 2D renderer's light that bounces fell over on llvmpipe 26.0 and 26.1 (CI's Linux): a loop in a loop
+  in its distances, now one loop, the same distances.
 - **Metal draws what WebGPU does** (phase 6.1), the same way (set 1 as argument buffers, push constants by setBytes):
   on CI's macOS runner, every case within 0.00% to 0.38% of pixels of the CPU.
 - **WebGPU draws nearly all Vulkan does** (phase 6.2): materials of your own, layers of transparency, the frame in

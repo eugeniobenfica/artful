@@ -54,9 +54,6 @@ jobs:
           ARTFUL_2D_STEP=1 gdb -batch -ex run -ex bt -ex 'x/6i $pc' -ex 'info registers' -ex 'thread apply all bt 3' --args build/artful-tests --exact 2d/vulkanFrames > gdb.txt 2>&1 || true
           grep -E "2d step" gdb.txt | tail -4
           grep -E "SIGSEGV|^#|=>|^r[a-z0-9]+ +0x" gdb.txt | grep -v futex | head -60
-          # (whether it is this llvmpipe's code generation: with no optimizing, and with SSE's width in place of AVX's)
-          GALLIVM_DEBUG=nopt build/artful-tests --exact 2d/vulkanFrames > /dev/null 2>&1; echo "2d/vulkanFrames, GALLIVM_DEBUG=nopt: exit $?"
-          LP_NATIVE_VECTOR_WIDTH=128 build/artful-tests --exact 2d/vulkanFrames > /dev/null 2>&1; echo "2d/vulkanFrames, LP_NATIVE_VECTOR_WIDTH=128: exit $?"
       # (what FLIP measured of each comparison here, to set thresholds by it: docs/plano-de-correcao.md, 0.4)
       - uses: actions/upload-artifact@v4
         if: always()

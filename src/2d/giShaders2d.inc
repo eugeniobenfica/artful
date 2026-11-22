@@ -193,7 +193,7 @@ uint32_t* artf2DShaderGiDistance(size_t* size, bool columns) {
     static const int used[] = {B2_GLOBALS, B2_SOLID, B2_DIST, B2_SCRATCH};
     begin(h, &spv, used, (int)ARTF_COUNT(used));
     SpvId main = spvBeginMain(S);
-    SpvId k = fnVar(h, h->fnInt), qI = fnVar(h, h->fnUint), sVar = fnVar(h, h->fnFloat);
+    SpvId k = fnVar(h, h->fnInt), qI = fnVar(h, h->fnUint), sVar = fnVar(h, h->fnFloat), top = fnVar(h, h->fnInt), qAt = fnVar(h, h->fnUint);
     SpvId id = spvLoad(S, h->uvec3, h->global);
     SpvId line = spvExtract(S, S->uintType, id, 0);
     SpvId gMode = vecAt(h, B2_GLOBALS, UINT(G_MODE));
@@ -252,6 +252,7 @@ uint32_t* artf2DShaderGiDistance(size_t* size, bool columns) {
         }
         loopEnd(h, &first);
         SpvId empty = LESS_I(LOAD_I(k), INT(0));
+        spvStore(S, top, LOAD_I(k)); /* (the last parabola) */
         SpvId emptyMerge;
         spvIfBegin(S, empty, &emptyMerge);
         {
@@ -264,20 +265,38 @@ uint32_t* artf2DShaderGiDistance(size_t* size, bool columns) {
         SpvId fullMerge;
         spvIfBegin(S, NOT_B(empty), &fullMerge);
         {
+            /* each line's distances, as distanceLine's second loop (`while (z[k + 1] < q) ++k`, then q's value), but one loop,
+             * not one in another: each step either moves k on or writes q and moves q on (k and q only grow: at most n
+             * steps of q and top of k). (A loop in a loop here, its end on what was read, fell over in llvmpipe 26.0 and
+             * 26.1, the CI's Linux; 26.2 has it right.) */
             spvStore(S, k, INT(0));
+            spvStore(S, qAt, UINT(0));
             Loop2D out;
-            SpvId qq = loopBegin(h, &out, qI, n);
+            loopBegin(h, &out, qI, ADD_U(n, ADD_U(I_AS_U(LOAD_I(top)), UINT(1))));
             {
-                SpvId qf = TO_F(qq);
-                While2D ahead;
-                whileBegin(h, &ahead);
-                whileTest(h, &ahead, LESS_F(LOAD_F(Z_(ADD_U(I_AS_U(LOAD_I(k)), UINT(1)))), qf));
-                spvStore(S, k, ADD_I(LOAD_I(k), INT(1)));
-                whileEnd(h, &ahead);
-                SpvId vk = LOAD_F(V(I_AS_U(LOAD_I(k))));
-                SpvId dq = SUB_F(qf, vk);
-                SpvId value = ADD_F(MUL_F(dq, dq), LOAD_F(D(TO_U(vk))));
-                spvStore(S, floatPtr(h, B2_DIST, AT(qq)), columns ? SQRT_F(value) : value);
+                SpvId qq = LOAD_U(qAt);
+                SpvId some;
+                spvIfBegin(S, LESS_U(qq, n), &some);
+                {
+                    SpvId qf = TO_F(qq);
+                    SpvId kNow = LOAD_I(k);
+                    SpvId on = AND_B(LESS_I(kNow, LOAD_I(top)), LESS_F(LOAD_F(Z_(ADD_U(I_AS_U(kNow), UINT(1)))), qf));
+                    SpvId onMerge;
+                    spvIfBegin(S, on, &onMerge);
+                    spvStore(S, k, ADD_I(kNow, INT(1)));
+                    spvIfEnd(S, onMerge);
+                    SpvId writeMerge;
+                    spvIfBegin(S, NOT_B(on), &writeMerge);
+                    {
+                        SpvId vk = LOAD_F(V(I_AS_U(kNow)));
+                        SpvId dq = SUB_F(qf, vk);
+                        SpvId value = ADD_F(MUL_F(dq, dq), LOAD_F(D(TO_U(vk))));
+                        spvStore(S, floatPtr(h, B2_DIST, AT(qq)), columns ? SQRT_F(value) : value);
+                        spvStore(S, qAt, ADD_U(qq, UINT(1)));
+                    }
+                    spvIfEnd(S, writeMerge);
+                }
+                spvIfEnd(S, some);
             }
             loopEnd(h, &out);
         }
