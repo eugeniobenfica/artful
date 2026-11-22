@@ -120,6 +120,7 @@ void testVulkan(void);
 void testLostDevice(void);
 void testUniformTextures(void);
 void testWebGpu(void);
+void testWebGpuFloats(void);
 void testMetal(void);
 void testShaderIr(void);
 void testSpirvRoundTrip(void);

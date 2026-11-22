@@ -181,6 +181,58 @@ static void otherGpu(ArtfBackend backend, const char* what) {
     artfRendererFree(cpu);
 }
 void testWebGpu(void) { otherGpu(ARTF_BACKEND_WEBGPU, "webgpu"); }
+
+/* A frame in floats on WebGPU (the plan's 6.2) or Metal (6.1), against the CPU's: as it is; each effect; temporal
+ * antialiasing and motion blur on a ball that moves; auto exposure; layers. */
+static void otherGpuFloats(ArtfBackend backend, const char* what) {
+    ArtfRendererOptions o = options(backend, 0, false);
+    o.hdr = true;
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (!gpu) { missing(what); return; }
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    uint32_t* plain = artfMalloc((size_t)W * H * 4);
+    static const struct { const char* name; ArtfPostDesc post; int frames; bool moving, layered; double most; } cases[] = {
+        {"as it is", {0}, 1, false, false, .03},
+        {"bloom, ambient occlusion, reflections, depth of field", {.lens.bloom = .2f, .screen.occlusion = 1, .screen.reflections = 1, .lens.focus = 6, .lens.aperture = 6}, 1, false, false, .03},
+        {"temporal antialiasing and motion blur, a ball moving", {.lens.bloom = .3f, .screen.temporal = true, .lens.motionBlur = .5f}, 6, true, false, .05},
+        {"auto exposure", {.exposure.automatic = true, .exposure.speed = 1}, 4, false, false, .03},
+        {"layers", {.lens.bloom = .1f}, 1, false, true, .03},
+    };
+    for (size_t k = 0; k < ARTF_COUNT(cases); ++k) {
+        ArtfRenderer* both[2] = {gpu, cpu};
+        uint32_t* into[2] = {a, b};
+        for (int r = 0; r < 2; ++r) {
+            ArtfScene* s = cases[k].layered ? layeredScene() : bleedScene();
+            ArtfInstance ball = 0;
+            if (cases[k].moving) ball = addAt(s, artfSceneAddSphere(s, .5f, 16, 24), whiteMaterial(s), 0, 0, 0, 1);
+            artfSceneSetPost(s, &cases[k].post);
+            for (int f = 0; f < cases[k].frames; ++f) {
+                if (ball) {
+                    const ArtfTransform t = artfTransformAt(.2f * (float)f, 0, 0, 1);
+                    artfInstanceSetTransform(s, ball, &t);
+                }
+                CHECK(artfRendererDraw(both[r], s));
+            }
+            CHECK(artfRendererReadPixels(both[r], into[r]));
+            artfSceneFree(s);
+        }
+        const double apart = differentShare(a, b, 16);
+        /* (and each effect shows: the GPU's frame is not the one as it is) */
+        const double changed = k ? differentShare(a, plain, 16) : 1;
+        if (!k) memcpy(plain, a, (size_t)W * H * 4);
+        printf("%s in floats against the CPU, %s: %.2f%% of pixels apart by more than 16 of 255 (%.1f%% from it as it is)\n", artfBackendName(backend), cases[k].name, apart * 100, k ? changed * 100 : 0.0);
+        CHECK(apart < cases[k].most && changed > .01);
+    }
+    artfFree(plain);
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(gpu);
+    artfRendererFree(cpu);
+}
+void testWebGpuFloats(void) { otherGpuFloats(ARTF_BACKEND_WEBGPU, "webgpu"); }
 void testMetal(void) { otherGpu(ARTF_BACKEND_METAL, "metal"); }
 
 /* (Without Vulkan, what follows has nothing to run on: its switches are Vulkan's, and the tests are empty.) */

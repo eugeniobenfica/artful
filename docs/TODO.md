@@ -12,9 +12,10 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 ## Dá para fazer aqui
 
 ### CI
-- [ ] A queda do Linux em `2d/vulkanFrames`, no código gerado pelo llvmpipe (não reproduz aqui; o passo de falha da
-  CI roda o teste com `ARTFUL_2D_STEP=1`, que nomeia o shader, e com `ARTFUL_ROBUST=1`). As camadas e as ray queries,
-  que caíam antes, foram corrigidas e passam na CI.
+- [ ] A queda do Linux em `2d/vulkanFrames`: é o shader `giRows` do 2D (as distâncias por linha), no primeiro quadro,
+  no código que o llvmpipe gera (um ponteiro nulo + 8), com o `robustBufferAccess` também. Só no Mesa 26.0.8 com
+  LLVM 21 do runner; aqui (Mesa 26.2.6, LLVM 23) passa, sob todas as validações. Um Mesa mais novo pelo PPA kisak
+  não veio (o runner seguiu no 26.0.8): falta trocar o laço do shader por um que esse llvmpipe aceite, ou outro Mesa.
 
 ### Fase 6 — Alcance de plataforma
 - [~] 6.1 Metal — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado e as camadas, e rodar nele os

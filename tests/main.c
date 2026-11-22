@@ -103,8 +103,15 @@ static bool skippedHere(const char* name) {
         }                                                       \
     } while (0)
 
+/* (ARTFUL_TEST_LOG: what the library logs, to stderr) */
+static void logToStderr(void* user, const char* message) {
+    (void)user;
+    fprintf(stderr, "%s\n", message);
+}
+
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0); /* (all of what was said reaches a pipe, also when the program dies) */
+    if (getenv("ARTFUL_TEST_LOG")) artfSetLog(logToStderr, NULL);
     listing = argc > 1 && !strcmp(argv[1], "--list");
     exact = argc > 2 && !strcmp(argv[1], "--exact");
     if (exact) {
@@ -147,6 +154,7 @@ int main(int argc, char** argv) {
     RUN("backends/gpuLeftAlone", testGpuLeftAlone());
     RUN("backends/vulkan", testVulkan());
     RUN("backends/webgpu", testWebGpu());
+    RUN("backends/webgpuFloats", testWebGpuFloats());
     RUN("backends/metal", testMetal());
     RUN("layers/colorData", testColorData());
     RUN("layers/layers/software", testLayers(ARTF_BACKEND_SOFTWARE));
