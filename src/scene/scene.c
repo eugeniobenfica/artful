@@ -1427,7 +1427,9 @@ size_t artfSceneLightTiles(const ArtfFrameData* f, int width, int height, const 
     }
     /* the squares' edges, as slopes of the view (orthographic: as places across it), and the lengths of the planes'
      * normals through them */
-    float* edges = artfMalloc(((size_t)t.tilesX + t.tilesY) * 4 * sizeof(float) + ((size_t)t.tilesX + t.tilesY) + (clusters ? cells * sizeof(uint32_t) : 0));
+    /* (the rows' and columns' bytes rounded up to four: the counts after them are words) */
+    const size_t flags = ((size_t)t.tilesX + t.tilesY + 3) & ~(size_t)3;
+    float* edges = artfMalloc(((size_t)t.tilesX + t.tilesY) * 4 * sizeof(float) + flags + (clusters ? cells * sizeof(uint32_t) : 0));
     float* xs = edges;
     float* ys = edges + (size_t)t.tilesX * 4;
     for (int tx = 0; tx < t.tilesX; ++tx) {
@@ -1448,7 +1450,7 @@ size_t artfSceneLightTiles(const ArtfFrameData* f, int width, int height, const 
     t.ys = ys;
     uint8_t* cols = (uint8_t*)(ys + (size_t)t.tilesY * 4);
     uint8_t* rows = cols + t.tilesX;
-    uint32_t* filled = clusters ? (uint32_t*)(void*)((char*)edges + ((size_t)t.tilesX + t.tilesY) * 4 * sizeof(float) + ((size_t)t.tilesX + t.tilesY)) : NULL;
+    uint32_t* filled = clusters ? (uint32_t*)(void*)((char*)edges + ((size_t)t.tilesX + t.tilesY) * 4 * sizeof(float) + flags) : NULL;
     if (tiles)
         for (size_t q = 0; q < squares; ++q) tiles[q * (1 + count)] = 0;
     /* first, how long each cluster's list is (into filled); the squares' lists, made as they go: a light at a time,
