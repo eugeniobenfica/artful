@@ -303,6 +303,9 @@ float* artfImageDecodeHdr(const void* data, size_t size, int* width, int* height
     char ys = 0, xs = 0, ya = 0, xa = 0;
     if (sscanf(line, "%c%c %d %c%c %d", &ys, &ya, &h, &xs, &xa, &w) != 6 || ys != '-' || ya != 'Y' || xs != '+' || xa != 'X') return NULL;
     if (w <= 0 || h <= 0 || w > 32768 || h > 32768) return NULL;
+    /* (no more pixels than the bytes left could make: runs of 127 in two bytes a channel give about 32 a byte; 256 is
+     * far past any file's, and keeps what is said, not what is there, from asking for gigabytes) */
+    if ((size_t)w * (size_t)h > (size_t)(end - p) * 256 + 65536) return NULL;
     float* out = artfMalloc((size_t)w * h * 12);
     uint8_t* row = artfMalloc((size_t)w * 4);
     for (int y = 0; y < h; ++y) {

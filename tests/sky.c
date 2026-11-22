@@ -88,6 +88,9 @@ void testEnvironment(void) {
     artfFree(got);
     CHECK(!artfImageDecodeHdr(runs, at - 3, &fw, &fh));
     CHECK(!artfImageDecodeHdr("not one", 7, &fw, &fh));
+    /* a size the bytes left could not make is refused before anything is asked for (the fuzzer's: a gigabyte) */
+    static const char huge[] = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 30000 +X 30000\n\x02\x02\x75\x30";
+    CHECK(!artfImageDecodeHdr(huge, sizeof huge - 1, &fw, &fh));
 }
 
 /* A sky from the sun: blue overhead by day, red toward a low sun, the sun reddened and then gone; the same on both
