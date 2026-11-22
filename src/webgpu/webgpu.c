@@ -26,6 +26,7 @@
 #endif
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define BLANK_BYTES 65536
@@ -265,6 +266,18 @@ static char* wgslOf(uint32_t* code, size_t bytes, bool flipY, IrWgslBindings* bi
     char* text = read ? irWgsl(&m, &options, bindings, why, sizeof why) : NULL;
     if (!text) artfLog("artful: a shader could not be written for WebGPU: %s", why);
     irFree(&m);
+    /* (ARTFUL_WGSL_DUMP: each, into that folder, for another compiler to check: tools/web/wgslCheck.html) */
+    const char* dump = getenv("ARTFUL_WGSL_DUMP");
+    if (text && dump) {
+        static int written;
+        char path[512];
+        snprintf(path, sizeof path, "%s/%04d.wgsl", dump, written++);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            fputs(text, f);
+            fclose(f);
+        }
+    }
     return text;
 }
 
