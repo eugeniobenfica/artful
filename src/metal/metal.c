@@ -13,9 +13,10 @@
  *   with or without one.
  *
  * With argument buffers of tier 2, textures are read by any index, a thousand of them; with tier 1, by constant
- * indices (ARTF_TEXTURES_UNIFORM), 64. What it leaves out, it says in the log: a frame in floats and what follows it,
- * light from all around and from probes, layers of transparency, tracing, materials in C, a background pass and
- * views; compressed textures go up decoded. */
+ * indices (ARTF_TEXTURES_UNIFORM), 64. It draws what webgpu.c draws, as it does: materials in C, layers of
+ * transparency, the frame in floats and what follows it (set 1, the light's roles, an argument buffer for each way they
+ * fall), light from all around, tracing and the probes through the scene's trees. What it leaves out, it says in the
+ * log: a background pass and views; compressed textures go up decoded. */
 #include "render/rendererInternal.h"
 #include "scene/sceneInternal.h"
 #include "shaderir/ir.h"
@@ -40,12 +41,12 @@ typedef struct NSRange { NSUInteger location, length; } NSRange;
 typedef struct CGSize { double width, height; } CGSize;
 
 enum {
-    PIXEL_BGRA8 = 80, PIXEL_DEPTH32 = 252,
+    PIXEL_BGRA8 = 80, PIXEL_DEPTH32 = 252, PIXEL_RGBA16F = 115, PIXEL_R32U = 53, PIXEL_RGBA32U = 123,
     STORAGE_SHARED = 0, STORAGE_MANAGED = 1, STORAGE_PRIVATE = 2,
     TEXTURE_READ = 1, TEXTURE_TARGET = 4, TEXTURE_2D = 2, TEXTURE_2D_MS = 4,
-    LOAD_CLEAR = 2, STORE_DONT_CARE = 0, STORE_STORE = 1, STORE_RESOLVE = 2,
+    LOAD_LOAD = 1, LOAD_CLEAR = 2, STORE_DONT_CARE = 0, STORE_STORE = 1, STORE_RESOLVE = 2, STORE_STORE_RESOLVE = 3,
     COMPARE_LESS = 1, COMPARE_EQUAL = 2, COMPARE_GREATER = 4, COMPARE_ALWAYS = 7,
-    BLEND_ONE = 1, BLEND_ONE_MINUS_SOURCE_ALPHA = 5,
+    BLEND_ZERO = 0, BLEND_ONE = 1, BLEND_SOURCE_ALPHA = 4, BLEND_ONE_MINUS_SOURCE_ALPHA = 5, BLEND_DESTINATION_ALPHA = 8,
     VERTEX_USHORT4_NORMALIZED = 21, VERTEX_SHORT2_NORMALIZED = 22, VERTEX_HALF2 = 25,
     PRIMITIVE_TRIANGLE = 3, INDEX_UINT32 = 1, WINDING_COUNTER_CLOCKWISE = 1, CULL_NONE = 0, CULL_BACK = 2,
     SAMPLER_NEAREST = 0, SAMPLER_LINEAR = 1, MIP_LINEAR = 2, ADDRESS_CLAMP = 0, ADDRESS_REPEAT = 2,
@@ -107,11 +108,18 @@ typedef struct Shader {
     id arguments;   /* the argument buffer */
     uint64_t stamp; /* what it was written for */
     IrMslArguments table;
+    /* set 1, Vulkan's roles (the light, the second, the history): an argument buffer for each way they fall, one after
+     * the other in roleArguments, each roleStride bytes */
+    id encoder1, roleArguments;
+    NSUInteger roleStride;
+    uint64_t roleStamp[27];
+    MTLSize threads; /* a compute shader's threadgroup: its LocalSize */
 } Shader;
 
 typedef struct Buffer { id buffer; size_t size; void* mapped; } Buffer;
 
 typedef struct Pipeline { id state, depth; int cull; Shader vertex, fragment; bool hasFragment; } Pipeline;
+typedef struct Compute { Shader shader; id state; } Compute;
 
 typedef struct MeshRange { uint32_t firstIndex; int32_t vertexOffset; uint32_t indexCount, colorBase; uint64_t deformVersion; } MeshRange;
 
@@ -131,10 +139,35 @@ typedef struct Metal {
     Shader cullShader;
     id cull;
     Pipeline scene, cutout, overlayDraw, shadow, shadowHoles;
+    Pipeline layerDepth, layerDraw, particle, environmentBehind, fogBehind, traceShow, final, overlayFloats;
+    id depthEqual;
     id last; /* the frame on its way */
     double gpuMs, cpuMs;
     uint64_t frameNumber;
-    bool warnedHole, warnedGraphs, warnedLayers, warnedTrace, warnedView;
+    bool warnedHole, warnedTrace, warnedView, warnedWide;
+    /* what the scene's pipelines were made for: its materials of their own, the variant, wide */
+    bool programsMade, madeWide, froxels, wide, floats;
+    uint32_t graphCount, madeVariant, variantBits;
+    uint64_t graphScene;
+    ARTF_VEC(ArtfLayer) layers;
+    /* a frame in floats (as webgpu.c's) */
+    int sceneWidth, sceneHeight;
+    float scale;
+    id floatColor, floatSamples, floatSurface;
+    Buffer post[8], postLocks, postGathered, cloudField, cloudGrid, environment;
+    uint32_t postNeeds, bloomSizes[6][3], postFrames, grainFrames, gatheredHalf, lutRoom, lockHalf;
+    uint8_t role[3];
+    bool historyValid, exposureValid, hasPrevious, gatheredValid;
+    uint64_t lutScene, lutVersion, cloudGeneration, environmentVersion, environmentScene;
+    float previous[16];
+    ArtfMotion motion;
+    Compute posts[22], trace, denoisePasses[9], probeStep, reflectionTraced;
+    /* tracing and the probes, through the scene's trees */
+    Buffer traceNodes, traceTriangles, traceVertices, traceTop, traceInstances, traceSum, traceFrameUbo, denoiseBuffers[7], denoiseShift, traceMotion, probesNow, probesNext;
+    uint64_t traceScene, traceMeshVersion, traceTopVersion, traceKey, traceProgramScene, probeKey, probeScene, probeSerial, probeGraphScene, reflectionScene;
+    uint32_t traceDone, traceFrames, traceProgramKey, probeFrames, probeGraphs, reflectionGraphs;
+    bool denoiseFirst;
+    float tracePrevious[16];
 
     id textureTable[MAX_TEXTURES];
     id samplerTable[MAX_TEXTURES];
@@ -234,12 +267,15 @@ static bool shaderMake(Metal* v, Shader* s, uint32_t* code, size_t bytes, bool f
         artfLog("artful: a shader could not be written for Metal: %s", why);
         return false;
     }
-    for (int k = 0; k < s->table.count; ++k)
-        if (s->table.items[k].set) {
-            artfLog("artful: a Metal shader binds set %u: only set 0 is given", s->table.items[k].set);
+    bool set1 = false;
+    for (int k = 0; k < s->table.count; ++k) {
+        if (s->table.items[k].set > 1) {
+            artfLog("artful: a Metal shader binds set %u: only sets 0 and 1 are given", s->table.items[k].set);
             artfFree(text);
             return false;
         }
+        set1 = set1 || s->table.items[k].set == 1;
+    }
     id options_ = GET(id, objcClass("MTLCompileOptions"), "new");
     SET_U(options_, "setLanguageVersion:", LANGUAGE_3_0);
     id error = NULL;
@@ -255,10 +291,31 @@ static bool shaderMake(Metal* v, Shader* s, uint32_t* code, size_t bytes, bool f
     if (s->table.count) {
         s->encoder = SEND(id, s->function, "newArgumentEncoderWithBufferIndex:", (id, SEL, NSUInteger), (NSUInteger)0);
         const NSUInteger length = GET(NSUInteger, s->encoder, "encodedLength");
-        s->arguments = SEND(id, v->device, "newBufferWithLength:options:", (id, SEL, NSUInteger, NSUInteger), length, (NSUInteger)0);
+        s->arguments = SEND(id, v->device, "newBufferWithLength:options:", (id, SEL, NSUInteger, NSUInteger), length ? length : 16, (NSUInteger)0);
         SEND(void, s->encoder, "setArgumentBuffer:offset:", (id, SEL, id, NSUInteger), s->arguments, (NSUInteger)0);
     }
+    if (set1) {
+        s->encoder1 = SEND(id, s->function, "newArgumentEncoderWithBufferIndex:", (id, SEL, NSUInteger), (NSUInteger)1);
+        const NSUInteger length = GET(NSUInteger, s->encoder1, "encodedLength");
+        s->roleStride = (length + 255) & ~(NSUInteger)255;
+        s->roleArguments = SEND(id, v->device, "newBufferWithLength:options:", (id, SEL, NSUInteger, NSUInteger), s->roleStride * 27, (NSUInteger)0);
+    }
     return true;
+}
+
+/* A compute shader's threadgroup, as its SPIR-V says (OpExecutionMode LocalSize): Metal's dispatch gives it. */
+static MTLSize localSizeOf(const uint32_t* code, size_t bytes) {
+    MTLSize size = {64, 1, 1};
+    for (size_t at = 5; code && at < bytes / 4;) {
+        const uint32_t count = code[at] >> 16, op = code[at] & 0xFFFF;
+        if (!count) break;
+        if (op == 16 && count >= 6 && code[at + 2] == 17) {
+            size.width = code[at + 3], size.height = code[at + 4], size.depth = code[at + 5];
+            break;
+        }
+        at += count;
+    }
+    return size;
 }
 
 /* What Vulkan's binding is here (as webgpu.c's bufferAt). */
@@ -279,10 +336,32 @@ static Buffer* bufferAt(Metal* v, uint32_t binding) {
     case 60: b = &v->extraLights; break;
     case 61: b = &v->tileLights; break;
     case 63: b = &v->decals; break;
+    case 17: b = &v->traceNodes; break;
+    case 18: b = &v->traceTriangles; break;
+    case 19: b = &v->traceVertices; break;
+    case 20: b = &v->traceTop; break;
+    case 21: b = &v->traceInstances; break;
+    case 22: b = &v->traceSum; break;
+    case 23: b = &v->traceFrameUbo; break;
+    case 27: case 28: case 29: case 30: case 31: case 32: case 33: b = &v->denoiseBuffers[binding - 27]; break;
+    case 37: b = &v->traceMotion; break;
+    case 48: b = &v->denoiseShift; break;
+    case 49: b = &v->environment; break;
+    case 50: case 51: case 52: case 53: case 54: case 55: case 56: case 57: b = &v->post[binding - 50]; break;
+    case 62: b = &v->probesNow; break;
+    case 69: b = v->postNeeds & 2 /* NEED_BLUR */ ? &v->post[5] : &v->empty; break;
+    case 70: b = &v->probesNext; break;
+    case 71: b = &v->postLocks; break;
+    case 72: b = &v->postGathered; break;
+    case 73: b = &v->cloudField; break;
+    case 74: b = &v->cloudGrid; break;
     default: b = &v->empty; break;
     }
     return b->buffer ? b : &v->empty;
 }
+
+/* (what is read as it is, never filtered: depth, the shadow atlas, the light and the surface words) */
+static bool unfiltered(uint32_t binding) { return binding == 8 || binding == 25 || binding == 58 || binding == 59; }
 
 /* This shader's argument buffer, up to date. */
 static id arguments(Metal* v, Shader* s) {
@@ -291,6 +370,7 @@ static id arguments(Metal* v, Shader* s) {
     for (int k = 0; k < s->table.count; ++k) {
         const IrMslArgument* e = &s->table.items[k];
         const NSUInteger at = e->id;
+        if (e->set) continue; /* (set 1: rolesArguments) */
         switch (e->kind) {
         case IR_MSL_BUFFER:
             SEND(void, s->encoder, "setBuffer:offset:atIndex:", (id, SEL, id, NSUInteger, NSUInteger), bufferAt(v, e->binding)->buffer, (NSUInteger)0, at);
@@ -300,7 +380,7 @@ static id arguments(Metal* v, Shader* s) {
                 const NSRange range = {at, e->count};
                 SEND(void, s->encoder, "setTextures:withRange:", (id, SEL, id*, NSRange), v->textureTable, range);
             } else {
-                id t = e->binding == 7 ? v->overlay : e->binding == 25 ? v->shadowAtlas : NULL;
+                id t = e->binding == 7 ? v->overlay : e->binding == 25 ? v->shadowAtlas : e->binding == 8 ? v->depthTexture : e->binding == 58 ? v->floatColor : e->binding == 59 ? v->floatSurface : NULL;
                 SEND(void, s->encoder, "setTexture:atIndex:", (id, SEL, id, NSUInteger), t ? t : v->blank, at);
             }
             break;
@@ -309,12 +389,96 @@ static id arguments(Metal* v, Shader* s) {
                 const NSRange range = {at, e->count};
                 SEND(void, s->encoder, "setSamplerStates:withRange:", (id, SEL, id*, NSRange), v->samplerTable, range);
             } else {
-                SEND(void, s->encoder, "setSamplerState:atIndex:", (id, SEL, id, NSUInteger), e->binding == 25 ? v->nearest : v->sampler, at);
+                SEND(void, s->encoder, "setSamplerState:atIndex:", (id, SEL, id, NSUInteger), unfiltered(e->binding) ? v->nearest : v->sampler, at);
             }
             break;
         }
     }
     return s->arguments;
+}
+
+/* Its set 1, as the light buffers' roles now fall (vulkan.c's roleSets): its buffer, and offset the place in it. */
+static id rolesArguments(Metal* v, Shader* s, NSUInteger* offset) {
+    const int key = v->role[0] * 9 + v->role[1] * 3 + v->role[2];
+    *offset = s->roleStride * (NSUInteger)key;
+    if (s->roleStamp[key] == v->stamp + 1) return s->roleArguments;
+    s->roleStamp[key] = v->stamp + 1;
+    Buffer* const three[3] = {&v->post[0], v->post[3].buffer ? &v->post[3] : &v->empty, v->post[4].buffer ? &v->post[4] : &v->empty};
+    SEND(void, s->encoder1, "setArgumentBuffer:offset:", (id, SEL, id, NSUInteger), s->roleArguments, *offset);
+    for (int k = 0; k < s->table.count; ++k) {
+        const IrMslArgument* e = &s->table.items[k];
+        if (e->set != 1 || e->kind != IR_MSL_BUFFER || e->binding > 2) continue;
+        id b = three[v->role[e->binding]]->buffer ? three[v->role[e->binding]]->buffer : v->empty.buffer;
+        SEND(void, s->encoder1, "setBuffer:offset:atIndex:", (id, SEL, id, NSUInteger, NSUInteger), b, (NSUInteger)0, (NSUInteger)e->id);
+    }
+    return s->roleArguments;
+}
+
+/* What a pipeline draws into and how (as webgpu.c's RenderState): color, the light (light: its format; 0: BGRA8); in
+ * floats the surface words' target, written by what is solid; blending (1 premultiplied, 2 fog over what is behind);
+ * depth (0: no depth attachment); samples (0: the frame's). */
+typedef struct RenderSpec { int light, surface; bool surfaceWrite; int blend; bool color, depth; int samples; bool vertices; } RenderSpec;
+
+static bool pipelineMakeAs(Metal* v, Pipeline* p, uint32_t* vertexCode, size_t vertexBytes, uint32_t* fragmentCode, size_t fragmentBytes, id depth, int cull, const RenderSpec* r) {
+    if (!shaderMake(v, &p->vertex, vertexCode, vertexBytes, false)) {
+        artfFree(fragmentCode);
+        return false;
+    }
+    p->hasFragment = fragmentCode != NULL;
+    if (p->hasFragment && !shaderMake(v, &p->fragment, fragmentCode, fragmentBytes, false)) return false;
+    id d = GET(id, objcClass("MTLRenderPipelineDescriptor"), "new");
+    SET_ID(d, "setVertexFunction:", p->vertex.function);
+    if (p->hasFragment) SET_ID(d, "setFragmentFunction:", p->fragment.function);
+    if (r->vertices) SET_ID(d, "setVertexDescriptor:", v->vertexDescriptor);
+    SET_U(d, "setRasterSampleCount:", r->samples ? r->samples : v->samples);
+    if (r->depth) SET_U(d, "setDepthAttachmentPixelFormat:", PIXEL_DEPTH32);
+    id attachments = GET(id, d, "colorAttachments");
+    id attachment = AT(attachments, 0);
+    SET_U(attachment, "setPixelFormat:", r->light ? r->light : PIXEL_BGRA8);
+    if (!r->color) SET_U(attachment, "setWriteMask:", 0);
+    if (r->blend) {
+        SET_B(attachment, "setBlendingEnabled:", 1);
+        if (r->blend == 2) {
+            /* fog over what is behind: light * what is left + added * what shows of it, alpha kept */
+            SET_U(attachment, "setSourceRGBBlendFactor:", BLEND_DESTINATION_ALPHA);
+            SET_U(attachment, "setDestinationRGBBlendFactor:", BLEND_SOURCE_ALPHA);
+            SET_U(attachment, "setSourceAlphaBlendFactor:", BLEND_ZERO);
+            SET_U(attachment, "setDestinationAlphaBlendFactor:", BLEND_ONE);
+        } else {
+            SET_U(attachment, "setSourceRGBBlendFactor:", BLEND_ONE);
+            SET_U(attachment, "setSourceAlphaBlendFactor:", BLEND_ONE);
+            SET_U(attachment, "setDestinationRGBBlendFactor:", BLEND_ONE_MINUS_SOURCE_ALPHA);
+            SET_U(attachment, "setDestinationAlphaBlendFactor:", BLEND_ONE_MINUS_SOURCE_ALPHA);
+        }
+    }
+    if (r->surface) {
+        id second = AT(attachments, 1);
+        SET_U(second, "setPixelFormat:", r->surface);
+        if (!r->surfaceWrite) SET_U(second, "setWriteMask:", 0);
+    }
+    id error = NULL;
+    p->state = SEND(id, v->device, "newRenderPipelineStateWithDescriptor:error:", (id, SEL, id, id*), d, &error);
+    release(d);
+    if (!p->state) {
+        artfLog("artful: a Metal pipeline failed: %s", errorText(error));
+        return false;
+    }
+    p->depth = depth;
+    p->cull = cull;
+    return true;
+}
+
+/* A compute pipeline of shaders.c's. */
+static bool computeMake(Metal* v, Compute* c, uint32_t* code, size_t bytes) {
+    c->shader.threads = localSizeOf(code, bytes);
+    if (!shaderMake(v, &c->shader, code, bytes, false)) return false;
+    id error = NULL;
+    c->state = SEND(id, v->device, "newComputePipelineStateWithFunction:error:", (id, SEL, id, id*), c->shader.function, &error);
+    if (!c->state) {
+        artfLog("artful: a Metal compute pipeline failed: %s", errorText(error));
+        return false;
+    }
+    return true;
 }
 
 /* depth: its state; blend: premultiplied; color: writes color; shadow: into the atlas, depth alone. */
@@ -380,6 +544,8 @@ static id samplerMake(Metal* v, bool linear) {
     return made;
 }
 
+static bool postProgramsMake(Metal* v);
+
 static bool pipelinesMake(Metal* v) {
     v->sampler = samplerMake(v, true);
     v->nearest = samplerMake(v, false);
@@ -415,11 +581,11 @@ static bool pipelinesMake(Metal* v) {
     uint32_t *vertex, *fragment;
 #define PIPELINE(p, vertexCall, flip, fragmentCall, ...) \
     (vertex = vertexCall, more = size, fragment = fragmentCall, pipelineMake(v, p, vertex, more, flip, fragment, size, __VA_ARGS__))
-    return PIPELINE(&v->scene, artfShaderSceneVertex(&size, false), false, artfShaderSceneFragment(&size, textures, false, NULL, 0, 0, 0), v->depthOn, CULL_BACK, false, true, true, false) &&
-           PIPELINE(&v->cutout, artfShaderSceneVertex(&size, false), false, artfShaderSceneFragment(&size, textures, true, NULL, 0, 0, 0), v->depthOn, CULL_NONE, false, true, true, false) &&
-           PIPELINE(&v->overlayDraw, artfShaderOverlayVertex(&size), false, artfShaderOverlayFragment(&size, false), v->depthOff, CULL_NONE, true, true, false, false) &&
+    v->depthEqual = depthState(v, COMPARE_EQUAL, false);
+    return PIPELINE(&v->overlayDraw, artfShaderOverlayVertex(&size), false, artfShaderOverlayFragment(&size, false), v->depthOff, CULL_NONE, true, true, false, false) &&
            PIPELINE(&v->shadow, artfShaderShadowVertex(&size), true, (uint32_t*)NULL, v->depthNear, CULL_NONE, false, false, true, true) &&
-           PIPELINE(&v->shadowHoles, artfShaderShadowVertex(&size), true, artfShaderShadowFragment(&size, textures), v->depthNear, CULL_NONE, false, false, true, true);
+           PIPELINE(&v->shadowHoles, artfShaderShadowVertex(&size), true, artfShaderShadowFragment(&size, textures), v->depthNear, CULL_NONE, false, false, true, true) &&
+           (!v->floats || postProgramsMake(v));
 #undef PIPELINE
 }
 
@@ -430,18 +596,32 @@ static void targetsFree(Metal* v) {
     release(v->samplesTexture);
     release(v->depthTexture);
     release(v->overlay);
-    v->frameTexture = v->samplesTexture = v->depthTexture = v->overlay = NULL;
+    release(v->floatColor);
+    release(v->floatSamples);
+    release(v->floatSurface);
+    v->frameTexture = v->samplesTexture = v->depthTexture = v->overlay = v->floatColor = v->floatSamples = v->floatSurface = NULL;
     ++v->stamp;
     v->overlayUsable = false;
 }
+
+static bool postBuffersMake(Metal* v);
 
 static bool targetsMake(Metal* v) {
     targetsFree(v);
     v->targetsStale = false;
     if (v->width <= 0 || v->height <= 0) return true;
     v->frameTexture = textureNew(v, PIXEL_BGRA8, v->width, v->height, 1, 1, TEXTURE_TARGET | TEXTURE_READ, STORAGE_PRIVATE);
-    v->depthTexture = textureNew(v, PIXEL_DEPTH32, v->width, v->height, 1, v->samples, TEXTURE_TARGET, STORAGE_PRIVATE);
+    /* (with renderScale, in floats, the scene is drawn smaller, and made whole at the frame's size after it) */
+    v->sceneWidth = v->floats ? artfMaxi((int)((float)v->width * v->scale + .5f), 1) : v->width;
+    v->sceneHeight = v->floats ? artfMaxi((int)((float)v->height * v->scale + .5f), 1) : v->height;
+    v->depthTexture = textureNew(v, PIXEL_DEPTH32, v->sceneWidth, v->sceneHeight, 1, v->samples, TEXTURE_TARGET | (v->floats ? TEXTURE_READ : 0), STORAGE_PRIVATE);
     if (v->samples > 1) v->samplesTexture = textureNew(v, PIXEL_BGRA8, v->width, v->height, 1, v->samples, TEXTURE_TARGET, STORAGE_PRIVATE);
+    if (v->floats) {
+        v->floatColor = textureNew(v, PIXEL_RGBA16F, v->sceneWidth, v->sceneHeight, 1, 1, TEXTURE_TARGET | TEXTURE_READ, STORAGE_PRIVATE);
+        if (v->samples > 1) v->floatSamples = textureNew(v, PIXEL_RGBA16F, v->sceneWidth, v->sceneHeight, 1, v->samples, TEXTURE_TARGET, STORAGE_PRIVATE);
+        v->floatSurface = textureNew(v, v->wide ? PIXEL_RGBA32U : PIXEL_R32U, v->sceneWidth, v->sceneHeight, 1, v->samples, TEXTURE_TARGET | TEXTURE_READ, STORAGE_PRIVATE);
+        if (!v->floatColor || !v->floatSurface || !postBuffersMake(v)) return false;
+    }
     v->overlay = textureNew(v, PIXEL_BGRA8, v->width, v->height, 1, 1, TEXTURE_READ, hostStorage(v));
     ++v->stamp;
     if (v->layer) {
@@ -588,7 +768,7 @@ static bool syncScene(Metal* v, ArtfScene* scene) {
     }
     if (scene->instances.len > v->instanceCapacity) {
         v->instanceCapacity = (uint32_t)scene->instances.len * 2;
-        if (!bufferNew(v, &v->instances, (size_t)v->instanceCapacity * sizeof(ArtfInstanceData))) return false;
+        if (!bufferNew(v, &v->instances, (size_t)v->instanceCapacity * (sizeof(ArtfInstanceData) + 64))) return false;
         if (!bufferNew(v, &v->visible, ((size_t)layersAt(v) + v->instanceCapacity) * 8)) return false;
         v->fresh = true;
     }
@@ -749,18 +929,45 @@ static void uploadOverlay(Metal* v) {
 
 /* ---- a frame ---- */
 
+enum { NEED_OCCLUSION = 1, NEED_BLUR = 2, NEED_FOG = 4, NEED_SECOND = 8, NEED_HISTORY = 16, NEED_GATHERED = 32 };
+enum { POST_GATHER, POST_OCCLUSION, POST_OCCLUSION_BLUR, POST_REFLECTION, POST_FROXELS, POST_TEMPORAL, POST_FOCUS, POST_BLOOM_DOWN, POST_BLOOM_UP, POST_REFLECTION_APPLY, POST_METER,
+       POST_MOTION_BLUR, POST_VELOCITY, POST_TILE_MOST, POST_UPSCALE, POST_SHARPEN, POST_SAMPLED, POST_SAMPLED_SPACE, POST_CLOUD_COLUMNS, POST_CLOUD_APPLY, POST_UNDER_ACROSS, POST_UNDER_DOWN, POST_KINDS };
+
+/* What goes into a buffer, at a place, with room made (and every argument written again) when there is not. */
+static bool bufferPut(Metal* v, Buffer* b, size_t at, const void* data, size_t bytes) {
+    if (!b->buffer || at + bytes > b->size) {
+        Buffer was = *b;
+        memset(b, 0, sizeof *b);
+        if (!bufferNew(v, b, (at + bytes) + (at + bytes) / 2 + 64)) return false;
+        if (was.buffer) memcpy(b->mapped, was.mapped, was.size < b->size ? was.size : b->size);
+        bufferFree(&was);
+    }
+    if (bytes) memcpy((char*)b->mapped + at, data, bytes);
+    return true;
+}
+
 /* All that shaders reach through argument buffers: Metal cannot see it there, and is told. The atlas comes last,
  * for a pass that draws into it to leave out. */
 static void resourcesGather(Metal* v) {
     v->resources.len = 0;
     Buffer* buffers[] = {&v->empty, &v->frame, &v->instances, &v->visible, &v->indirect, &v->materials, &v->meshTable, &v->colors, &v->shadowData,
-                         &v->shadowList, &v->meshletMeshes, &v->meshletState, &v->extraLights, &v->tileLights, &v->decals};
+                         &v->shadowList, &v->meshletMeshes, &v->meshletState, &v->extraLights, &v->tileLights, &v->decals,
+                         &v->post[0], &v->post[1], &v->post[2], &v->post[3], &v->post[4], &v->post[5], &v->post[6], &v->post[7], &v->postLocks, &v->postGathered,
+                         &v->cloudField, &v->cloudGrid, &v->environment, &v->traceNodes, &v->traceTriangles, &v->traceVertices, &v->traceTop, &v->traceInstances,
+                         &v->traceSum, &v->traceFrameUbo, &v->denoiseBuffers[0], &v->denoiseBuffers[1], &v->denoiseBuffers[2], &v->denoiseBuffers[3],
+                         &v->denoiseBuffers[4], &v->denoiseBuffers[5], &v->denoiseBuffers[6], &v->denoiseShift, &v->traceMotion, &v->probesNow, &v->probesNext};
     for (size_t i = 0; i < ARTF_COUNT(buffers); ++i)
         if (buffers[i]->buffer) artfVecPush(&v->resources, buffers[i]->buffer);
     artfVecPush(&v->resources, v->blank);
     for (size_t i = 0; i < v->textures.len; ++i)
         if (v->textures.items[i]) artfVecPush(&v->resources, v->textures.items[i]);
     if (v->overlay) artfVecPush(&v->resources, v->overlay);
+    if (v->floats) {
+        /* (what the gather reads; drawn into in the scene's passes, read after them) */
+        if (v->depthTexture) artfVecPush(&v->resources, v->depthTexture);
+        if (v->floatColor) artfVecPush(&v->resources, v->floatColor);
+        if (v->floatSurface) artfVecPush(&v->resources, v->floatSurface);
+    }
     if (v->shadowAtlas) artfVecPush(&v->resources, v->shadowAtlas);
 }
 
@@ -768,8 +975,21 @@ static void computeUse(Metal* v, id e) {
     SEND(void, e, "useResources:count:usage:", (id, SEL, id*, NSUInteger, NSUInteger), v->resources.items, (NSUInteger)v->resources.len, (NSUInteger)USE_READ_WRITE);
 }
 
+/* (in a pass that draws into them, the floats' targets and the atlas are not told: a target is not a resource read) */
 static void renderUse(Metal* v, id e, bool withAtlas) {
-    const NSUInteger count = v->resources.len - (!withAtlas && v->shadowAtlas ? 1 : 0);
+    NSUInteger count = v->resources.len - (!withAtlas && v->shadowAtlas ? 1 : 0);
+    if (withAtlas && v->floats) {
+        /* (the scene's passes: all but the floats' targets, which come just before the atlas) */
+        id kept[512];
+        NSUInteger n = 0;
+        for (size_t i = 0; i < v->resources.len && n < 512; ++i) {
+            id r = v->resources.items[i];
+            if (r == v->depthTexture || r == v->floatColor || r == v->floatSurface) continue;
+            kept[n++] = r;
+        }
+        SEND(void, e, "useResources:count:usage:stages:", (id, SEL, id*, NSUInteger, NSUInteger, NSUInteger), kept, n, (NSUInteger)USE_READ_WRITE, (NSUInteger)STAGE_VERTEX_FRAGMENT);
+        return;
+    }
     SEND(void, e, "useResources:count:usage:stages:", (id, SEL, id*, NSUInteger, NSUInteger, NSUInteger), v->resources.items, count, (NSUInteger)USE_READ_WRITE, (NSUInteger)STAGE_VERTEX_FRAGMENT);
 }
 
@@ -779,6 +999,11 @@ static void pipelineUse(Metal* v, id e, Pipeline* p) {
     SET_U(e, "setCullMode:", p->cull);
     if (p->vertex.table.count) SEND(void, e, "setVertexBuffer:offset:atIndex:", (id, SEL, id, NSUInteger, NSUInteger), arguments(v, &p->vertex), (NSUInteger)0, (NSUInteger)0);
     if (p->hasFragment && p->fragment.table.count) SEND(void, e, "setFragmentBuffer:offset:atIndex:", (id, SEL, id, NSUInteger, NSUInteger), arguments(v, &p->fragment), (NSUInteger)0, (NSUInteger)0);
+    if (p->hasFragment && p->fragment.encoder1) {
+        NSUInteger offset;
+        id b = rolesArguments(v, &p->fragment, &offset);
+        SEND(void, e, "setFragmentBuffer:offset:atIndex:", (id, SEL, id, NSUInteger, NSUInteger), b, offset, (NSUInteger)1);
+    }
 }
 
 static void verticesUse(Metal* v, id e) {
@@ -795,6 +1020,26 @@ static void drawCommands(Metal* v, id e, id commands, uint32_t first, uint32_t c
 
 static void drawTriangle(id e) {
     SEND(void, e, "drawPrimitives:vertexStart:vertexCount:", (id, SEL, NSUInteger, NSUInteger, NSUInteger), (NSUInteger)PRIMITIVE_TRIANGLE, (NSUInteger)0, (NSUInteger)3);
+}
+
+/* A compute pass's dispatch, on an encoder: its push constant (where it has one), its sets, groups of its own size. */
+static void computeStep(Metal* v, id e, Compute* c, const uint32_t* push, NSUInteger pushBytes, MTLSize groups) {
+    SET_ID(e, "setComputePipelineState:", c->state);
+    if (c->shader.table.count) SEND(void, e, "setBuffer:offset:atIndex:", (id, SEL, id, NSUInteger, NSUInteger), arguments(v, &c->shader), (NSUInteger)0, (NSUInteger)0);
+    if (c->shader.encoder1) {
+        NSUInteger offset;
+        id b = rolesArguments(v, &c->shader, &offset);
+        SEND(void, e, "setBuffer:offset:atIndex:", (id, SEL, id, NSUInteger, NSUInteger), b, offset, (NSUInteger)1);
+    }
+    if (push && c->shader.table.pushAt >= 0) SEND(void, e, "setBytes:length:atIndex:", (id, SEL, const void*, NSUInteger, NSUInteger), push, pushBytes, (NSUInteger)c->shader.table.pushAt);
+    SEND(void, e, "dispatchThreadgroups:threadsPerThreadgroup:", (id, SEL, MTLSize, MTLSize), groups, c->shader.threads);
+}
+
+/* A post pass: count invocations of 64 (postStep). */
+static void postStep(Metal* v, id e, int kind, uint32_t push, uint32_t count) {
+    const uint32_t words[4] = {push, 0, 0, 0};
+    const MTLSize groups = {(count + 63) / 64, 1, 1};
+    computeStep(v, e, &v->posts[kind], words, sizeof words, groups);
 }
 
 static void drawShadows(Metal* v, id commands, const ArtfShadowFrame* shadows, uint32_t views) {
@@ -828,37 +1073,578 @@ static void drawShadows(Metal* v, id commands, const ArtfShadowFrame* shadows, u
     DO(e, "endEncoding");
 }
 
+/* ---- the scene's pipelines, as the scene and the frame are ---- */
+
+static void pipelineFree(Pipeline* p);
+static void shaderFree(Shader* s);
+static void computeFree(Compute* c) {
+    release(c->state);
+    shaderFree(&c->shader);
+    memset(c, 0, sizeof *c);
+}
+
+/* A pipeline of a triangle over the frame (the overlay's vertices), with a pixel shader of shaders.c's. */
+static bool fullMake(Metal* v, Pipeline* p, uint32_t* fragmentCode, size_t fragmentBytes, id depth, const RenderSpec* r) {
+    size_t size = 0;
+    uint32_t* vertex = artfShaderOverlayVertex(&size);
+    return pipelineMakeAs(v, p, vertex, size, fragmentCode, fragmentBytes, depth, CULL_NONE, r);
+}
+
+/* The scene's pipelines (as webgpu.c's scenePrograms): what is solid; the cutout's (holes, and materials of the
+ * program's own), a layer's depth alone, the layer at that depth blended, particles; and what draws behind the scene
+ * (light from all around, fog) and what shows what tracing gathered, in the scene's targets. */
+static bool scenePrograms(Metal* v, const ArtfGraphData* graphs, uint32_t count) {
+    const uint32_t variant = (v->floats ? ARTF_SHADER_FLOATS : 0u) | (v->froxels ? ARTF_SHADER_FROXELS : 0u) | v->variantBits;
+    const uint32_t textures = v->maxTextures | (v->uniformTextures ? ARTF_TEXTURES_UNIFORM : 0u);
+    const int light = v->floats ? PIXEL_RGBA16F : 0, surface = !v->floats ? 0 : v->wide ? PIXEL_RGBA32U : PIXEL_R32U;
+    Pipeline* const programs[5] = {&v->scene, &v->cutout, &v->layerDepth, &v->layerDraw, &v->particle};
+    const id depths[5] = {v->depthOn, v->depthOn, v->depthOn, v->depthEqual, v->depthOn};
+    const int culls[5] = {CULL_BACK, CULL_NONE, CULL_NONE, CULL_NONE, CULL_NONE};
+    const RenderSpec specs[5] = {{light, surface, true, 0, true, true, 0, true}, {light, surface, true, 0, true, true, 0, true}, {light, surface, false, 0, false, true, 0, true},
+                                 {light, surface, false, 1, true, true, 0, true}, {light, surface, false, 1, true, true, 0, true}};
+    for (int k = 0; k < 5; ++k) {
+        pipelineFree(programs[k]);
+        size_t size = 0, vertexSize = 0;
+        uint32_t* vertex = artfShaderSceneVertex(&vertexSize, v->floats);
+        uint32_t* fragment = artfShaderSceneFragment(&size, textures, k != 0, k ? graphs : NULL, k ? count : 0, 0, variant);
+        if (!pipelineMakeAs(v, programs[k], vertex, vertexSize, fragment, size, depths[k], culls[k], &specs[k])) return false;
+    }
+    Pipeline* const behind[3] = {&v->environmentBehind, &v->fogBehind, &v->traceShow};
+    for (int k = 0; k < 3; ++k) pipelineFree(behind[k]);
+    const RenderSpec over = {light, surface, false, 0, true, true, 0}, fog = {light, surface, false, 2, true, true, 0};
+    size_t size = 0;
+    uint32_t* code = artfShaderEnvironmentBackdrop(&size, v->floats);
+    if (!fullMake(v, &v->environmentBehind, code, size, v->depthOff, &over)) return false;
+    code = artfShaderTraceShow(&size, v->floats);
+    if (!fullMake(v, &v->traceShow, code, size, v->depthOff, &over)) return false;
+    if (v->floats) {
+        code = artfShaderFogBackdrop(&size);
+        if (!fullMake(v, &v->fogBehind, code, size, v->depthOff, &fog)) return false;
+    }
+    return true;
+}
+
+static bool graphsSync(Metal* v, const ArtfScene* scene) {
+    const uint32_t count = (uint32_t)scene->graphs.len;
+    const uint32_t variant = (v->froxels ? 1u : 0u) | v->variantBits << 1;
+    if (v->programsMade && count == v->graphCount && (!count || v->graphScene == scene->id) && v->madeWide == v->wide && v->madeVariant == variant) return true;
+    if (!scenePrograms(v, scene->graphs.items, count)) return false;
+    v->graphCount = count;
+    v->graphScene = scene->id;
+    v->madeWide = v->wide;
+    v->madeVariant = variant;
+    v->programsMade = true;
+    return true;
+}
+
+/* ---- a frame in floats: what comes after the scene (as webgpu.c's, from vulkan.c's) ---- */
+
+static uint32_t postNeedsOf(const ArtfFrameData* f, bool second, bool scaled) {
+    const bool temporal = f->post[1][3] > 0;
+    uint32_t n = 0;
+    if (f->post[0][2] > 0) n |= NEED_OCCLUSION;
+    if (f->motionBlur > 0) n |= NEED_BLUR | NEED_SECOND;
+    if (f->post[1][1] > 0 && f->look[1] > 0) n |= NEED_FOG;
+    if (scaled || temporal) n |= NEED_SECOND | NEED_HISTORY;
+    if (f->post[2][1] > 0 && f->post[2][0] > 0) n |= NEED_SECOND;
+    if (f->more[3] > 0 && temporal) n |= NEED_GATHERED;
+    if (second) n |= NEED_SECOND;
+    return n;
+}
+
+static bool postBuffersMake(Metal* v) {
+    const size_t pixels = (size_t)v->sceneWidth * v->sceneHeight, framePixels = (size_t)v->width * v->height;
+    const size_t fog = (size_t)((v->sceneWidth + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ((v->sceneHeight + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * ARTF_FROXEL_SLICES;
+    size_t bloom = 0;
+    uint32_t w = (uint32_t)v->width, h = (uint32_t)v->height;
+    for (int l = 0; l < 6; ++l) {
+        w = (w + 1) / 2 ? (w + 1) / 2 : 1;
+        h = (h + 1) / 2 ? (h + 1) / 2 : 1;
+        v->bloomSizes[l][0] = (uint32_t)bloom;
+        v->bloomSizes[l][1] = w;
+        v->bloomSizes[l][2] = h;
+        bloom += (size_t)w * h;
+    }
+    for (int i = 0; i < 8; ++i) bufferFree(&v->post[i]);
+    bufferFree(&v->postGathered);
+    bufferFree(&v->postLocks);
+    const size_t tiles = (size_t)((v->width + 15) / 16) * ((v->height + 15) / 16);
+    const size_t occlusion = v->postNeeds & NEED_OCCLUSION ? pixels * 4 : 0, blur = v->postNeeds & NEED_BLUR ? (framePixels + tiles * 2) * 8 : 0;
+    const size_t sizes[8] = {framePixels * 8, pixels * 4, pixels * 12, v->postNeeds & NEED_SECOND ? framePixels * 8 : 0, v->postNeeds & NEED_HISTORY ? framePixels * 8 : 0,
+                             occlusion > blur ? occlusion : blur, v->postNeeds & NEED_FOG ? fog * 16 : 0, (bloom + 1 + v->lutRoom) * 16};
+    for (int i = 0; i < 8; ++i)
+        if (sizes[i] && !bufferNew(v, &v->post[i], sizes[i])) return false;
+    if (v->postNeeds & NEED_GATHERED && !bufferNew(v, &v->postGathered, pixels * 64)) return false;
+    if (v->postNeeds & NEED_HISTORY && pixels != framePixels && !bufferNew(v, &v->postLocks, framePixels * 8)) return false;
+    v->role[0] = 0, v->role[1] = 1, v->role[2] = 2;
+    v->historyValid = v->exposureValid = v->hasPrevious = v->gatheredValid = false;
+    v->lutVersion = 0;
+    ++v->stamp;
+    return true;
+}
+
+static bool syncLut(Metal* v, const ArtfScene* scene) {
+    if (!scene->lut || (v->lutScene == scene->id && v->lutVersion == scene->lutVersion)) return true;
+    const uint32_t entries = (uint32_t)(scene->lutFloats / 3);
+    const size_t bloom = (size_t)v->bloomSizes[5][0] + (size_t)v->bloomSizes[5][1] * v->bloomSizes[5][2];
+    if (entries > v->lutRoom) {
+        v->lutRoom = entries;
+        if (!bufferNew(v, &v->post[7], (bloom + 1 + v->lutRoom) * 16)) return false;
+        v->exposureValid = false;
+    }
+    float* rows = (float*)((char*)v->post[7].mapped + (bloom + 1) * 16);
+    for (uint32_t i = 0; i < entries; ++i) {
+        memcpy(rows + i * 4, scene->lut + i * 3, 12);
+        rows[i * 4 + 3] = 0;
+    }
+    v->lutScene = scene->id;
+    v->lutVersion = scene->lutVersion;
+    return true;
+}
+
+static bool cloudsSync(Metal* v, const ArtfScene* scene, uint32_t* columns, uint32_t* rows) {
+    *columns = ((uint32_t)v->sceneWidth + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
+    *rows = ((uint32_t)v->sceneHeight + ARTF_CLOUD_TILE - 1) / ARTF_CLOUD_TILE;
+    const size_t grid = (size_t)*columns * *rows * ARTF_CLOUD_CELL * 4;
+    if (!v->cloudField.buffer && !bufferNew(v, &v->cloudField, (size_t)ARTF_CLOUD_FLOATS * 4)) return false;
+    if (v->cloudGrid.size != grid) {
+        if (!bufferNew(v, &v->cloudGrid, grid)) return false;
+        v->cloudGeneration = ~(uint64_t)0;
+    }
+    if (v->cloudGeneration != scene->cloudsGeneration) {
+        memcpy(v->cloudField.mapped, scene->clouds, (size_t)ARTF_CLOUD_FLOATS * 4);
+        v->cloudGeneration = scene->cloudsGeneration;
+    }
+    return true;
+}
+
+static bool syncEnvironment(Metal* v, const ArtfScene* scene) {
+    const size_t full = ARTF_ENV_FLOATS * sizeof(float);
+    if (!v->environment.buffer && !bufferNew(v, &v->environment, full)) return false;
+    if (scene->environment && (v->environmentVersion != scene->environmentVersion || v->environmentScene != scene->id)) {
+        memcpy(v->environment.mapped, scene->environment, full);
+        v->environmentVersion = scene->environmentVersion;
+        v->environmentScene = scene->id;
+    }
+    return true;
+}
+
+static bool postProgramsMake(Metal* v) {
+    uint32_t* (*const makers[POST_KINDS])(size_t*) = {NULL, artfShaderPostOcclusion, artfShaderPostOcclusionBlur, artfShaderPostReflection, artfShaderPostFroxels,
+                                                      artfShaderPostTemporal, artfShaderPostFocus, artfShaderPostBloomDown, artfShaderPostBloomUp, artfShaderPostReflectionApply,
+                                                      artfShaderPostMeter, artfShaderPostMotionBlur, artfShaderPostVelocity, artfShaderPostTileMost, artfShaderPostUpscale,
+                                                      artfShaderPostSharpen, artfShaderPostSampled, artfShaderPostSampledSpace, artfShaderPostCloudColumns, artfShaderPostCloudApply,
+                                                      artfShaderPostUnderAcross, artfShaderPostUnderDown};
+    for (int k = 0; k < POST_KINDS; ++k) {
+        size_t size = 0;
+        uint32_t* code = k == POST_GATHER ? artfShaderPostGather(&size, v->samples) : makers[k](&size);
+        if (!computeMake(v, &v->posts[k], code, size)) {
+            artfLog("artful: Metal's post pass %d could not be made", k);
+            return false;
+        }
+    }
+    size_t size = 0;
+    const RenderSpec one = {0, 0, false, 0, true, false, 1}, over = {0, 0, false, 1, true, false, 1};
+    uint32_t* code = artfShaderPostFinalFor(&size, false, NULL);
+    if (!fullMake(v, &v->final, code, size, v->depthOff, &one)) return false;
+    code = artfShaderOverlayFragment(&size, false);
+    return fullMake(v, &v->overlayFloats, code, size, v->depthOff, &over);
+}
+
+static void postSwap(Metal* v, bool keep) {
+    const uint8_t light = v->role[1], was = v->role[0];
+    if (keep) v->role[2] = light;
+    v->role[0] = light;
+    v->role[1] = was != v->role[2] && was != light ? was : (uint8_t)(3 - light - v->role[2]);
+}
+
+/* The post passes, in post.c's order (postRecord). */
+static void postChain(Metal* v, id commands, const ArtfFrameData* frame, bool under, bool clouds, uint32_t cloudColumns, uint32_t cloudRows) {
+    const uint32_t pixels = (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight, framePixels = (uint32_t)v->width * (uint32_t)v->height;
+    const bool scaled = pixels != framePixels;
+    id e = GET(id, commands, "computeCommandEncoder");
+    computeUse(v, e);
+    v->role[0] = v->role[2] ? 0 : 1;
+    v->role[1] = (uint8_t)(3 - v->role[0] - v->role[2]);
+    postStep(v, e, POST_GATHER, 0, pixels);
+    if (under) {
+        postStep(v, e, POST_UNDER_ACROSS, 0, pixels);
+        postStep(v, e, POST_UNDER_DOWN, 0, pixels);
+    }
+    if (frame->post[0][2] > 0) {
+        postStep(v, e, POST_OCCLUSION, 0, pixels);
+        postStep(v, e, POST_OCCLUSION_BLUR, 0, pixels);
+    }
+    if (frame->post[1][0] > 0) {
+        const uint32_t half = v->bloomSizes[0][1] * v->bloomSizes[0][2];
+        if (frame->traced & ARTF_TRACED_REFLECTIONS && v->reflectionTraced.state) {
+            const MTLSize groups = {(half + 63) / 64, 1, 1};
+            computeStep(v, e, &v->reflectionTraced, NULL, 0, groups);
+        } else
+            postStep(v, e, POST_REFLECTION, 0, half);
+        postStep(v, e, POST_REFLECTION_APPLY, 0, pixels);
+    }
+    const bool temporal = frame->post[1][3] > 0;
+    if (frame->more[3] > 0 && temporal && v->postGathered.buffer) {
+        postStep(v, e, POST_SAMPLED, (v->gatheredValid ? 1u : 0u) | v->gatheredHalf << 1, pixels);
+        v->gatheredHalf ^= 1;
+        v->gatheredValid = true;
+        postSwap(v, false);
+        postStep(v, e, POST_SAMPLED_SPACE, 0, pixels);
+        postSwap(v, false);
+    } else v->gatheredValid = false;
+    if (clouds) {
+        postStep(v, e, POST_CLOUD_COLUMNS, cloudColumns, cloudColumns * cloudRows);
+        postStep(v, e, POST_CLOUD_APPLY, cloudColumns, pixels);
+        postSwap(v, false);
+    }
+    if (scaled) {
+        postStep(v, e, POST_UPSCALE, (temporal && v->historyValid ? 1u : 0u) | v->lockHalf << 1, framePixels);
+        v->lockHalf ^= 1;
+        postSwap(v, temporal);
+    } else if (temporal) {
+        postStep(v, e, POST_TEMPORAL, v->historyValid ? 1u : 0u, pixels);
+        postSwap(v, true);
+    }
+    v->historyValid = temporal;
+    if (frame->output[2] > 0 && (scaled || temporal)) {
+        postStep(v, e, POST_SHARPEN, 0, framePixels);
+        postSwap(v, false);
+    }
+    if (frame->post[2][1] > 0 && frame->post[2][0] > 0) {
+        postStep(v, e, POST_FOCUS, 0, framePixels);
+        postSwap(v, false);
+    }
+    if (frame->motionBlur > 0) {
+        const uint32_t tiles = (((uint32_t)v->width + 15) / 16) * (((uint32_t)v->height + 15) / 16);
+        postStep(v, e, POST_VELOCITY, 0, framePixels);
+        postStep(v, e, POST_TILE_MOST, 0, tiles);
+        postStep(v, e, POST_TILE_MOST, 1, tiles);
+        postStep(v, e, POST_MOTION_BLUR, 0, framePixels);
+        postSwap(v, false);
+    }
+    if (frame->grade[0][1] > 0) {
+        postStep(v, e, POST_METER, v->exposureValid ? 1u : 0u, 1);
+        v->exposureValid = true;
+    } else v->exposureValid = false;
+    if (frame->post[0][0] > 0) {
+        for (uint32_t l = 0; l < 6; ++l) postStep(v, e, POST_BLOOM_DOWN, l, v->bloomSizes[l][1] * v->bloomSizes[l][2]);
+        for (int l = 4; l >= 0; --l) postStep(v, e, POST_BLOOM_UP, (uint32_t)l, v->bloomSizes[l][1] * v->bloomSizes[l][2]);
+    }
+    DO(e, "endEncoding");
+}
+
+static void gatherDepth(Metal* v, id commands) {
+    id e = GET(id, commands, "computeCommandEncoder");
+    computeUse(v, e);
+    postStep(v, e, POST_GATHER, 1, (uint32_t)v->sceneWidth * (uint32_t)v->sceneHeight);
+    DO(e, "endEncoding");
+}
+
+static void finalPass(Metal* v, id commands) {
+    id pass = GET(id, objcClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+    id color = AT(GET(id, pass, "colorAttachments"), 0);
+    SET_ID(color, "setTexture:", v->frameTexture);
+    SET_U(color, "setLoadAction:", LOAD_CLEAR);
+    SET_U(color, "setStoreAction:", STORE_STORE);
+    id e = SEND(id, commands, "renderCommandEncoderWithDescriptor:", (id, SEL, id), pass);
+    renderUse(v, e, true);
+    SET_U(e, "setFrontFacingWinding:", WINDING_COUNTER_CLOCKWISE);
+    pipelineUse(v, e, &v->final);
+    drawTriangle(e);
+    if (v->overlayPixels && v->overlayUsable) {
+        pipelineUse(v, e, &v->overlayFloats);
+        drawTriangle(e);
+    }
+    DO(e, "endEncoding");
+}
+
+/* ---- tracing and the probes, through the scene's trees (as webgpu.c's) ---- */
+
+static bool treesSync(Metal* v, ArtfScene* scene) {
+    artfSceneTraceSync(scene);
+    const ArtfTrace* t = &scene->trace;
+    if (v->traceScene != scene->id || v->traceMeshVersion != t->meshVersion || scene->deforming.len) {
+        if (!bufferPut(v, &v->traceNodes, 0, t->wide.items, t->wide.len * sizeof *t->wide.items) || !bufferPut(v, &v->traceTriangles, 0, t->triangles.items, t->triangles.len * sizeof *t->triangles.items) ||
+            !bufferPut(v, &v->traceVertices, 0, t->vertices.items, t->vertices.len * sizeof *t->vertices.items))
+            return false;
+        v->traceMeshVersion = t->meshVersion;
+    }
+    if (v->traceScene != scene->id || v->traceTopVersion != t->topVersion) {
+        if (!bufferPut(v, &v->traceTop, 0, t->top.items, t->top.len * sizeof *t->top.items) ||
+            !bufferPut(v, &v->traceInstances, 0, t->instances.items, (t->instances.len + 1) * sizeof *t->instances.items))
+            return false;
+        v->traceTopVersion = t->topVersion;
+    }
+    v->traceScene = scene->id;
+    return true;
+}
+
+static bool traceSync(Metal* v, ArtfScene* scene, bool guides) {
+    if (!treesSync(v, scene)) return false;
+    const ArtfTrace* t = &scene->trace;
+    const size_t pixels = (size_t)v->sceneWidth * v->sceneHeight;
+    if (v->traceSum.size < pixels * 16) {
+        if (!bufferNew(v, &v->traceSum, pixels * 16)) return false;
+        v->traceDone = 0;
+    }
+    if (!v->traceFrameUbo.buffer && !bufferNew(v, &v->traceFrameUbo, sizeof(ArtfTraceFrame))) return false;
+    if (guides && v->denoiseBuffers[0].size < pixels * 16) {
+        for (uint32_t i = 0; i < 7; ++i)
+            if (!bufferNew(v, &v->denoiseBuffers[i], pixels * (i == 3 || i == 4 ? 32 : 16))) return false;
+        if (!bufferNew(v, &v->denoiseShift, pixels * 16)) return false;
+        v->denoiseFirst = true;
+    }
+    if (guides && !bufferPut(v, &v->traceMotion, 0, t->motion.items, (t->motion.len + 12) * 4)) return false;
+    return true;
+}
+
+static bool tracePrograms(Metal* v, const ArtfScene* scene, bool guides, bool more) {
+    const uint32_t count = (uint32_t)scene->graphs.len, key = count << 2 | (guides ? 1u : 0u) | (more ? 2u : 0u);
+    const uint32_t textures = v->maxTextures | (v->uniformTextures ? ARTF_TEXTURES_UNIFORM : 0u);
+    if (!v->trace.state || key != v->traceProgramKey || (count && v->traceProgramScene != scene->id)) {
+        computeFree(&v->trace);
+        size_t size = 0;
+        uint32_t* code = artfShaderTrace(&size, textures, scene->graphs.items, count, guides, false, more);
+        if (!computeMake(v, &v->trace, code, size)) {
+            artfLog("artful: Metal's trace shader could not be made");
+            return false;
+        }
+        v->traceProgramKey = key;
+        v->traceProgramScene = scene->id;
+    }
+    if (guides && !v->denoisePasses[0].state)
+        for (int i = 0; i < 9; ++i) {
+            size_t size = 0;
+            uint32_t* code = i == 0 ? artfShaderDenoiseLight(&size) : i == 1 ? artfShaderDenoiseTime(&size) : i == 2 ? artfShaderDenoiseVariance(&size)
+                             : i < 8 ? artfShaderDenoiseSpace(&size, i - 3) : artfShaderDenoiseEnd(&size);
+            if (!computeMake(v, &v->denoisePasses[i], code, size)) return false;
+        }
+    return true;
+}
+
+static void traceRecord(Metal* v, id commands, bool clear, bool adding, bool denoise) {
+    const size_t pixels = (size_t)v->sceneWidth * v->sceneHeight;
+    if (clear) {
+        id blit = GET(id, commands, "blitCommandEncoder");
+        const NSRange all = {0, pixels * 16};
+        SEND(void, blit, "fillBuffer:range:value:", (id, SEL, id, NSRange, unsigned char), v->traceSum.buffer, all, (unsigned char)0);
+        DO(blit, "endEncoding");
+    }
+    if (!adding) return;
+    const MTLSize groups = {((NSUInteger)v->sceneWidth + 7) / 8, ((NSUInteger)v->sceneHeight + 7) / 8, 1};
+    id e = GET(id, commands, "computeCommandEncoder");
+    computeUse(v, e);
+    computeStep(v, e, &v->trace, NULL, 0, groups);
+    for (int i = 0; denoise && i < 9; ++i) computeStep(v, e, &v->denoisePasses[i], NULL, 0, groups);
+    DO(e, "endEncoding");
+    if (denoise) {
+        id blit = GET(id, commands, "blitCommandEncoder");
+        SEL copy = selName("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
+        ((void (*)(id, SEL, id, NSUInteger, id, NSUInteger, NSUInteger))objcSend)(blit, copy, v->denoiseBuffers[0].buffer, 0, v->denoiseBuffers[2].buffer, 0, pixels * 16);
+        ((void (*)(id, SEL, id, NSUInteger, id, NSUInteger, NSUInteger))objcSend)(blit, copy, v->denoiseBuffers[4].buffer, 0, v->denoiseBuffers[3].buffer, 0, pixels * 32);
+        DO(blit, "endEncoding");
+    }
+}
+
+static bool probesSync(Metal* v, ArtfScene* scene, bool* step) {
+    *step = false;
+    const ArtfIndirect* g = &scene->indirect;
+    const size_t need = (size_t)artfIndirectCount(g) * ARTF_PROBE_FLOATS * 4;
+    if (!treesSync(v, scene)) return false;
+    if (v->probesNow.size < need) {
+        if (!bufferNew(v, &v->probesNow, need) || !bufferNew(v, &v->probesNext, need)) return false;
+        v->probeScene = 0;
+    }
+    const int rays = g->desc.rays > 0 ? g->desc.rays : 64;
+    const float keep = g->desc.hysteresis > 0 ? artfClampf(g->desc.hysteresis, 0, .999f) : .9f;
+    const bool walls = !g->desc.throughWalls, more = scene->moreMaterials > 0;
+    uint32_t keepBits;
+    memcpy(&keepBits, &keep, 4);
+    const uint64_t key = (uint64_t)keepBits << 32 | (uint64_t)rays << 3 | (walls ? 1u : 0u) | (more ? 4u : 0u);
+    if (!v->probeStep.state || v->probeKey != key || v->probeGraphs != scene->graphs.len || v->probeGraphScene != scene->id) {
+        computeFree(&v->probeStep);
+        size_t size = 0;
+        const uint32_t textures = v->maxTextures | (v->uniformTextures ? ARTF_TEXTURES_UNIFORM : 0u);
+        uint32_t* code = artfShaderProbes(&size, textures, scene->graphs.items, (uint32_t)scene->graphs.len, false, more, walls, rays, keep);
+        if (!computeMake(v, &v->probeStep, code, size)) {
+            artfLog("artful: Metal's probes' shader could not be made");
+            return false;
+        }
+        v->probeKey = key;
+        v->probeGraphs = (uint32_t)scene->graphs.len;
+        v->probeGraphScene = scene->id;
+    }
+    if (v->probeScene != scene->id || v->probeSerial != g->serial) {
+        v->probeScene = scene->id;
+        v->probeSerial = g->serial;
+        v->probeFrames = 0;
+        if (g->frames && g->probes) {
+            memcpy(v->probesNow.mapped, g->probes, need);
+            v->probeFrames = g->frames;
+        } else memset(v->probesNow.mapped, 0, need);
+    }
+    *step = true;
+    return true;
+}
+
+static void probesRecord(Metal* v, id commands, const ArtfScene* scene) {
+    const ArtfIndirect* g = &scene->indirect;
+    id e = GET(id, commands, "computeCommandEncoder");
+    computeUse(v, e);
+    const uint32_t push[4] = {v->probeFrames, 0, 0, 0};
+    const MTLSize groups = {(NSUInteger)(g->dims[0] * g->dims[1]), (NSUInteger)(g->dims[2] * (g->cascades > 0 ? g->cascades : 1)), 1};
+    computeStep(v, e, &v->probeStep, push, sizeof push, groups);
+    DO(e, "endEncoding");
+    id blit = GET(id, commands, "blitCommandEncoder");
+    SEL copy = selName("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
+    ((void (*)(id, SEL, id, NSUInteger, id, NSUInteger, NSUInteger))objcSend)(blit, copy, v->probesNext.buffer, 0, v->probesNow.buffer, 0, (NSUInteger)artfIndirectCount(g) * ARTF_PROBE_FLOATS * 4);
+    DO(blit, "endEncoding");
+    ++v->probeFrames;
+}
+
+/* A render pass into the scene's targets (in floats: the light and the surface words); clear or keep what is there. */
+static id scenePass(Metal* v, id commands, const ArtfFrameData* frame, bool clear) {
+    id pass = GET(id, objcClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
+    id colors = GET(id, pass, "colorAttachments");
+    id color = AT(colors, 0);
+    MTLClearColor clearColor = {frame->background[0], frame->background[1], frame->background[2], frame->background[3]};
+    if (v->floats) {
+        /* (the background as light, as on the CPU) */
+        const float alpha = frame->background[3], over = alpha > 0 ? 1.f / alpha : 0.f;
+        clearColor.red = artfSrgbDecode(frame->background[0] * over) * alpha;
+        clearColor.green = artfSrgbDecode(frame->background[1] * over) * alpha;
+        clearColor.blue = artfSrgbDecode(frame->background[2] * over) * alpha;
+    }
+    SET_U(color, "setLoadAction:", clear ? LOAD_CLEAR : LOAD_LOAD);
+    SEND(void, color, "setClearColor:", (id, SEL, MTLClearColor), clearColor);
+    id target = v->floats ? v->floatColor : v->frameTexture, samples = v->floats ? v->floatSamples : v->samplesTexture;
+    if (v->samples > 1) {
+        SET_ID(color, "setTexture:", samples);
+        SET_ID(color, "setResolveTexture:", target);
+        SET_U(color, "setStoreAction:", v->floats ? STORE_STORE_RESOLVE : STORE_RESOLVE);
+    } else {
+        SET_ID(color, "setTexture:", target);
+        SET_U(color, "setStoreAction:", STORE_STORE);
+    }
+    if (v->floats) {
+        id surface = AT(colors, 1);
+        SET_ID(surface, "setTexture:", v->floatSurface);
+        SET_U(surface, "setLoadAction:", clear ? LOAD_CLEAR : LOAD_LOAD);
+        SET_U(surface, "setStoreAction:", STORE_STORE);
+    }
+    id depth = GET(id, pass, "depthAttachment");
+    SET_ID(depth, "setTexture:", v->depthTexture);
+    SET_U(depth, "setLoadAction:", clear ? LOAD_CLEAR : LOAD_LOAD);
+    SET_U(depth, "setStoreAction:", v->floats ? STORE_STORE : STORE_DONT_CARE);
+    SEND(void, depth, "setClearDepth:", (id, SEL, double), 0.0);
+    id e = SEND(id, commands, "renderCommandEncoderWithDescriptor:", (id, SEL, id), pass);
+    renderUse(v, e, true);
+    /* (y goes up in clip space and down in a frame here, as Vulkan's flipped viewport has it) */
+    SET_U(e, "setFrontFacingWinding:", WINDING_COUNTER_CLOCKWISE);
+    return e;
+}
+
 static bool frameDraw(Metal* v, ArtfScene* scene) {
     waitLast(v);
+    const bool wants = v->floats && (scene->post.screen.temporal || scene->post.lens.motionBlur > 0 || artfSceneHasUnder(scene));
+    if (wants && v->samples > 1 && !v->warnedWide) {
+        v->warnedWide = true;
+        artfLog("artful: Metal with four samples has no temporal antialiasing, motion blur or light under the surface");
+    }
+    const bool wide = wants && v->samples == 1;
+    if (wide != v->wide) {
+        v->wide = wide;
+        v->targetsStale = true;
+    }
+    if (v->floats && v->base.renderScale != v->scale) {
+        v->scale = v->base.renderScale;
+        v->targetsStale = true;
+    }
     if (v->targetsStale && !targetsMake(v)) return false;
     if (!v->frameTexture) return true; /* a window with no size */
 #define ONCE(flag, ...) do { if (!v->flag) { v->flag = true; artfLog(__VA_ARGS__); } } while (0)
+    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !v->base.view;
     if (scene->backgroundPass.on) ONCE(warnedHole, "artful: Metal does not draw a background pass");
-    if (scene->graphs.len) ONCE(warnedGraphs, "artful: Metal does not run materials written in C yet: they show their plain values");
-    if (scene->trace.desc.mode != ARTF_TRACE_NONE) ONCE(warnedTrace, "artful: Metal does not trace: the scene is drawn");
-    if (scene->translucentCount) ONCE(warnedLayers, "artful: Metal does not draw layers of transparency yet: they are left out");
+    if (tracing && scene->trace.desc.hardware) ONCE(warnedTrace, "artful: Metal traces through the scene's trees: not through its ray tracing hardware");
     if (v->base.view) ONCE(warnedView, "artful: Metal shows no views but the frame");
 #undef ONCE
-    if (!syncScene(v, scene)) return false;
+    v->froxels = v->floats && scene->post.screen.volumetric > 0 && scene->fogDensity > 0;
+    v->variantBits = (scene->layeredMaterials > 0 ? (uint32_t)ARTF_SHADER_COAT : 0u) | (scene->shadows.soft && scene->shadows.resolution > 0 ? (uint32_t)ARTF_SHADER_SOFT : 0u) |
+                     (artfSceneShapedLights(scene) ? (uint32_t)ARTF_SHADER_SHAPES : 0u);
+    if (scene->shadows.traced && !tracing) v->variantBits |= (uint32_t)ARTF_SHADER_TRACED;
+    if (scene->indirect.on && scene->indirect.probes) v->variantBits |= (uint32_t)ARTF_SHADER_PROBES | (!scene->indirect.desc.throughWalls ? (uint32_t)ARTF_SHADER_WALLS : 0u);
+    if (!syncEnvironment(v, scene) || !syncScene(v, scene) || !graphsSync(v, scene)) return false;
+    if (v->floats && !v->posts[0].state) return false;
     ArtfFrameData frame;
-    artfSceneFrame(scene, v->width, v->height, &frame);
+    artfSceneFrame(scene, v->sceneWidth, v->sceneHeight, &frame);
     frame.output[0] = (float)v->width;
     frame.output[1] = (float)v->height;
-    /* (what is left out here: light from all around and from probes, lights' shapes, rays, and all a frame in floats has) */
-    frame.sky[3] = frame.ground[3] = 0;
-    memset(frame.lightShapes, 0, sizeof frame.lightShapes);
-    memset(frame.indirect, 0, sizeof frame.indirect);
-    memset(frame.post, 0, sizeof frame.post);
-    frame.traced = frame.tracedCasts = 0;
-    frame.indirect[1][3] = (float)artfSceneDecals(scene, &frame, v->height, v->decals.mapped);
+    if (tracing || !v->floats) frame.traced &= ~(uint32_t)ARTF_TRACED_REFLECTIONS;
+    if (tracing) frame.traced = frame.tracedCasts = 0;
+    if ((frame.traced || frame.tracedCasts) && !treesSync(v, scene)) return false;
+    if (tracing) frame.post[1][1] = 0;
+    bool clouds = false, under = false;
+    uint32_t cloudColumns = 0, cloudRows = 0;
+    if (!v->floats) {
+        memset(frame.post, 0, sizeof frame.post);
+    } else {
+        if (!v->wide) {
+            frame.post[1][3] = 0;
+            frame.motionBlur = 0;
+        }
+        clouds = scene->clouds && !artfOrtho(&frame);
+        under = v->wide && artfSceneHasUnder(scene);
+        const uint32_t needs = postNeedsOf(&frame, clouds || under, v->sceneWidth != v->width || v->sceneHeight != v->height);
+        if (needs != v->postNeeds) {
+            v->postNeeds = needs;
+            if (!postBuffersMake(v)) return false;
+        }
+        if (!syncLut(v, scene)) return false;
+        if (clouds && !cloudsSync(v, scene, &cloudColumns, &cloudRows)) return false;
+        frame.output[3] = (float)v->postFrames;
+        float now[16];
+        memcpy(now, frame.viewProj, sizeof now);
+        if (v->hasPrevious) memcpy(frame.previous, v->previous, sizeof v->previous);
+        memcpy(v->previous, now, sizeof now);
+        v->hasPrevious = true;
+        if (frame.post[1][3] > 0) artfFrameJitter(&frame, v->postFrames++, v->sceneWidth, v->sceneHeight);
+        frame.grade2[2][3] = (float)(v->grainFrames++ & 0xFFFFFu);
+        if (frame.post[1][3] > 0 || frame.motionBlur > 0) {
+            /* how each instance moved: four rows each, after the instances */
+            artfMotionStep(&v->motion, scene, false);
+            frame.moving = v->motion.moving ? 1.f : 0.f;
+            float* rows = (float*)((char*)v->instances.mapped + scene->instances.len * sizeof(ArtfInstanceData));
+            for (size_t i = 0; i < v->motion.count; ++i) {
+                memcpy(rows + i * 16, v->motion.motion + i * 12, 48);
+                rows[i * 16 + 12] = rows[i * 16 + 13] = rows[i * 16 + 14] = rows[i * 16 + 15] = 0;
+            }
+        }
+    }
+    frame.indirect[1][3] = (float)artfSceneDecals(scene, &frame, v->sceneHeight, v->decals.mapped);
     if (!syncLights(v, scene, &frame)) return false;
-    artfSceneResidencyStep(scene, &frame, v->height);
+    artfSceneResidencyStep(scene, &frame, v->sceneHeight);
+    uint32_t layerCount = 0;
+    if (scene->translucentCount && scene->instances.len && !tracing) {
+        artfVecReserve(&v->layers, scene->translucentCount);
+        layerCount = artfSceneLayers(scene, &frame, v->layers.items);
+        artfLayerRange(&frame, v->layers.items, layerCount);
+        uint32_t* out = (uint32_t*)v->visible.mapped + (size_t)layersAt(v) * 2;
+        for (uint32_t i = 0; i < layerCount; ++i) {
+            out[i * 2] = v->layers.items[i].instance;
+            out[i * 2 + 1] = v->layers.items[i].mesh;
+        }
+    }
     memcpy(v->frame.mapped, &frame, sizeof frame);
+    for (uint32_t k = 0; k < frame.lightCount; ++k)
+        if (frame.lightShapes[k][2][3] > 0)
+            memcpy((char*)v->extraLights.mapped + ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + (size_t)k * ARTF_PROFILE_FLOATS * sizeof(float), scene->lightProfile[(int)frame.lightShapes[k][2][3] - 1],
+                   ARTF_PROFILE_FLOATS * sizeof(float));
     uploadOverlay(v);
 
     ArtfShadowFrame shadows;
     memset(&shadows, 0, sizeof shadows);
-    const uint32_t shadowViews = artfSceneShadowFrame(scene, &frame, &shadows);
+    const uint32_t shadowViews = tracing ? 0 : artfSceneShadowFrame(scene, &frame, &shadows);
     memcpy(v->shadowData.mapped, &shadows, sizeof shadows);
     if (shadowViews) {
         const int width = (int)shadows.sun[2] * ARTF_SHADOW_ATLAS_COLUMNS, height = (int)shadows.sun[3];
@@ -873,7 +1659,46 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
         if (!syncShadowList(v, scene)) return false;
     }
 
-    const uint32_t meshCount = (uint32_t)v->meshes.len, instanceCount = (uint32_t)scene->instances.len;
+    const uint32_t meshCount = (uint32_t)v->meshes.len, instanceCount = tracing ? 0 : (uint32_t)scene->instances.len;
+    bool probeStep = false;
+    if (!tracing && frame.indirect[0][3] > 0 && !probesSync(v, scene, &probeStep)) return false;
+    if (frame.traced & ARTF_TRACED_REFLECTIONS && (!v->reflectionTraced.state || v->reflectionGraphs != scene->graphs.len || (scene->graphs.len && v->reflectionScene != scene->id))) {
+        computeFree(&v->reflectionTraced);
+        size_t size = 0;
+        const uint32_t textures = v->maxTextures | (v->uniformTextures ? ARTF_TEXTURES_UNIFORM : 0u);
+        uint32_t* code = artfShaderPostReflectionTraced(&size, textures, scene->graphs.items, (uint32_t)scene->graphs.len, false);
+        if (!computeMake(v, &v->reflectionTraced, code, size)) artfLog("artful: Metal's reflections from rays could not be made: from the screen");
+        v->reflectionGraphs = (uint32_t)scene->graphs.len;
+        v->reflectionScene = scene->id;
+    }
+    bool traceClear = false, traceShown = false;
+    uint32_t traceAdding = 0;
+    if (tracing) {
+        const ArtfTraceDesc* d = &scene->trace.desc;
+        const bool more = scene->moreMaterials > 0 || artfSceneShapedLights(scene);
+        if (!traceSync(v, scene, d->denoise) || !tracePrograms(v, scene, d->denoise, more)) return false;
+        const uint64_t key = artfSceneTraceKey(scene, &frame);
+        if (key != v->traceKey || !v->traceDone) {
+            traceClear = !d->denoise;
+            v->traceDone = 0;
+            v->traceKey = key;
+        }
+        traceAdding = (uint32_t)d->samples;
+        if (d->maxSamples > 0) traceAdding = v->traceDone >= (uint32_t)d->maxSamples ? 0 : (uint32_t)artfMini(d->samples, d->maxSamples - (int)v->traceDone);
+        if (d->denoise && traceAdding) traceClear = true;
+        ArtfTraceFrame* traced = v->traceFrameUbo.mapped;
+        artfSceneTraceFrame(scene, &frame, v->sceneWidth, v->sceneHeight, d->denoise ? v->traceFrames : v->traceDone, traced);
+        traced->pad[0] = d->denoise ? 1 : v->traceDone + traceAdding;
+        traced->pad[1] = (v->denoiseFirst ? 1u : 0u) | (d->denoise && !v->denoiseFirst && !memcmp(v->tracePrevious, frame.viewProj, sizeof v->tracePrevious) ? 2u : 0u);
+        memcpy(traced->previous, v->tracePrevious, sizeof traced->previous);
+        v->traceDone += traceAdding;
+        if (d->denoise && traceAdding) {
+            v->traceFrames += traceAdding;
+            v->denoiseFirst = false;
+            memcpy(v->tracePrevious, frame.viewProj, sizeof v->tracePrevious);
+        }
+        traceShown = v->traceDone || d->denoise;
+    }
     const bool cutouts = scene->cutoutCount != 0 || scene->features[ARTF_FEATURE_LOD_FADE];
     if (instanceCount) memcpy(v->indirect.mapped, v->template_.mapped, (size_t)meshCount * 80);
 
@@ -881,7 +1706,8 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     id commands = GET(id, v->queue, "commandBuffer");
     DO(commands, "retain");
     v->last = commands;
-
+    if (tracing) traceRecord(v, commands, traceClear, traceAdding != 0, scene->trace.desc.denoise);
+    if (probeStep) probesRecord(v, commands, scene);
     if (instanceCount) {
         id e = GET(id, commands, "computeCommandEncoder");
         computeUse(v, e);
@@ -892,29 +1718,27 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
         DO(e, "endEncoding");
     }
     if (shadowViews && instanceCount) drawShadows(v, commands, &shadows, shadowViews);
-
-    id pass = GET(id, objcClass("MTLRenderPassDescriptor"), "renderPassDescriptor");
-    id color = AT(GET(id, pass, "colorAttachments"), 0);
-    const MTLClearColor clear = {frame.background[0], frame.background[1], frame.background[2], frame.background[3]};
-    SET_U(color, "setLoadAction:", LOAD_CLEAR);
-    SEND(void, color, "setClearColor:", (id, SEL, MTLClearColor), clear);
-    if (v->samples > 1) {
-        SET_ID(color, "setTexture:", v->samplesTexture);
-        SET_ID(color, "setResolveTexture:", v->frameTexture);
-        SET_U(color, "setStoreAction:", STORE_RESOLVE);
-    } else {
-        SET_ID(color, "setTexture:", v->frameTexture);
-        SET_U(color, "setStoreAction:", STORE_STORE);
+    const bool fogGrid = v->froxels && frame.post[1][1] > 0 && frame.look[1] > 0;
+    if (fogGrid) {
+        id g = GET(id, commands, "computeCommandEncoder");
+        computeUse(v, g);
+        postStep(v, g, POST_FROXELS, 0, (uint32_t)((v->sceneWidth + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE) * (uint32_t)((v->sceneHeight + ARTF_FROXEL_TILE - 1) / ARTF_FROXEL_TILE));
+        DO(g, "endEncoding");
     }
-    id depth = GET(id, pass, "depthAttachment");
-    SET_ID(depth, "setTexture:", v->depthTexture);
-    SET_U(depth, "setLoadAction:", LOAD_CLEAR);
-    SET_U(depth, "setStoreAction:", STORE_DONT_CARE);
-    SEND(void, depth, "setClearDepth:", (id, SEL, double), 0.0);
-    id e = SEND(id, commands, "renderCommandEncoderWithDescriptor:", (id, SEL, id), pass);
-    renderUse(v, e, true);
-    /* (y goes up in clip space and down in a frame here, as Vulkan's flipped viewport has it) */
-    SET_U(e, "setFrontFacingWinding:", WINDING_COUNTER_CLOCKWISE);
+
+    id e = scenePass(v, commands, &frame, true);
+    if (frame.sky[3] > 0 && frame.ground[3] > 0 && v->environmentBehind.state) {
+        pipelineUse(v, e, &v->environmentBehind);
+        drawTriangle(e);
+    }
+    if (fogGrid && v->fogBehind.state) {
+        pipelineUse(v, e, &v->fogBehind);
+        drawTriangle(e);
+    }
+    if (traceShown && v->traceShow.state) {
+        pipelineUse(v, e, &v->traceShow);
+        drawTriangle(e);
+    }
     if (instanceCount) {
         verticesUse(v, e);
         pipelineUse(v, e, &v->scene);
@@ -923,12 +1747,40 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
             pipelineUse(v, e, &v->cutout);
             drawCommands(v, e, v->indirect.buffer, meshCount * 2, meshCount);
         }
+        if (v->floats) {
+            /* (what comes after reads the depth of what is solid: taken before the layers write theirs) */
+            DO(e, "endEncoding");
+            gatherDepth(v, commands);
+            e = scenePass(v, commands, &frame, false);
+            verticesUse(v, e);
+        }
+        SEL drawOne = selName("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:baseVertex:baseInstance:");
+        for (uint32_t i = 0; i < layerCount; ++i) {
+            const MeshRange* m = &v->meshes.items[v->layers.items[i].mesh];
+            if (!m->indexCount) continue;
+            uint32_t end = i + 1;
+            const bool particle = (scene->instances.items[v->layers.items[i].instance].flags & ARTF_INSTANCE_PARTICLE) != 0;
+            if (particle)
+                while (end < layerCount && v->layers.items[end].mesh == v->layers.items[i].mesh && (scene->instances.items[v->layers.items[end].instance].flags & ARTF_INSTANCE_PARTICLE)) ++end;
+            Pipeline* const passes[2] = {particle ? &v->particle : &v->layerDepth, particle ? NULL : &v->layerDraw};
+            for (int k = 0; k < 2 && passes[k]; ++k) {
+                pipelineUse(v, e, passes[k]);
+                ((void (*)(id, SEL, NSUInteger, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger, long, NSUInteger))objcSend)(
+                    e, drawOne, PRIMITIVE_TRIANGLE, m->indexCount, INDEX_UINT32, v->indices.buffer, (NSUInteger)m->firstIndex * 4, end - i, (long)m->vertexOffset, layersAt(v) + i);
+            }
+            i = end - 1;
+        }
     }
-    if (v->overlayPixels && v->overlayUsable) {
+    if (v->overlayPixels && v->overlayUsable && !v->floats) {
         pipelineUse(v, e, &v->overlayDraw);
         drawTriangle(e);
     }
     DO(e, "endEncoding");
+    if (v->floats) {
+        if (!instanceCount) gatherDepth(v, commands);
+        postChain(v, commands, &frame, under, clouds, cloudColumns, cloudRows);
+        finalPass(v, commands);
+    }
 
     if (v->layer) {
         id drawable = GET(id, v->layer, "nextDrawable");
@@ -1003,6 +1855,8 @@ static void metalStats(const ArtfRenderer* r, ArtfFrameStats* out) {
 static void shaderFree(Shader* s) {
     release(s->arguments);
     release(s->encoder);
+    release(s->roleArguments);
+    release(s->encoder1);
     release(s->function);
     release(s->library);
     memset(s, 0, sizeof *s);
@@ -1012,6 +1866,7 @@ static void pipelineFree(Pipeline* p) {
     release(p->state);
     shaderFree(&p->vertex);
     shaderFree(&p->fragment);
+    memset(p, 0, sizeof *p);
 }
 
 static void metalFree(ArtfRenderer* r) {
@@ -1022,10 +1877,23 @@ static void metalFree(ArtfRenderer* r) {
                          &v->shadowData, &v->shadowList, &v->shadowCommands, &v->meshletMeshes, &v->meshletState, &v->extraLights, &v->tileLights, &v->decals};
     for (size_t i = 0; i < ARTF_COUNT(buffers); ++i) bufferFree(buffers[i]);
     for (size_t i = 0; i < v->textures.len; ++i) release(v->textures.items[i]);
-    Pipeline* pipelines[] = {&v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles};
+    Pipeline* pipelines[] = {&v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->layerDepth, &v->layerDraw, &v->particle, &v->environmentBehind,
+                             &v->fogBehind, &v->traceShow, &v->final, &v->overlayFloats};
     for (size_t i = 0; i < ARTF_COUNT(pipelines); ++i) pipelineFree(pipelines[i]);
+    for (int k = 0; k < 22; ++k) computeFree(&v->posts[k]);
+    for (int k = 0; k < 9; ++k) computeFree(&v->denoisePasses[k]);
+    computeFree(&v->trace);
+    computeFree(&v->probeStep);
+    computeFree(&v->reflectionTraced);
+    Buffer* more[] = {&v->postLocks, &v->postGathered, &v->cloudField, &v->cloudGrid, &v->environment, &v->traceNodes, &v->traceTriangles, &v->traceVertices, &v->traceTop,
+                      &v->traceInstances, &v->traceSum, &v->traceFrameUbo, &v->denoiseShift, &v->traceMotion, &v->probesNow, &v->probesNext};
+    for (size_t i = 0; i < ARTF_COUNT(more); ++i) bufferFree(more[i]);
+    for (int k = 0; k < 8; ++k) bufferFree(&v->post[k]);
+    for (int k = 0; k < 7; ++k) bufferFree(&v->denoiseBuffers[k]);
+    artfMotionFree(&v->motion);
+    artfVecFree(&v->layers);
     shaderFree(&v->cullShader);
-    const id others[] = {v->cull, v->depthOn, v->depthOff, v->depthNear, v->sampler, v->nearest, v->vertexDescriptor, v->blank, v->shadowAtlas, v->queue, v->device};
+    const id others[] = {v->cull, v->depthOn, v->depthOff, v->depthNear, v->depthEqual, v->sampler, v->nearest, v->vertexDescriptor, v->blank, v->shadowAtlas, v->queue, v->device};
     for (size_t i = 0; i < ARTF_COUNT(others); ++i) release(others[i]);
     artfFree(v->lightScratch);
     artfFree(v->listScratch);
@@ -1057,6 +1925,9 @@ ArtfRenderer* artfMetalNew(const ArtfRendererOptions* o) {
     v->height = o->height;
     v->samples = o->antialias ? 4 : 1;
     v->noVsync = o->noVsync;
+    v->floats = o->hdr;
+    v->scale = v->base.renderScale = o->hdr && o->renderScale > 0 && o->renderScale < 1.f ? artfMaxf(o->renderScale, .25f) : 1.f;
+    v->base.renderScaleMost = v->scale;
     v->meshesUp = ~(size_t)0;
     snprintf(v->description, sizeof v->description, "%s (Metal%s)", GET(const char*, GET(id, device, "name"), "UTF8String"), v->uniformTextures ? ", textures by constant indices" : "");
     if (o->surface.kind == ARTF_SURFACE_METAL) {
@@ -1072,7 +1943,7 @@ ArtfRenderer* artfMetalNew(const ArtfRendererOptions* o) {
     texturePut(v->blank, 0, 0, 0, 1, 1, &white, 1);
     for (int i = 0; i < MAX_TEXTURES; ++i) v->textureTable[i] = v->blank;
     bool ok = bufferNew(v, &v->empty, BLANK_BYTES) && bufferNew(v, &v->frame, sizeof(ArtfFrameData)) && bufferNew(v, &v->shadowData, sizeof(ArtfShadowFrame)) &&
-              bufferNew(v, &v->extraLights, (size_t)ARTF_MAX_LIGHTS * sizeof(ArtfLightData)) && bufferNew(v, &v->tileLights, 64) &&
+              bufferNew(v, &v->extraLights, (size_t)ARTF_MAX_LIGHTS * sizeof(ArtfLightData) + (size_t)ARTF_FRAME_LIGHTS * ARTF_PROFILE_FLOATS * sizeof(float)) && bufferNew(v, &v->tileLights, 64) &&
               bufferNew(v, &v->decals, (size_t)ARTF_MAX_DECALS * sizeof(ArtfDecalData)) && pipelinesMake(v) && targetsMake(v);
     poolPop(pool);
     if (!ok) {

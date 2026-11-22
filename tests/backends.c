@@ -156,13 +156,13 @@ static ArtfScene* skyFeatureScene(void) {
 
 static void otherGpuFeatures(ArtfRenderer* gpu, ArtfRenderer* cpu, ArtfBackend backend, uint32_t* a, uint32_t* b) {
     static const struct { const char* name; FeatureScene make; bool webgpu, metal; } features[] = {
-        {"a material of its own", graphFeatureScene, true, false},
-        {"layers of transparency", layeredScene, true, false},
-        {"a coat with sheen", coatFeatureScene, true, false},
-        {"soft shadows", softFeatureScene, true, false},
-        {"a light with a shape", shapeFeatureScene, true, false},
-        {"light from all around (a sky)", skyFeatureScene, true, false},
-        {"shadows from rays", tracedShadowFeatureScene, true, false},
+        {"a material of its own", graphFeatureScene, true, true},
+        {"layers of transparency", layeredScene, true, true},
+        {"a coat with sheen", coatFeatureScene, true, true},
+        {"soft shadows", softFeatureScene, true, true},
+        {"a light with a shape", shapeFeatureScene, true, true},
+        {"light from all around (a sky)", skyFeatureScene, true, true},
+        {"shadows from rays", tracedShadowFeatureScene, true, true},
     };
     /* (and each shows: what is built on the sun's scene is not that scene, drawn on the same GPU) */
     uint32_t* base = artfMalloc((size_t)W * H * 4);
@@ -216,7 +216,7 @@ static void otherGpu(ArtfBackend backend, const char* what) {
         CHECK(far < .02);
     }
     otherGpuFeatures(gpu, cpu, backend, a, b);
-    if (backend == ARTF_BACKEND_WEBGPU) {
+    {
         /* traced: paths, sixteen frames; and with the filter */
         for (int filtered = 0; filtered < 2; ++filtered) {
             ArtfScene* s = coatFeatureScene();
@@ -338,6 +338,7 @@ static void otherGpuFloats(ArtfBackend backend, const char* what) {
     artfRendererFree(cpu);
 }
 void testWebGpuFloats(void) { otherGpuFloats(ARTF_BACKEND_WEBGPU, "webgpu"); }
+void testMetalFloats(void) { otherGpuFloats(ARTF_BACKEND_METAL, "metal"); }
 void testMetal(void) { otherGpu(ARTF_BACKEND_METAL, "metal"); }
 
 /* (Without Vulkan, what follows has nothing to run on: its switches are Vulkan's, and the tests are empty.) */

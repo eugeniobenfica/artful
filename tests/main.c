@@ -156,6 +156,7 @@ int main(int argc, char** argv) {
     RUN("backends/webgpu", testWebGpu());
     RUN("backends/webgpuFloats", testWebGpuFloats());
     RUN("backends/metal", testMetal());
+    RUN("backends/metalFloats", testMetalFloats());
     RUN("layers/colorData", testColorData());
     RUN("layers/layers/software", testLayers(ARTF_BACKEND_SOFTWARE));
     RUN("layers/layers/vulkan", testLayers(ARTF_BACKEND_VULKAN));
