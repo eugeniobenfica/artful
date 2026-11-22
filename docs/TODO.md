@@ -12,7 +12,8 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 ## Dá para fazer aqui
 
 ### CI
-- [ ] Conferir a run da CI depois da correção do shader `giRows` do 2D (a causa e a correção estão no plano)
+- [ ] Conferir a run da CI depois da correção do `scale/drawnLift` no modo `-lod` (o Linux passou do 2D: a suíte chega
+  ao fim nos quatro modos, e só esse teste, que dependia do nível de detalhe ligado, falhou em um)
 
 ### Fase 6 — Alcance de plataforma
 - [ ] 6.1 e 6.2 Metal e WebGPU — as vistas, o pass de fundo e, com quatro amostras, o que segue o movimento (o resto

@@ -1023,6 +1023,7 @@ void testDrawnLift(void) {
         artfSceneSetAmbient(s, artfVec3(0, 0, 0), artfVec3(0, 0, 0));
         artfSceneSetSun(s, artfVec3(-.3f, -.4f, -1), artfVec3(2, 2, 2));
         artfSceneSetLodError(s, 6);
+        artfSceneSetFeature(s, ARTF_FEATURE_LOD, true); /* (what it is about: whatever ARTFUL_FEATURES says) */
         ArtfMaterialDesc grey = artfMaterialDefaults();
         grey.baseColor = artfVec3(.7f, .7f, .7f);
         addAt(s, artfSceneAddSphere(s, 1, 96, 192), artfSceneAddMaterial(s, &grey), 0, 0, 0, 1);
