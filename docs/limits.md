@@ -173,8 +173,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   Its gas is painted, as the film's was, and moved by a two-dimensional fluid with no magnetic field; both
   are maps, which show their texels when the eye comes close.
 - A KTX2 file of Basis Universal's (`KHR_texture_basisu`) is kept as ASTC 4 x 4 blocks (UASTC) or ETC1 blocks (ETC1S
-  without alpha), exactly, only where it has all its mipmaps; a GPU that takes neither (most desktop ones) gets pixels,
-  four bytes a texel, as a PNG's texture: there is no transcoding to BC7 or BC1. ETC1S with alpha is pixels everywhere.
+  without alpha), exactly, where it has all its mipmaps; a GPU that takes neither gets BC7 (from UASTC, about 45 dB from
+  its texels) or BC1 and BC3 (from ETC1S, about 30 dB), made as it goes up, on Vulkan. Metal and WebGPU get pixels.
   ETC1S and UASTC 4 x 4 only (not UASTC HDR, nor basisu 2.x's XUASTC and XUBC7), one image (no arrays, cube maps or
   video).
 - A texture is read between two of its texels as bytes, then made light: across a sharp edge between dark and light

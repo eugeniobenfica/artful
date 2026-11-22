@@ -203,6 +203,7 @@ typedef struct ArtfTextureData {
     int residentMip;       /* what is drawn from */
     bool removed;
     uint32_t format;       /* what Vulkan calls its blocks; 0: plain pixels */
+    uint8_t basis;         /* from Basis Universal (1 ETC1S, 2 UASTC): made into what a GPU takes when it takes not these */
     uint8_t* blocks;
     size_t blockBytes;
     uint32_t blockOffsets[16];
@@ -1400,9 +1401,18 @@ uint32_t artfTextureBlockBytes(uint32_t format);
 void artfTextureBlockSize(uint32_t format, int* width, int* height);
 void artfDecodeBc7(const uint8_t* block, uint32_t* out);
 void artfDecodeAstc(const uint8_t* block, int width, int height, uint32_t* out);
+/* BC7 from 16 pixels (blocks.c): the nearest of a few modes' fits. */
+void artfEncodeBc7(const uint32_t* pixels, uint8_t* out);
+/* BC7 of an ASTC 4 x 4 block (Basis Universal's UASTC, as kept): in its own partition where BC7 has it. */
+void artfAstcToBc7(const uint8_t* astc, uint8_t* out);
 void artfTextureDecode(ArtfTextureData* t);
 void artfSceneDecodeTextures(ArtfScene* s);
 uint8_t* artfTextureEncode(const ArtfTextureData* t, bool etc, uint32_t* format, size_t* size, uint32_t* offsets);
+/* A Basis Universal texture (ArtfTextureData.basis) in blocks a GPU takes, where it takes not what it has: UASTC's ASTC
+ * as BC7, each block in its own partition; ETC1S as BC1, or BC3 and ETC2 with EAC where it has alpha; on the pool's
+ * workers. NULL: none (its pixels go up). */
+struct ArtfPool;
+uint8_t* artfTextureTranscode(ArtfTextureData* t, bool takesBc, bool takesEtc, struct ArtfPool* pool, uint32_t* format, size_t* size, uint32_t* offsets);
 
 /* From a to b, of length 1, at a steady speed. */
 void artfQuatSlerp(const float* a, const float* b, float t, float* out);

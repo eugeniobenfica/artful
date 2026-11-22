@@ -3,8 +3,8 @@
 ## Unreleased
 
 - **Basis Universal files kept as GPU blocks** (phase 5.10): UASTC as ASTC 4 x 4 and ETC1S without alpha as ETC1, both
-  exact (the same texels to the bit); a GPU that takes them gets a quarter (an eighth) of the memory, the others and
-  the CPU get pixels as before.
+  exact (the same texels to the bit); on GPUs of PCs, which take neither, UASTC goes up as BC7 (a BC7 encoder of
+  Artful's own: 45 dB from UASTC's texels) and ETC1S as BC1 or BC3.
 - **OpenPBR's layers in a material of your own** (phase 5.12): a graph can set a coat, fuzz, the specular color, a thin
   film and light under the surface (`ARTF_OUT_COAT` to `ARTF_OUT_SUBSURFACE`), each where it says so and the material's
   elsewhere, drawn and traced, on both backends.

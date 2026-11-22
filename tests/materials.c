@@ -19,6 +19,34 @@ static uint32_t middleOf(ArtfRenderer* r, ArtfScene* s, uint32_t* frame, bool tr
     return frame[(size_t)(H / 2) * W + W / 2];
 }
 
+/* A Basis Universal texture on the GPU (here BC7, made from UASTC's ASTC as it goes up) against the CPU (its ASTC as
+ * pixels). */
+void testBasisDrawn(void) {
+    ArtfRendererOptions o = options(ARTF_BACKEND_VULKAN, 0, false);
+    ArtfRenderer* gpu = artfRendererNew(&o);
+    if (!gpu) return;
+    o = options(ARTF_BACKEND_SOFTWARE, 0, false);
+    ArtfRenderer* cpu = artfRendererNew(&o);
+    uint32_t* a = artfMalloc((size_t)W * H * 4);
+    uint32_t* b = artfMalloc((size_t)W * H * 4);
+    ArtfScene* s = plainScene();
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.unlit = true;
+    d.texture = artfSceneAddTextureKtx2(s, artfTestBasisUastc, artfTestBasisUastcSize);
+    CHECK(d.texture != 0);
+    addAt(s, addPictureSquare(s), artfSceneAddMaterial(s, &d), 0, 0, 0, 1);
+    drawInto(gpu, s, a);
+    drawInto(cpu, s, b);
+    const double apart = differentShare(a, b, 12);
+    printf("UASTC's texture, GPU (BC7) against CPU (ASTC): %.3f%% of pixels apart by more than 12 of 255\n", apart * 100);
+    CHECK(apart < .01);
+    artfSceneFree(s);
+    artfFree(a);
+    artfFree(b);
+    artfRendererFree(gpu);
+    artfRendererFree(cpu);
+}
+
 void testPhysical(ArtfBackend backend) {
     ArtfRendererOptions o = options(backend, 0, false);
     ArtfRenderer* r = artfRendererNew(&o);

@@ -1777,11 +1777,19 @@ bool uploadTexture(Vulkan* v, ArtfTextureData* t, uint32_t index, bool compress,
     const uint8_t* source = t->blocks;
     uint8_t* encoded = NULL;
     size_t bytes = t->blockBytes;
+    if (t->basis && !v->pool) v->pool = artfPoolNew(0); /* (Basis Universal's are made again on all the cores) */
     if (format && !takesFormat(v, format)) {
-        artfTextureDecode(t);
-        format = 0;
+        /* (Basis Universal's: in blocks it takes, where it takes some; else pixels) */
+        encoded = artfTextureTranscode(t, v->takesBc, v->takesEtc, v->pool, &format, &bytes, offsets);
+        if (encoded) source = encoded;
+        else {
+            artfTextureDecode(t);
+            format = 0;
+        }
     } else if (format) {
         memcpy(offsets, t->blockOffsets, sizeof offsets);
+    } else if (t->basis && (encoded = artfTextureTranscode(t, v->takesBc, v->takesEtc, v->pool, &format, &bytes, offsets))) {
+        source = encoded;
     } else if (compress && !t->read && (v->takesBc || v->takesEtc)) {
         encoded = artfTextureEncode(t, !v->takesBc, &format, &bytes, offsets);
         source = encoded;

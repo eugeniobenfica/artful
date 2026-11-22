@@ -114,6 +114,497 @@ void artfDecodeBc7(const uint8_t* b, uint32_t* out) {
     }
 }
 
+/* ---- BC7, made ----
+ * For what a GPU of PCs reads where a texture came in other blocks (Basis Universal's UASTC, as ASTC). Each block is
+ * tried in a few modes: 6 (one set of endpoints, RGBA); with no alpha, 1 and 3 (two sets) and 2 (three), each over the
+ * partitions a quick measure likes best; with alpha, 7 (two sets, RGBA). Each try fits its endpoints on the colors'
+ * main axis, then by least squares on the weights it gave, a few times over, with the endpoints' bits found by trying;
+ * and the one whose decoded texels are nearest wins. Floats, with nothing fused, and no library's functions but
+ * sqrtf: the same bytes everywhere. */
+
+typedef struct Bc7Fit { int q[6][4], p[6]; int index[16], index2[16]; } Bc7Fit;
+
+/* (bits of a block, the lowest first) */
+static void bitsPutAt(uint8_t* b, int* at, uint32_t v, int n) {
+    for (int i = 0; i < n; ++i, ++*at)
+        if (v >> i & 1) b[*at >> 3] |= (uint8_t)(1u << (*at & 7));
+}
+
+/* The value an endpoint's color takes, of bits (and its p bit, where the mode has one). */
+static int bc7Value(int q, int p, int bits, bool hasP) { return hasP ? bc7Expand(q << 1 | p, bits + 1) : bc7Expand(q, bits); }
+
+/* The nearest of a target, in bits with p given. */
+static int bc7Quantize(float t, int p, int bits, bool hasP) {
+    const int top = (1 << bits) - 1;
+    const float scale = hasP ? (float)((1 << (bits + 1)) - 1) : (float)top;
+    int guess = hasP ? (int)((t * scale / 255.f - (float)p) * .5f + .5f) : (int)(t * scale / 255.f + .5f);
+    int best = 0;
+    float bestError = 1e30f;
+    for (int q = guess - 1; q <= guess + 1; ++q) {
+        if (q < 0 || q > top) continue;
+        const float d = (float)bc7Value(q, p, bits, hasP) - t;
+        if (d * d < bestError) { bestError = d * d; best = q; }
+    }
+    return best;
+}
+
+/* The subset of each texel, of a partition (subsets 1 to 3). */
+static int bc7SubsetOf(int subsets, int partition, int i) {
+    return subsets == 1 ? 0 : subsets == 2 ? (int)(partitions2[partition] >> i & 1) : (int)(partitions3[partition] >> (i * 2) & 3);
+}
+static bool bc7Anchor(int subsets, int partition, int i) {
+    return i == 0 || (subsets == 2 && i == anchors2[partition]) || (subsets == 3 && (i == anchors3a[partition] || i == anchors3b[partition]));
+}
+
+/* The colors' main axis in a subset (four channels, alpha's own weight `channels`), by power iteration from the
+ * widest one; its mean and the furthest each way along it. */
+static void bc7Axis(const float (*px)[4], const int* subset, int s, int channels, float* lo, float* hi) {
+    float mean[4] = {0, 0, 0, 0};
+    int n = 0;
+    for (int i = 0; i < 16; ++i)
+        if (subset[i] == s) {
+            for (int c = 0; c < channels; ++c) mean[c] += px[i][c];
+            ++n;
+        }
+    if (!n) {
+        for (int c = 0; c < 4; ++c) lo[c] = hi[c] = 0;
+        return;
+    }
+    for (int c = 0; c < channels; ++c) mean[c] /= (float)n;
+    float cov[4][4] = {{0}};
+    for (int i = 0; i < 16; ++i)
+        if (subset[i] == s)
+            for (int a = 0; a < channels; ++a)
+                for (int b = 0; b < channels; ++b) cov[a][b] += (px[i][a] - mean[a]) * (px[i][b] - mean[b]);
+    float axis[4] = {0, 0, 0, 0};
+    int widest = 0;
+    for (int c = 1; c < channels; ++c)
+        if (cov[c][c] > cov[widest][widest]) widest = c;
+    axis[widest] = 1;
+    for (int it = 0; it < 8; ++it) {
+        float next[4] = {0, 0, 0, 0}, len = 0;
+        for (int a = 0; a < channels; ++a) {
+            for (int b = 0; b < channels; ++b) next[a] += cov[a][b] * axis[b];
+            len += next[a] * next[a];
+        }
+        if (!(len > 1e-12f)) break;
+        len = 1.f / sqrtf(len);
+        for (int a = 0; a < channels; ++a) axis[a] = next[a] * len;
+    }
+    float least = 1e30f, most = -1e30f;
+    for (int i = 0; i < 16; ++i)
+        if (subset[i] == s) {
+            float t = 0;
+            for (int c = 0; c < channels; ++c) t += (px[i][c] - mean[c]) * axis[c];
+            if (t < least) least = t;
+            if (t > most) most = t;
+        }
+    for (int c = 0; c < 4; ++c) {
+        lo[c] = c < channels ? mean[c] + axis[c] * least : 255.f;
+        hi[c] = c < channels ? mean[c] + axis[c] * most : 255.f;
+    }
+}
+
+/* What a subset's texels leave off its own main axis: a partition's measure. */
+static float bc7AxisError(const float (*px)[4], const int* subset, int subsets, int channels) {
+    float error = 0;
+    for (int s = 0; s < subsets; ++s) {
+        float lo[4], hi[4], d[4], len = 0;
+        bc7Axis(px, subset, s, channels, lo, hi);
+        for (int c = 0; c < channels; ++c) {
+            d[c] = hi[c] - lo[c];
+            len += d[c] * d[c];
+        }
+        for (int i = 0; i < 16; ++i) {
+            if (subset[i] != s) continue;
+            float t = 0;
+            for (int c = 0; c < channels; ++c) t += (px[i][c] - lo[c]) * d[c];
+            t = len > 0 ? t / len : 0;
+            for (int c = 0; c < channels; ++c) {
+                const float r = px[i][c] - (lo[c] + d[c] * t);
+                error += r * r;
+            }
+        }
+    }
+    return error;
+}
+
+/* A quick measure of a partition: what each subset's texels leave off a line through their mean along the block's own
+ * main axis, from sums of the texels in it (no axis of its own: that is for the fit). */
+typedef struct Bc7Moments { float x[16][4], t[16]; float axis[4]; } Bc7Moments;
+static void bc7MomentsOf(const float (*px)[4], int channels, Bc7Moments* m) {
+    const int all[16] = {0};
+    float lo[4], hi[4], len = 0;
+    bc7Axis(px, all, 0, channels, lo, hi);
+    for (int c = 0; c < 4; ++c) {
+        m->axis[c] = c < channels ? hi[c] - lo[c] : 0;
+        len += m->axis[c] * m->axis[c];
+    }
+    len = len > 0 ? 1.f / sqrtf(len) : 0;
+    for (int c = 0; c < 4; ++c) m->axis[c] *= len;
+    for (int i = 0; i < 16; ++i) {
+        m->t[i] = 0;
+        for (int c = 0; c < 4; ++c) {
+            m->x[i][c] = c < channels ? px[i][c] : 0;
+            m->t[i] += m->x[i][c] * m->axis[c];
+        }
+    }
+}
+static float bc7PartitionError(const Bc7Moments* m, const int* subset, int subsets) {
+    float error = 0;
+    for (int s = 0; s < subsets; ++s) {
+        float sum[4] = {0, 0, 0, 0}, squares = 0, along = 0, alongSquares = 0;
+        int n = 0;
+        for (int i = 0; i < 16; ++i) {
+            if (subset[i] != s) continue;
+            for (int c = 0; c < 4; ++c) {
+                sum[c] += m->x[i][c];
+                squares += m->x[i][c] * m->x[i][c];
+            }
+            along += m->t[i];
+            alongSquares += m->t[i] * m->t[i];
+            ++n;
+        }
+        if (!n) continue;
+        /* (all their spread, less what is along the axis) */
+        float meanSquares = 0;
+        for (int c = 0; c < 4; ++c) meanSquares += sum[c] * sum[c];
+        error += (squares - meanSquares / (float)n) - (alongSquares - along * along / (float)n);
+    }
+    return error;
+}
+
+/* One mode, one partition: endpoints and weights fitted, written into out. */
+static void bc7Try(int mode, int partition, const float (*px)[4], bool opaque, uint8_t* out) {
+    const Bc7Mode* m = &bc7Modes[mode];
+    const int subsets = m->subsets, channels = m->alphaBits ? 4 : 3, levels = 1 << m->indexBits;
+    const bool hasP = m->endBit || m->sharedBit;
+    int subset[16];
+    for (int i = 0; i < 16; ++i) subset[i] = bc7SubsetOf(subsets, partition, i);
+    float end[6][4];
+    for (int s = 0; s < subsets; ++s) bc7Axis(px, subset, s, channels, end[s * 2], end[s * 2 + 1]);
+    Bc7Fit f;
+    memset(&f, 0, sizeof f);
+    for (int pass = 0; pass < 3; ++pass) {
+        /* the endpoints' bits: each p bit (shared, or each its own) tried both ways */
+        for (int s = 0; s < subsets; ++s) {
+            float bestError = 1e30f;
+            int bestP[2] = {0, 0}, bestQ[2][4] = {{0}};
+            for (int pa = 0; pa < (hasP ? 2 : 1); ++pa)
+                for (int pb = 0; pb < (m->endBit ? 2 : 1); ++pb) {
+                    const int ps[2] = {pa, m->endBit ? pb : pa};
+                    float error = 0;
+                    int q[2][4];
+                    for (int e = 0; e < 2; ++e)
+                        for (int c = 0; c < 4; ++c) {
+                            const int bits = c < 3 ? m->colorBits : m->alphaBits;
+                            if (c == 3 && !m->alphaBits) { q[e][c] = 0; continue; }
+                            const float t = artfClampf(end[s * 2 + e][c], 0.f, 255.f);
+                            q[e][c] = bc7Quantize(t, ps[e], bits, hasP);
+                            const float d = (float)bc7Value(q[e][c], ps[e], bits, hasP) - t;
+                            error += d * d;
+                        }
+                    if (error < bestError) {
+                        bestError = error;
+                        bestP[0] = ps[0], bestP[1] = ps[1];
+                        memcpy(bestQ, q, sizeof q);
+                    }
+                }
+            for (int e = 0; e < 2; ++e) {
+                f.p[s * 2 + e] = bestP[e];
+                memcpy(f.q[s * 2 + e], bestQ[e], sizeof bestQ[e]);
+            }
+        }
+        /* each texel, the nearest of its subset's colors */
+        float sumA[3] = {0}, sumB[3] = {0}, sumAB[3] = {0};
+        float xa[3][4], xb[3][4];
+        memset(xa, 0, sizeof xa);
+        memset(xb, 0, sizeof xb);
+        for (int i = 0; i < 16; ++i) {
+            const int s = subset[i];
+            int lo[4], hi[4];
+            for (int c = 0; c < 4; ++c) {
+                const int bits = c < 3 ? m->colorBits : m->alphaBits;
+                lo[c] = c == 3 && !m->alphaBits ? 255 : bc7Value(f.q[s * 2][c], f.p[s * 2], bits, hasP);
+                hi[c] = c == 3 && !m->alphaBits ? 255 : bc7Value(f.q[s * 2 + 1][c], f.p[s * 2 + 1], bits, hasP);
+            }
+            int best = 0;
+            float bestError = 1e30f;
+            for (int k = 0; k < levels; ++k) {
+                const int w = bc7Weight(k, m->indexBits);
+                float e = 0;
+                for (int c = 0; c < channels; ++c) {
+                    const float d = (float)bc7Blend(lo[c], hi[c], w) - px[i][c];
+                    e += d * d;
+                }
+                if (e < bestError) { bestError = e; best = k; }
+            }
+            f.index[i] = best;
+            /* (for the least squares: a = 1 - w, b = w) */
+            const float w = (float)bc7Weight(best, m->indexBits) / 64.f, a = 1.f - w;
+            sumA[s] += a * a, sumB[s] += w * w, sumAB[s] += a * w;
+            for (int c = 0; c < channels; ++c) xa[s][c] += a * px[i][c], xb[s][c] += w * px[i][c];
+        }
+        if (pass == 2) break;
+        /* the endpoints that fit those weights best */
+        for (int s = 0; s < subsets; ++s) {
+            const float det = sumA[s] * sumB[s] - sumAB[s] * sumAB[s];
+            if (!(det > 1e-6f)) continue;
+            for (int c = 0; c < channels; ++c) {
+                end[s * 2][c] = (xa[s][c] * sumB[s] - xb[s][c] * sumAB[s]) / det;
+                end[s * 2 + 1][c] = (xb[s][c] * sumA[s] - xa[s][c] * sumAB[s]) / det;
+            }
+        }
+    }
+    (void)opaque;
+    /* each anchor's weight has its top bit 0: where not, its subset's endpoints change places and its weights turn */
+    for (int s = 0; s < subsets; ++s) {
+        int anchor = 0;
+        for (int i = 0; i < 16; ++i)
+            if (subset[i] == s && bc7Anchor(subsets, partition, i)) { anchor = i; break; }
+        if (!(f.index[anchor] >> (m->indexBits - 1) & 1)) continue;
+        int t[4];
+        memcpy(t, f.q[s * 2], sizeof t);
+        memcpy(f.q[s * 2], f.q[s * 2 + 1], sizeof t);
+        memcpy(f.q[s * 2 + 1], t, sizeof t);
+        const int tp = f.p[s * 2];
+        f.p[s * 2] = f.p[s * 2 + 1];
+        f.p[s * 2 + 1] = tp;
+        for (int i = 0; i < 16; ++i)
+            if (subset[i] == s) f.index[i] = levels - 1 - f.index[i];
+    }
+    /* written as the decoder reads it */
+    memset(out, 0, 16);
+    int at = 0;
+    bitsPutAt(out, &at, 1u << mode, mode + 1);
+    bitsPutAt(out, &at, (uint32_t)partition, m->partitionBits);
+    for (int c = 0; c < 3; ++c)
+        for (int e = 0; e < subsets * 2; ++e) bitsPutAt(out, &at, (uint32_t)f.q[e][c], m->colorBits);
+    if (m->alphaBits)
+        for (int e = 0; e < subsets * 2; ++e) bitsPutAt(out, &at, (uint32_t)f.q[e][3], m->alphaBits);
+    if (m->endBit)
+        for (int e = 0; e < subsets * 2; ++e) bitsPutAt(out, &at, (uint32_t)f.p[e], 1);
+    if (m->sharedBit)
+        for (int s = 0; s < subsets; ++s) bitsPutAt(out, &at, (uint32_t)f.p[s * 2], 1);
+    for (int i = 0; i < 16; ++i) bitsPutAt(out, &at, (uint32_t)f.index[i], bc7Anchor(subsets, partition, i) ? m->indexBits - 1 : m->indexBits);
+}
+
+/* Mode 5: one set of endpoints, the colors' and alpha's weights apart (2 bits each), the colors in 7 bits and alpha in
+ * 8; with a rotation, the channel it names changes places with alpha first, so that it is the one with weights of its
+ * own (as ASTC's second plane). */
+static void bc7TryDual(int rotation, const float (*source)[4], uint8_t* out) {
+    float px[16][4];
+    for (int i = 0; i < 16; ++i) {
+        memcpy(px[i], source[i], sizeof px[i]);
+        if (rotation) {
+            const float t = px[i][3];
+            px[i][3] = px[i][rotation - 1];
+            px[i][rotation - 1] = t;
+        }
+    }
+    const int all[16] = {0};
+    float lo[4], hi[4];
+    bc7Axis((const float (*)[4])px, all, 0, 3, lo, hi);
+    float alo = 255, ahi = 0;
+    for (int i = 0; i < 16; ++i) {
+        alo = px[i][3] < alo ? px[i][3] : alo;
+        ahi = px[i][3] > ahi ? px[i][3] : ahi;
+    }
+    int q[2][4], ci[16], ai[16];
+    for (int pass = 0; pass < 3; ++pass) {
+        for (int c = 0; c < 3; ++c) {
+            q[0][c] = bc7Quantize(artfClampf(lo[c], 0.f, 255.f), 0, 7, false);
+            q[1][c] = bc7Quantize(artfClampf(hi[c], 0.f, 255.f), 0, 7, false);
+        }
+        q[0][3] = (int)(artfClampf(alo, 0.f, 255.f) + .5f);
+        q[1][3] = (int)(artfClampf(ahi, 0.f, 255.f) + .5f);
+        float sA = 0, sB = 0, sAB = 0, xa[3] = {0}, xb[3] = {0}, tA = 0, tB = 0, tAB = 0, ya = 0, yb = 0;
+        for (int i = 0; i < 16; ++i) {
+            float best = 1e30f, bestA = 1e30f;
+            for (int k = 0; k < 4; ++k) {
+                const int w = blend2[k];
+                float e = 0;
+                for (int c = 0; c < 3; ++c) {
+                    const float d = (float)bc7Blend(bc7Expand(q[0][c], 7), bc7Expand(q[1][c], 7), w) - px[i][c];
+                    e += d * d;
+                }
+                if (e < best) best = e, ci[i] = k;
+                const float da = (float)bc7Blend(q[0][3], q[1][3], w) - px[i][3];
+                if (da * da < bestA) bestA = da * da, ai[i] = k;
+            }
+            const float w = (float)blend2[ci[i]] / 64.f, a = 1.f - w, wa = (float)blend2[ai[i]] / 64.f, aa = 1.f - wa;
+            sA += a * a, sB += w * w, sAB += a * w;
+            for (int c = 0; c < 3; ++c) xa[c] += a * px[i][c], xb[c] += w * px[i][c];
+            tA += aa * aa, tB += wa * wa, tAB += aa * wa, ya += aa * px[i][3], yb += wa * px[i][3];
+        }
+        if (pass == 2) break;
+        const float det = sA * sB - sAB * sAB, detA = tA * tB - tAB * tAB;
+        if (det > 1e-6f)
+            for (int c = 0; c < 3; ++c) lo[c] = (xa[c] * sB - xb[c] * sAB) / det, hi[c] = (xb[c] * sA - xa[c] * sAB) / det;
+        if (detA > 1e-6f) alo = (ya * tB - yb * tAB) / detA, ahi = (yb * tA - ya * tAB) / detA;
+    }
+    /* (texel 0's weights have their top bit 0: else the endpoints change places) */
+    if (ci[0] & 2) {
+        for (int c = 0; c < 3; ++c) { const int t = q[0][c]; q[0][c] = q[1][c]; q[1][c] = t; }
+        for (int i = 0; i < 16; ++i) ci[i] = 3 - ci[i];
+    }
+    if (ai[0] & 2) {
+        const int t = q[0][3]; q[0][3] = q[1][3]; q[1][3] = t;
+        for (int i = 0; i < 16; ++i) ai[i] = 3 - ai[i];
+    }
+    memset(out, 0, 16);
+    int at = 0;
+    bitsPutAt(out, &at, 1u << 5, 6);
+    bitsPutAt(out, &at, (uint32_t)rotation, 2);
+    for (int c = 0; c < 3; ++c)
+        for (int e = 0; e < 2; ++e) bitsPutAt(out, &at, (uint32_t)q[e][c], 7);
+    for (int e = 0; e < 2; ++e) bitsPutAt(out, &at, (uint32_t)q[e][3], 8);
+    for (int i = 0; i < 16; ++i) bitsPutAt(out, &at, (uint32_t)ci[i], i ? 2 : 1);
+    for (int i = 0; i < 16; ++i) bitsPutAt(out, &at, (uint32_t)ai[i], i ? 2 : 1);
+}
+
+static float bc7Error(const uint8_t* block, const uint32_t* px) {
+    uint32_t back[16];
+    artfDecodeBc7(block, back);
+    float e = 0;
+    for (int i = 0; i < 16; ++i)
+        for (int c = 0; c < 32; c += 8) {
+            const float d = (float)(int)((back[i] >> c & 255) - (px[i] >> c & 255));
+            e += d * d;
+        }
+    return e;
+}
+
+/* The n partitions of `subsets` the quick measure likes best, into best (n at most 16). */
+static void bc7Shortlist(const Bc7Moments* m, int subsets, int n, int* best) {
+    float error[16];
+    for (int k = 0; k < n; ++k) error[k] = 1e30f, best[k] = k;
+    for (int p = 0; p < 64; ++p) {
+        int subset[16];
+        for (int i = 0; i < 16; ++i) subset[i] = bc7SubsetOf(subsets, p, i);
+        const float e = bc7PartitionError(m, subset, subsets);
+        int at = n;
+        while (at > 0 && e < error[at - 1]) --at;
+        if (at == n) continue;
+        for (int k = n - 1; k > at; --k) error[k] = error[k - 1], best[k] = best[k - 1];
+        error[at] = e, best[at] = p;
+    }
+}
+
+/* BC7 of 16 pixels; with a partition known (subsets 2 or 3, partition its BC7 number), only that one is fitted, else
+ * the partitions are searched. */
+static void bc7Encode(const uint32_t* pixels, int hintSubsets, int hintPartition, int hintRotation, uint8_t* out) {
+    float px[16][4];
+    bool opaque = true;
+    for (int i = 0; i < 16; ++i) {
+        const uint32_t p = pixels[i];
+        px[i][0] = (float)(p >> 16 & 255), px[i][1] = (float)(p >> 8 & 255), px[i][2] = (float)(p & 255), px[i][3] = (float)(p >> 24);
+        opaque = opaque && p >> 24 == 255;
+    }
+    uint8_t best[16], trial[16];
+    bc7Try(6, 0, (const float (*)[4])px, opaque, best);
+    float bestError = bc7Error(best, pixels);
+#define TRY(mode, partition)                                                       \
+    do {                                                                           \
+        bc7Try(mode, partition, (const float (*)[4])px, opaque, trial);            \
+        const float e = bc7Error(trial, pixels);                                   \
+        if (e < bestError) { bestError = e; memcpy(best, trial, 16); }             \
+    } while (0)
+#define TRY_DUAL(rotation)                                                         \
+    do {                                                                           \
+        bc7TryDual(rotation, (const float (*)[4])px, trial);                       \
+        const float e = bc7Error(trial, pixels);                                   \
+        if (e < bestError) { bestError = e; memcpy(best, trial, 16); }             \
+    } while (0)
+    if (bestError > 16.f * 4.f * 2.f) { /* (beyond about one and a half of a byte a channel, others are tried) */
+        if (hintRotation >= 0) TRY_DUAL(hintRotation); /* (ASTC's second plane: that channel's own weights) */
+        if (hintSubsets == 2) {
+            if (opaque) {
+                TRY(1, hintPartition);
+                TRY(3, hintPartition);
+            } else TRY(7, hintPartition);
+        } else if (hintSubsets == 3 && opaque) {
+            TRY(2, hintPartition);
+        } else if (hintSubsets < 0) {
+            /* (known to be one set of endpoints: mode 6 it is) */
+        } else {
+            /* a short list by the quick measure, the best of it by each subset's own axis */
+            const int channels = opaque ? 3 : 4;
+            Bc7Moments moments;
+            bc7MomentsOf((const float (*)[4])px, channels, &moments);
+            int two[16], three[8], first[2] = {0, 1}, third = 0;
+            float firstError[2] = {1e30f, 1e30f}, thirdError = 1e30f;
+            bc7Shortlist(&moments, 2, 16, two);
+            for (int k = 0; k < 16; ++k) {
+                int subset[16];
+                for (int i = 0; i < 16; ++i) subset[i] = bc7SubsetOf(2, two[k], i);
+                const float e = bc7AxisError((const float (*)[4])px, subset, 2, channels);
+                if (e < firstError[0]) { firstError[1] = firstError[0]; first[1] = first[0]; firstError[0] = e; first[0] = two[k]; }
+                else if (e < firstError[1]) { firstError[1] = e; first[1] = two[k]; }
+            }
+            if (opaque) {
+                bc7Shortlist(&moments, 3, 8, three);
+                for (int k = 0; k < 8; ++k) {
+                    int subset[16];
+                    for (int i = 0; i < 16; ++i) subset[i] = bc7SubsetOf(3, three[k], i);
+                    const float e = bc7AxisError((const float (*)[4])px, subset, 3, 3);
+                    if (e < thirdError) { thirdError = e; third = three[k]; }
+                }
+            }
+            for (int k = 0; k < 2; ++k) {
+                if (opaque) {
+                    TRY(1, first[k]);
+                    TRY(3, first[k]);
+                } else TRY(7, first[k]);
+            }
+            if (opaque) TRY(2, third);
+            if (!opaque) TRY_DUAL(0);
+        }
+    }
+#undef TRY
+#undef TRY_DUAL
+    memcpy(out, best, 16);
+}
+
+void artfEncodeBc7(const uint32_t* pixels, uint8_t* out) { bc7Encode(pixels, 0, 0, -1, out); }
+
+/* BC7 of an ASTC 4 x 4 block (Basis Universal's UASTC, as it is kept): its texels, fitted in the BC7 partition that is
+ * its own where BC7 has it (as UASTC's are); one set of endpoints, mode 6 alone; else searched. */
+static int astcPartitionOf(int seed, int x, int y, int count);
+void artfAstcToBc7(const uint8_t* astc, uint8_t* out) {
+    uint32_t px[16];
+    artfDecodeAstc(astc, 4, 4, px);
+    const uint32_t mode = bitsAt(astc, 0, 11);
+    int subsets = -1, partition = 0, rotation = -1;
+    if ((mode & 0x1FF) != 0x1FC) {
+        const int parts = (int)bitsAt(astc, 11, 2) + 1;
+        if (parts > 1) subsets = 0;
+        /* (two planes: the second's channel, as a rotation: alpha 0, red 1, green 2, blue 3) */
+        if (mode >> 10 & 1) {
+            const uint32_t weightBits = (mode >> 9 & 1 ? (mode & 3) == 3 && (mode >> 4 & 1) ? 5u : 4u : (mode & 3) == 3 && (mode >> 4 & 1) ? 3u : (mode & 3) == 2 ? 2u : 1u);
+            const uint32_t ccs = bitsAt(astc, 128 - (int)(32 * weightBits) - 2, 2);
+            rotation = ccs == 3 ? 0 : (int)ccs + 1;
+        }
+        if (parts == 2 || parts == 3) {
+            const int seed = (int)bitsAt(astc, 13, 10);
+            int label[16];
+            for (int i = 0; i < 16; ++i) label[i] = astcPartitionOf(seed, i % 4, i / 4, parts);
+            /* (the BC7 partition with the same texels together, whatever each subset's number) */
+            for (int p = 0; p < 64 && !subsets; ++p) {
+                int map[4] = {-1, -1, -1, -1}, back[4] = {-1, -1, -1, -1};
+                bool same = true;
+                for (int i = 0; i < 16 && same; ++i) {
+                    const int bs = bc7SubsetOf(parts, p, i), a = label[i];
+                    if (map[a] < 0 && back[bs] < 0) map[a] = bs, back[bs] = a;
+                    same = map[a] == bs && back[bs] == a;
+                }
+                if (same) subsets = parts, partition = p;
+            }
+        }
+    }
+    bc7Encode(px, subsets, partition, rotation, out);
+}
+
 /* ---- ASTC ---- */
 
 /* The sizes numbers can have, by how they are stored: bits, and maybe a trit or a quint. */
@@ -316,6 +807,8 @@ static int partitionOf(int seed, int x, int y, int count, bool small) {
     if (count < 3) c = 0;
     return a >= b && a >= c && a >= d ? 0 : b >= c && b >= d ? 1 : c >= d ? 2 : 3;
 }
+
+static int astcPartitionOf(int seed, int x, int y, int count) { return partitionOf(seed, x, y, count, true); }
 
 static void transferBits(int* a, int* b) {
     *b >>= 1;

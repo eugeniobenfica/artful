@@ -799,11 +799,115 @@ static const uint8_t basisUastc[1382] = {
     172, 255, 255, 127, 0,
 };
 
+const uint8_t* artfTestBasisUastc = basisUastc;
+const size_t artfTestBasisUastcSize = sizeof basisUastc;
+
 /* (each level's pixels, hashed: FNV-1a of the packed values) */
 static uint32_t basisHash(const uint32_t* pixels, size_t count) {
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < count; ++i) h = (h ^ pixels[i]) * 16777619u;
     return h;
+}
+
+static int bc7Byte(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+
+/* PSNR of blocks against what they were made from, w x h pixels (a whole number of blocks). */
+static double blocksPsnr(const uint32_t* pixels, int w, int h, bool bc7) {
+    double sse = 0;
+    for (int by = 0; by < h; by += 4)
+        for (int bx = 0; bx < w; bx += 4) {
+            uint32_t px[16], back[16];
+            uint8_t block[16];
+            for (int i = 0; i < 16; ++i) px[i] = pixels[(size_t)(by + i / 4) * w + bx + i % 4];
+            if (bc7) {
+                artfEncodeBc7(px, block);
+                artfDecodeBc7(block, back);
+            } else {
+                ArtfTextureData t;
+                memset(&t, 0, sizeof t);
+                t.width = t.height = 4, t.mipCount = 1, t.pixels = px;
+                uint32_t format, offsets[16];
+                size_t size;
+                uint8_t* made = artfTextureEncode(&t, false, &format, &size, offsets);
+                ArtfTextureData d;
+                memset(&d, 0, sizeof d);
+                d.width = d.height = 4, d.mipCount = 1, d.format = format, d.blocks = made, d.blockBytes = size;
+                artfTextureDecode(&d);
+                memcpy(back, d.pixels, sizeof back);
+                artfFree(d.pixels);
+                artfFree(made);
+            }
+            for (int i = 0; i < 16; ++i)
+                for (int c = 0; c < 32; c += 8) {
+                    const double d = (double)(int)((back[i] >> c & 255) - (px[i] >> c & 255));
+                    sse += d * d;
+                }
+        }
+    const double mse = sse / ((double)w * h * 4);
+    return mse > 0 ? 10 * log10(255.0 * 255.0 / mse) : 99;
+}
+
+/* BC7 made from pixels: a gradient with a little noise, one with alpha, the UASTC file's largest level (as its texels),
+ * and edges of colors; better than BC1 and BC3, and as fast as a texture's loading allows. */
+void testBc7Encode(void) {
+    enum { N = 64 };
+    static uint32_t images[4][N * N];
+    uint32_t state = 7u;
+    for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x) {
+            state = state * 1664525u + 1013904223u;
+            const int noise = (int)(state >> 29) - 4;
+            const int r = bc7Byte(x * 4 + noise), g = bc7Byte(y * 4 - noise), b = bc7Byte((x + y) * 2);
+            images[0][y * N + x] = 0xFF000000u | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+            images[1][y * N + x] = (uint32_t)bc7Byte(255 - y * 4) << 24 | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+            const bool left = (x * 3 + y * 2) % 23 < 11, up = (x - y * 2 + 64) % 17 < 6;
+            images[3][y * N + x] = left ? (up ? 0xFFE03010u : 0xFF20C040u) : (up ? 0xFF1030F0u : 0xFFF0F0F0u);
+        }
+    uint32_t* uastc = NULL;
+    uint32_t offsets[16];
+    CHECK(artfBasisLevels(basisUastc, sizeof basisUastc, &uastc, offsets));
+    for (int i = 0; i < N * N; ++i) images[2][i] = uastc ? uastc[(i / N % 20) * 30 + i % N % 28] : 0; /* (28 x 20 of it, repeated) */
+    artfFree(uastc);
+    static const char* names[4] = {"a gradient", "a gradient with alpha", "UASTC's texels", "edges of colors"};
+    static const double least[4] = {44, 40, 32, 30}; /* (UASTC's texels without their partitions: see artfAstcToBc7 for those with) */
+    for (int k = 0; k < 4; ++k) {
+        const double started = artfNowMs();
+        const double bc7 = blocksPsnr(images[k], N, N, true);
+        const double took = (artfNowMs() - started) * 1000.0 / (N * N / 16);
+        const double bc1 = blocksPsnr(images[k], N, N, false);
+        printf("BC7 of %s: %.1f dB (BC1 or BC3: %.1f dB), %.1f us a block\n", names[k], bc7, bc1, took);
+        CHECK(bc7 >= least[k] && bc7 > bc1);
+    }
+    /* UASTC kept as ASTC, then made BC7 for a GPU of PCs: each block in its own partition */
+    uint32_t format, at[16];
+    uint8_t* blocks = NULL;
+    size_t bytes;
+    uint32_t* direct = NULL;
+    CHECK(artfBasisBlocks(basisUastc, sizeof basisUastc, &format, &blocks, &bytes, at) && artfBasisLevels(basisUastc, sizeof basisUastc, &direct, offsets));
+    if (blocks && direct) {
+        double sse = 0;
+        const double started = artfNowMs();
+        for (int round = 0; round < 20; ++round)
+            for (int by = 0; by < 5; ++by)
+                for (int bx = 0; bx < 7; ++bx) {
+                    uint8_t bc7[16];
+                    uint32_t back[16];
+                    artfAstcToBc7(blocks + (size_t)(by * 8 + bx) * 16, bc7);
+                    if (round) continue;
+                    artfDecodeBc7(bc7, back);
+                    for (int i = 0; i < 16; ++i)
+                        for (int c = 0; c < 32; c += 8) {
+                            const double d = (double)(int)((back[i] >> c & 255) - (direct[(size_t)(by * 4 + i / 4) * 30 + bx * 4 + i % 4] >> c & 255));
+                            sse += d * d;
+                        }
+                }
+        const double took = (artfNowMs() - started) * 1000.0 / (20 * 35);
+        const double psnr = 10 * log10(255.0 * 255.0 / (sse / (35 * 16 * 4)));
+        printf("UASTC's ASTC as BC7, each block in its own partition: %.1f dB, %.1f us a block\n", psnr, took);
+        CHECK(psnr > 40);
+    }
+    artfFree(blocks);
+    artfFree(direct);
 }
 
 /* UASTC's 19 modes as ASTC's: of each, blocks of random bits after its code; every one UASTC reads gives the same 16
@@ -884,6 +988,51 @@ void testBasis(void) {
         const ArtfTexture u = artfSceneAddTextureKtx2(s, plain, files[f].size);
         if (u) CHECK(s->textures.items[u].format == (f ? 157u : 147u));
         artfSceneFree(s);
+        /* for a GPU of PCs (BC, neither ASTC nor ETC2): UASTC as BC7, each block in its own partition; ETC1S as BC1, and
+         * with alpha (kept as pixels) as BC3 */
+        for (int which = 0; which < 2; ++which) {
+            const uint8_t* file = which ? files[f].data : plain;
+            if (which && f) continue; /* (UASTC: the one file) */
+            uint32_t* truth = NULL;
+            uint32_t truthOffsets[16];
+            CHECK(artfBasisLevels(file, files[f].size, &truth, truthOffsets));
+            ArtfPreparedTexture* prepared = artfPrepareTextureBasis(file, files[f].size);
+            CHECK(prepared != NULL);
+            if (!prepared || !truth) {
+                artfFree(truth);
+                artfPreparedTextureFree(prepared);
+                continue;
+            }
+            ArtfTextureData* tex = (ArtfTextureData*)artfPreparedTextureData(prepared);
+            uint32_t format, offs[16];
+            size_t bytes;
+            uint8_t* made = artfTextureTranscode(tex, true, false, NULL, &format, &bytes, offs);
+            CHECK(made != NULL && format == (f ? 145u : which ? 137u : 131u));
+            if (made) {
+                ArtfTextureData d;
+                memset(&d, 0, sizeof d);
+                d.width = 30, d.height = 22, d.mipCount = 5, d.format = format, d.blocks = made, d.blockBytes = bytes;
+                memcpy(d.blockOffsets, offs, sizeof offs);
+                artfTextureDecode(&d);
+                double sse = 0;
+                for (int i = 0; i < 30 * 22; ++i)
+                    for (int c = 0; c < 32; c += 8) {
+                        const double e = (double)(int)((d.pixels[i] >> c & 255) - (truth[i] >> c & 255));
+                        sse += e * e;
+                    }
+                const double psnr = 10 * log10(255.0 * 255.0 / (sse / (30 * 22 * 4) + 1e-9));
+                printf("Basis %s%s for BC: %s, %.1f dB\n", f ? "UASTC" : "ETC1S", which ? " with alpha" : "", f ? "BC7" : which ? "BC3" : "BC1", psnr);
+                CHECK(psnr > (f ? 40 : 30));
+                artfFree(d.pixels);
+                artfFree(made);
+            }
+            /* and for ETC2 alone: ETC1S as it is, with alpha as ETC2 with EAC */
+            uint8_t* etc = artfTextureTranscode(tex, false, true, NULL, &format, &bytes, offs);
+            if (!f) CHECK(which ? etc != NULL && format == 151u : etc == NULL);
+            artfFree(etc);
+            artfPreparedTextureFree(prepared);
+            artfFree(truth);
+        }
         artfFree(plain);
         /* every block a byte spoiled: turned or refused, never past the block */
         uint8_t* spoiled = artfMalloc(files[f].size);

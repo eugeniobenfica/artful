@@ -16,10 +16,6 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
   CI roda o teste com `ARTFUL_2D_STEP=1`, que nomeia o shader, e com `ARTFUL_ROBUST=1`). As camadas e as ray queries,
   que caíam antes, foram corrigidas e passam na CI.
 
-### Fase 5 — Alcance de conteúdo
-- [ ] 5.10 Basis Universal para BC7 (UASTC) e BC1 (ETC1S), para GPUs de desktop; ETC1S com alfa para ETC2 com EAC (UASTC
-  para ASTC e ETC1S sem alfa para ETC1 feitos)
-
 ### Fase 6 — Alcance de plataforma
 - [~] 6.1 Metal — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado e as camadas, e rodar nele os
   demais testes de imagem (dá para conferir pela CI do macOS, no dispositivo virtual)

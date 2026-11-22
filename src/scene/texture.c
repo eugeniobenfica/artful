@@ -3,6 +3,7 @@
  * makes BC and ETC2 from plain pixels, and turns blocks back into pixels for the CPU and for GPUs that do not
  * take a format (BC7 and ASTC in blocks.c). */
 #include "scene/sceneInternal.h"
+#include "core/threads.h"
 
 #include <stdlib.h>
 
@@ -439,6 +440,74 @@ uint8_t* artfTextureEncode(const ArtfTextureData* t, bool etc, uint32_t* format,
     return out;
 }
 
+/* ---- Basis Universal's, for what a GPU takes ---- */
+
+typedef struct TranscodeRows { const ArtfTextureData* t; uint8_t* out; const uint32_t* offsets; int level; } TranscodeRows;
+
+/* One row of a level's blocks: ASTC 4 x 4 (UASTC's) as BC7. */
+static void astcRowToBc7(void* user, uint32_t row, uint32_t worker) {
+    (void)worker;
+    const TranscodeRows* r = user;
+    const int across = (artfMaxi(r->t->width >> r->level, 1) + 3) / 4;
+    const uint8_t* from = r->t->blocks + r->t->blockOffsets[r->level] + (size_t)row * across * 16;
+    uint8_t* to = r->out + r->offsets[r->level] + (size_t)row * across * 16;
+    for (int i = 0; i < across; ++i) artfAstcToBc7(from + i * 16, to + i * 16);
+}
+
+uint8_t* artfTextureTranscode(ArtfTextureData* t, bool takesBc, bool takesEtc, struct ArtfPool* pool, uint32_t* format, size_t* size, uint32_t* offsets) {
+    if (!t->basis || t->read || !(takesBc || takesEtc)) return NULL;
+    if (t->format >= ASTC_FIRST && takesBc) {
+        /* (the same blocks of 16 bytes, one for one) */
+        uint8_t* out = artfMalloc(t->blockBytes);
+        memcpy(offsets, t->blockOffsets, sizeof t->blockOffsets);
+        for (int level = 0; level < t->mipCount; ++level) {
+            TranscodeRows rows = {t, out, offsets, level};
+            const uint32_t down = (uint32_t)(artfMaxi(t->height >> level, 1) + 3) / 4;
+            if (pool) artfPoolRun(pool, astcRowToBc7, &rows, down);
+            else
+                for (uint32_t y = 0; y < down; ++y) astcRowToBc7(&rows, y, 0);
+        }
+        *format = BC7;
+        *size = t->blockBytes;
+        return out;
+    }
+    if (t->format) {
+        if (t->format == ETC2_RGB && takesEtc) return NULL; /* (taken as it is) */
+        artfTextureDecode(t);
+    }
+    if (t->basis == 2 && takesBc) {
+        /* UASTC's pixels (a file without all its mipmaps): BC7, each block searched */
+        size_t total = 0;
+        int w = t->width, h = t->height;
+        for (int level = 0; level < t->mipCount; ++level) {
+            offsets[level] = (uint32_t)total;
+            total += (size_t)((w + 3) / 4) * ((h + 3) / 4) * 16;
+            w = artfMaxi(w / 2, 1);
+            h = artfMaxi(h / 2, 1);
+        }
+        uint8_t* out = artfMalloc(total);
+        w = t->width, h = t->height;
+        for (int level = 0; level < t->mipCount; ++level) {
+            const uint32_t* from = t->pixels + t->offsets[level];
+            uint8_t* block = out + offsets[level];
+            for (int by = 0; by < h; by += 4)
+                for (int bx = 0; bx < w; bx += 4, block += 16) {
+                    uint32_t px[16];
+                    for (int y = 0; y < 4; ++y)
+                        for (int x = 0; x < 4; ++x) px[y * 4 + x] = from[(size_t)artfMini(by + y, h - 1) * w + artfMini(bx + x, w - 1)];
+                    artfEncodeBc7(px, block);
+                }
+            w = artfMaxi(w / 2, 1);
+            h = artfMaxi(h / 2, 1);
+        }
+        *format = BC7;
+        *size = total;
+        return out;
+    }
+    /* ETC1S's (and UASTC's where only ETC2 is taken): BC1 or BC3, or ETC2 with EAC */
+    return artfTextureEncode(t, !takesBc, format, size, offsets);
+}
+
 /* ---- KTX2 ---- */
 
 static uint32_t read32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -460,9 +529,12 @@ ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size) {
             t.width = (int)width;
             t.height = (int)height;
             t.mipCount = (int)levels;
+            t.basis = t.format == ETC2_RGB ? 1 : 2;
             return artfPreparedTextureOf(&t);
         }
     }
+    const uint32_t dfd = size >= 80 ? read32(d + 48) : 0;
+    const uint8_t kind = dfd + 12 < size && d[dfd + 12] == 166 ? 2 : 1;
     if (size < 80 || !artfBasisLevels(d, size, &pixels, offsets)) {
         artfLog("artful: a KTX2 file of Basis Universal's that cannot be read here (ETC1S or UASTC 4 x 4, one image, no video)");
         return NULL;
@@ -474,6 +546,7 @@ ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size) {
     if (levels != whole) {
         ArtfPreparedTexture* made = artfPrepareTexture(pixels, (int)width, (int)height, 0);
         artfFree(pixels);
+        if (made) ((ArtfTextureData*)artfPreparedTextureData(made))->basis = kind;
         return made;
     }
     ArtfTextureData t;
@@ -482,6 +555,7 @@ ArtfPreparedTexture* artfPrepareTextureBasis(const void* data, size_t size) {
     t.height = (int)height;
     t.mipCount = (int)levels;
     t.pixels = pixels;
+    t.basis = kind;
     memcpy(t.offsets, offsets, sizeof(uint32_t) * levels);
     return artfPreparedTextureOf(&t);
 }

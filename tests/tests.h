@@ -176,6 +176,11 @@ void testBlocks(void);
 void testBlockDecoders(void);
 void testBasis(void);
 void testBasisAstc(void);
+void testBc7Encode(void);
+void testBasisDrawn(void);
+/* (files.c's little UASTC file, for a draw) */
+extern const uint8_t* artfTestBasisUastc;
+extern const size_t artfTestBasisUastcSize;
 void testGltfSparse(void);
 void testGltfExtensions(void);
 void testGltfMeshopt(void);
