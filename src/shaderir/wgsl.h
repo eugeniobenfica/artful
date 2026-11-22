@@ -19,6 +19,9 @@
 
 typedef struct IrWgslOptions {
     bool flipY; /* a vertex shader's position upside down (as Metal's: msl.h) */
+    /* a pixel shader's four words at location 1 go out as three, at 1, 2 and 3, each in two halves (the low first; the
+     * fourth word is unused): WebGPU has no 32-bit integer target with samples, and RG16Uint has (webgpu.c) */
+    bool splitSurface;
 } IrWgslOptions;
 
 /* What the shader binds, for a backend to make its bind groups from: each a group and binding of WGSL's, what it is,

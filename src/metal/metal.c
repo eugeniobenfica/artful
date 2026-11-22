@@ -15,8 +15,9 @@
  * With argument buffers of tier 2, textures are read by any index, a thousand of them; with tier 1, by constant
  * indices (ARTF_TEXTURES_UNIFORM), 64. It draws what webgpu.c draws, as it does: materials in C, layers of
  * transparency, the frame in floats and what follows it (set 1, the light's roles, an argument buffer for each way they
- * fall), light from all around, tracing and the probes through the scene's trees. What it leaves out, it says in the
- * log: a background pass and views; compressed textures go up decoded. */
+ * fall), light from all around, tracing and the probes through the scene's trees, views and a background pass (its
+ * shader read back into the IR as the library's are). What it leaves out, it says in the log; compressed textures go up
+ * decoded. */
 #include "render/rendererInternal.h"
 #include "scene/sceneInternal.h"
 #include "shaderir/ir.h"
@@ -144,7 +145,15 @@ typedef struct Metal {
     id last; /* the frame on its way */
     double gpuMs, cpuMs;
     uint64_t frameNumber;
-    bool warnedHole, warnedTrace, warnedView, warnedWide;
+    bool warnedTrace, warnedWide;
+    /* the overdraw view's (artfShaderOverdraw): what is solid, then what has holes and the layers, both sides */
+    Pipeline overdraw[2];
+    /* a background pass of the program's (as webgpu.c's): its shader writes the light (12) from the block (11), its data
+     * (14) and stream (15); the bloom's passes (13), and what draws it behind */
+    Buffer backgroundBlock, backgroundLight, backgroundBloom, backgroundData, backgroundStream;
+    Compute backgroundUser, bloomFirst, bloomNext, bloomUp;
+    Pipeline backdrop;
+    uint64_t backgroundModuleStamp, backgroundModuleScene, backgroundDataStamp, backgroundDataScene, backgroundStreamStamp, backgroundStreamScene;
     /* what the scene's pipelines were made for: its materials of their own, the variant, wide */
     bool programsMade, madeWide, froxels, wide, floats;
     uint32_t graphCount, madeVariant, variantBits;
@@ -345,6 +354,11 @@ static Buffer* bufferAt(Metal* v, uint32_t binding) {
     case 23: b = &v->traceFrameUbo; break;
     case 27: case 28: case 29: case 30: case 31: case 32: case 33: b = &v->denoiseBuffers[binding - 27]; break;
     case 37: b = &v->traceMotion; break;
+    case 11: b = &v->backgroundBlock; break;
+    case 12: b = &v->backgroundLight; break;
+    case 13: b = &v->backgroundBloom; break;
+    case 14: b = &v->backgroundData; break;
+    case 15: b = &v->backgroundStream; break;
     case 48: b = &v->denoiseShift; break;
     case 49: b = &v->environment; break;
     case 50: case 51: case 52: case 53: case 54: case 55: case 56: case 57: b = &v->post[binding - 50]; break;
@@ -415,7 +429,8 @@ static id rolesArguments(Metal* v, Shader* s, NSUInteger* offset) {
 }
 
 /* What a pipeline draws into and how (as webgpu.c's RenderState): color, the light (light: its format; 0: BGRA8); in
- * floats the surface words' target, written by what is solid; blending (1 premultiplied, 2 fog over what is behind);
+ * floats the surface words' target, written by what is solid; blending (1 premultiplied, 2 fog over what is behind, 3
+ * added with alpha kept: the overdraw view's);
  * depth (0: no depth attachment); samples (0: the frame's). */
 typedef struct RenderSpec { int light, surface; bool surfaceWrite; int blend; bool color, depth; int samples; bool vertices; } RenderSpec;
 
@@ -438,7 +453,12 @@ static bool pipelineMakeAs(Metal* v, Pipeline* p, uint32_t* vertexCode, size_t v
     if (!r->color) SET_U(attachment, "setWriteMask:", 0);
     if (r->blend) {
         SET_B(attachment, "setBlendingEnabled:", 1);
-        if (r->blend == 2) {
+        if (r->blend == 3) {
+            SET_U(attachment, "setSourceRGBBlendFactor:", BLEND_ONE);
+            SET_U(attachment, "setDestinationRGBBlendFactor:", BLEND_ONE);
+            SET_U(attachment, "setSourceAlphaBlendFactor:", BLEND_ZERO);
+            SET_U(attachment, "setDestinationAlphaBlendFactor:", BLEND_ONE);
+        } else if (r->blend == 2) {
             /* fog over what is behind: light * what is left + added * what shows of it, alpha kept */
             SET_U(attachment, "setSourceRGBBlendFactor:", BLEND_DESTINATION_ALPHA);
             SET_U(attachment, "setDestinationRGBBlendFactor:", BLEND_SOURCE_ALPHA);
@@ -955,7 +975,8 @@ static void resourcesGather(Metal* v) {
                          &v->post[0], &v->post[1], &v->post[2], &v->post[3], &v->post[4], &v->post[5], &v->post[6], &v->post[7], &v->postLocks, &v->postGathered,
                          &v->cloudField, &v->cloudGrid, &v->environment, &v->traceNodes, &v->traceTriangles, &v->traceVertices, &v->traceTop, &v->traceInstances,
                          &v->traceSum, &v->traceFrameUbo, &v->denoiseBuffers[0], &v->denoiseBuffers[1], &v->denoiseBuffers[2], &v->denoiseBuffers[3],
-                         &v->denoiseBuffers[4], &v->denoiseBuffers[5], &v->denoiseBuffers[6], &v->denoiseShift, &v->traceMotion, &v->probesNow, &v->probesNext};
+                         &v->denoiseBuffers[4], &v->denoiseBuffers[5], &v->denoiseBuffers[6], &v->denoiseShift, &v->traceMotion, &v->probesNow, &v->probesNext,
+                         &v->backgroundBlock, &v->backgroundLight, &v->backgroundBloom, &v->backgroundData, &v->backgroundStream};
     for (size_t i = 0; i < ARTF_COUNT(buffers); ++i)
         if (buffers[i]->buffer) artfVecPush(&v->resources, buffers[i]->buffer);
     artfVecPush(&v->resources, v->blank);
@@ -1131,6 +1152,10 @@ static bool graphsSync(Metal* v, const ArtfScene* scene) {
     if (!scenePrograms(v, scene->graphs.items, count)) return false;
     v->graphCount = count;
     v->graphScene = scene->id;
+    /* (made again when next asked for: their targets are the scene's) */
+    pipelineFree(&v->overdraw[0]);
+    pipelineFree(&v->overdraw[1]);
+    pipelineFree(&v->backdrop);
     v->madeWide = v->wide;
     v->madeVariant = variant;
     v->programsMade = true;
@@ -1545,14 +1570,108 @@ static id scenePass(Metal* v, id commands, const ArtfFrameData* frame, bool clea
     return e;
 }
 
+/* The overdraw view's pipelines (as webgpu.c's overdrawMake): the scene's vertex shader and artfShaderOverdraw, added,
+ * with no depth to test or write; the first culls back faces, the second none. */
+static bool overdrawMake(Metal* v) {
+    if (v->overdraw[0].state) return true;
+    const int light = v->floats ? PIXEL_RGBA16F : 0, surface = !v->floats ? 0 : v->wide ? PIXEL_RGBA32U : PIXEL_R32U;
+    const RenderSpec added = {light, surface, false, 3, true, true, 0, true};
+    for (int k = 0; k < 2; ++k) {
+        size_t size = 0, vertexSize = 0;
+        uint32_t* vertex = artfShaderSceneVertex(&vertexSize, v->floats);
+        uint32_t* fragment = artfShaderOverdraw(&size, v->floats);
+        if (!pipelineMakeAs(v, &v->overdraw[k], vertex, vertexSize, fragment, size, v->depthOff, k ? CULL_NONE : CULL_BACK, &added)) return false;
+    }
+    return true;
+}
+
+/* A background pass's buffers, its shader when the scene's is another, the bloom's and what draws it behind (as
+ * webgpu.c's backgroundSync). Memory is shared, and the frame before is done: what changed is written in place. */
+static bool backgroundSync(Metal* v, const ArtfScene* scene, const ArtfBackgroundBlock* block, uint32_t bloomPixels) {
+    const ArtfBackground* b = &scene->backgroundPass;
+    const ArtfBackgroundPass* p = &b->pass;
+    const size_t light = (size_t)v->sceneWidth * (size_t)v->sceneHeight * 16, bloom = (size_t)(bloomPixels ? bloomPixels : 1) * 16;
+    if (v->backgroundLight.size != light && !bufferNew(v, &v->backgroundLight, light)) return false;
+    if (v->backgroundBloom.size != bloom && !bufferNew(v, &v->backgroundBloom, bloom)) return false;
+    if (!bufferPut(v, &v->backgroundBlock, 0, block, sizeof *block)) return false;
+    if (v->backgroundDataStamp != b->dataStamp || v->backgroundDataScene != scene->id || !v->backgroundData.buffer) {
+        if (!v->backgroundData.buffer && !bufferNew(v, &v->backgroundData, 16)) return false;
+        if (p->data && !bufferPut(v, &v->backgroundData, 0, p->data, p->dataBytes)) return false;
+        v->backgroundDataStamp = b->dataStamp;
+        v->backgroundDataScene = scene->id;
+    }
+    if (v->backgroundStreamStamp != b->streamStamp || v->backgroundStreamScene != scene->id || !v->backgroundStream.buffer) {
+        if (!v->backgroundStream.buffer && !bufferNew(v, &v->backgroundStream, 16)) return false;
+        if (p->stream && !bufferPut(v, &v->backgroundStream, 0, p->stream, p->streamBytes)) return false;
+        v->backgroundStreamStamp = b->streamStamp;
+        v->backgroundStreamScene = scene->id;
+    }
+    if (v->backgroundModuleStamp != b->moduleStamp || v->backgroundModuleScene != scene->id) {
+        v->backgroundModuleStamp = b->moduleStamp;
+        v->backgroundModuleScene = scene->id;
+        computeFree(&v->backgroundUser);
+        if (b->spirv && p->spirvBytes) {
+            uint32_t* code = artfMalloc(p->spirvBytes);
+            memcpy(code, b->spirv, p->spirvBytes);
+            if (!computeMake(v, &v->backgroundUser, code, p->spirvBytes)) {
+                computeFree(&v->backgroundUser);
+                artfLog("artful: the background pass's shader could not be made for Metal");
+            }
+        }
+    }
+    /* (no shader: no light) */
+    if (!v->backgroundUser.state) memset(v->backgroundLight.mapped, 0, v->backgroundLight.size);
+    if (!v->bloomFirst.state) {
+        size_t size = 0;
+        uint32_t* code = artfShaderBloomDown(&size, true);
+        if (!computeMake(v, &v->bloomFirst, code, size)) return false;
+        code = artfShaderBloomDown(&size, false);
+        if (!computeMake(v, &v->bloomNext, code, size)) return false;
+        code = artfShaderBloomUp(&size);
+        if (!computeMake(v, &v->bloomUp, code, size)) return false;
+    }
+    if (!v->backdrop.state) {
+        const int lightFormat = v->floats ? PIXEL_RGBA16F : 0, surface = !v->floats ? 0 : v->wide ? PIXEL_RGBA32U : PIXEL_R32U;
+        const RenderSpec over = {lightFormat, surface, false, 0, true, true, 0};
+        size_t size = 0;
+        uint32_t* code = artfShaderBackgroundBackdrop(&size, v->floats);
+        if (!fullMake(v, &v->backdrop, code, size, v->depthOff, &over)) return false;
+    }
+    return true;
+}
+
+/* Its light (with a shader), then its bloom: before the scene's pass. */
+static void backgroundRecord(Metal* v, id commands, const ArtfBackgroundBlock* h) {
+    id e = GET(id, commands, "computeCommandEncoder");
+    computeUse(v, e);
+    if (v->backgroundUser.state) {
+        const MTLSize groups = {((NSUInteger)v->sceneWidth + 7) / 8, ((NSUInteger)v->sceneHeight + 7) / 8, 1};
+        computeStep(v, e, &v->backgroundUser, NULL, 0, groups);
+    }
+    const uint32_t levels = h->size[2];
+    for (uint32_t i = 0; i < levels; ++i) {
+        const uint32_t words[4] = {i, 0, 0, 0};
+        const MTLSize groups = {(h->bloom[i][1] * h->bloom[i][2] + 63) / 64, 1, 1};
+        computeStep(v, e, i ? &v->bloomNext : &v->bloomFirst, words, sizeof words, groups);
+    }
+    for (uint32_t i = levels ? levels - 1 : 0; i-- > 0;) {
+        const uint32_t words[4] = {i, 0, 0, 0};
+        const MTLSize groups = {(h->bloom[i][1] * h->bloom[i][2] + 63) / 64, 1, 1};
+        computeStep(v, e, &v->bloomUp, words, sizeof words, groups);
+    }
+    DO(e, "endEncoding");
+}
+
 static bool frameDraw(Metal* v, ArtfScene* scene) {
     waitLast(v);
+    /* (the surface's other words: where motion is followed or light goes under the surface; with samples too, as
+     * Vulkan's, an RGBA32Uint of four) */
     const bool wants = v->floats && (scene->post.screen.temporal || scene->post.lens.motionBlur > 0 || artfSceneHasUnder(scene));
-    if (wants && v->samples > 1 && !v->warnedWide) {
+    if (wants && scene->deforming.len && !v->warnedWide) {
         v->warnedWide = true;
-        artfLog("artful: Metal with four samples has no temporal antialiasing, motion blur or light under the surface");
+        artfLog("artful: Metal follows the motion of instances, not of what bones bend");
     }
-    const bool wide = wants && v->samples == 1;
+    const bool wide = wants;
     if (wide != v->wide) {
         v->wide = wide;
         v->targetsStale = true;
@@ -1564,20 +1683,22 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     if (v->targetsStale && !targetsMake(v)) return false;
     if (!v->frameTexture) return true; /* a window with no size */
 #define ONCE(flag, ...) do { if (!v->flag) { v->flag = true; artfLog(__VA_ARGS__); } } while (0)
-    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !v->base.view;
-    if (scene->backgroundPass.on) ONCE(warnedHole, "artful: Metal does not draw a background pass");
+    const ArtfView view = v->base.view;
+    const bool tracing = scene->trace.desc.mode != ARTF_TRACE_NONE && !view; /* (a view is of triangles) */
     if (tracing && scene->trace.desc.hardware) ONCE(warnedTrace, "artful: Metal traces through the scene's trees: not through its ray tracing hardware");
-    if (v->base.view) ONCE(warnedView, "artful: Metal shows no views but the frame");
 #undef ONCE
     v->froxels = v->floats && scene->post.screen.volumetric > 0 && scene->fogDensity > 0;
     v->variantBits = (scene->layeredMaterials > 0 ? (uint32_t)ARTF_SHADER_COAT : 0u) | (scene->shadows.soft && scene->shadows.resolution > 0 ? (uint32_t)ARTF_SHADER_SOFT : 0u) |
                      (artfSceneShapedLights(scene) ? (uint32_t)ARTF_SHADER_SHAPES : 0u);
     if (scene->shadows.traced && !tracing) v->variantBits |= (uint32_t)ARTF_SHADER_TRACED;
     if (scene->indirect.on && scene->indirect.probes) v->variantBits |= (uint32_t)ARTF_SHADER_PROBES | (!scene->indirect.desc.throughWalls ? (uint32_t)ARTF_SHADER_WALLS : 0u);
+    /* (a view: what it shows, in the pixel shaders; the meshlets view, without the triangles' numbers, shows instances) */
+    if (view) v->variantBits |= (uint32_t)ARTF_SHADER_VIEW;
     if (!syncEnvironment(v, scene) || !syncScene(v, scene) || !graphsSync(v, scene)) return false;
     if (v->floats && !v->posts[0].state) return false;
     ArtfFrameData frame;
     artfSceneFrame(scene, v->sceneWidth, v->sceneHeight, &frame);
+    artfFrameForView(&frame, (int)view);
     frame.output[0] = (float)v->width;
     frame.output[1] = (float)v->height;
     if (tracing || !v->floats) frame.traced &= ~(uint32_t)ARTF_TRACED_REFLECTIONS;
@@ -1588,6 +1709,12 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     uint32_t cloudColumns = 0, cloudRows = 0;
     if (!v->floats) {
         memset(frame.post, 0, sizeof frame.post);
+        if (view == ARTF_VIEW_MOTION) {
+            /* (the motion view: the frame before, as in floats) */
+            if (v->hasPrevious) memcpy(frame.previous, v->previous, sizeof v->previous);
+            memcpy(v->previous, frame.viewProj, sizeof v->previous);
+            v->hasPrevious = true;
+        }
     } else {
         if (!v->wide) {
             frame.post[1][3] = 0;
@@ -1610,15 +1737,15 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
         v->hasPrevious = true;
         if (frame.post[1][3] > 0) artfFrameJitter(&frame, v->postFrames++, v->sceneWidth, v->sceneHeight);
         frame.grade2[2][3] = (float)(v->grainFrames++ & 0xFFFFFu);
-        if (frame.post[1][3] > 0 || frame.motionBlur > 0) {
-            /* how each instance moved: four rows each, after the instances */
-            artfMotionStep(&v->motion, scene, false);
-            frame.moving = v->motion.moving ? 1.f : 0.f;
-            float* rows = (float*)((char*)v->instances.mapped + scene->instances.len * sizeof(ArtfInstanceData));
-            for (size_t i = 0; i < v->motion.count; ++i) {
-                memcpy(rows + i * 16, v->motion.motion + i * 12, 48);
-                rows[i * 16 + 12] = rows[i * 16 + 13] = rows[i * 16 + 14] = rows[i * 16 + 15] = 0;
-            }
+    }
+    if (frame.post[1][3] > 0 || frame.motionBlur > 0 || view == ARTF_VIEW_MOTION) {
+        /* how each instance moved: four rows each, after the instances */
+        artfMotionStep(&v->motion, scene, false);
+        frame.moving = v->motion.moving ? 1.f : 0.f;
+        float* rows = (float*)((char*)v->instances.mapped + scene->instances.len * sizeof(ArtfInstanceData));
+        for (size_t i = 0; i < v->motion.count; ++i) {
+            memcpy(rows + i * 16, v->motion.motion + i * 12, 48);
+            rows[i * 16 + 12] = rows[i * 16 + 13] = rows[i * 16 + 14] = rows[i * 16 + 15] = 0;
         }
     }
     frame.indirect[1][3] = (float)artfSceneDecals(scene, &frame, v->sceneHeight, v->decals.mapped);
@@ -1701,6 +1828,16 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     }
     const bool cutouts = scene->cutoutCount != 0 || scene->features[ARTF_FEATURE_LOD_FADE];
     if (instanceCount) memcpy(v->indirect.mapped, v->template_.mapped, (size_t)meshCount * 80);
+    const bool overdraw = view == ARTF_VIEW_OVERDRAW;
+    if (overdraw && !overdrawMake(v)) return false;
+    /* a background pass of the program's: not under a view, which is black behind */
+    const bool background = scene->backgroundPass.on && !view;
+    ArtfBackgroundBlock backgroundFrame;
+    if (background) {
+        uint32_t bloomPixels = 0;
+        artfBackgroundFrame(scene, v->sceneWidth, v->sceneHeight, &backgroundFrame, &bloomPixels);
+        if (!backgroundSync(v, scene, &backgroundFrame, bloomPixels)) return false;
+    }
 
     resourcesGather(v);
     id commands = GET(id, v->queue, "commandBuffer");
@@ -1718,6 +1855,7 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
         DO(e, "endEncoding");
     }
     if (shadowViews && instanceCount) drawShadows(v, commands, &shadows, shadowViews);
+    if (background) backgroundRecord(v, commands, &backgroundFrame);
     const bool fogGrid = v->froxels && frame.post[1][1] > 0 && frame.look[1] > 0;
     if (fogGrid) {
         id g = GET(id, commands, "computeCommandEncoder");
@@ -1727,7 +1865,10 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     }
 
     id e = scenePass(v, commands, &frame, true);
-    if (frame.sky[3] > 0 && frame.ground[3] > 0 && v->environmentBehind.state) {
+    if (background) {
+        pipelineUse(v, e, &v->backdrop);
+        drawTriangle(e);
+    } else if (frame.sky[3] > 0 && frame.ground[3] > 0 && v->environmentBehind.state) {
         pipelineUse(v, e, &v->environmentBehind);
         drawTriangle(e);
     }
@@ -1741,10 +1882,10 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
     }
     if (instanceCount) {
         verticesUse(v, e);
-        pipelineUse(v, e, &v->scene);
+        pipelineUse(v, e, overdraw ? &v->overdraw[0] : &v->scene);
         drawCommands(v, e, v->indirect.buffer, 0, meshCount);
         if (cutouts) {
-            pipelineUse(v, e, &v->cutout);
+            pipelineUse(v, e, overdraw ? &v->overdraw[1] : &v->cutout);
             drawCommands(v, e, v->indirect.buffer, meshCount * 2, meshCount);
         }
         if (v->floats) {
@@ -1762,7 +1903,7 @@ static bool frameDraw(Metal* v, ArtfScene* scene) {
             const bool particle = (scene->instances.items[v->layers.items[i].instance].flags & ARTF_INSTANCE_PARTICLE) != 0;
             if (particle)
                 while (end < layerCount && v->layers.items[end].mesh == v->layers.items[i].mesh && (scene->instances.items[v->layers.items[end].instance].flags & ARTF_INSTANCE_PARTICLE)) ++end;
-            Pipeline* const passes[2] = {particle ? &v->particle : &v->layerDepth, particle ? NULL : &v->layerDraw};
+            Pipeline* const passes[2] = {overdraw ? &v->overdraw[1] : particle ? &v->particle : &v->layerDepth, particle || overdraw ? NULL : &v->layerDraw};
             for (int k = 0; k < 2 && passes[k]; ++k) {
                 pipelineUse(v, e, passes[k]);
                 ((void (*)(id, SEL, NSUInteger, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger, long, NSUInteger))objcSend)(
@@ -1878,14 +2019,18 @@ static void metalFree(ArtfRenderer* r) {
     for (size_t i = 0; i < ARTF_COUNT(buffers); ++i) bufferFree(buffers[i]);
     for (size_t i = 0; i < v->textures.len; ++i) release(v->textures.items[i]);
     Pipeline* pipelines[] = {&v->scene, &v->cutout, &v->overlayDraw, &v->shadow, &v->shadowHoles, &v->layerDepth, &v->layerDraw, &v->particle, &v->environmentBehind,
-                             &v->fogBehind, &v->traceShow, &v->final, &v->overlayFloats};
+                             &v->fogBehind, &v->traceShow, &v->final, &v->overlayFloats, &v->overdraw[0], &v->overdraw[1], &v->backdrop};
     for (size_t i = 0; i < ARTF_COUNT(pipelines); ++i) pipelineFree(pipelines[i]);
     for (int k = 0; k < 22; ++k) computeFree(&v->posts[k]);
     for (int k = 0; k < 9; ++k) computeFree(&v->denoisePasses[k]);
     computeFree(&v->trace);
     computeFree(&v->probeStep);
     computeFree(&v->reflectionTraced);
-    Buffer* more[] = {&v->postLocks, &v->postGathered, &v->cloudField, &v->cloudGrid, &v->environment, &v->traceNodes, &v->traceTriangles, &v->traceVertices, &v->traceTop,
+    computeFree(&v->backgroundUser);
+    computeFree(&v->bloomFirst);
+    computeFree(&v->bloomNext);
+    computeFree(&v->bloomUp);
+    Buffer* more[] = {&v->backgroundBlock, &v->backgroundLight, &v->backgroundBloom, &v->backgroundData, &v->backgroundStream, &v->postLocks, &v->postGathered, &v->cloudField, &v->cloudGrid, &v->environment, &v->traceNodes, &v->traceTriangles, &v->traceVertices, &v->traceTop,
                       &v->traceInstances, &v->traceSum, &v->traceFrameUbo, &v->denoiseShift, &v->traceMotion, &v->probesNow, &v->probesNext};
     for (size_t i = 0; i < ARTF_COUNT(more); ++i) bufferFree(more[i]);
     for (int k = 0; k < 8; ++k) bufferFree(&v->post[k]);

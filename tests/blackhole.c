@@ -351,10 +351,21 @@ void testBlackHole(void) {
     artfRendererResize(cpu, W, H);
     CHECK(artfRendererDraw(cpu, s));
 
-    /* the GPU draws the same hole, with what is in front of it, with and without occlusion */
-    o = options(ARTF_BACKEND_VULKAN, 0, false);
-    ArtfRenderer* gpu = artfRendererNew(&o);
-    if (gpu) {
+    /* the GPU draws the same hole, with what is in front of it, with and without occlusion: Vulkan, WebGPU and Metal
+     * (theirs, the same shader read back into the IR) */
+    static const ArtfBackend gpus[3] = {ARTF_BACKEND_VULKAN, ARTF_BACKEND_WEBGPU, ARTF_BACKEND_METAL};
+    const ArtfBlackHoleDesc first = d;
+    for (int g = 0; g < 6; ++g) {
+        /* (and each in floats, against the CPU in floats) */
+        o = options(gpus[g / 2], 0, false);
+        o.hdr = g & 1;
+        ArtfRenderer* gpu = artfRendererNew(&o);
+        if (!gpu) continue;
+        ArtfRendererOptions co = options(ARTF_BACKEND_SOFTWARE, 0, false);
+        co.hdr = g & 1;
+        ArtfRenderer* reference = g & 1 ? artfRendererNew(&co) : cpu;
+        d = first;
+        artfSceneSetFeature(s, ARTF_FEATURE_OCCLUSION, false);
         d.doppler = .6f;
         d.bloom = 1.f;
         d.samples = 2;
@@ -362,8 +373,8 @@ void testBlackHole(void) {
         d.shutter = 2.f;
         d.velocity = artfVec3(.2f, 0, -.1f);
         artfSceneSetBlackHole(s, &d);
-        CHECK(artfRendererDraw(cpu, s));
-        CHECK(artfRendererReadPixels(cpu, b));
+        CHECK(artfRendererDraw(reference, s));
+        CHECK(artfRendererReadPixels(reference, b));
         for (int occlusion = 0; occlusion < 2; ++occlusion) {
             artfSceneSetFeature(s, ARTF_FEATURE_OCCLUSION, occlusion != 0);
             CHECK(artfRendererDraw(gpu, s));
@@ -371,7 +382,7 @@ void testBlackHole(void) {
             CHECK(artfRendererDraw(gpu, s));
             CHECK(artfRendererReadPixels(gpu, a));
             const double far = differentShare(a, b, 24);
-            printf("black hole, pixels that differ by more than 24 of 255: %.2f%%\n", far * 100);
+            printf("black hole, %s%s, pixels that differ by more than 24 of 255: %.2f%%\n", artfRendererDescription(gpu), g & 1 ? " in floats" : "", far * 100);
             CHECK(far < .01);
             CHECK(differentShare(a, b, 96) < .001);
         }
@@ -395,11 +406,12 @@ void testBlackHole(void) {
         CHECK(artfRendererDraw(gpu, s));
         CHECK(artfRendererDraw(gpu, s));
         CHECK(artfRendererDraw(gpu, s));
-        CHECK(artfRendererDraw(cpu, s));
+        CHECK(artfRendererDraw(reference, s));
         CHECK(artfRendererReadPixels(gpu, a));
-        CHECK(artfRendererReadPixels(cpu, b));
+        CHECK(artfRendererReadPixels(reference, b));
         CHECK(differentShare(a, b, 24) < .01);
         artfRendererFree(gpu);
+        if (reference != cpu) artfRendererFree(reference);
     }
     artfSceneFree(s);
     artfRendererFree(cpu);

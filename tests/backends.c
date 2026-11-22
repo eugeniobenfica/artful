@@ -332,6 +332,34 @@ static void otherGpuFloats(ArtfBackend backend, const char* what) {
     const double scaled = differentShare(a, b, 16);
     printf("%s in floats against the CPU, drawn at half its size: %.2f%% of pixels apart by more than 16 of 255\n", artfBackendName(backend), scaled * 100);
     CHECK(scaled < .03);
+    /* with four samples, what follows motion: temporal antialiasing and motion blur, a ball moving (the surface's
+     * words, with samples: on WebGPU, in three targets) */
+    artfRendererFree(gpu);
+    artfRendererFree(cpu);
+    o = options(backend, 0, false);
+    o.hdr = true;
+    o.antialias = true;
+    gpu = artfRendererNew(&o);
+    o.backend = ARTF_BACKEND_SOFTWARE;
+    cpu = artfRendererNew(&o);
+    both[0] = gpu;
+    both[1] = cpu;
+    for (int r = 0; r < 2 && gpu; ++r) {
+        ArtfScene* s = bleedScene();
+        const ArtfInstance ball = addAt(s, artfSceneAddSphere(s, .5f, 16, 24), whiteMaterial(s), 0, 0, 0, 1);
+        const ArtfPostDesc moving = {.lens.bloom = .3f, .screen.temporal = true, .lens.motionBlur = .5f};
+        artfSceneSetPost(s, &moving);
+        for (int f = 0; f < 6; ++f) {
+            const ArtfTransform t = artfTransformAt(.2f * (float)f, 0, 0, 1);
+            artfInstanceSetTransform(s, ball, &t);
+            CHECK(artfRendererDraw(both[r], s));
+        }
+        CHECK(artfRendererReadPixels(both[r], into[r]));
+        artfSceneFree(s);
+    }
+    const double sampled = differentShare(a, b, 16);
+    printf("%s in floats against the CPU, four samples, a ball moving: %.2f%% of pixels apart by more than 16 of 255\n", artfBackendName(backend), sampled * 100);
+    CHECK(sampled < .05);
     artfFree(a);
     artfFree(b);
     artfRendererFree(gpu);

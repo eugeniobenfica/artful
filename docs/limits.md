@@ -40,8 +40,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   keep their maps (none at resolution 0), and so does the sun, for fog that light goes through. Particles cast none.
   On a GPU without ray tracing hardware the pixel shader walks the trees: the same picture, slower. The GPU's pixel
   shader for plain materials reads what materials of the program's own make of alpha only when shadows from rays are
-  on; then it holds their code too. Metal has neither shadows nor reflections from rays: with them asked, the sun and
-  the sixteen lights cast nothing there, and reflections are marched.
+  on; then it holds their code too.
 - Reflections from rays (`ArtfPostDesc.screen.tracedReflections`) light what they find simply: its color under the sun and
   the sixteen lights with no shadows, its own light, and light from all around (the picture, or the sky's two colors:
   not probes, not fog); what is less than half there is gone through. One ray for each 2 x 2 pixels, as the march.
@@ -70,7 +69,7 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   by a tetrahedron, and a .cube file's domain is taken to be 0 to 1. The flare is three ghosts of what blooms, with no
   dirt on the lens. A background pass (the black hole) keeps its own exposure, bloom and tone mapping. Fog that
   light goes through is a grid of cells 16 pixels square, in 64 slices: a shadow's edge in it is as soft as a cell is
-  wide, and it reaches 4 / density along the view. It is not traced. Metal leaves all of it out.
+  wide, and it reaches 4 / density along the view. It is not traced.
 - Lights past the first 16 are listed for each 64 x 64 square of the frame and, on the GPU, each of its 16 slices of
   depth, as many as reach it (up to 4M places in all, `ArtfFrameStats.lightsOmitted` counts any past that); they are
   left out of tracing and of
@@ -163,13 +162,13 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   solid, not on what blends, and read one mipmap, chosen for the box's distance.
 - Light from all around, from a picture, is reflected as if the eye looked along each surface's normal (the usual
   approximation): at grazing angles a rough surface's reflection is less stretched than it should be. Its maps are
-  512 texels a side at most, so the picture shown behind the scene is soft at a wide view's center. Metal leaves it
-  out. Paths aim at the picture for what surfaces give back diffusely; what they reflect of it (a highlight, a
+  512 texels a side at most, so the picture shown behind the scene is soft at a wide view's center. Paths aim at the picture for what surfaces give back diffusely; what they reflect of it (a highlight, a
   mirror) is still found only by bouncing into it, so a small, very bright sun seen in a rough highlight is noisy.
   Light from the picture over 64 in one path is cut there, as all light of a path is.
 - A background pass is light behind the scene, and only that: what the scene holds is drawn in front of it, and is
-  not bent, lit or reflected by it; it fills the frame (alpha 1), its bloom and tone curve are its own, and Metal
-  draws none. The black hole (extensions/blackhole) is one: it bends only its own disc and stars.
+  not bent, lit or reflected by it; it fills the frame (alpha 1), and its bloom and tone curve are its own. WebGPU and
+  Metal run its Vulkan shader read back into the IR (src/shaderir), so it must be SPIR-V the IR reads (as the library's
+  builder makes it), and a frame of theirs goes out in one dispatch, not in bands as on Vulkan. The black hole (extensions/blackhole) is one: it bends only its own disc and stars.
   Its gas is painted, as the film's was, and moved by a two-dimensional fluid with no magnetic field; both
   are maps, which show their texels when the eye comes close.
 - A KTX2 file of Basis Universal's (`KHR_texture_basisu`) is kept as ASTC 4 x 4 blocks (UASTC) or ETC1 blocks (ETC1S
@@ -197,8 +196,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   hidden included, without occlusion; the GPU and the CPU round slivers in their own ways, so in a crowd of small
   things (`city`) 2% of pixels differ by a step. The meshlets view needs geometry shaders on Vulkan (`PrimitiveId`), and
   draws whole meshes while it is on; without them it shows instances. Light complexity counts the lights whose reach a
-  point is in, not their cones or shadows. Motion is what instances and the eye did, not what bones bend. Metal shows
-  only the picture. On the GPU a view asked for after the first frame shows a few frames later, once its shaders are
+  point is in, not their cones or shadows. Motion is what instances and the eye did, not what bones bend. WebGPU and
+  Metal do not know the triangles' numbers: their meshlets view shows instances. On the GPU a view asked for after the first frame shows a few frames later, once its shaders are
   made (`artfRendererWarm` waits for them).
 - What passes take on the GPU is between timestamps at the bottom of the pipe: where a GPU runs passes side by side,
   one's time can hold part of another's. They are of the last frame the GPU finished, two behind.
@@ -216,7 +215,8 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
 - **Metal has run only on CI's macOS runner** (an Apple Paravirtual device, 21 November 2026), and is not built unless
   asked for (`-DARTFUL_METAL=ON`, Apple only); so it is chosen only by name. It draws what WebGPU draws, as WebGPU does
   (below), and leaves out the same: there, against the CPU, 0.00 to 0.38% of pixels apart in every case
-  (`backends/metal`, `backends/metalFloats`). No window has shown it, and no real Mac has run it.
+  (`backends/metal`, `backends/metalFloats`). With four samples, the surface's words are an RGBA32Uint of four
+  samples, as on Vulkan. No window has shown it, and no real Mac has run it.
 - Linux and macOS are built and tested by CI, Linux on a software Vulkan; iOS has not been built
   with Apple's tools. Windows on ARM is built with clang (`aarch64-w64-mingw32`, the NEON kernels) and has never run;
   MSVC builds and tests only on CI (no MSVC here), and MSVC for ARM64 has not been built at all: it would take the
@@ -226,8 +226,9 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   16; what is beyond is white), lights, shadow maps (soft too), decals, what has holes, materials in C, layers of
   transparency, the frame in floats with every effect after it, light from all around, lights with a shape, shadows
   and reflections from rays, tracing and its filter, and probes; all rays through the scene's trees (no ray tracing
-  hardware). It leaves out, and says so: views, occlusion culling, a background pass, and with four samples temporal
-  antialiasing, motion blur and light under the surface (WebGPU's RGBA32Uint has no samples); textures go up decoded;
+  hardware), views and a background pass. With four samples, as WebGPU has no 32-bit integer target with samples, the
+  surface's words are drawn in halves into three RG16Uint targets and put together before the passes after the scene
+  read them. It leaves out, and says so: occlusion culling and the motion of what bones bend; textures go up decoded;
   its probes do not go back to the scene; post passes reach 4.2 million pixels (a frame larger than about 2730 x 1536
   is left partly unmade). It needs `indirect-first-instance`. In a browser a frame is not read back (it goes to a canvas), and
   the waits for the adapter and the device take Emscripten's ASYNCIFY. It has run on wgpu-native and in Chromium, on

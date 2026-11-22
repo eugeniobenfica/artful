@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **WebGPU and Metal show views and draw a background pass** (phases 6.1 and 6.2): each view as Vulkan's (the meshlets
+  view shows instances: they have no triangle numbers), and the program's background shader read back into the IR.
+  With four samples a frame in floats now follows motion (temporal antialiasing, motion blur, light under the
+  surface): on WebGPU, which has no 32-bit integer target with samples, the surface's words go in halves into three
+  targets and are put together. **Fixed:** a frame in floats with four samples on WebGPU failed outright.
+
 - **Fixed:** the 2D renderer's light that bounces fell over on llvmpipe 26.0 and 26.1 (CI's Linux): a loop in a loop
   in its distances, now one loop, the same distances.
 - **Metal draws what WebGPU does** (phase 6.1), the same way (set 1 as argument buffers, push constants by setBytes):
@@ -9,8 +15,7 @@
 - **WebGPU draws nearly all Vulkan does** (phase 6.2): materials of your own, layers of transparency, the frame in
   floats and every post effect (with renderScale and fog that light goes through), coats and more past glTF's core,
   soft shadows, lights with a shape, light from all around, shadows and reflections from rays, tracing with its
-  filter, and probes; each within 0.00% to 0.44% of pixels of the CPU. Not yet: views, and with four samples what
-  follows motion.
+  filter, and probes; each within 0.00% to 0.44% of pixels of the CPU.
 - **Basis Universal files kept as GPU blocks** (phase 5.10): UASTC as ASTC 4 x 4 and ETC1S without alpha as ETC1, both
   exact (the same texels to the bit); on GPUs of PCs, which take neither, UASTC goes up as BC7 (a BC7 encoder of
   Artful's own: 45 dB from UASTC's texels) and ETC1S as BC1 or BC3.

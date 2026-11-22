@@ -14,18 +14,21 @@ static bool rgbNear(uint32_t p, const int* rgb, int margin) {
     return near_(CHANNEL(p, 16), rgb[0], margin) && near_(CHANNEL(p, 8), rgb[1], margin) && near_(CHANNEL(p, 0), rgb[2], margin);
 }
 
-/* Each view (ArtfView) drawn: what was asked for comes out, on each backend and with a frame in floats; the two
- * backends agree; and a view put back leaves the picture as it was, to the byte. */
+/* Each view (ArtfView) drawn: what was asked for comes out, on each backend and with a frame in floats; the GPUs
+ * agree with the CPU; and a view put back leaves the picture as it was, to the byte. (WebGPU and Metal do not know
+ * the triangles' numbers: their meshlets view shows instances.) */
 void testViews(void) {
     uint32_t* frame = artfMalloc(W * H * 4);
-    uint32_t* frames[2][2][ARTF_VIEW_COUNT];
+    static const ArtfBackend backends[4] = {ARTF_BACKEND_SOFTWARE, ARTF_BACKEND_VULKAN, ARTF_BACKEND_WEBGPU, ARTF_BACKEND_METAL};
+    static const char* const names[4] = {"CPU", "GPU", "WebGPU", "Metal"};
+    uint32_t* frames[4][2][ARTF_VIEW_COUNT];
     memset(frames, 0, sizeof frames);
     CHECK(!strcmp(artfViewName(ARTF_VIEW_BASE_COLOR), "base-color") && !artfViewName(ARTF_VIEW_COUNT));
     ArtfView named = ARTF_VIEW_LIT;
     CHECK(artfViewFromName("overdraw", &named) && named == ARTF_VIEW_OVERDRAW && !artfViewFromName("lit up", &named));
-    for (int backend = 0; backend < 2; ++backend)
+    for (int backend = 0; backend < 4; ++backend)
         for (int floats = 0; floats < 2; ++floats) {
-            ArtfRendererOptions o = options(backend ? ARTF_BACKEND_VULKAN : ARTF_BACKEND_SOFTWARE, 0, false);
+            ArtfRendererOptions o = options(backends[backend], 0, false);
             o.hdr = floats;
             ArtfRenderer* r = artfRendererNew(&o);
             if (!r) continue;
@@ -61,7 +64,7 @@ void testViews(void) {
                 drawInto(r, s, frame);
                 const uint32_t at = frame[(H / 2) * W + W / 2 + 12], behind = frame[2 * W + 2];
                 const bool good = rgbNear(at, colors[v], 1) && rgbNear(behind, black, 0);
-                if (!good) printf("%s%s, view %s: %d %d %d, behind %06x\n", backend ? "GPU" : "CPU", floats ? " in floats" : "", artfViewName((ArtfView)v), CHANNEL(at, 16), CHANNEL(at, 8), CHANNEL(at, 0), behind & 0xFFFFFF);
+                if (!good) printf("%s%s, view %s: %d %d %d, behind %06x\n", names[backend], floats ? " in floats" : "", artfViewName((ArtfView)v), CHANNEL(at, 16), CHANNEL(at, 8), CHANNEL(at, 0), behind & 0xFFFFFF);
                 CHECK(good);
             }
             /* motion: the square goes right, so red is past grey; up and down, nothing */
@@ -70,7 +73,7 @@ void testViews(void) {
             artfInstanceSetTransform(s, square, &right);
             drawOnce(r, s, frame);
             const uint32_t went = frame[(H / 2) * W + W / 2 + 12];
-            printf("%s%s, a square going right 3.7 pixels: red %d, green %d\n", backend ? "GPU" : "CPU", floats ? " in floats" : "", CHANNEL(went, 16), CHANNEL(went, 8));
+            printf("%s%s, a square going right 3.7 pixels: red %d, green %d\n", names[backend], floats ? " in floats" : "", CHANNEL(went, 16), CHANNEL(went, 8));
             CHECK(CHANNEL(went, 16) > 145 && CHANNEL(went, 16) < 170 && near_(CHANNEL(went, 8), 128, 1));
             artfSceneFree(s);
 
@@ -104,14 +107,19 @@ void testViews(void) {
             artfSceneFree(s);
             artfRendererFree(r);
         }
-    for (int floats = 0; floats < 2; ++floats) {
-        if (!frames[1][floats][0]) break;
-        for (int v = 1; v < ARTF_VIEW_COUNT; ++v) {
-            const double apart = differentShare(frames[0][floats][v], frames[1][floats][v], 24);
-            if (apart > .002) printf("the view %s%s, the GPU against the CPU: %.3f%% of pixels apart\n", artfViewName((ArtfView)v), floats ? " in floats" : "", apart * 100);
-            FLIP_ALIKE(0.076); /* (measured 0.0190 on a Radeon RX 9060 XT) */
-            CHECK(apart < .01);
+    for (int backend = 1; backend < 4; ++backend)
+        for (int floats = 0; floats < 2; ++floats) {
+            if (!frames[backend][floats][0]) continue;
+            for (int v = 1; v < ARTF_VIEW_COUNT; ++v) {
+                if (backend > 1 && v == ARTF_VIEW_MESHLETS) continue;
+                const double apart = differentShare(frames[0][floats][v], frames[backend][floats][v], 24);
+                if (apart > .002) printf("the view %s%s, %s against the CPU: %.3f%% of pixels apart\n", artfViewName((ArtfView)v), floats ? " in floats" : "", names[backend], apart * 100);
+                if (backend == 1) FLIP_ALIKE(0.076); /* (measured 0.0190 on a Radeon RX 9060 XT) */
+                CHECK(apart < .01);
+            }
         }
+    for (int floats = 0; floats < 2; ++floats) {
+        if (!frames[0][floats][0]) break;
         /* (and not all the same picture; the spheres far away are lighter levels) */
         CHECK(differentShare(frames[0][floats][ARTF_VIEW_INSTANCES], frames[0][floats][ARTF_VIEW_MESHLETS], 24) > .01);
         int lighter = 0;
@@ -121,7 +129,7 @@ void testViews(void) {
         }
         CHECK(lighter > 0);
     }
-    for (int i = 0; i < 2 * 2 * ARTF_VIEW_COUNT; ++i) artfFree((&frames[0][0][0])[i]);
+    for (int i = 0; i < 4 * 2 * ARTF_VIEW_COUNT; ++i) artfFree((&frames[0][0][0])[i]);
     artfFree(frame);
 }
 

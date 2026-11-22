@@ -296,9 +296,12 @@ uint32_t* artfShaderPostGather(size_t* size, int samples) {
     spvInit(s);
     Post post, *p = &post;
     postDeclare(s, p);
-    const bool many = samples > 1;
+    /* (ARTF_GATHER_SURFACE_ONE: the surface's words of one sample, where depth has more: WebGPU's, put together) */
+    const bool surfaceOne = (samples & ARTF_GATHER_SURFACE_ONE) != 0;
+    samples &= ~ARTF_GATHER_SURFACE_ONE;
+    const bool many = samples > 1, manySurface = many && !surfaceOne;
     SpvId floatImage, floatSampled = spvTypeSampledImage2D(s, &floatImage);
-    SpvId uintImage, uintSampled = many ? spvTypeSampledImage2DMSOf(s, s->uintType, &uintImage) : spvTypeSampledImage2DOf(s, s->uintType, &uintImage);
+    SpvId uintImage, uintSampled = manySurface ? spvTypeSampledImage2DMSOf(s, s->uintType, &uintImage) : spvTypeSampledImage2DOf(s, s->uintType, &uintImage);
     SpvId depthType, depthSampled = many ? spvTypeSampledImage2DMS(s, &depthType) : floatSampled;
     if (!many) depthType = floatImage;
     SpvId color = spvResource(s, floatSampled, SPV_STORAGE_UniformConstant, 58);
@@ -315,7 +318,7 @@ uint32_t* artfShaderPostGather(size_t* size, int samples) {
     SpvId depthAlone = spvOp2(s, SPV_OP_INotEqual, s->boolType, postPush(s, p), UINT(0)), rest, depthOnly;
     spvIfBegin(s, P_NOT(depthAlone), &rest);
     postLightStore(s, p, p->light, i, spvImageFetchAs(s, s->vec4, floatImage, spvLoad(s, floatSampled, color), at));
-    SpvId word = many ? spvImageFetchSampleAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at, spvConstInt(s, 0)) : spvImageFetchAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at);
+    SpvId word = manySurface ? spvImageFetchSampleAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at, spvConstInt(s, 0)) : spvImageFetchAs(s, uvec4, uintImage, spvLoad(s, uintSampled, surfaceImage), at);
     spvStore(s, postPtr(s, p, p->surface, s->uintType, i), spvExtract(s, s->uintType, word, 0));
     /* (light under the surface, after the instances: artfUnderReach's word; 0 from a surface of fewer words) */
     spvStore(s, postPtr(s, p, p->surface, s->uintType, ADD_U(MUL_U(MUL_U(p->width, p->height), UINT(2)), i)), spvExtract(s, s->uintType, word, 2));

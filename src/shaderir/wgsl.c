@@ -78,6 +78,7 @@ typedef struct Wgsl {
     uint32_t* code;
     uint32_t codeCount;
     bool hasOut;
+    IrId split; /* (the output splitSurface splits: set whole, and its words go out as the function returns) */
     Text body;
     int indent;
     Loop loops[16];
@@ -835,6 +836,14 @@ static void blockFrom(Wgsl* s, IrId label, IrId stop) {
         if (t->op == 252) { line(s, "discard;"); return; }
         if (t->op == 253) {
             if (s->o && s->o->flipY && s->model == 0) line(s, "o.gl_Position.y = -o.gl_Position.y;");
+            if (s->split) {
+                char words[160];
+                static const char* const parts[3] = {"", "_1", "_2"};
+                for (int k = 0; k < 3; ++k) {
+                    snprintf(words, sizeof words, "o.m_%u%s = vec2<u32>(w_%u.%c & 0xFFFFu, w_%u.%c >> 16u);", s->split, parts[k], s->split, "xyz"[k], s->split, "xyz"[k]);
+                    line(s, words);
+                }
+            }
             line(s, s->hasOut ? "return o;" : "return;");
             return;
         }
@@ -1110,6 +1119,11 @@ char* irWgsl(const IrModule* m, const IrWgslOptions* options, IrWgslBindings* bi
                 }
                 s.facts[id].perVertex = true;
                 s.expr[id] = copyOf("o");
+            } else if (s.o && s.o->splitSurface && s.model == 4 && f->location == 1 && !strcmp(typeName(&s, type), "vec4<u32>")) {
+                say(&outs, "    @location(1) m_%u: vec2<u32>,\n    @location(2) m_%u_1: vec2<u32>,\n    @location(3) m_%u_2: vec2<u32>,\n", id, id, id);
+                say(&top, "    var w_%u: vec4<u32>;\n", id);
+                s.expr[id] = format("w_%u", id);
+                s.split = id;
             } else {
                 const char* name = typeName(&s, type);
                 say(&outs, "    @location(%u)%s m_%u: %s,\n", f->location, s.model == 0 ? interpolation(f, name) : "", id, name);

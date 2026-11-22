@@ -84,6 +84,8 @@ uint32_t* artfShaderBloomUp(size_t* size);
 uint32_t* artfShaderBackgroundBackdrop(size_t* size, bool hdr);
 uint32_t* artfShaderEnvironmentBackdrop(size_t* size, bool hdr);
 /* What comes after a frame in floats (postShaders.inc): post.c's passes. */
+/* (samples: depth's and the surface's; with ARTF_GATHER_SURFACE_ONE, the surface has one) */
+#define ARTF_GATHER_SURFACE_ONE 0x100
 uint32_t* artfShaderPostGather(size_t* size, int samples);
 uint32_t* artfShaderPostOcclusion(size_t* size);
 uint32_t* artfShaderPostOcclusionBlur(size_t* size);
