@@ -18,10 +18,8 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
   não veio (o runner seguiu no 26.0.8): falta trocar o laço do shader por um que esse llvmpipe aceite, ou outro Mesa.
 
 ### Fase 6 — Alcance de plataforma
-- [~] 6.1 Metal — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado e as camadas, e rodar nele os
-  demais testes de imagem (dá para conferir pela CI do macOS, no dispositivo virtual)
-- [~] 6.2 WebGPU — tem o que o Vulkan desenha, menos as vistas e, com quatro amostras, o que segue o movimento;
-  falta conferir no Chromium o que veio depois do quadro simples (os shaders novos no Tint)
+- [~] 6.1 e 6.2 Metal e WebGPU — têm o que o Vulkan desenha, menos as vistas, o pass de fundo e, com quatro amostras,
+  o que segue o movimento; falta conferir no Chromium o que o WebGPU ganhou (os shaders novos no Tint)
 
 ## Depende de hardware ou ferramenta que não está aqui
 - [~] 3.3 Pré-rotação no Android — ver num aparelho (o gancho de teste já confere)

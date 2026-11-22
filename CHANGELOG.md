@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Metal draws what WebGPU does** (phase 6.1), the same way (set 1 as argument buffers, push constants by setBytes):
+  on CI's macOS runner, every case within 0.00% to 0.38% of pixels of the CPU.
 - **WebGPU draws nearly all Vulkan does** (phase 6.2): materials of your own, layers of transparency, the frame in
   floats and every post effect (with renderScale and fog that light goes through), coats and more past glTF's core,
   soft shadows, lights with a shape, light from all around, shadows and reflections from rays, tracing with its
