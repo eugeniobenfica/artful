@@ -60,8 +60,8 @@
  * With --frames a black hole's time goes on, so that what a frame took includes the fluid's step. */
 #include "artful/artful.h"
 #include "artful/blackhole.h"
+#include "scene/sceneInternal.h" /* (what --clusters and ARTFUL_TREE_BYTES say of the scene) */
 #ifdef ARTFUL_VULKAN
-#include "scene/sceneInternal.h"
 #include "vulkan/frameGraph.h"
 #endif
 
