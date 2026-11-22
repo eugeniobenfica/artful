@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **WebGPU draws nearly all Vulkan does** (phase 6.2): materials of your own, layers of transparency, the frame in
+  floats and every post effect (with renderScale and fog that light goes through), coats and more past glTF's core,
+  soft shadows, lights with a shape, light from all around, shadows and reflections from rays, tracing with its
+  filter, and probes; each within 0.00% to 0.44% of pixels of the CPU. Not yet: views, and with four samples what
+  follows motion.
 - **Basis Universal files kept as GPU blocks** (phase 5.10): UASTC as ASTC 4 x 4 and ETC1S without alpha as ETC1, both
   exact (the same texels to the bit); on GPUs of PCs, which take neither, UASTC goes up as BC7 (a BC7 encoder of
   Artful's own: 45 dB from UASTC's texels) and ETC1S as BC1 or BC3.

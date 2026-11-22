@@ -20,8 +20,8 @@ rodando no macOS; os fuzzers passam. O Linux cai só nas camadas da 5.8, no lava
 ### Fase 6 — Alcance de plataforma
 - [~] 6.1 Metal — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado e as camadas, e rodar nele os
   demais testes de imagem (dá para conferir pela CI do macOS, no dispositivo virtual)
-- [~] 6.2 WebGPU — tem só o quadro simples: faltam o quadro em floats, as probes, o traçado, as camadas e os materiais
-  em C (conferidos aqui no wgpu-native e no Chromium)
+- [~] 6.2 WebGPU — tem o que o Vulkan desenha, menos as vistas e, com quatro amostras, o que segue o movimento;
+  falta conferir no Chromium o que veio depois do quadro simples (os shaders novos no Tint)
 
 ## Depende de hardware ou ferramenta que não está aqui
 - [~] 3.3 Pré-rotação no Android — ver num aparelho (o gancho de teste já confere)

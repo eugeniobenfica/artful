@@ -225,12 +225,15 @@ What Artful does not do yet, or does only in part. What comes next, and in what 
   with Apple's tools. Windows on ARM is built with clang (`aarch64-w64-mingw32`, the NEON kernels) and has never run;
   MSVC builds and tests only on CI (no MSVC here), and MSVC for ARM64 has not been built at all: it would take the
   portable kernels.
-- WebGPU is built only when asked for (`-DARTFUL_WEBGPU=ON`) and chosen only by name. It draws the plain frame:
-  textures (by constant indices, as many as a stage may have less two: 14 where the adapter allows 16; what is beyond
-  is white), lights and those past the sixteen, shadow maps, decals, what has holes and the overlay. It leaves out,
-  and says so: a frame in floats and all that comes after it, light from all around and from probes, lights with a
-  shape or a profile, layers of transparency, tracing, materials in C, views, occlusion and a background pass; textures
-  go up decoded. It needs `indirect-first-instance`. In a browser a frame is not read back (it goes to a canvas), and
+- WebGPU is built only when asked for (`-DARTFUL_WEBGPU=ON`) and chosen only by name. It draws what Vulkan draws, by
+  the same shaders: textures (by constant indices, as many as a stage may have less two: 14 where the adapter allows
+  16; what is beyond is white), lights, shadow maps (soft too), decals, what has holes, materials in C, layers of
+  transparency, the frame in floats with every effect after it, light from all around, lights with a shape, shadows
+  and reflections from rays, tracing and its filter, and probes; all rays through the scene's trees (no ray tracing
+  hardware). It leaves out, and says so: views, occlusion culling, a background pass, and with four samples temporal
+  antialiasing, motion blur and light under the surface (WebGPU's RGBA32Uint has no samples); textures go up decoded;
+  its probes do not go back to the scene; post passes reach 4.2 million pixels (a frame larger than about 2730 x 1536
+  is left partly unmade). It needs `indirect-first-instance`. In a browser a frame is not read back (it goes to a canvas), and
   the waits for the adapter and the device take Emscripten's ASYNCIFY. It has run on wgpu-native and in Chromium, on
   one GPU; not in Safari or Firefox.
 - On macOS and iOS the cascade bridge draws on the CPU, as the Metal layer is cascade's to hand over.
