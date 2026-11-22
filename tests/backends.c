@@ -106,21 +106,71 @@ static ArtfScene* graphFeatureScene(void) {
     return s;
 }
 
+/* A coat with sheen, on a ball in the sun (materials past glTF's core). */
+static ArtfScene* coatFeatureScene(void) {
+    ArtfScene* s = shadowScene();
+    ArtfMaterialDesc d = artfMaterialDefaults();
+    d.baseColor = artfVec3(.5f, .05f, .05f);
+    d.roughness = .8f;
+    d.clearcoat = 1;
+    d.clearcoatRoughness = .1f;
+    d.sheen = artfVec3(.4f, .4f, .4f);
+    d.sheenRoughness = .5f;
+    artfInstanceSetMaterial(s, 1, artfSceneAddMaterial(s, &d));
+    return s;
+}
+
+/* Soft shadows of a sun with a size. */
+static ArtfScene* softFeatureScene(void) {
+    ArtfScene* s = shadowScene();
+    const ArtfShadowDesc soft = {1024, 0, true, false, false};
+    artfSceneSetShadows(s, &soft);
+    artfSceneSetSunSize(s, .05f);
+    return s;
+}
+
+/* A light with a shape: a rectangle, facing down, over the floor. */
+static ArtfScene* shapeFeatureScene(void) {
+    ArtfScene* s = shadowScene();
+    artfSceneSetSun(s, artfVec3(0, -1, 0), artfVec3(0, 0, 0));
+    const ArtfLight l = artfSceneAddLight(s, artfVec3(.5f, 1.2f, .5f), artfVec3(3, 3, 3), 6);
+    artfLightSetShape(s, l, artfVec3(1, 0, 0), artfVec3(0, -1, 0), 1.5f, .5f);
+    return s;
+}
+
+/* Light from all around, a sky from the sun. */
+static ArtfScene* skyFeatureScene(void) {
+    ArtfScene* s = shadowScene();
+    const ArtfSkyDesc day = {{3, 3, 3}, 0, 0, {0, 0, 0}, 128, false, false};
+    artfSceneSetSky(s, &day);
+    return s;
+}
+
 static void otherGpuFeatures(ArtfRenderer* gpu, ArtfRenderer* cpu, ArtfBackend backend, uint32_t* a, uint32_t* b) {
     static const struct { const char* name; FeatureScene make; bool webgpu, metal; } features[] = {
         {"a material of its own", graphFeatureScene, true, false},
         {"layers of transparency", layeredScene, true, false},
+        {"a coat with sheen", coatFeatureScene, true, false},
+        {"soft shadows", softFeatureScene, true, false},
+        {"a light with a shape", shapeFeatureScene, true, false},
+        {"light from all around (a sky)", skyFeatureScene, true, false},
     };
+    /* (and each shows: what is built on the sun's scene is not that scene, drawn on the same GPU) */
+    uint32_t* base = artfMalloc((size_t)W * H * 4);
+    ArtfScene* plain = shadowScene();
+    drawSamples(gpu, plain, 2, base);
+    artfSceneFree(plain);
     for (size_t k = 0; k < ARTF_COUNT(features); ++k) {
         if (!(backend == ARTF_BACKEND_WEBGPU ? features[k].webgpu : features[k].metal)) continue;
         ArtfScene* s = features[k].make();
         drawSamples(gpu, s, 2, a);
         drawSamples(cpu, s, 1, b);
-        const double far = differentShare(a, b, 24);
-        printf("%s against the CPU, %s: %.2f%% of pixels differ by more than 24 of 255\n", artfBackendName(backend), features[k].name, far * 100);
-        CHECK(far < .02);
+        const double far = differentShare(a, b, 24), shows = features[k].make == layeredScene ? 1 : differentShare(a, base, 8);
+        printf("%s against the CPU, %s: %.2f%% of pixels differ by more than 24 of 255 (%.1f%% from the sun's scene)\n", artfBackendName(backend), features[k].name, far * 100, shows * 100);
+        CHECK(far < .02 && shows > .002);
         artfSceneFree(s);
     }
+    artfFree(base);
 }
 
 /* WebGPU (the plan's 6.2) and Metal (6.1) against the CPU: a textured scene with its lights; a sun's shadows; what
